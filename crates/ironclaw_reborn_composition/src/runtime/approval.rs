@@ -15,7 +15,7 @@ use crate::builtin_capability_policy::{
 };
 use crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID;
 
-use super::local_dev::extension_surface::ExtensionCapabilitySurfaceSource;
+use ironclaw_extension_host::capability_surface::ExtensionCapabilitySurfaceSource;
 
 pub(super) struct PolicyApprovalLeaseTermsProvider {
     policy: Arc<BuiltinCapabilityPolicy>,
@@ -72,7 +72,7 @@ impl PolicyApprovalLeaseTermsProvider {
             .snapshot()
             .await
             .map_err(|error| {
-                tracing::error!(%error, "local-dev extension approval lease terms are unavailable");
+                tracing::error!(%error, "standalone extension approval lease terms are unavailable");
                 lease_terms_unavailable()
             })?;
         // Lease terms resolve for the user whose run raised the gate; the
@@ -94,7 +94,7 @@ impl PolicyApprovalLeaseTermsProvider {
         {
             tracing::error!(
                 capability = %capability,
-                "local-dev extension spawn approval lease lacks SpawnProcess"
+                "standalone extension spawn approval lease lacks SpawnProcess"
             );
             return Err(lease_terms_unavailable());
         }
@@ -110,7 +110,7 @@ impl PolicyApprovalLeaseTermsProvider {
             .snapshot()
             .await
             .map_err(|error| {
-                tracing::error!(%error, "local-dev extension approval surface is unavailable");
+                tracing::error!(%error, "standalone extension approval surface is unavailable");
                 lease_terms_unavailable()
             })?;
         let Some(capability) = surface.capability(action.capability()) else {
@@ -119,7 +119,7 @@ impl PolicyApprovalLeaseTermsProvider {
         if action.is_spawn_capability() && !capability.effects.contains(&EffectKind::SpawnProcess) {
             tracing::error!(
                 capability = %action.capability(),
-                "local-dev extension spawn persistent approval lacks SpawnProcess"
+                "standalone extension spawn persistent approval lacks SpawnProcess"
             );
             return Ok(false);
         }
@@ -158,7 +158,7 @@ impl ApprovalLeaseTermsProvider for PolicyApprovalLeaseTermsProvider {
                 self.extension_lease_terms_for(gate, action).await
             }
             Err(error) => {
-                tracing::error!(%error, "local-dev approval lease terms are unavailable");
+                tracing::error!(%error, "standalone approval lease terms are unavailable");
                 Err(lease_terms_unavailable())
             }
         }
@@ -193,7 +193,7 @@ impl ApprovalLeaseTermsProvider for PolicyApprovalLeaseTermsProvider {
                 Err(error) => {
                     tracing::error!(
                         %error,
-                        "local-dev persistent approval terms are unavailable"
+                        "standalone persistent approval terms are unavailable"
                     );
                     return Err(lease_terms_unavailable());
                 }
@@ -231,10 +231,10 @@ mod tests {
     use ironclaw_turns::{GateRef, TurnRunId};
 
     use crate::builtin_capability_policy::builtin_capability_policy;
-    use crate::runtime::local_dev::extension_surface::{
+    use ironclaw_extension_host::ActiveExtensionCapability;
+    use ironclaw_extension_host::capability_surface::{
         ExtensionCapabilitySurface, ExtensionCapabilitySurfaceSource,
     };
-    use ironclaw_extension_host::ActiveExtensionCapability;
 
     use super::*;
 

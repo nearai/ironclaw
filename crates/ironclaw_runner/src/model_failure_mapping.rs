@@ -120,6 +120,7 @@ mod tests {
             | K::ContextOverflow
             | K::OutputTruncated
             | K::BudgetApprovalRequired
+            | K::RateLimited
             | K::Unavailable
             | K::Cancelled
             | K::CheckpointRejected
@@ -143,6 +144,7 @@ mod tests {
             K::OutputTruncated,
             K::BudgetApprovalRequired,
             K::BudgetAccountingFailed,
+            K::RateLimited,
             K::Unavailable,
             K::Cancelled,
             K::CheckpointRejected,

@@ -123,7 +123,7 @@ where
 // lifecycle service models the installed extension set, while active_registry
 // is the model-visible capability surface read by host runtime dispatch.
 // install/remove keep the lifecycle set durable; activate/remove are the only
-// local-dev writers that should mirror lifecycle-managed packages into or out
+// standalone writers that should mirror lifecycle-managed packages into or out
 // of active_registry. Production and multi-tenant reuse require scoped storage
 // and registry ownership first; tracked in #4091.
 pub struct ExtensionLifecycleManager {
@@ -160,7 +160,7 @@ pub struct ExtensionLifecycleManager {
     /// per-request cap into N x 64 MiB of pressure before any lifecycle lock
     /// applies (#5499 review finding #3).
     import_decode_semaphore: Arc<Semaphore>,
-    /// The tenant operator identity (#5459 P1). In local-dev this is the base
+    /// The tenant operator identity (#5459 P1). In standalone this is the base
     /// owner user (`IRONCLAW_REBORN_WEBUI_USER_ID` semantics). Lifecycle
     /// installs by every caller, including this user, make or join the member
     /// set [`InstallationOwner::Users`]. Tenant-wide deployment state belongs
@@ -406,6 +406,7 @@ impl ExtensionLifecycleManager {
                     &host_ports,
                     None,
                     &contracts,
+                    Some(package.root.clone()),
                 )
                 .map_err(|error| ProductSurfaceFailure::InvalidBindingRequest {
                     reason: format!("bundled extension manifest is invalid: {error}"),
@@ -661,7 +662,7 @@ impl ExtensionLifecycleManager {
         &self,
     ) -> Result<Vec<ActiveExtensionCapability>, ProductSurfaceFailure> {
         // #5459 P1: carry each enabled installation's owner onto its
-        // capabilities so the per-request grant minting in the local-dev
+        // capabilities so the per-request grant minting in the standalone
         // capability surface can filter user-private extensions to their
         // owner. The registry itself stays global; owner is joined here.
         let owner_by_extension = project_installation_owners(
@@ -3263,6 +3264,7 @@ output_schema_ref = "schemas/search.output.json"
             &contracts,
         )
         .expect("fixture manifest");
+        let root = VirtualPath::new("/system/extensions/fixture").expect("extension root");
         let resolved_manifest = Arc::new(
             ExtensionManifestRecord::from_toml(
                 manifest_toml,
@@ -3270,12 +3272,12 @@ output_schema_ref = "schemas/search.output.json"
                 &HostPortCatalog::empty(),
                 None,
                 &contracts,
+                Some(root.clone()),
             )
             .expect("resolved fixture manifest")
             .resolved()
             .clone(),
         );
-        let root = VirtualPath::new("/system/extensions/fixture").expect("extension root");
         let package = ExtensionPackage::from_manifest_toml(manifest, root, manifest_toml)
             .expect("fixture package");
         AvailableExtensionPackage {

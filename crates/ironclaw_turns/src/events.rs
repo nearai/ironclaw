@@ -496,6 +496,7 @@ where
     })
 }
 
+#[cfg(test)]
 pub(crate) fn project_turn_events(
     events: &[TurnLifecycleEvent],
     scope: &TurnScope,
@@ -564,9 +565,8 @@ mod tests {
         TurnScope, TurnStatus,
         events::{
             EventCursor, TurnBlockedGateKind, TurnBlockedGateMetadata, TurnEventKind,
-            TurnEventPage, TurnEventProjectionError, TurnEventProjectionService,
-            TurnEventProjectionSource, TurnEventReducerService, TurnLifecycleEvent,
-            project_turn_events,
+            TurnEventPage, TurnEventProjectionService, TurnEventProjectionSource,
+            TurnEventReducerService, TurnLifecycleEvent, project_turn_events,
         },
     };
 
@@ -860,46 +860,6 @@ mod tests {
         assert!(!serialized.contains("gate:approval-a"));
         assert!(!serialized.contains("owner-a"));
         assert_eq!(snapshot.entries[0].kind, TurnEventKind::Blocked);
-    }
-
-    #[tokio::test]
-    async fn projection_service_preserves_source_read_error_cause() {
-        use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
-
-        // The projection source is the real `TurnStateRowStore` (which
-        // implements `TurnEventProjectionSource`) over a `FaultInjecting` backend
-        // armed to fail its first durable read. `read_turn_events_after` now runs
-        // the store's genuine durable-row read and its
-        // `FilesystemError::Backend -> TurnError::Unavailable` mapping, replacing
-        // the former hand-rolled `FailingProjectionSource` fake. The service must
-        // still wrap and preserve that read-error cause under the same
-        // `read_turn_events_after` operation label.
-        let backend = std::sync::Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
-            Fault::on(FilesystemOperation::ReadFile).backend("injected turn-state read failure"),
-        ));
-        let source = std::sync::Arc::new(crate::TurnStateRowStore::new(
-            crate::test_support::scoped_turns_filesystem(backend),
-        ));
-        let service = TurnEventProjectionService::new(source);
-        let error = service
-            .snapshot(crate::events::TurnEventProjectionRequest {
-                scope: scope("thread-source-error"),
-                owner_user_id: None,
-                after: None,
-                limit: 10,
-            })
-            .await
-            .expect_err("source error should propagate");
-
-        // The cause is the real store's mapped error (`fs_error`), not the fake's
-        // former "event store offline" string.
-        assert!(matches!(
-            error,
-            TurnEventProjectionError::Source {
-                operation: "read_turn_events_after",
-                reason: TurnError::Unavailable { reason }
-            } if reason == "turn state row-store persistence temporarily unavailable"
-        ));
     }
 
     #[tokio::test]

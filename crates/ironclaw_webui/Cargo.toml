@@ -16,7 +16,7 @@ layer = "products"
 [features]
 # Compile in `EmailUserDirectory` as a public crate item. Off by default so a
 # production deployment cannot accidentally trust provider identities without a
-# host-owned user join. Local dev and tests opt in.
+# host-owned user join. Standalone deployments and tests opt in.
 test-support = []
 
 [dependencies]

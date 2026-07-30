@@ -7,15 +7,16 @@ use chrono::{TimeZone, Utc};
 use ironclaw_host_api::{
     AgentId, Blocked, CapabilityId, ProjectId, Resolution, RuntimeKind, TenantId, ThreadId, UserId,
 };
-use ironclaw_turns::test_support::in_memory_turn_state_store;
+use ironclaw_processes::{ClaimProcessesRequest, ProcessKind, ProcessWorkerId};
+use ironclaw_turns::test_support::in_memory_agent_turn_process_system;
 use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
     DefaultTurnCoordinator, IdempotencyKey, LoopBlocked, LoopBlockedKind, LoopCompleted,
     LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef, ProductTurnContext,
     ReplyTargetBindingRef, RunOriginAdapter, RunProfileRequest, RunProfileVersion,
     SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
-    TurnCoordinator, TurnLeaseToken, TurnOriginKind, TurnOwner, TurnRunId, TurnRunState,
-    TurnRunnerId, TurnStatus,
+    TurnCoordinator, TurnOriginKind, TurnOwner, TurnRunId, TurnRunState, TurnRunnerId, TurnStatus,
+    claimed_turn_run_from_process_claim,
     events::EventCursor,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
@@ -44,7 +45,6 @@ use ironclaw_turns::{
         PromptSkillContextMetadata, SkillTrustLevel, VisibleCapabilityRequest,
         VisibleCapabilitySurface, resolution,
     },
-    runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
 
 #[test]
@@ -198,6 +198,7 @@ async fn host_managed_model_port_routes_gateway_and_emits_model_milestones() {
             }],
             surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
             model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -256,6 +257,7 @@ async fn host_managed_model_port_returns_response_when_model_started_milestone_f
             messages: Vec::new(),
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -300,6 +302,7 @@ async fn host_managed_model_port_returns_response_when_model_completed_milestone
             messages: Vec::new(),
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -341,6 +344,7 @@ async fn host_managed_model_port_sanitizes_gateway_errors() {
             messages: Vec::new(),
             surface_version: None,
             model_preference: None,
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -2670,6 +2674,7 @@ impl AgentLoopDriver for ReplyDriver {
                         .model_profile_id
                         .clone(),
                 ),
+                fallback_index: 0,
                 capability_view: None,
             })
             .await
@@ -2961,6 +2966,7 @@ async fn host_managed_model_port_times_out_a_hung_gateway() {
             }],
             surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
             model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -2998,6 +3004,7 @@ async fn host_managed_model_port_allows_long_calls_that_keep_streaming_progress(
             }],
             surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
             model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
+            fallback_index: 0,
             capability_view: None,
         })
         .await
@@ -3421,7 +3428,8 @@ async fn claimed_run_context() -> LoopRunContext {
         Some(ProjectId::new("project-loop").unwrap()),
         ThreadId::new("thread-loop-host").unwrap(),
     );
-    let store = Arc::new(in_memory_turn_state_store());
+    let processes = in_memory_agent_turn_process_system();
+    let store = Arc::new(processes.runtime());
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let response = coordinator
         .submit_turn(SubmitTurnRequest {
@@ -3443,13 +3451,21 @@ async fn claimed_run_context() -> LoopRunContext {
         .await
         .unwrap();
     let SubmitTurnResponse::Accepted { run_id, .. } = response;
-    let claimed = store
-        .claim_next_run(ClaimRunRequest {
-            runner_id: TurnRunnerId::new(),
-            lease_token: TurnLeaseToken::new(),
-            scope_filter: Some(scope),
+    let runner_id = TurnRunnerId::new();
+    let claimed = processes
+        .transitions()
+        .claim_next_processes(ClaimProcessesRequest {
+            worker_id: ProcessWorkerId::from_trusted(runner_id.as_uuid().to_string()),
+            scope_filter: Some(scope.to_resource_scope()),
+            process_id_filter: None,
+            process_kind_filter: Some(ProcessKind::AgentTurn),
+            max_processes: 1,
         })
         .await
+        .unwrap()
+        .pop()
+        .map(claimed_turn_run_from_process_claim)
+        .transpose()
         .unwrap()
         .unwrap();
     assert_eq!(claimed.state.run_id, run_id);
@@ -3602,6 +3618,7 @@ fn simple_model_request(context: &LoopRunContext) -> LoopModelRequest {
         }],
         surface_version: None,
         model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
+        fallback_index: 0,
         capability_view: None,
     }
 }

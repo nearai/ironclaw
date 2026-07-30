@@ -21,8 +21,8 @@ use crate::{
 use super::prompt::build_prompt_bundle_for_surface;
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, FailedExitDetails,
-    HostStage, StageContext, exit_id, failed_exit, honor_retry_alteration, loop_gate_kind,
-    model_error_class, model_error_failure_summary, model_preference_to_host, model_recovery_class,
+    HostStage, StageContext, exit_id, failed_exit, loop_gate_kind, model_error_class,
+    model_error_failure_summary, model_preference_to_host, model_recovery_class,
     sanitized_strategy_summary_or_fallback,
 };
 
@@ -67,7 +67,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
             CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
         };
 
-        let model_preference =
+        let (model_preference, fallback_index) =
             model_preference_to_host(ctx.planner.model().preference(&state).await)?;
         state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
             CancelCheck::Continue(state) => *state,
@@ -80,6 +80,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
             inline_messages: input.inline_messages,
             surface_version: Some(surface_version.clone()),
             model_preference,
+            fallback_index,
             capability_view: Some(capability_view.clone()),
         };
         let visible_capability_count = capability_view.visible_capability_ids.len();
@@ -108,6 +109,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
             let model_result = ctx.host.stream_model(request.clone()).await;
             match model_result {
                 Ok(response) => {
+                    state.model_state.fallback_index = request.fallback_index;
                     // A successful response proves the provider saw this
                     // request. Consume the pending controls only now; a
                     // gate-shaped error below happens before provider dispatch
@@ -229,6 +231,8 @@ impl ExecutorStage<ModelInput> for ModelStage {
                     let summary = ModelErrorSummary {
                         class,
                         safe_summary,
+                        retry_after_ms: error.retry_after_ms,
+                        next_fallback_index: error.next_fallback_index,
                     };
                     last_error_summary = Some(summary.clone());
                     last_error_detail.clone_from(&model_failure_detail);
@@ -306,6 +310,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
                     }
                     let retry_action =
                         prepare_model_retry_alteration(&mut state, scope, alter.as_ref())?;
+                    request.fallback_index = state.model_state.fallback_index;
                     state.recovery_state = recovery;
                     state.pending_model_error_observation = observation;
                     CheckpointStage
@@ -437,7 +442,6 @@ fn prepare_model_retry_alteration(
     scope: RetryScope,
     alteration: Option<&RetryAlteration>,
 ) -> Result<ModelRetryAction, AgentLoopExecutorError> {
-    honor_retry_alteration(alteration)?;
     state.pending_model_retry_directive = None;
     match alteration {
         Some(RetryAlteration::Backoff { .. }) => {}
@@ -459,7 +463,20 @@ fn prepare_model_retry_alteration(
             state.pending_model_retry_directive =
                 Some(PendingModelRetryDirective::RepairInvalidOutput);
         }
-        Some(RetryAlteration::AdvanceFallback) | None => {}
+        Some(RetryAlteration::AdvanceFallback { fallback_index }) => {
+            if scope != RetryScope::Call {
+                return Err(AgentLoopExecutorError::PlannerContract {
+                    detail: "fallback advancement requires call scope",
+                });
+            }
+            if *fallback_index <= state.model_state.fallback_index {
+                return Err(AgentLoopExecutorError::PlannerContract {
+                    detail: "fallback model route index did not advance",
+                });
+            }
+            state.model_state.fallback_index = *fallback_index;
+        }
+        None => {}
     }
 
     Ok(match scope {

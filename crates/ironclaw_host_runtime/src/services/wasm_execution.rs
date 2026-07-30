@@ -411,6 +411,10 @@ fn wasm_guest_error_kind(error: &str) -> WasmGuestErrorKind {
 }
 
 #[cfg(test)]
+#[path = "tests/wasm_execution_fault_profiles.rs"]
+mod fault_profile_tests;
+
+#[cfg(test)]
 mod tests {
     use std::time::Duration;
 

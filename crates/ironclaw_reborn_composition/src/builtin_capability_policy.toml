@@ -15,7 +15,7 @@ authority_effects = [
 ]
 
 [approval_gates]
-# Local-dev gates are intentionally conservative at EffectKind granularity.
+# Standalone gates are intentionally conservative at EffectKind granularity.
 # Some effects (process, network, filesystem writes) can be write-level or
 # destructive depending on action details that are evaluated later by the
 # capability policy, so ask_destructive currently overlaps ask_writes instead
@@ -167,7 +167,7 @@ mounts = "memory"
 network = "default"
 
 # The first-party shell handler still uses direct host process execution in
-# local-dev, so its filesystem/network authority intentionally mirrors the
+# standalone mode, so its filesystem/network authority intentionally mirrors the
 # previous Rust-wired ambient grant.
 [[grants]]
 capability = "builtin.shell"

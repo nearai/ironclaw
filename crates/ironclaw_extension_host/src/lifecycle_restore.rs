@@ -176,6 +176,7 @@ pub fn prepare_install(
         &host_ports,
         Some(manifest_hash.clone()),
         &contracts,
+        Some(available.package.root.clone()),
     )
     .map_err(map_extension_installation_error)?
     .with_removal_cleanup_requirements(available.cleanup_requirements.clone());
@@ -217,6 +218,7 @@ fn prepare_manifest_migration(
         &host_ports,
         Some(manifest_hash.clone()),
         &contracts,
+        Some(available.package.root.clone()),
     )
     .map_err(map_extension_installation_error)?
     .with_removal_cleanup_requirements(available.cleanup_requirements.clone());

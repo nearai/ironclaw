@@ -508,10 +508,16 @@ async def test_reborn_legacy_always_approve_survives_reborn_restart(
         base_url = state["base_url"]
         force_first_prompt = await client.post(
             f"{base_url}/api/webchat/v2/settings/tools/{capability_id}",
+            # The profile default is allowed to evolve. This scenario needs a
+            # deterministic first gate before it can prove that "always allow"
+            # survives restart, so pin that precondition explicitly.
             json={"state": "ask_each_time"},
             timeout=15,
         )
         force_first_prompt.raise_for_status()
+        assert (
+            force_first_prompt.json()["entry"]["value"]["state"] == "ask_each_time"
+        )
         thread_id = await create_thread(client, base_url)
 
     first_prompt = await _wait_for_gate_prompt_after_send(

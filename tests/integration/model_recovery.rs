@@ -11,7 +11,7 @@ mod reborn_support;
 mod support;
 
 use ironclaw_turns::{TurnEventKind, TurnStatus};
-use reborn_support::builder::RebornIntegrationHarness;
+use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
 use reborn_support::doubles::TRANSCRIPT_FAILURE_SECRET;
 use reborn_support::http_matcher::ScriptedHttpResponse;
 use reborn_support::reply::RebornScriptedReply;
@@ -23,6 +23,39 @@ const UNPERSISTED_ASSISTANT_REPLY: &str =
 const UNPERSISTED_TOOL_RESULT: &str =
     "raw tool result that must never enter the transcript failure";
 const TRANSCRIPT_FAILURE_TOOL_URL: &str = "https://transcript-failure.example.test/result";
+
+#[tokio::test]
+async fn provider_outage_advances_real_fallback_chain_and_persists_reply() {
+    let harness = RebornIntegrationHarness::test_default()
+        .storage(StorageMode::LibSql)
+        .with_turn_event_sink()
+        .advance_fallback_after_unavailable()
+        .script([RebornScriptedReply::text("fallback recovered the turn")])
+        .build()
+        .await
+        .expect("harness builds");
+
+    harness
+        .submit_turn("recover through the configured provider fallback")
+        .await
+        .expect("whole turn completes through fallback index one");
+    harness
+        .assert_ordered_fallback_vendor_calls()
+        .await
+        .expect("primary is called once and fallback index one is authoritative");
+    harness
+        .assert_reply_persists_after_reopen("fallback recovered the turn")
+        .await
+        .expect("final fallback reply survives a fresh libSQL connection");
+    harness
+        .assert_turn_event_recorded(TurnEventKind::Completed)
+        .await
+        .expect("the recovered turn emits its durable completed event");
+    harness
+        .assert_no_turn_event_recorded(TurnEventKind::Failed)
+        .await
+        .expect("the recoverable primary outage emits no false terminal failure");
+}
 
 #[tokio::test]
 async fn content_filtered_completion_recovers_with_model_visible_observation() {
@@ -167,6 +200,8 @@ async fn invalid_output_recovers_with_model_visible_observation() {
 #[tokio::test]
 async fn output_truncation_recovers_without_shrinking_input_context() {
     let harness = RebornIntegrationHarness::test_default()
+        .with_builtin_http_tools()
+        .with_budget_accounting()
         .output_truncated_model_times(1)
         .script([RebornScriptedReply::text(
             "concise complete answer after truncation",
@@ -201,6 +236,18 @@ async fn output_truncation_recovers_without_shrinking_input_context() {
         .assert_conversation_history_lacks("partial response that must not be reported as complete")
         .await
         .expect("partial provider output is never durably reported as a successful reply");
+    harness
+        .assert_tool_not_invoked("builtin.http")
+        .await
+        .expect("a truncated textual tool call must never reach capability dispatch");
+    harness
+        .assert_egress_count(0)
+        .await
+        .expect("a truncated textual tool call must never reach HTTP egress");
+    harness
+        .assert_budget_spent_tokens(11, 7)
+        .await
+        .expect("truncated provider usage must still be durably charged");
 }
 
 #[tokio::test]

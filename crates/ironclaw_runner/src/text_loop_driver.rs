@@ -84,6 +84,7 @@ impl AgentLoopDriver for TextOnlyModelReplyDriver {
                 messages: prompt_bundle.messages,
                 surface_version: prompt_bundle.surface_version,
                 model_preference: None,
+                fallback_index: 0,
                 capability_view: None,
             })
             .await
@@ -217,11 +218,11 @@ fn map_host_error(stage: HostStage, error: AgentLoopHostError) -> AgentLoopDrive
         | AgentLoopHostErrorKind::ScopeMismatch => AgentLoopDriverError::InvalidRequest {
             reason: format!("{stage_name}: {}", error.kind.as_str()),
         },
-        AgentLoopHostErrorKind::Unavailable | AgentLoopHostErrorKind::Cancelled => {
-            AgentLoopDriverError::Unavailable {
-                reason: format!("{stage_name}: {}", error.kind.as_str()),
-            }
-        }
+        AgentLoopHostErrorKind::RateLimited
+        | AgentLoopHostErrorKind::Unavailable
+        | AgentLoopHostErrorKind::Cancelled => AgentLoopDriverError::Unavailable {
+            reason: format!("{stage_name}: {}", error.kind.as_str()),
+        },
         AgentLoopHostErrorKind::InvalidOutput => AgentLoopDriverError::Failed {
             reason_kind: loop_failure_kind_name(LoopFailureKind::InvalidModelOutput).to_string(),
             detail: error.detail.clone(),

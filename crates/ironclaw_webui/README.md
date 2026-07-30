@@ -72,7 +72,7 @@ attach under their feature flag.
 - `serve_webui_v2(RebornWebuiServeOptions)` — bind a `tokio::net::TcpListener`
   and run `axum::serve` with graceful shutdown.
 - **Authenticators** (`WebuiAuthenticator` impls): `EnvBearerAuthenticator`
-  (single operator token for the standalone binary / local dev),
+  (single operator token for the standalone binary),
   `SessionAuthenticator` (bearer → `SignedTokenSessionStore` lookup),
   `OidcAuthenticator` (JWKS + standard-claim verifier, non-operator).
 - **Sessions:** `SignedTokenSessionStore` plus the signed-token login surface
@@ -100,7 +100,7 @@ attach under their feature flag.
 | Feature | Effect |
 |---|---|
 | `default` | Route surface + SPA + serve loop + auth. |
-| `test-support` | Compile in `EmailUserDirectory` for local dev / tests. |
+| `test-support` | Compile in `EmailUserDirectory` for standalone deployments and tests. |
 
 The generic extension administration surface and the `OpenAiCompatActorScope`
 stamping for protected OpenAI-compatible mounts are unconditional parts of

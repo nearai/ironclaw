@@ -75,7 +75,6 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_event_streams: "events-conversations",
       ironclaw_events: "events-conversations",
       ironclaw_prompt_envelope: "events-conversations",
-      ironclaw_run_state: "events-conversations",
       ironclaw_threads: "events-conversations",
       ironclaw_turns: "events-conversations",
 

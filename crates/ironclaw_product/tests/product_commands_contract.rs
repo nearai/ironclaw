@@ -1,11 +1,11 @@
 //! Contract tests for the Reborn-native product command model.
 
-use ironclaw_product::{InboundCommandPayload, ProductRejectionKind, ProductTriggerReason};
 use ironclaw_product::{
-    LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
-    ProductCommand, ProductModelCommand, declared_command_help_text, product_command_descriptors,
-    validate_declared_product_command,
+    CommandAudience, LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef,
+    LifecycleProductAction, ProductCommand, ProductModelCommand, declared_command_help_text,
+    product_command_descriptors, required_audience, validate_declared_product_command,
 };
+use ironclaw_product::{InboundCommandPayload, ProductRejectionKind, ProductTriggerReason};
 
 #[test]
 fn command_payload_maps_to_typed_model_command_without_v1_parser() {
@@ -119,13 +119,6 @@ fn command_payload_maps_all_declared_commands_and_unknown_fallback() {
         ),
         (
             "status",
-            "",
-            ProductCommand::Status,
-            "status",
-            Some("status"),
-        ),
-        (
-            "progress",
             "",
             ProductCommand::Status,
             "status",
@@ -392,11 +385,14 @@ fn lifecycle_command_parser_preserves_skill_install_content() {
 
 #[test]
 fn command_registry_declares_model_without_source_policy() {
-    let model = product_command_descriptors()
+    let model_descriptor = product_command_descriptors()
         .find(|descriptor| descriptor.name == "model")
         .expect("model descriptor");
-
-    assert!(model.aliases.is_empty());
+    assert_eq!(
+        model_descriptor.audience,
+        CommandAudience::User,
+        "model audience must be User"
+    );
 }
 
 #[test]
@@ -423,7 +419,8 @@ fn command_registry_declares_canonical_lifecycle_commands() {
 #[test]
 fn declared_command_validation_uses_exact_registry_tokens() {
     assert!(validate_declared_product_command("status").is_ok());
-    assert!(validate_declared_product_command("progress").is_ok());
+    // Aliases are retired: `progress` is no longer a declarable token.
+    assert!(validate_declared_product_command("progress").is_err());
 
     let error =
         validate_declared_product_command("notacommand").expect_err("unknown command must fail");
@@ -445,4 +442,61 @@ fn declared_command_help_is_scoped_and_fail_closed() {
     assert_eq!(empty, "Commands are not available in this channel.");
     assert!(!empty.contains("/model"));
     assert!(!empty.contains("/extension_configure"));
+}
+
+#[test]
+fn listing_audience_is_user_for_model_and_status_and_admin_for_lifecycle() {
+    for descriptor in product_command_descriptors() {
+        let expected = match descriptor.name {
+            "model" | "status" => CommandAudience::User,
+            _ => CommandAudience::Admin, // the lifecycle family
+        };
+        assert_eq!(
+            descriptor.audience, expected,
+            "descriptor {}",
+            descriptor.name
+        );
+    }
+}
+
+#[test]
+fn execution_audience_is_per_action() {
+    let user_cases = [
+        ProductCommand::Status,
+        ProductCommand::Model {
+            action: ProductModelCommand::Status,
+        },
+        ProductCommand::Unknown {
+            name: "nope".into(),
+            arguments: String::new(),
+        },
+    ];
+    for command in user_cases {
+        assert_eq!(
+            required_audience(&command),
+            CommandAudience::User,
+            "{command:?}"
+        );
+    }
+    let admin_cases = [
+        ProductCommand::Model {
+            action: ProductModelCommand::Set { model: "m".into() },
+        },
+        ProductCommand::Model {
+            action: ProductModelCommand::SetProvider {
+                provider: "p".into(),
+                model: None,
+            },
+        },
+        ProductCommand::Lifecycle {
+            action: LifecycleProductAction::ExtensionList,
+        },
+    ];
+    for command in admin_cases {
+        assert_eq!(
+            required_audience(&command),
+            CommandAudience::Admin,
+            "{command:?}"
+        );
+    }
 }

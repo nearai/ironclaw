@@ -19,12 +19,12 @@ ironclaw_extensions = { path = "../ironclaw_extensions" }
 # ScopedFilesystem over the shared CAS lane (mirrors run_state's Filesystem*Store).
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_approvals = { path = "../ironclaw_approvals" }
 ironclaw_processes = { path = "../ironclaw_processes" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 # Runtime-policy planner run in-fold by authorize() (§5.3.2/§9). Pure
 # host_api-only crate (depends only on ironclaw_host_api), so no dependency cycle.
 ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
-ironclaw_run_state = { path = "../ironclaw_run_state" }
 ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 # Resume-payload vocabulary owner: ReplayPayload embeds CapabilityInputRef and
@@ -37,13 +37,11 @@ thiserror = "2"
 tracing = "0.1"
 
 [dev-dependencies]
-ironclaw_approvals = { path = "../ironclaw_approvals" }
+ironclaw_approvals = { path = "../ironclaw_approvals", features = ["test-support"] }
 # Enables the in-memory-backed capability-lease store constructor for tests only.
 ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test-support"] }
 # Enables the in-memory-backed process store constructors for tests only.
 ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
-# Enables the in-memory-backed run-state/approval store constructors for tests only.
-ironclaw_run_state = { path = "../ironclaw_run_state", features = ["test-support"] }
 ironclaw_events = { path = "../ironclaw_events" }
 # Enables the shared TestDispatcher CapabilityDispatcher double for tests only.
 ironclaw_host_api = { path = "../ironclaw_host_api", features = ["test-support"] }

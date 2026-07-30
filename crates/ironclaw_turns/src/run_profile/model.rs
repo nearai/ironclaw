@@ -13,8 +13,8 @@ use crate::LoopGateRef;
 
 use super::host::{
     AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind, LoopModelPort,
-    LoopModelRequest, LoopModelResponse, LoopRunContext, LoopSafeSummary, ParentLoopOutput,
-    sanitize_model_visible_text,
+    LoopModelRequest, LoopModelResponse, LoopModelUsage, LoopRunContext, LoopSafeSummary,
+    ParentLoopOutput, sanitize_model_visible_text,
 };
 use super::milestones::{LoopHostMilestoneEmitter, LoopHostMilestoneSink};
 use super::model_work::{ModelWorkOutcome, ModelWorkRequest};
@@ -23,8 +23,7 @@ use super::model_work::{ModelWorkOutcome, ModelWorkRequest};
 ///
 /// This is a defense-in-depth bound for every provider, not just NEAR AI. Text
 /// progress resets the watchdog so a healthy long response is not cancelled.
-/// It MUST stay below the runner lease
-/// ([`crate::turn_state_row_store::turn_state_engine::DEFAULT_RUNNER_LEASE_TTL_SECONDS`] = 90s) so a hung
+/// It MUST stay below the process runner lease (90s by default) so a hung
 /// provider is surfaced as a retryable `Unavailable` error before the lease
 /// reclaims the runner mid-flight — the failure mode that wedged the Reborn
 /// runtime on 2026-06-24. The invariant is enforced by
@@ -134,6 +133,15 @@ pub struct LoopModelGatewayError {
     pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_ref: Option<LoopGateRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    /// Deterministic evidence that recovery can advance to this ordered
+    /// provider fallback index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_fallback_index: Option<u32>,
+    /// Provider-reported usage for a call that consumed tokens before failing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<LoopModelUsage>,
     /// Secret-value-scrubbed cause text for model recovery and failure
     /// explanation. Unlike `safe_summary`, path and payload delimiters are
     /// allowed.
@@ -151,6 +159,9 @@ impl LoopModelGatewayError {
             safe_summary: LoopSafeSummary::new(safe_summary)?,
             reason_kind: None,
             gate_ref: None,
+            retry_after_ms: None,
+            next_fallback_index: None,
+            usage: None,
             detail: None,
         })
     }
@@ -166,6 +177,9 @@ impl LoopModelGatewayError {
             safe_summary: LoopSafeSummary::model_gateway_timed_out(),
             reason_kind: None,
             gate_ref: None,
+            retry_after_ms: None,
+            next_fallback_index: None,
+            usage: None,
             detail: None,
         }
     }
@@ -177,6 +191,21 @@ impl LoopModelGatewayError {
 
     pub fn with_gate_ref(mut self, gate_ref: LoopGateRef) -> Self {
         self.gate_ref = Some(gate_ref);
+        self
+    }
+
+    pub fn with_retry_after_ms(mut self, retry_after_ms: u64) -> Self {
+        self.retry_after_ms = Some(retry_after_ms);
+        self
+    }
+
+    pub fn with_next_fallback_index(mut self, fallback_index: u32) -> Self {
+        self.next_fallback_index = Some(fallback_index);
+        self
+    }
+
+    pub fn with_usage(mut self, usage: LoopModelUsage) -> Self {
+        self.usage = Some(usage);
         self
     }
 
@@ -192,6 +221,15 @@ impl LoopModelGatewayError {
         }
         if let Some(gate_ref) = self.gate_ref {
             error = error.with_gate_ref(gate_ref);
+        }
+        if let Some(retry_after_ms) = self.retry_after_ms {
+            error = error.with_retry_after_ms(retry_after_ms);
+        }
+        if let Some(next_fallback_index) = self.next_fallback_index {
+            error = error.with_next_fallback_index(next_fallback_index);
+        }
+        if let Some(usage) = self.usage {
+            error = error.with_usage(usage);
         }
         if let Some(detail) = self.detail {
             error = error.with_detail(detail);
@@ -645,21 +683,10 @@ fn log_milestone_failure(result: Result<(), AgentLoopHostError>, message: &'stat
 mod tests {
     use super::*;
 
-    /// The primary model-call idle timeout must fire before the runner lease can
-    /// reclaim the run mid-flight. This guards against a silent regression of
-    /// the 2026-06-24 wedge, where the provider timeout (120s) exceeded the
-    /// lease (90s) and the lease killed runners before any timeout fired.
     #[test]
     fn primary_model_call_idle_timeout_is_below_runner_lease() {
-        let lease_secs = u64::try_from(
-            crate::turn_state_row_store::turn_state_engine::DEFAULT_RUNNER_LEASE_TTL_SECONDS,
-        )
-        .expect("runner lease TTL is non-negative");
         assert!(
-            PRIMARY_MODEL_CALL_IDLE_TIMEOUT.as_secs() < lease_secs,
-            "primary model-call idle timeout ({}s) must be below the runner lease ({}s)",
-            PRIMARY_MODEL_CALL_IDLE_TIMEOUT.as_secs(),
-            lease_secs,
+            PRIMARY_MODEL_CALL_IDLE_TIMEOUT < ironclaw_processes::DEFAULT_PROCESS_LEASE_DURATION
         );
     }
 

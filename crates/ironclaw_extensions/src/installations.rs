@@ -177,12 +177,20 @@ impl ExtensionManifestRecord {
     /// The single manifest parse entry point: dispatches on the declared
     /// `schema_version` (v2 or v3) and normalizes both into the same
     /// resolved model.
+    /// `root` is the extension's package root, when the caller already knows
+    /// it (e.g. materializing a filesystem/import package at a stable path).
+    /// It is an explicit required parameter — not a `with_root()` builder —
+    /// so every call site is forced to decide `Some(root)` or `None` rather
+    /// than silently inheriting a default a site forgot to set. `None`
+    /// callers accept the loader's historical `/system/extensions/{id}`
+    /// fabrication (`CompositionExtensionLoader::load`).
     pub fn from_toml(
         raw_toml: impl Into<String>,
         source: ManifestSource,
         host_port_catalog: &HostPortCatalog,
         manifest_hash: Option<ManifestHash>,
         contracts: &HostApiContractRegistry,
+        root: Option<VirtualPath>,
     ) -> Result<Self, ExtensionInstallationError> {
         let raw_toml = raw_toml.into();
         let probe: SchemaVersionProbe = toml::from_str(&raw_toml).map_err(|error| {
@@ -190,19 +198,20 @@ impl ExtensionManifestRecord {
                 reason: format!("failed to parse extension manifest: {error}"),
             }
         })?;
-        let (manifest, resolved) = if probe.schema_version == crate::v3::MANIFEST_SCHEMA_VERSION_V3
-        {
-            crate::v3::parse_v3(&raw_toml, source, host_port_catalog).map_err(|error| {
-                ExtensionInstallationError::InvalidManifest {
-                    reason: error.to_string(),
-                }
-            })?
-        } else {
-            let manifest =
-                ExtensionManifestV2::parse(&raw_toml, source, host_port_catalog, contracts)?;
-            let resolved = ResolvedExtensionManifest::from_v2(&manifest);
-            (manifest, resolved)
-        };
+        let (manifest, mut resolved) =
+            if probe.schema_version == crate::v3::MANIFEST_SCHEMA_VERSION_V3 {
+                crate::v3::parse_v3(&raw_toml, source, host_port_catalog).map_err(|error| {
+                    ExtensionInstallationError::InvalidManifest {
+                        reason: error.to_string(),
+                    }
+                })?
+            } else {
+                let manifest =
+                    ExtensionManifestV2::parse(&raw_toml, source, host_port_catalog, contracts)?;
+                let resolved = ResolvedExtensionManifest::from_v2(&manifest);
+                (manifest, resolved)
+            };
+        resolved.root = root;
         Ok(Self {
             raw_toml,
             manifest,
@@ -1151,6 +1160,8 @@ impl ExtensionInstallationStore {
                     &self.host_ports,
                     wire.manifest_hash,
                     &self.contracts,
+                    // Legacy pre-REC-1 row: no root was ever persisted for it.
+                    None,
                 )?
                 .with_removal_cleanup_requirements(wire.removal_cleanup_requirements);
                 match self
@@ -3674,6 +3685,7 @@ mod tests {
             &HostPortCatalog::empty(),
             hash.map(|value| ManifestHash::new(value).expect("hash")),
             &capability_provider_contracts(),
+            None,
         )
         .expect("manifest record")
     }

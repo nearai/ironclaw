@@ -367,3 +367,31 @@ impl CanonicalAgentLoopExecutor {
         InputStage.drain_followup(ctx, state).await
     }
 }
+
+#[cfg(test)]
+mod checkpoint_host_error_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_checkpoint_rejection_summary_uses_cause_neutral_fallback() {
+        let error = checkpoint_host_error(
+            CheckpointKind::BeforeModel,
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::CheckpointRejected,
+                "api_key marker must not escape",
+            ),
+        );
+
+        assert_eq!(
+            error,
+            AgentLoopExecutorError::CheckpointRejected {
+                stage: CheckpointKind::BeforeModel,
+                safe_summary: LoopSafeSummary::checkpoint_rejected(),
+            }
+        );
+        assert_eq!(
+            LoopSafeSummary::checkpoint_rejected().as_str(),
+            "checkpoint was rejected and no safe explanation was available"
+        );
+    }
+}

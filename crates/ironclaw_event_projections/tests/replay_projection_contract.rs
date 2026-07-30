@@ -1829,6 +1829,7 @@ async fn replay_projection_keeps_spawned_process_run_active_until_terminal_proce
 
 #[tokio::test]
 async fn replay_projection_orders_runs_by_recent_activity_descending() {
+    // arch-exempt: large_file, strengthens existing replay ordering contract coverage, plan #6723
     // Six invocations, not two. `RuntimeProjectionState::runs` is a `HashMap`,
     // so with two entries its iteration order matches sorted order about half
     // the time and this test passes by luck even when the sort is gone —

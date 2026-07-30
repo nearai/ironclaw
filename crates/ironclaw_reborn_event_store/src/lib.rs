@@ -155,12 +155,23 @@ pub enum RebornEventStoreConfig {
         path_or_url: String,
         auth_token: Option<SecretString>,
     },
+    /// libSQL backend using an already-opened filesystem.
+    ///
+    /// Hosted production uses this so event and audit logs participate in the
+    /// same process-local writer admission lane as every other libSQL-backed
+    /// adapter. The caller owns database construction and schema migration;
+    /// `path_or_url` is retained only for production durability/transport
+    /// policy validation and is never reopened.
+    LibsqlFilesystem {
+        filesystem: Arc<ironclaw_filesystem::LibSqlRootFilesystem>,
+        path_or_url: String,
+    },
 }
 
 /// Reborn composition profile controlling which fallbacks are legal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RebornProfile {
-    LocalDev,
+    Standalone,
     Test,
     Production,
 }
@@ -260,6 +271,15 @@ pub async fn build_reborn_event_stores(
                 validate_production_libsql_target(&path_or_url)?;
             }
             libsql_backed::build(path_or_url, auth_token).await
+        }
+        RebornEventStoreConfig::LibsqlFilesystem {
+            filesystem,
+            path_or_url,
+        } => {
+            if profile == RebornProfile::Production {
+                validate_production_libsql_target(&path_or_url)?;
+            }
+            build_reborn_event_stores_from_root_filesystem(filesystem)
         }
     }
 }
@@ -413,7 +433,10 @@ mod libsql_backed {
         auth_token: Option<SecretString>,
     ) -> Result<RebornEventStores, RebornEventStoreError> {
         let db = build_database(&path_or_url, auth_token).await?;
-        let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+        let filesystem =
+            Arc::new(LibSqlRootFilesystem::new(db).map_err(|source| {
+                RebornEventStoreError::backend("libsql", "build runtime", source)
+            })?);
         filesystem
             .run_migrations()
             .await
@@ -1764,7 +1787,7 @@ mod tests {
 
     async fn jsonl_event_log(root: std::path::PathBuf) -> Arc<dyn DurableEventLog> {
         build_reborn_event_stores(
-            RebornProfile::LocalDev,
+            RebornProfile::Standalone,
             RebornEventStoreConfig::Jsonl {
                 root,
                 accept_single_node_durable: false,
@@ -1773,6 +1796,87 @@ mod tests {
         .await
         .expect("build jsonl event store")
         .events
+    }
+
+    /// Break caught: rebuilding the libSQL filesystem from a URL gives event
+    /// logs a second, independent writer pool instead of the production
+    /// composition's shared runtime.
+    #[tokio::test]
+    async fn prebuilt_libsql_filesystem_config_reuses_existing_backend() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("prebuilt-event-store.db");
+        let db = Arc::new(
+            libsql::Builder::new_local(&path)
+                .build()
+                .await
+                .expect("database"),
+        );
+        let filesystem = Arc::new(
+            ironclaw_filesystem::LibSqlRootFilesystem::new(db).expect("filesystem runtime"),
+        );
+        filesystem
+            .run_migrations()
+            .await
+            .expect("filesystem migrations");
+        let stores = build_reborn_event_stores(
+            RebornProfile::Production,
+            RebornEventStoreConfig::LibsqlFilesystem {
+                filesystem: Arc::clone(&filesystem),
+                path_or_url: path.to_string_lossy().into_owned(),
+            },
+        )
+        .await
+        .expect("build stores from prebuilt filesystem");
+
+        let scope = jsonl_scope();
+        let stream = EventStreamKey::from_scope(&scope);
+        stores
+            .events
+            .append(RuntimeEvent::dispatch_requested(
+                scope,
+                CapabilityId::new("demo.prebuilt").expect("capability id"),
+            ))
+            .await
+            .expect("append through prebuilt filesystem");
+        assert_eq!(
+            stores
+                .events
+                .head_cursor(&stream, EventCursor::origin())
+                .await
+                .expect("event head"),
+            EventCursor::new(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn production_prebuilt_libsql_filesystem_rejects_in_memory_target() {
+        let database = Arc::new(
+            libsql::Builder::new_local(":memory:")
+                .build()
+                .await
+                .expect("in-memory database"),
+        );
+        let filesystem = Arc::new(
+            ironclaw_filesystem::LibSqlRootFilesystem::new(database).expect("filesystem runtime"),
+        );
+        filesystem
+            .run_migrations()
+            .await
+            .expect("filesystem migrations");
+
+        let result = build_reborn_event_stores(
+            RebornProfile::Production,
+            RebornEventStoreConfig::LibsqlFilesystem {
+                filesystem,
+                path_or_url: ":memory:".to_string(),
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(RebornEventStoreError::ProductionInMemoryDisabled)
+        ));
     }
 
     #[tokio::test]
@@ -1870,13 +1974,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_allows_cleartext_http_libsql_url() {
+    async fn standalone_allows_cleartext_http_libsql_url() {
         // Non-production profiles can still use http:// for local sqld.
         // The build call will fail on the actual connection attempt below
         // for an unreachable address, but it must NOT fail with the
         // cleartext-disabled error.
         let result = build_reborn_event_stores(
-            RebornProfile::LocalDev,
+            RebornProfile::Standalone,
             RebornEventStoreConfig::Libsql {
                 path_or_url: "http://127.0.0.1:1".to_string(),
                 auth_token: None,
@@ -1986,14 +2090,14 @@ mod tests {
         ));
     }
     #[tokio::test]
-    async fn local_dev_still_allows_bare_relative_libsql_path() {
-        // The bare-path rejection is a production-only policy. LocalDev /
+    async fn standalone_still_allows_bare_relative_libsql_path() {
+        // The bare-path rejection is a production-only policy. Standalone /
         // Test must still allow `events.db` for ergonomic test/demo configs.
         let temp = tempfile::tempdir().expect("tempdir");
         let cwd = std::env::current_dir().expect("cwd");
         std::env::set_current_dir(temp.path()).expect("chdir to tempdir");
         let result = build_reborn_event_stores(
-            RebornProfile::LocalDev,
+            RebornProfile::Standalone,
             RebornEventStoreConfig::Libsql {
                 path_or_url: "events.db".to_string(),
                 auth_token: None,
@@ -2006,7 +2110,7 @@ mod tests {
                 result,
                 Err(RebornEventStoreError::ProductionLibsqlAmbiguousTarget)
             ),
-            "LocalDev must accept bare relative paths"
+            "Standalone must accept bare relative paths"
         );
         // The build itself should succeed for a bare filename in cwd.
         result.expect("local libsql with bare relative path should build");
@@ -2092,7 +2196,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().join("event-store");
         let stores = build_reborn_event_stores(
-            RebornProfile::LocalDev,
+            RebornProfile::Standalone,
             RebornEventStoreConfig::Jsonl {
                 root: root.clone(),
                 accept_single_node_durable: false,

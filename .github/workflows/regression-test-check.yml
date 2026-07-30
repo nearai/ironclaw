@@ -66,7 +66,8 @@ jobs:
           HIGH_RISK_PATTERNS=(
             "crates/ironclaw_turns/src/coordinator.rs"
             "crates/ironclaw_turns/src/status.rs"
-            "crates/ironclaw_run_state/src/"
+            "crates/ironclaw_processes/src/journal_store"
+            "crates/ironclaw_processes/src/supervisor.rs"
             "crates/ironclaw_llm/src/circuit_breaker.rs"
             "crates/ironclaw_llm/src/retry.rs"
             "crates/ironclaw_llm/src/failover.rs"

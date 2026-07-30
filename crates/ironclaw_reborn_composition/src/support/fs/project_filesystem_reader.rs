@@ -24,7 +24,7 @@ use ironclaw_product::{
 };
 use ironclaw_threads::ThreadScope;
 
-use crate::local_dev_mounts::WORKSPACE_ALIAS;
+use crate::runtime_mounts::WORKSPACE_ALIAS;
 
 const DEFAULT_OCTET_STREAM: &str = "application/octet-stream";
 

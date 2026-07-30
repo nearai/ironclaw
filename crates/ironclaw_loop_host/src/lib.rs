@@ -17,10 +17,6 @@ use std::{
 };
 
 mod await_edge_port;
-#[cfg(any(test, feature = "test-support"))]
-mod test_support;
-#[cfg(any(test, feature = "test-support"))]
-pub use test_support::in_memory_backed_checkpoint_state_store;
 mod budget_accountant;
 mod budget_cost_table;
 mod budget_seeding;
@@ -29,9 +25,9 @@ mod capability_allow_set;
 mod capability_info;
 mod capability_port;
 mod capability_surface_filter;
-mod checkpoint_state_store;
 mod compaction_task;
 mod context_window_cache;
+mod external_tool_capability;
 mod filesystem_skill_bundle_source;
 pub mod identity_context;
 mod input_port;
@@ -40,14 +36,17 @@ mod memory_context;
 mod model_capability_view;
 mod model_visible_scrub;
 mod prompt_context_budget;
+mod result_read;
 mod skill_bundle_context_source;
 mod skill_bundle_source;
 mod skill_context;
 mod subagent_prompt_port;
 mod subagent_spawn_port;
+mod surface_disclosure;
+mod synthetic_capability;
 mod system_inference;
+mod thread_scope;
 mod token_estimator;
-mod turn_event_publisher;
 pub mod user_profile_context;
 
 pub use await_edge_port::{
@@ -57,10 +56,10 @@ pub use budget_accountant::GovernorBackedAccountant;
 pub use budget_cost_table::{ModelCost, ModelCostTable, StaticModelCostTable, ZeroCostTable};
 pub use budget_seeding::BudgetSeedingPolicy;
 pub use cancellation_port::{
-    AlwaysAliveLoopCancellationPort, AlwaysAliveRunCancellationFactory,
-    CompositeTurnRunWakeNotifier, ProductLiveCancellationProbe, ProductLiveCancellationReadiness,
-    RunCancellationFactory, RunCancellationHandle, RunCancellationObservationKind,
-    RunStateLoopCancellationPort, TurnStateRunCancellationFactory,
+    AgentTurnRunCancellationFactory, AlwaysAliveLoopCancellationPort,
+    AlwaysAliveRunCancellationFactory, CompositeTurnRunWakeNotifier, ProductLiveCancellationProbe,
+    ProductLiveCancellationReadiness, RunCancellationFactory, RunCancellationHandle,
+    RunCancellationObservationKind, RunStateLoopCancellationPort,
     verify_product_live_cancellation_probe,
 };
 pub use capability_allow_set::{
@@ -77,13 +76,13 @@ pub use capability_surface_filter::{
     CapabilitySurfaceDenyFilter, CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
     PerSurfaceCapabilityDenyDecorator,
 };
-pub use checkpoint_state_store::CheckpointStateStore;
 pub use compaction_task::{
     ACTIVE_TASK_COMPACTION_PROMPT_ID, DEFAULT_COMPACTION_PROMPT_ID, HostManagedLoopCompactionPort,
     active_task_compaction_prompt_id, default_compaction_prompt_id,
     default_host_managed_loop_compaction_port, host_managed_loop_compaction_port_with_prompt_id,
 };
 pub use context_window_cache::ThreadContextWindowCache;
+pub use external_tool_capability::wrap_external_tools;
 pub use filesystem_skill_bundle_source::{FilesystemSkillBundleRoot, FilesystemSkillBundleSource};
 pub use identity_context::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
@@ -96,6 +95,9 @@ pub use input_port::HostQueueLoopInputPort;
 pub use input_queue::{HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError};
 pub use ironclaw_turns::run_profile::PromptContextTokenBudget;
 pub use model_visible_scrub::scrub_model_visible_detail;
+pub use result_read::{RESULT_READ_CAPABILITY_ID, result_read_capability};
+#[cfg(feature = "test-support")]
+pub use result_read::{RESULT_READ_CAPABILITY_ID_FOR_TEST, wrap_result_read_capability_for_test};
 pub use skill_bundle_context_source::SkillBundleContextSource;
 pub use skill_bundle_source::{
     SkillBundleDescriptor, SkillBundleId, SkillBundleProvenance, SkillBundleSource,
@@ -117,10 +119,16 @@ pub use subagent_spawn_port::{
     InMemoryAwaitEdgeWriter, JsonSpawnSubagentInputCodec, SpawnSubagentArgs,
     SpawnSubagentFlavorDescriptor, SpawnSubagentInputCodec, SpawnSubagentMode, SubagentDefinition,
     SubagentDefinitionResolver, SubagentGoalRecord, SubagentKindId, SubagentSpawnCapabilityPort,
-    SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits, SubagentThreadKind,
-    SubagentThreadMetadata, build_spawn_subagent_parameters_schema,
+    SubagentSpawnDeps, SubagentSpawnLimits, SubagentThreadKind, SubagentThreadMetadata,
+    build_spawn_subagent_parameters_schema,
+};
+pub use surface_disclosure::wrap_surface_disclosure;
+pub use synthetic_capability::{
+    SyntheticCapability, SyntheticCapabilityDescriptor, SyntheticCapabilityHandler,
+    SyntheticCapabilityInvocation, wrap_synthetic_capabilities,
 };
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
+pub use thread_scope::ThreadScopeResolver;
 pub use user_profile_context::{EmptyUserProfileSource, HostUserProfileSource};
 pub const COMPACTION_SYSTEM_PROMPT: &str =
     include_str!("../prompts/compaction_summarizer_fresh.md");
@@ -134,7 +142,6 @@ pub const FAILURE_EXPLANATION_SYSTEM_PROMPT: &str =
 pub use token_estimator::{
     CHARS_PER_TOKEN_DEFAULT, EstimatedTokenCount, estimate_tokens_from_chars,
 };
-pub use turn_event_publisher::EventPublishingTurnRunTransitionPort;
 
 use tokio::sync::{Mutex, OnceCell};
 
@@ -1283,6 +1290,7 @@ where
         self.emit_model_started(requested_model_profile_id).await;
         let host_request = HostManagedModelRequest {
             model_profile_id: model_profile_id.clone(),
+            fallback_index: request.fallback_index,
             messages: resolved_messages,
             surface_version: request.surface_version.clone(),
             resolved_model_route: self.run_context.resolved_model_route.clone(),
@@ -1327,21 +1335,29 @@ where
                     safe_reasoning_deltas,
                     output,
                     usage,
+                    effective_fallback_index,
                 } = response;
-                let chunks = safe_text_deltas
-                    .into_iter()
-                    .map(|safe_text_delta| ModelStreamChunk {
-                        safe_text_delta: sanitize_model_visible_text(safe_text_delta),
-                    })
-                    .collect::<Vec<_>>();
-                let loop_response = LoopModelResponse {
-                    chunks,
-                    safe_reasoning_deltas,
-                    output,
-                    effective_model_profile_id: model_profile_id.clone(),
-                    usage,
-                };
-                Ok(loop_response)
+                if effective_fallback_index != Some(request.fallback_index) {
+                    Err(AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::Internal,
+                        "model gateway returned mismatched fallback route evidence",
+                    ))
+                } else {
+                    let chunks = safe_text_deltas
+                        .into_iter()
+                        .map(|safe_text_delta| ModelStreamChunk {
+                            safe_text_delta: sanitize_model_visible_text(safe_text_delta),
+                        })
+                        .collect::<Vec<_>>();
+                    let loop_response = LoopModelResponse {
+                        chunks,
+                        safe_reasoning_deltas,
+                        output,
+                        effective_model_profile_id: model_profile_id.clone(),
+                        usage,
+                    };
+                    Ok(loop_response)
+                }
             }
             Err(error) => Err(model_gateway_error(error)),
         };
@@ -1737,6 +1753,9 @@ pub trait HostManagedModelStreamSink: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostManagedModelRequest {
     pub model_profile_id: ModelProfileId,
+    /// Zero-based index into the gateway provider's ordered fallback chain.
+    #[serde(default)]
+    pub fallback_index: u32,
     pub messages: Vec<HostManagedModelMessage>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1860,6 +1879,9 @@ pub struct HostManagedModelResponse {
     /// USD spend instead of the conservative reservation estimate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<LoopModelUsage>,
+    /// Authoritative ordered-chain index used for this successful call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_fallback_index: Option<u32>,
 }
 
 impl HostManagedModelResponse {
@@ -1873,6 +1895,7 @@ impl HostManagedModelResponse {
                 content: sanitized_content,
             }),
             usage: None,
+            effective_fallback_index: Some(0),
         }
     }
 
@@ -1899,6 +1922,7 @@ impl HostManagedModelResponse {
             safe_reasoning_deltas: Vec::new(),
             output: ParentLoopOutput::CapabilityCalls(calls),
             usage: None,
+            effective_fallback_index: Some(0),
         }
     }
 
@@ -1916,6 +1940,11 @@ impl HostManagedModelResponse {
     /// sites can chain into [`assistant_reply`] / [`capability_calls`].
     pub fn with_usage(mut self, usage: LoopModelUsage) -> Self {
         self.usage = Some(usage);
+        self
+    }
+
+    pub fn with_effective_fallback_index(mut self, fallback_index: u32) -> Self {
+        self.effective_fallback_index = Some(fallback_index);
         self
     }
 }
@@ -1959,6 +1988,11 @@ pub enum HostManagedModelErrorKind {
     BudgetAccountingFailed,
     /// Provider credentials are missing, expired, or otherwise unavailable.
     CredentialUnavailable,
+    /// Provider throttled the request. `retry_after_ms` carries the bounded
+    /// provider instruction when present.
+    RateLimited,
+    /// Provider returned a typed upstream 5xx availability failure.
+    ProviderUnavailable,
     Unavailable,
     Cancelled,
 }
@@ -1970,6 +2004,14 @@ pub struct HostManagedModelError {
     pub safe_summary: String,
     pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
     pub gate_ref: Option<LoopGateRef>,
+    /// Provider-supplied retry delay. Typed so the recovery strategy does not
+    /// have to parse model-visible detail text.
+    pub retry_after_ms: Option<u64>,
+    /// Deterministic evidence that the provider chain has another configured
+    /// route. Recovery may advance only when this is present.
+    pub next_fallback_index: Option<u32>,
+    /// Provider-reported usage for a call that consumed tokens before failing.
+    pub usage: Option<LoopModelUsage>,
     /// Model-visible, secret-scrubbed raw cause (status line, provider body
     /// snippet). Unlike `safe_summary`, this carries the original message so the
     /// failure explainer can describe the real fault. Secret VALUES must be
@@ -1986,6 +2028,9 @@ impl HostManagedModelError {
             safe_summary: safe_model_summary(kind).to_string(),
             reason_kind: None,
             gate_ref: None,
+            retry_after_ms: None,
+            next_fallback_index: None,
+            usage: None,
             detail: None,
         }
     }
@@ -1996,6 +2041,9 @@ impl HostManagedModelError {
             safe_summary: safe_summary.into(),
             reason_kind: None,
             gate_ref: None,
+            retry_after_ms: None,
+            next_fallback_index: None,
+            usage: None,
             detail: None,
         }
     }
@@ -2025,6 +2073,27 @@ impl HostManagedModelError {
 
     pub fn with_gate_ref(mut self, gate_ref: LoopGateRef) -> Self {
         self.gate_ref = Some(gate_ref);
+        self
+    }
+
+    pub fn with_retry_after(mut self, retry_after: std::time::Duration) -> Self {
+        self.retry_after_ms = Some(
+            retry_after
+                .as_millis()
+                .min(u64::MAX as u128)
+                .try_into()
+                .unwrap_or(u64::MAX),
+        );
+        self
+    }
+
+    pub fn with_next_fallback_index(mut self, fallback_index: u32) -> Self {
+        self.next_fallback_index = Some(fallback_index);
+        self
+    }
+
+    pub fn with_usage(mut self, usage: LoopModelUsage) -> Self {
+        self.usage = Some(usage);
         self
     }
 }
@@ -2350,6 +2419,15 @@ fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
     if let Some(gate_ref) = error.gate_ref {
         host_error = host_error.with_gate_ref(gate_ref);
     }
+    if let Some(retry_after_ms) = error.retry_after_ms {
+        host_error = host_error.with_retry_after_ms(retry_after_ms);
+    }
+    if let Some(next_fallback_index) = error.next_fallback_index {
+        host_error = host_error.with_next_fallback_index(next_fallback_index);
+    }
+    if let Some(usage) = error.usage {
+        host_error = host_error.with_usage(usage);
+    }
     // `error.detail` is already producer-scrubbed; fall back to the scrubbed
     // rejected summary only when there is no structured detail.
     if let Some(detail) = error.detail.or(rejected_summary_detail) {
@@ -2381,6 +2459,8 @@ fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
         HostManagedModelErrorKind::CredentialUnavailable => {
             AgentLoopHostErrorKind::CredentialUnavailable
         }
+        HostManagedModelErrorKind::RateLimited => AgentLoopHostErrorKind::RateLimited,
+        HostManagedModelErrorKind::ProviderUnavailable => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::Unavailable => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::Cancelled => AgentLoopHostErrorKind::Cancelled,
     }
@@ -2409,6 +2489,10 @@ fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
             "resource accounting storage is unavailable"
         }
         HostManagedModelErrorKind::CredentialUnavailable => "model credentials are unavailable",
+        HostManagedModelErrorKind::RateLimited => "model provider rate limited the request",
+        HostManagedModelErrorKind::ProviderUnavailable => {
+            "model provider is temporarily unavailable"
+        }
         HostManagedModelErrorKind::Unavailable => "model service is unavailable",
         HostManagedModelErrorKind::Cancelled => "model request was cancelled",
     }
@@ -2419,6 +2503,76 @@ mod tests {
     use crate::memory_context::latest_user_message_text;
 
     use super::*;
+
+    #[test]
+    fn missing_model_route_evidence_stays_explicit_after_deserialization() {
+        let response = HostManagedModelResponse::assistant_reply("ok");
+        let mut serialized = serde_json::to_value(response).expect("response serializes");
+        serialized
+            .as_object_mut()
+            .expect("response is an object")
+            .remove("effective_fallback_index");
+
+        let decoded: HostManagedModelResponse =
+            serde_json::from_value(serialized).expect("legacy response shape deserializes");
+
+        assert_eq!(decoded.effective_fallback_index, None);
+    }
+
+    #[test]
+    fn failed_model_usage_survives_host_error_mapping() {
+        let usage = LoopModelUsage {
+            input_tokens: 11,
+            output_tokens: 7,
+            ..Default::default()
+        };
+
+        let mapped = model_gateway_error(
+            HostManagedModelError::safe(
+                HostManagedModelErrorKind::OutputTruncated,
+                "model response was truncated before completion",
+            )
+            .with_usage(usage),
+        );
+
+        assert_eq!(mapped.usage, Some(usage));
+    }
+
+    #[test]
+    fn typed_provider_errors_reach_distinct_loop_recovery_classes_with_retry_payload() {
+        for (kind, expected) in [
+            (
+                HostManagedModelErrorKind::RateLimited,
+                AgentLoopHostErrorKind::RateLimited,
+            ),
+            (
+                HostManagedModelErrorKind::ProviderUnavailable,
+                AgentLoopHostErrorKind::Unavailable,
+            ),
+        ] {
+            let mut error = HostManagedModelError::safe(kind, safe_model_summary(kind))
+                .with_retry_after(std::time::Duration::from_millis(1_750));
+            if kind == HostManagedModelErrorKind::ProviderUnavailable {
+                error = error.with_next_fallback_index(1);
+            }
+            let mapped = model_gateway_error(error);
+
+            assert_eq!(
+                mapped.kind, expected,
+                "{kind:?} must reach its distinct loop recovery class"
+            );
+            assert_eq!(
+                mapped.retry_after_ms,
+                Some(1_750),
+                "{kind:?} must preserve its typed provider retry hint"
+            );
+            assert_eq!(
+                mapped.next_fallback_index,
+                (kind == HostManagedModelErrorKind::ProviderUnavailable).then_some(1),
+                "{kind:?} must preserve only applicable fallback route evidence"
+            );
+        }
+    }
 
     fn ctx_msg(sequence: u64, kind: MessageKind, content: &str) -> ContextMessage {
         ContextMessage {

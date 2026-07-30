@@ -4,7 +4,7 @@
 //! Proves the cancel path end-to-end: the model call parks at the vendor-SDK
 //! seam, the test cancels the in-flight run, releases the park, and the run
 //! reaches `TurnStatus::Cancelled` (not `Completed`). Cancellation is observed
-//! by the loop-driver host's default `TurnStateRunCancellationFactory`, not a
+//! by the loop-driver host's default `AgentTurnRunCancellationFactory`, not a
 //! wired coordinator fan-out.
 //!
 //! Also covers C-ERRORS: a leaked-permit regression guard (precedent: PR

@@ -28,7 +28,7 @@ async fn libsql_filesystem(path: &str) -> Arc<LibSqlRootFilesystem> {
             .await
             .expect("build libsql db"),
     );
-    let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(db).expect("filesystem runtime"));
     filesystem
         .run_migrations()
         .await

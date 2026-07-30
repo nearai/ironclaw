@@ -55,16 +55,42 @@
 
 [global]
 enforce = true
-# Recaptured locally from the current main-line Reborn integration inventory:
-# aggregate 304733 / 377084 = 80.81%. The previous baseline was captured before
-# the current main-line coverage inventory expanded; this records that legitimate
-# denominator shift without changing any crate-specific floor (none are enabled).
-floor_percent = 80.81
+# Recaptured from PR #6696's successful merged CI artifact before the behavioral
+# coverage additions in this PR: aggregate 307208 / 360961 = 85.11%. New tests
+# may raise this value; this floor prevents either test removal or denominator
+# shrinkage from returning to the previous permissive 80.81% baseline.
+floor_percent = 85.11
 tolerance_percent = 0.5
-captured_total_lines = 377084
-captured_date = "2026-07-25"
-captured_from = "3af839354"
+captured_total_lines = 360961
+captured_date = "2026-07-28"
+captured_from = "cef5eab53f47b2fc603a6dffc6cdeb7e12ed9ef5"
 
-# No [[crate]] entries at initial landing — opt-in, added as owners choose to
-# ratchet a crate they care about (e.g. ironclaw_reborn_composition,
-# ironclaw_product) as a fast-follow, not blocking this landing.
+[[crate]]
+name = "ironclaw_runner"
+floor_percent = 83.58
+floor_covered_lines = 13083
+tolerance_percent = 0.5
+tolerance_lines = 20
+captured_total_lines = 15653
+captured_date = "2026-07-28"
+rationale = "Protects runner orchestration and await-edge caller paths after the process-journal migration."
+
+[[crate]]
+name = "ironclaw_processes"
+floor_percent = 82.29
+floor_covered_lines = 5140
+tolerance_percent = 0.5
+tolerance_lines = 20
+captured_total_lines = 6246
+captured_date = "2026-07-28"
+rationale = "Protects the process journal state machine with both percentage and deletion-resistant covered-line floors."
+
+[[crate]]
+name = "ironclaw_turns"
+floor_percent = 85.36
+floor_covered_lines = 9181
+tolerance_percent = 0.5
+tolerance_lines = 20
+captured_total_lines = 10755
+captured_date = "2026-07-28"
+rationale = "Protects child submission, retry, admission, and process-projection behavior."

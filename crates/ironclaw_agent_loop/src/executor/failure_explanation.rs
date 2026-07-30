@@ -75,6 +75,7 @@ pub(super) async fn explain_failure(
             messages,
             surface_version: None,
             model_preference: None,
+            fallback_index: state.model_state.fallback_index,
             capability_view: Some(LoopModelCapabilityView {
                 visible_capability_ids: Vec::new(),
             }),
