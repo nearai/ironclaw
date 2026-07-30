@@ -55,8 +55,8 @@ MOCK_PROJECTS = [
             "engineering, and sales."
         ),
         "metadata": {"goals": ["Ship v2.0 by June 15", "Hit launch signups"]},
-        "state": "active",
-        "role": "owner",
+        "state": "archived",
+        "role": "viewer",
         "created_at": "2026-04-11T08:45:00Z",
         "updated_at": "2026-04-12T08:45:00Z",
     },
@@ -287,6 +287,54 @@ async def test_reborn_legacy_projects_overview_search_and_open_workspace(
         await page.wait_for_url(f"**/projects/{MOCK_PROJECT_ID}**", timeout=5000)
         assert "/api/webchat/v2/projects" in project_requests
         assert f"/api/webchat/v2/projects/{MOCK_PROJECT_ID}" in project_requests
+    finally:
+        await harness["context"].close()
+
+
+async def test_reborn_projects_overview_shows_only_api_backed_fields(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_projects_page(reborn_v2_server, reborn_v2_browser)
+    try:
+        page = harness["page"]
+        await expect(page.locator(SEL_V2["projects_summary"])).to_be_visible()
+        research_card = page.locator(
+            SEL_V2["project_card_for"].format(id=MOCK_PROJECT_ID)
+        )
+        archived_card = page.locator(
+            SEL_V2["project_card_for"].format(id=PRODUCT_PROJECT_ID)
+        )
+
+        await expect(
+            page.locator(SEL_V2["projects_summary_for"].format(kind="projects"))
+        ).to_contain_text("3")
+        await expect(
+            page.locator(SEL_V2["projects_summary_for"].format(kind="active"))
+        ).to_contain_text("2")
+        await expect(
+            page.locator(SEL_V2["projects_summary_for"].format(kind="archived"))
+        ).to_contain_text("1")
+
+        await expect(research_card).to_contain_text("Active")
+        await expect(research_card).to_contain_text("Owner")
+        await expect(research_card).to_contain_text("Updated")
+        await expect(archived_card).to_contain_text("Archived")
+        await expect(archived_card).to_contain_text("Viewer")
+        await expect(archived_card).to_contain_text("Updated")
+
+        for fabricated_copy in [
+            "Healthy",
+            "No recent activity",
+            "Threads today: 0",
+            "Pending gates: 0",
+            "Failures in 24h: 0",
+            "$0.00 spend today",
+            "Attention queue",
+            "Spend today",
+        ]:
+            await expect(
+                page.get_by_text(fabricated_copy, exact=True)
+            ).to_have_count(0)
     finally:
         await harness["context"].close()
 

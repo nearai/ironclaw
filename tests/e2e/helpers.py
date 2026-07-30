@@ -374,6 +374,10 @@ SEL_V2 = {
     "tool_activity_detail": "[data-testid='tool-activity-detail']",
     "projects_grid": "[data-testid='projects-grid']",
     "projects_search_input": "[data-testid='projects-search-input']",
+    "projects_summary": "[data-testid='projects-summary']",
+    "projects_summary_for": (
+        "[data-testid='projects-summary'] [data-summary-kind='{kind}']"
+    ),
     "project_card": "[data-testid='project-card']",
     "project_card_for": "[data-testid='project-card'][data-project-id='{id}']",
     "project_open_workspace": "[data-testid='project-open-workspace']",
