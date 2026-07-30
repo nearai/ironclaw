@@ -70,6 +70,10 @@
   --v2-accent-soft:  rgba(76, 167, 230, 0.12);
   --v2-accent-text:  #10649e;
 
+  /* NEAR AI primary brand blue (near.ai/brand) — the process indicator mark.
+     A brand constant, defined once and inherited by every theme. */
+  --near-blue: #0091fd;
+
   /* Semantic colours */
   --v2-positive-soft: rgba(32, 210, 154, 0.13);
   --v2-positive-text: #087a5d;
@@ -394,9 +398,57 @@ input:focus, select:focus, textarea:focus {
   animation: v2-spin 0.8s linear infinite !important;
 }
 
+/* NEAR "N" process indicator (see pages/chat/components/near-process-indicator.tsx).
+   Another intentional motion-policy exception: while the agent is working, a
+   light chases the N's spine (`near-chase`) and the glyph does a quick spin +
+   heartbeat (`near-pulse`). Both use a class selector + !important so they
+   outrank the universal `animation: none` rule, and both are suppressed under
+   prefers-reduced-motion below. */
+.near-process-icon {
+  color: var(--near-blue);
+  overflow: visible;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.near-process-icon .near-base { fill: currentColor; }
+.near-process-icon .near-comet {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  /* Short lit segment (~15% of the ~66px spine) + long gap so a single comet
+     travels the mark; the keyframe shifts one full period for a seamless loop. */
+  stroke-dasharray: 10 56;
+  stroke-dashoffset: 0;
+  filter: drop-shadow(0 0 1.5px currentColor);
+}
+.near-process.is-busy .near-process-icon {
+  animation: near-pulse 2s ease-in-out infinite !important;
+}
+.near-process.is-busy .near-process-icon .near-comet {
+  animation: near-chase 1.1s linear infinite !important;
+}
+@keyframes near-chase {
+  to { stroke-dashoffset: -66; }
+}
+@keyframes near-pulse {
+  0%   { transform: rotate(0deg)   scale(1); }
+  22%  { transform: rotate(360deg) scale(1); }
+  50%  { transform: rotate(360deg) scale(1); }
+  58%  { transform: rotate(360deg) scale(1.28); }
+  66%  { transform: rotate(360deg) scale(0.98); }
+  74%  { transform: rotate(360deg) scale(1.16); }
+  82%  { transform: rotate(360deg) scale(1); }
+  100% { transform: rotate(360deg) scale(1); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .v2-typing-dot { animation: none !important; }
   .v2-spin { animation: none !important; }
+  .near-process.is-busy .near-process-icon,
+  .near-process.is-busy .near-process-icon .near-comet { animation: none !important; }
+  .near-process .near-comet { display: none !important; }
 }
 
 /* ── Markdown body ───────────────────────────────────────────────── */
