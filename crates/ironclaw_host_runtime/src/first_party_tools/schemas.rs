@@ -120,12 +120,16 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "type": "object",
             "properties": {
                 "attached": { "type": "boolean", "const": true },
-                "path": { "type": "string" },
+                "attachment_ref": {
+                    "type": "string",
+                    "pattern": "^att_[0-9a-f]{64}$",
+                    "description": "Opaque host-issued reference for the registered attachment."
+                },
                 "filename": { "type": "string" },
                 "mime_type": { "type": "string" },
                 "size_bytes": { "type": "integer", "minimum": 0 }
             },
-            "required": ["attached", "path", "filename", "mime_type", "size_bytes"],
+            "required": ["attached", "attachment_ref", "filename", "mime_type", "size_bytes"],
             "additionalProperties": false
         }),
         "schemas/builtin/http-save.input.v1.json" => http_schema(true),
@@ -1041,6 +1045,31 @@ mod tests {
                 "default_modality"
             ])
         );
+    }
+
+    #[test]
+    fn reply_attachment_output_schema_exposes_only_opaque_identity_and_safe_metadata() {
+        let output = resolve_builtin_input_schema_ref(
+            "schemas/builtin/attach_workspace_file_to_reply.output.v1.json",
+        )
+        .expect("reply attachment output schema is registered");
+
+        assert!(output["properties"].get("path").is_none());
+        assert_eq!(
+            output["properties"]["attachment_ref"]["pattern"],
+            "^att_[0-9a-f]{64}$"
+        );
+        assert_eq!(
+            output["required"],
+            serde_json::json!([
+                "attached",
+                "attachment_ref",
+                "filename",
+                "mime_type",
+                "size_bytes"
+            ])
+        );
+        assert_eq!(output["additionalProperties"], false);
     }
 
     #[test]

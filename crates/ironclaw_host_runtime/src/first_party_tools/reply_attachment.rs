@@ -9,7 +9,9 @@ use ironclaw_host_api::{
     CapabilityId, DispatchInputIssue, DispatchInputIssueCode, EffectKind, HostApiError,
     PermissionMode, ResourceUsage, RuntimeDispatchErrorKind, ScopedPath,
 };
-use ironclaw_outbound::{OutboundError, ReplyAttachmentIntent, ReplyAttachmentIntentPort};
+use ironclaw_outbound::{
+    OutboundError, ReplyAttachmentHandle, ReplyAttachmentIntent, ReplyAttachmentIntentPort,
+};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -23,7 +25,7 @@ use super::{first_party_capability_manifest, resource_profile};
 pub const ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID: &str =
     "builtin.attach_workspace_file_to_reply";
 
-const DESCRIPTION: &str = "Attach a file that already exists under /workspace to the final assistant reply for the current run. Use this after creating a file the user should receive through any supported channel. This registers bounded metadata only; it does not send the file immediately.";
+const DESCRIPTION: &str = "Register a file that already exists under /workspace as an attachment to the final assistant reply for the current run. The host includes every registered attachment automatically on supported channels. In final prose, refer to the safe filename when useful; never emit the workspace path or try to attach the file through a Markdown link. This registers bounded metadata only; it does not send the file immediately.";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -143,6 +145,7 @@ impl FirstPartyCapabilityHandler for AttachWorkspaceFileHandler {
             size_bytes: stat.len,
         };
         intent.validate().map_err(map_intent_validation_error)?;
+        let attachment_ref = ReplyAttachmentHandle::for_run_path(&run_id, &intent.path);
         self.intent_port
             .register(&request.scope, &run_id, intent.clone())
             .await
@@ -151,7 +154,7 @@ impl FirstPartyCapabilityHandler for AttachWorkspaceFileHandler {
         Ok(FirstPartyCapabilityResult::new(
             json!({
                 "attached": true,
-                "path": intent.path,
+                "attachment_ref": attachment_ref,
                 "filename": intent.filename,
                 "mime_type": intent.mime_type,
                 "size_bytes": intent.size_bytes,
@@ -532,31 +535,63 @@ mod tests {
     async fn reply_attachment_registers_defaults_and_duplicate_is_idempotent() {
         let harness = harness();
         seed_file(harness.root.as_ref(), "report.csv", b"a,b\n1,2\n".to_vec()).await;
+        seed_file(harness.root.as_ref(), "chart.png", b"png".to_vec()).await;
         let run_id = RunId::new();
         let scope = ResourceScope::system();
-        for _ in 0..2 {
-            let result = harness
-                .handler
-                .dispatch(request(
-                    Arc::clone(&harness.root),
-                    Some(run_id),
-                    Some(workspace_mount()),
-                    json!({"path": "/workspace/report.csv"}),
-                ))
-                .await
-                .expect("register reply attachment");
-            assert_eq!(result.output["attached"], true);
-            assert_eq!(result.output["mime_type"], "text/csv");
-        }
+        let first = harness
+            .handler
+            .dispatch(request(
+                Arc::clone(&harness.root),
+                Some(run_id),
+                Some(workspace_mount()),
+                json!({"path": "/workspace/report.csv"}),
+            ))
+            .await
+            .expect("register reply attachment");
+        let retry = harness
+            .handler
+            .dispatch(request(
+                Arc::clone(&harness.root),
+                Some(run_id),
+                Some(workspace_mount()),
+                json!({"path": "/workspace/report.csv"}),
+            ))
+            .await
+            .expect("retry reply attachment registration");
+        let other = harness
+            .handler
+            .dispatch(request(
+                Arc::clone(&harness.root),
+                Some(run_id),
+                Some(workspace_mount()),
+                json!({"path": "/workspace/chart.png"}),
+            ))
+            .await
+            .expect("register second reply attachment");
+
+        assert_eq!(first.output["attached"], true);
+        assert_eq!(
+            first.output["attachment_ref"],
+            retry.output["attachment_ref"]
+        );
+        assert_ne!(
+            first.output["attachment_ref"],
+            other.output["attachment_ref"]
+        );
+        assert!(first.output.get("path").is_none());
+        assert_eq!(first.output["filename"], "report.csv");
+        assert_eq!(first.output["mime_type"], "text/csv");
+        assert_eq!(first.output["size_bytes"], 8);
 
         let intents = harness
             .store
             .seal(&scope, &run_id)
             .await
             .expect("seal registered intents");
-        assert_eq!(intents.len(), 1);
+        assert_eq!(intents.len(), 2);
         assert_eq!(intents[0].filename, "report.csv");
         assert_eq!(intents[0].size_bytes, 8);
+        assert_eq!(intents[1].filename, "chart.png");
     }
 
     #[tokio::test]
