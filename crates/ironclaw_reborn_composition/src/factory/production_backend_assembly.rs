@@ -619,10 +619,9 @@ pub(super) async fn build_backend_production(
     #[cfg(not(any(test, feature = "test-support")))]
     let network_http_egress: Arc<dyn ironclaw_network::NetworkHttpEgress> =
         Arc::new(default_host_http_egress()?);
-    let services = services.try_with_host_http_egress_with_body_store(
-        network_http_egress,
-        Arc::clone(&stores.scoped_filesystem),
-    )?;
+    let http_body_store = Arc::clone(&stores.scoped_filesystem);
+    let services =
+        services.try_with_host_http_egress_with_body_store(network_http_egress, http_body_store)?;
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let services = attach_hosted_mcp_runtime(services)?;
     let admin_configuration_credential_slot = AdminConfigurationCredentialSlot::default();
