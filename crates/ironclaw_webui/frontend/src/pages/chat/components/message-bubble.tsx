@@ -378,7 +378,7 @@ function MessageBubbleImpl({
       {showMetaRow && (
         <div
           className={[
-            "mt-1 flex min-h-7 w-max v2-chat-readable-width flex-nowrap items-center gap-3 px-1 text-iron-400 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100",
+            "mt-1 flex min-h-7 w-max v2-chat-readable-width flex-nowrap items-center gap-3 px-1 text-iron-400",
             isUser
               ? "self-end justify-end"
               : isNotice
