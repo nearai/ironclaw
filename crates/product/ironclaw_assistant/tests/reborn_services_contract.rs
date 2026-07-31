@@ -16383,7 +16383,7 @@ async fn member_command_list_excludes_admin_audience() {
     );
     assert_eq!(
         model.usage,
-        "/model [<model> | set-provider <provider> [--model <model>]]"
+        "/model [<model> | set <model> | set-provider <provider> [--model <model>]]"
     );
     let status = response
         .commands
