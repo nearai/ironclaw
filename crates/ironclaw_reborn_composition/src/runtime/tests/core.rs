@@ -857,8 +857,6 @@ fn large_echo_message() -> String {
 #[derive(Debug, Default)]
 struct LargeEchoToolCallingGateway {
     calls: StdMutex<usize>,
-    suppress_result_read_preview: bool,
-    source_result_ref: StdMutex<Option<String>>,
 }
 
 #[async_trait]
@@ -904,22 +902,16 @@ impl HostManagedModelGateway for LargeEchoToolCallingGateway {
                 "tool result replay must stay within the envelope bound, got {} bytes",
                 tool_result.content.len()
             );
-            if !self.suppress_result_read_preview {
-                assert!(
-                    tool_result.content.contains("Secretary of the Treasury"),
-                    "the initial result-reference preview must retain ordinary document text"
-                );
-            }
+            assert!(
+                tool_result.content.contains("Secretary of the Treasury"),
+                "the initial result-reference preview must retain ordinary document text"
+            );
             let result_ref = match tool_result.tool_result_content.as_ref() {
                 Some(HostManagedToolResultContent::Reference { envelope }) => {
                     envelope.result_ref.clone()
                 }
                 other => panic!("expected a result reference, got {other:?}"),
             };
-            *self
-                .source_result_ref
-                .lock()
-                .expect("source result ref lock poisoned") = Some(result_ref.clone());
             let result_read_id = CapabilityId::new("builtin.result_read").expect("reader id");
             let result_read_tool = capabilities
                 .tool_definitions()
@@ -967,43 +959,6 @@ impl HostManagedModelGateway for LargeEchoToolCallingGateway {
                             })
                 })
                 .expect("third model call should include result_read output");
-            if self.suppress_result_read_preview {
-                assert!(
-                    !tool_result.content.contains("\"preview\""),
-                    "the rejected chunk preview must remain suppressed"
-                );
-                let observation: serde_json::Value =
-                    serde_json::from_str(&tool_result.content).expect("result_read observation");
-                let detail = &observation["model_observation"]["detail"];
-                let source_result_ref = self
-                    .source_result_ref
-                    .lock()
-                    .expect("source result ref lock poisoned")
-                    .clone()
-                    .expect("source result ref captured");
-                assert_eq!(
-                    detail["result_ref"].as_str(),
-                    Some(source_result_ref.as_str()),
-                    "suppressed preview replay must retain the durable source result reference"
-                );
-                assert_ne!(
-                    detail["result_ref"], observation["result_ref"],
-                    "the inline result_read invocation ref must never become continuation authority"
-                );
-                assert!(
-                    detail["total_bytes"]
-                        .as_u64()
-                        .is_some_and(|total_bytes| total_bytes > 2048),
-                    "suppressed preview replay must retain total bytes: {}",
-                    tool_result.content
-                );
-                assert_eq!(
-                    detail["next_offset"].as_u64(),
-                    Some(2048),
-                    "suppressed preview replay must retain the next continuation offset"
-                );
-                return Ok(HostManagedModelResponse::assistant_reply("tool ok"));
-            }
             assert!(
                 tool_result.content.contains(LARGE_ECHO_MESSAGE),
                 "result_read must expose its bounded chunk to the model"
@@ -1041,11 +996,7 @@ impl HostManagedModelGateway for LargeEchoToolCallingGateway {
             .find(|definition| definition.capability_id == echo_id)
             .expect("echo provider tool definition");
         // Larger than both the observer preview and model replay preview.
-        let big_message = if self.suppress_result_read_preview {
-            format!("secret {}", large_echo_message())
-        } else {
-            large_echo_message()
-        };
+        let big_message = large_echo_message();
         let candidate = capabilities
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
                 provider_id: "test-provider".to_string(),
@@ -4211,53 +4162,6 @@ async fn standalone_runtime_safe_preview_observer_receives_bounded_payload() {
         "observer should receive a truncated preview of the large result"
     );
     assert_eq!(results[1].1, "builtin.result_read");
-}
-
-/// Regression: a `result_read` chunk whose inline preview is rejected by the
-/// model-visible credential guard must still replay the durable source ref and
-/// continuation metadata. Its InlineOnly invocation ref is not readable.
-#[tokio::test]
-async fn standalone_runtime_result_read_suppressed_preview_keeps_durable_continuation_ref() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let gateway = Arc::new(LargeEchoToolCallingGateway {
-        calls: StdMutex::new(0),
-        suppress_result_read_preview: true,
-        source_result_ref: StdMutex::new(None),
-    });
-    let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway;
-    let input = RebornRuntimeInput::from_build_input(
-        crate::deployment::local_filesystem_build_input(
-            "runtime-suppressed-preview-owner",
-            root.path().join("standalone"),
-        )
-        .with_runtime_policy(standalone_runtime_policy()),
-    )
-    .with_identity(RebornRuntimeIdentity {
-        tenant_id: "runtime-suppressed-preview-tenant".to_string(),
-        agent_id: "runtime-suppressed-preview-agent".to_string(),
-        source_binding_id: "runtime-suppressed-preview-source".to_string(),
-        reply_target_binding_id: "runtime-suppressed-preview-reply".to_string(),
-    })
-    .with_poll_settings(PollSettings {
-        interval: Duration::from_millis(10),
-        max_total: Duration::from_secs(10),
-    })
-    .with_model_gateway_override(gateway_for_runtime);
-
-    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let conversation = runtime.new_conversation().await.expect("conversation");
-    runtime
-        .enable_global_auto_approve_for_test(&conversation)
-        .await;
-    let reply = tokio::time::timeout(
-        RUNTIME_SEND_TIMEOUT,
-        runtime.send_user_message(&conversation, "echo a sensitive large payload"),
-    )
-    .await
-    .expect("runtime send should finish")
-    .expect("runtime send should succeed");
-    assert_eq!(reply.status, TurnStatus::Completed, "reply: {reply:?}");
-    runtime.shutdown().await.expect("runtime shutdown");
 }
 
 #[tokio::test]

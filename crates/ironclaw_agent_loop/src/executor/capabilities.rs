@@ -1473,10 +1473,11 @@ fn child_result_from_outcome(
 /// Rebuild the `ResultReference` model observation from a completed [`Outcome`],
 /// carrying the #5838 first-look inline preview content the model reads without a
 /// follow-up `result_read`. Reconstructed from the channel's real
-/// [`ModelResultPreview`] (`refs.preview`) — the delimiter/JSON-bearing content
-/// that the collapse now preserves (it rode the caption `SafeSummary` before,
-/// which dropped it). `None` when no preview is staged, in which case
-/// `append_capability_result_ref` synthesizes a bare success observation.
+/// [`ModelResultPreview`] (`refs.preview`) and its independent continuation
+/// metadata. Metadata-only observations are reconstructed when preview safety
+/// suppresses the text; `None` is reserved for outcomes with neither preview nor
+/// continuation metadata, where `append_capability_result_ref` synthesizes a bare
+/// success observation.
 fn result_reference_observation_from_outcome(
     outcome: &Outcome,
 ) -> Option<ModelVisibleToolObservation> {

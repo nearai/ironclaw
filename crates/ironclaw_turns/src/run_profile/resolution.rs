@@ -1634,5 +1634,35 @@ mod tests {
             refs.preview_meta.summary.as_ref().map(SafeSummary::as_str),
             Some("tool completed")
         );
+
+        let mut suppressed_array = observation("secret");
+        let ToolObservationDetail::ResultReference {
+            total_bytes,
+            next_offset,
+            item_count,
+            ..
+        } = &mut suppressed_array.detail
+        else {
+            panic!("test observation must be a result reference");
+        };
+        *total_bytes = Some(4096);
+        *next_offset = Some(2048);
+        *item_count = Some(600);
+        let refs = match completed(
+            result_ref(),
+            "ok".to_string(),
+            CapabilityProgress::Unknown,
+            false,
+            4096,
+            None,
+            Some(suppressed_array),
+        ) {
+            Resolution::Done(outcome) => outcome.refs,
+            other => panic!("expected Done, got {other:?}"),
+        };
+        assert_eq!(refs.preview, None);
+        assert_eq!(refs.preview_meta.total_bytes, Some(4096));
+        assert_eq!(refs.preview_meta.next_offset, Some(2048));
+        assert_eq!(refs.preview_meta.item_count, Some(600));
     }
 }
