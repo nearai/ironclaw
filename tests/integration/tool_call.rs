@@ -321,9 +321,9 @@ async fn assertions_fail_when_tool_present_but_requested_tool_or_url_does_not_ma
 /// encoding to `builtin__http__save` at the provider seam) resolves end-to-end,
 /// writing to the `/workspace` mount `core_builtin_tools` provides read-write.
 #[tokio::test]
-async fn runs_http_save_tool_call_through_recorded_egress() {
+async fn runs_http_save_tool_call_through_real_egress_and_persists_body() {
     let h = RebornIntegrationHarness::test_default()
-        .with_builtin_http_tools()
+        .with_real_egress_pipeline()
         .script([
             RebornScriptedReply::tool_call(
                 "builtin.http.save",
@@ -340,10 +340,9 @@ async fn runs_http_save_tool_call_through_recorded_egress() {
     h.assert_tool_invoked("builtin.http.save")
         .await
         .expect("http.save tool ran");
-    // The save path must reach the real `RuntimeHttpEgress`.
-    h.assert_egress_request_matching("api.example.test")
+    h.assert_workspace_file_contains("response.json", r#"{"ok":true}"#)
         .await
-        .expect("http.save egress captured");
+        .expect("http.save persisted the response body");
     h.assert_reply_contains("saved")
         .await
         .expect("final reply finalized");
