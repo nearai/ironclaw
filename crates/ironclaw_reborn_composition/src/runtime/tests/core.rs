@@ -4976,6 +4976,7 @@ async fn standalone_runtime_maps_workspace_to_configured_root() {
         .with_local_runtime_workspace_root(workspace_root.path().to_path_buf())
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-workspace-tenant".to_string(),
         agent_id: "runtime-workspace-agent".to_string(),

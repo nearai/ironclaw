@@ -1008,6 +1008,7 @@ async fn standalone_test_support_interaction_services_use_supplied_turn_coordina
         )
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: format!("{tag}-tenant"),
         agent_id: format!("{tag}-agent"),

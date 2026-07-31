@@ -45,6 +45,7 @@ use ironclaw_reborn_composition::{
     OAuthClientConfig, PollSettings, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
     build_reborn_runtime,
 };
+use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_turns::run_profile::{
     CapabilityCallCandidate, LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
 };
@@ -698,6 +699,7 @@ async fn build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
             .with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_oauth_backend);
     }
     let input = RebornRuntimeInput::from_build_input(build_input)
+        .with_tool_disclosure(ToolDisclosureMode::Off)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: TENANT.to_string(),
             agent_id: AGENT.to_string(),
@@ -765,6 +767,7 @@ async fn build_two_user_harness(
             .with_runtime_policy(policy)
             .with_bundled_first_party_for_test(),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: TENANT.to_string(),
         agent_id: AGENT.to_string(),
@@ -1977,6 +1980,7 @@ mod operator_llm_config {
                 .with_runtime_policy(local_host_effective_policy())
                 .with_bundled_first_party_for_test(),
         )
+        .with_tool_disclosure(ToolDisclosureMode::Off)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: TENANT.to_string(),
             agent_id: AGENT.to_string(),
