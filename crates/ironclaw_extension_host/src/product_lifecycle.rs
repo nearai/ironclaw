@@ -2638,6 +2638,21 @@ pub(crate) async fn ensure_lifecycle_package_registered(
                 extension_id.as_str()
             ),
         })?;
+    // This repair path exists for hosted MCP discovery, whose refreshed tool
+    // catalog is persisted in the resolved contract. Do not rebuild a
+    // non-MCP package that the loader already registered: v3 channel loaders
+    // add runtime-only host APIs such as `product_adapter.inbound`, which are
+    // intentionally absent from the durable resolved manifest.
+    if record.resolved().mcp.is_none()
+        && lifecycle_service
+            .lock()
+            .await
+            .registry()
+            .get_extension(extension_id)
+            .is_some()
+    {
+        return Ok(());
+    }
     let manifest: ironclaw_extensions::ExtensionManifest = record
         .manifest()
         .clone()
@@ -2656,13 +2671,8 @@ pub(crate) async fn ensure_lifecycle_package_registered(
             .await
             .map_err(map_extension_error),
         Some(current) if current == &package => Ok(()),
-        // Only a hosted-MCP package is refreshed from its persisted contract:
-        // that is the catalog this helper exists to re-publish after
-        // discovery. Rebuilding any other extension loses whatever its own
-        // loader contributed beyond the stored manifest — a v3 channel
-        // extension has its `product_adapter.inbound` host API supplied at
-        // load time, so overwriting it here drops the inbound declaration and
-        // activation stops raising the channel connection requirement.
+        // A non-MCP package could have been installed while we rebuilt it.
+        // Keep the loader-owned runtime manifest data in that package.
         Some(_) if record.resolved().mcp.is_none() => Ok(()),
         Some(_) => lifecycle.update(package).await.map_err(map_extension_error),
     }
