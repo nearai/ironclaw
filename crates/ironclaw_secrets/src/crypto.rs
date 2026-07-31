@@ -380,7 +380,8 @@ fn distinct_byte_count(bytes: &[u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::{
-        AgentId, InvocationId, MissionId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+        ids::{AgentId, InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId},
+        resource::ResourceScope,
     };
 
     use super::{SecretsCrypto, credential_account_aad};
