@@ -12,8 +12,8 @@ fi
 python3 - "$fixture_dir" <<'PY'
 from __future__ import annotations
 
-import pathlib
 import json
+import pathlib
 import re
 import sys
 
@@ -75,8 +75,17 @@ for path in files:
     text = path.read_text(encoding="utf-8")
     try:
         fixture = json.loads(text)
-    except json.JSONDecodeError:
-        structure_findings.append((str(path), "invalid JSON"))
+    except json.JSONDecodeError as error:
+        findings.append(
+            (
+                str(path),
+                f"malformed JSON fixture ({error.msg} at column {error.colno})",
+                error.lineno,
+            )
+        )
+        continue
+    if not isinstance(fixture, dict):
+        structure_findings.append((str(path), "malformed JSON fixture: root must be an object"))
         continue
     if path.name.endswith(".candidate.json"):
         structure_findings.append((str(path), "candidate file is not a promoted fixture"))

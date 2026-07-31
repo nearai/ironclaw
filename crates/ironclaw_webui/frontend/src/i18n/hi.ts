@@ -1118,7 +1118,7 @@ registerPack("hi", {
   "admin.users.token": "टोकन",
   "admin.users.jobsCount": "{count} नौकरियां",
   "admin.users.suspendTitle": "उपयोगकर्ता को निलंबित करें",
-  "admin.users.suspendDesc": "यह उपयोगकर्ता को प्रमाणीकरण करने से रोकेगा। जारी रखना?",
+  "admin.users.suspendDesc": "यह \"{name}\" को प्रमाणीकरण करने से रोकेगा। जारी रखना?",
   "admin.users.tokenNamePrompt": "{name} के लिए टोकन नाम:",
   "admin.users.tokenCreated": "टोकन बनाया गया",
   "admin.users.tokenCreatedDesc": "इसे अभी कॉपी करें - यह दोबारा नहीं दिखाया जाएगा।",
@@ -1207,6 +1207,9 @@ registerPack("hi", {
   "logs.entryCount": "{count} प्रविष्टियां",
   "logs.pausedBadge": "● रुका हुआ",
   "logs.empty": "लॉग प्रविष्टियों की प्रतीक्षा है…",
+  "logs.loadOlder": "पुराने लॉग लोड करें",
+  "logs.retentionLimitReached":
+    "सबसे हाल की {count} लॉग प्रविष्टियां दिखाई जा रही हैं। स्थिर सीमा देखने के लिए लाइव अपडेट रोकें या फ़िल्टर सीमित करें।",
   "common.recent": "हाल ही का",
   "common.searchChats": "चैट खोजें...",
   "common.gatewaySession": "गेटवे सत्र",

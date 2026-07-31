@@ -105,6 +105,22 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
+  "named critical product invariant" \
+  "crates/ironclaw_product/src/run_delivery/observer.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "named critical extension-host invariant" \
+  "crates/ironclaw_extension_host/src/channel_outbound_targets.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
   "reborn root test runner script" \
   "scripts/ci/run-reborn-root-partition.sh" \
   "docs_only=false
@@ -238,6 +254,27 @@ has_reborn_tests=true"
 assert_scope \
   "Reborn coverage manifest" \
   "tests/e2e/reborn_coverage_tests.txt" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn changed coverage, branch export, and critical mutation gates" \
+  "scripts/ci/reborn_changed_coverage.py
+scripts/ci/check-reborn-branch-coverage-flags.py
+scripts/ci/test-check-reborn-branch-coverage-flags.sh
+scripts/ci/critical_mutation_gate.py
+scripts/ci/test-critical-mutation-gate.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn QA fixture checker and sabotage suite" \
+  "scripts/ci/check-reborn-qa-fixtures.sh
+scripts/ci/test-check-reborn-qa-fixtures.sh" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -397,7 +434,13 @@ has_reborn_tests=true"
 # down, inside a family directory.
 nested_root="$(mktemp -d)"
 trap 'rm -rf "${nested_root}"' EXIT
-for crate in ironclaw_host_runtime ironclaw_webui ironclaw_extension_host; do
+# `ironclaw_mcp` is the "in neither list" probe: it must classify identically
+# nested and flat, which is the whole point — normalization must not invent a
+# bucket for a crate that has none. If a future PR adds it to either arm (as
+# #6889 did for `ironclaw_extension_host`, which used to fill this role), swap
+# in any other crate that appears in neither `is_shared_test_path` nor
+# `is_reborn_test_path`.
+for crate in ironclaw_host_runtime ironclaw_webui ironclaw_mcp; do
   mkdir -p "${nested_root}/crates/substrates/${crate}/src"
   printf '[package]\nname = "%s"\n' "${crate}" \
     > "${nested_root}/crates/substrates/${crate}/Cargo.toml"
@@ -453,7 +496,7 @@ has_reborn_tests=true"
 assert_scope_with_root \
   "nested unlisted crate still classifies as legacy-only (unchanged bucketing)" \
   "${nested_root}" \
-  "crates/substrates/ironclaw_extension_host/src/lib.rs" \
+  "crates/substrates/ironclaw_mcp/src/lib.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true

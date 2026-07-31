@@ -124,7 +124,7 @@ done
 
 echo "::group::cargo llvm-cov --workspace test ${test_args[*]}"
 timeout --signal=INT --kill-after=30s "${test_timeout}" \
-  cargo llvm-cov --workspace test "${test_args[@]}" \
+  cargo llvm-cov --branch --skip-functions --workspace test "${test_args[@]}" \
     --lcov --output-path "${output_lcov}" \
-    -- --nocapture
+    --ignore-rust-version -- --nocapture
 echo "::endgroup::"

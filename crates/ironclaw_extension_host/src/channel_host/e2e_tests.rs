@@ -4372,7 +4372,7 @@ async fn slack_approval_then_auth_resume_completes_without_second_approval() {
 
 use crate::channel_outbound_targets::{
     ChannelOutboundTargetIdentity, GenericChannelOutboundTargetDeps,
-    GenericChannelOutboundTargetProvider,
+    GenericChannelOutboundTargetProvider, register_generic_channel_outbound_targets,
 };
 use crate::channel_triggered_delivery::GenericTriggeredRunDeliveryHook;
 use ironclaw_extension_host::{FilesystemChannelDmTargetStore, dm_target_payload};
@@ -4395,11 +4395,11 @@ fn generic_dm_target_store() -> Arc<FilesystemChannelDmTargetStore> {
     ))
 }
 
-fn generic_outbound_target_provider(
+fn generic_outbound_target_deps(
     harness: &Harness,
     dm_targets: Arc<FilesystemChannelDmTargetStore>,
-) -> GenericChannelOutboundTargetProvider {
-    GenericChannelOutboundTargetProvider::new(GenericChannelOutboundTargetDeps {
+) -> GenericChannelOutboundTargetDeps {
+    GenericChannelOutboundTargetDeps {
         watch: harness.assembly.snapshot_watch(),
         assembly: Arc::clone(&harness.assembly),
         channel_config: Arc::clone(&harness.channel_config),
@@ -4409,7 +4409,14 @@ fn generic_outbound_target_provider(
             agent_id: AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
             project_id: Some(ProjectId::new(PROJECT).expect("project")), // safety: static test project id is valid.
         },
-    })
+    }
+}
+
+fn generic_outbound_target_provider(
+    harness: &Harness,
+    dm_targets: Arc<FilesystemChannelDmTargetStore>,
+) -> GenericChannelOutboundTargetProvider {
+    GenericChannelOutboundTargetProvider::new(generic_outbound_target_deps(harness, dm_targets))
 }
 
 fn operator_caller() -> OutboundDeliveryTargetScope {
@@ -4437,6 +4444,41 @@ async fn save_outbound_target_config(harness: &Harness) {
         )
         .await
         .expect("save outbound target config"); // safety: manifest declares the handles.
+}
+
+#[tokio::test]
+async fn generic_outbound_target_registration_exposes_provider_through_registry() {
+    let harness = build_harness(TurnMode::Running).await;
+    save_outbound_target_config(&harness).await;
+    let registry = ironclaw_outbound::MutableOutboundDeliveryTargetRegistry::default();
+
+    register_generic_channel_outbound_targets(
+        &registry,
+        generic_outbound_target_deps(&harness, generic_dm_target_store()),
+    );
+
+    let caller = operator_caller();
+    let listed = registry
+        .list_outbound_delivery_targets(&caller)
+        .await
+        .expect("registered provider should be queryable");
+    assert_eq!(
+        listed.len(),
+        1,
+        "registered provider should list one target"
+    );
+    let registered = &listed[0];
+    assert_eq!(
+        registered.summary.target_id.as_str(),
+        format!("slack:shared-channel:{TEAM}:{ROUTED_CHANNEL}")
+    );
+    assert_eq!(registered.summary.channel.as_str(), ADAPTER);
+    assert!(registered.owner.matches_scope(&caller));
+    let conversation = SlackPreferenceTargetCodec
+        .conversation_for_target(external_reply_target(registered))
+        .expect("registered target should retain its Slack destination");
+    assert_eq!(conversation.space_id(), Some(TEAM));
+    assert_eq!(conversation.conversation_id(), ROUTED_CHANNEL);
 }
 
 /// The generic provider lists the operator's routed shared channel (from

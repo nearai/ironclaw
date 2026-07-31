@@ -827,11 +827,39 @@ async def reborn_v2_browser():
 
 
 @pytest.fixture
+async def reborn_v2_page_factory(reborn_v2_server, reborn_v2_browser):
+    """Create managed Reborn pages, optionally preparing routes before navigation."""
+    contexts = []
+
+    async def open_page(
+        *,
+        path: str = "/",
+        before_navigation=None,
+        ready_selector: str | None = SEL_V2["chat_composer"],
+    ):
+        context, page = await create_reborn_v2_page(
+            reborn_v2_browser,
+            reborn_v2_server,
+            path=path,
+            before_navigation=before_navigation,
+            ready_selector=ready_selector,
+        )
+        contexts.append(context)
+        return {"context": context, "page": page}
+
+    yield open_page
+
+    for context in reversed(contexts):
+        await context.close()
+
+
+@pytest.fixture
 async def reborn_v2_page(reborn_v2_server, reborn_v2_browser):
     """Fresh authenticated page on the Reborn v2 SPA."""
-    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
-    page = await context.new_page()
-    await open_reborn_v2_page(page, reborn_v2_server)
+    context, page = await create_reborn_v2_page(
+        reborn_v2_browser,
+        reborn_v2_server,
+    )
     yield page
     await context.close()
 
@@ -858,10 +886,42 @@ async def reborn_v2_vision_page(reborn_v2_vision_server, reborn_v2_browser):
     await context.close()
 
 
-async def open_reborn_v2_page(page, base_url: str, path: str = "/") -> None:
+async def open_reborn_v2_page(
+    page,
+    base_url: str,
+    path: str = "/",
+    ready_selector: str | None = SEL_V2["chat_composer"],
+) -> None:
     separator = "&" if "?" in path else "?"
     await page.goto(f"{base_url}{path}{separator}token={REBORN_V2_AUTH_TOKEN}")
-    await page.wait_for_selector(SEL_V2["chat_composer"], timeout=15000)
+    if ready_selector is not None:
+        await page.wait_for_selector(ready_selector, timeout=15000)
+
+
+async def create_reborn_v2_page(
+    browser,
+    base_url: str,
+    *,
+    path: str = "/",
+    before_navigation=None,
+    ready_selector: str | None = SEL_V2["chat_composer"],
+):
+    """Create one page and run optional setup before its first navigation."""
+    context = await browser.new_context(viewport={"width": 1280, "height": 720})
+    try:
+        page = await context.new_page()
+        if before_navigation is not None:
+            await before_navigation(page)
+        await open_reborn_v2_page(
+            page,
+            base_url,
+            path=path,
+            ready_selector=ready_selector,
+        )
+        return context, page
+    except BaseException:
+        await context.close()
+        raise
 
 
 def reborn_bearer_headers(token: str = REBORN_V2_AUTH_TOKEN) -> dict[str, str]:

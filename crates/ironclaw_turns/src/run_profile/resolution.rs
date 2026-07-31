@@ -543,8 +543,10 @@ fn result_progress_of(progress: CapabilityProgress) -> ResultProgress {
 /// at a word boundary, up to 24 KiB. The paired [`ResultPreviewMeta`] carries the
 /// TRUNCATED-preview continuation info (`result_read` / large results): the
 /// referenced result ref, full byte size, next offset, and JSON-array element
-/// count, so the model reads the full result. Detail kinds other than
-/// `ResultReference` have no inline content.
+/// count, so the model reads the full result. This metadata is preserved even
+/// when the preview text is rejected: continuation authority belongs to the
+/// durable source result, not to the ephemeral invocation presenting it. Detail
+/// kinds other than `ResultReference` have no inline content.
 ///
 /// `own_result_ref` is this outcome's own loop result ref: the referenced ref is
 /// carried only when it DIFFERS (a `result_read` presenting another result's ref);
@@ -567,7 +569,7 @@ fn result_preview_parts(
     let summary = SafeSummary::new(summary).ok();
     let ToolObservationDetail::ResultReference {
         result_ref,
-        preview: Some(text),
+        preview,
         total_bytes,
         next_offset,
         item_count,
@@ -577,19 +579,18 @@ fn result_preview_parts(
         return empty;
     };
     // `.ok()` intentionally degrades content that fails the credential redaction
-    // contract to an absent preview (a pure text-to-redacted-content conversion);
-    // the full output stays reachable through the result ref, and without inline
-    // content the continuation metadata is useless, so drop both.
-    let Some(preview) = ModelResultPreview::new(text).ok() else {
-        return empty;
-    };
+    // contract to an absent preview (a pure text-to-redacted-content conversion).
+    // The result ref and paging metadata are independent host-authored authority:
+    // keep them so replay can continue against the durable source without
+    // exposing the rejected content or the current invocation's ephemeral ref.
+    let preview = preview.and_then(|text| ModelResultPreview::new(text).ok());
     let referenced_result_ref = if result_ref == own_result_ref.as_str() {
         None
     } else {
         LoopRef::new(result_ref).ok()
     };
     (
-        Some(preview),
+        preview,
         ResultPreviewMeta {
             referenced_result_ref,
             total_bytes,
@@ -1596,7 +1597,7 @@ mod tests {
 
     #[test]
     fn completed_observation_preview_carries_delimiter_content_and_drops_credentials() {
-        let refs_preview = |content: &str| match completed(
+        let outcome_refs = |content: &str| match completed(
             result_ref(),
             "ok".to_string(),
             CapabilityProgress::Unknown,
@@ -1605,18 +1606,63 @@ mod tests {
             None,
             Some(observation(content)),
         ) {
-            Resolution::Done(outcome) => outcome
-                .refs
-                .preview
-                .as_ref()
-                .map(|p| p.as_str().to_string()),
+            Resolution::Done(outcome) => outcome.refs,
             other => panic!("expected Done, got {other:?}"),
         };
 
         // Structured content with delimiters + "Secretary" retained verbatim.
         let content = "{\"office\": \"Secretary of the Treasury\", \"rows\": [1, 2, 3]}";
-        assert_eq!(refs_preview(content).as_deref(), Some(content));
-        // A genuine credential in the content drops the inline preview to None.
-        assert_eq!(refs_preview("token sk-ant-abc123def456").as_deref(), None);
+        assert_eq!(
+            outcome_refs(content)
+                .preview
+                .as_ref()
+                .map(ModelResultPreview::as_str),
+            Some(content)
+        );
+        // A genuine credential in the content drops only the inline preview.
+        // The referenced durable result remains authoritative for replay.
+        let refs = outcome_refs("token sk-ant-abc123def456");
+        assert_eq!(refs.preview, None);
+        assert_eq!(
+            refs.preview_meta
+                .referenced_result_ref
+                .as_ref()
+                .map(LoopRef::as_str),
+            Some("result:staged")
+        );
+        assert_eq!(
+            refs.preview_meta.summary.as_ref().map(SafeSummary::as_str),
+            Some("tool completed")
+        );
+
+        let mut suppressed_array = observation("secret");
+        let ToolObservationDetail::ResultReference {
+            total_bytes,
+            next_offset,
+            item_count,
+            ..
+        } = &mut suppressed_array.detail
+        else {
+            panic!("test observation must be a result reference");
+        };
+        *total_bytes = Some(4096);
+        *next_offset = Some(2048);
+        *item_count = Some(600);
+        let refs = match completed(
+            result_ref(),
+            "ok".to_string(),
+            CapabilityProgress::Unknown,
+            false,
+            4096,
+            None,
+            Some(suppressed_array),
+        ) {
+            Resolution::Done(outcome) => outcome.refs,
+            other => panic!("expected Done, got {other:?}"),
+        };
+        assert_eq!(refs.preview, None);
+        assert_eq!(refs.preview_meta.total_bytes, Some(4096));
+        assert_eq!(refs.preview_meta.next_offset, Some(2048));
+        assert_eq!(refs.preview_meta.item_count, Some(600));
     }
 }
