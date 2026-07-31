@@ -38,6 +38,8 @@ pub mod channel_identity;
 pub mod egress;
 pub mod extension;
 pub mod external;
+pub mod hosted_mcp;
+pub mod lifecycle_id;
 pub mod memory;
 pub mod preference_target;
 pub mod recipe;

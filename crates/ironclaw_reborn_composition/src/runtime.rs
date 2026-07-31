@@ -46,7 +46,6 @@ use ironclaw_host_api::turn::{
 use ironclaw_host_api::{
     audit::{ActionResultSummary, ActionSummary, AuditEnvelope, AuditStage, DecisionSummary},
     capability::EffectKind,
-    http::RuntimeHttpEgress,
     ids::{
         AgentId, ApprovalRequestId, AuditEventId, CapabilityId, CorrelationId, ExtensionId,
         InvocationId, TenantId, ThreadId, UserId,
@@ -564,7 +563,6 @@ pub struct RebornRuntime {
     pub(crate) shared_extension_registry: Arc<SharedExtensionRegistry>,
     pub(crate) skill_auto_activate_learned: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) extension_management: Arc<RebornLocalExtensionManagementPort>,
-    pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
     pub(crate) owner_user_id: UserId,
     pub(crate) extension_filesystem: Arc<CompositeRootFilesystem>,
@@ -659,10 +657,6 @@ impl ironclaw_extension_host::extension_lifecycle_command::RebornExtensionLifecy
         Arc::clone(&self.extension_management)
     }
 
-    fn runtime_http_egress(&self) -> Option<Arc<dyn RuntimeHttpEgress>> {
-        self.runtime_http_egress.clone()
-    }
-
     fn runtime_credential_accounts(
         &self,
     ) -> Arc<dyn ironclaw_auth::RuntimeCredentialAccountSelectionService> {
@@ -719,7 +713,6 @@ pub(crate) struct InteractionServiceTestParts {
     skill_management: Arc<ScopedSkillManagementPort>,
     admin_configuration_resolver: Arc<ComposedExtensionAdminConfigurationResolver>,
     product_auth: Arc<RebornProductAuthServices>,
-    runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     builtin_capability_policy: Arc<BuiltinCapabilityPolicy>,
 }
 
@@ -898,10 +891,7 @@ impl RebornRuntime {
     ) -> Result<ironclaw_product::LifecycleProductResponse, ironclaw_product::ProductSurfaceFailure>
     {
         self.extension_management
-            .activate_with_prechecked_credentials_for_test(
-                package_ref,
-                ironclaw_extension_host::ExtensionActivationMode::Static,
-            )
+            .activate_with_prechecked_credentials_for_test(package_ref)
             .await
     }
 
@@ -3950,7 +3940,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
             skill_management: Arc::clone(&local_runtime.skill_management),
             admin_configuration_resolver: Arc::clone(&local_runtime.channel_config_service),
             product_auth: Arc::clone(&local_runtime.product_auth),
-            runtime_http_egress: local_runtime.runtime_http_egress.clone(),
             builtin_capability_policy: Arc::clone(builtin_capability_policy),
         },
     );
@@ -4051,7 +4040,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
         shared_extension_registry: services.shared_extension_registry.clone(),
         skill_auto_activate_learned: Arc::clone(&services.skill_auto_activate_learned),
         extension_management: services.extension_management.clone(),
-        runtime_http_egress: services.runtime_http_egress.as_ref().map(Arc::clone),
         host_runtime_http_egress: services.host_runtime_http_egress.clone(),
         owner_user_id: services.owner_user_id.clone(),
         extension_filesystem: services.extension_filesystem.clone(),

@@ -24,6 +24,8 @@ Today that is thirteen modules:
 | `egress` | Channel egress transport vocabulary: `ProtocolHttpEgress`, the `Egress*` request/response types, `DeliveryStatus`/`OutboundDeliverySink`, `DeclaredEgressHost`/`Target` — arrived with WS1.4. |
 | `extension` | `Extension`, `ExtensionContract`, `ExtensionRuntimeIdentity`, `ExtensionInstanceId`, `ExtensionHostAssemblyConfig`. |
 | `external` | Vendor-side refs the adapter cone names: `ExternalActorRef`, `ExternalConversationRef`, `ExternalEventId`, `ProductAttachmentDescriptor`/`Kind` — arrived with WS1.4. |
+| `hosted_mcp` | Untrusted registration input for user-registered hosted MCP servers: `RegisterHostedMcpRequest`, `HostedMcpEndpoint`, `HostedMcpAuthSelection`, `McpAuthChallenge`, and the auth-metadata extraction helper. |
+| `lifecycle_id` | The bounded package-identity newtypes both tiers need: `LifecyclePackageId` (which `hosted_mcp` names structurally) and `LifecycleBlockerRef`. |
 | `memory` | The `[memory]` manifest surface: `MemoryDescriptor`, `MemoryLifecycleHook`. |
 | `preference_target` | `PreferenceTargetCodec` + `PreferenceTargetEncodeRequest` — the one vendor-implemented port here. |
 | `recipe` | The auth recipe schema: `VendorAuthRecipe`, `OAuth2CodeRecipe`, `PkceMode`, ingress-verification recipes, and friends. |
@@ -41,6 +43,19 @@ execution, binding orchestration, or ingress routing
 of a port declared here (§6.1.4's rule applies family-wide — the
 `PreferenceTargetCodec` implementations live in the Slack and Telegram packages,
 which is the point).
+
+## Why none of these traits is sealed
+
+`ironclaw_agent_loop::planner` is the workspace's sealed-strategy template: a
+private `sealed::Sealed` supertrait with a closed impl list, so no crate outside
+the owner can add a variant of a *strategy* the host must reason about
+exhaustively. **The opposite is true here.** Every trait in this crate exists to
+be implemented outside it — `PreferenceTargetCodec` by the channel packages,
+`Extension` and the `ChannelIdentity*` hooks by extension implementations and
+their hosts. Sealing them would forbid exactly the extensibility the unified
+extension model is built on, so it is not an omission: a trait added here is
+open by default, and one that genuinely needs a closed impl set is a sign it
+belongs in an owner crate instead.
 
 ## Dependencies
 
@@ -66,6 +81,27 @@ Three architecture tests hold the line, all runnable with
   exists to prevent, and the extension tier had three live instances of it.
 - `reborn_extension_specificity.rs` — vendor-name scanning, which reaches this
   crate automatically through `cargo metadata`.
+
+## Why `hosted_mcp` lives here
+
+It arrived on `main` with #6930 as `ironclaw_host_api::hosted_mcp` and had to
+move: `hosted_mcp` names `LifecyclePackageId` and `package_lifecycle` names
+`hosted_mcp::RegisterHostedMcpRequest`. Mutually referencing modules are fine
+inside one crate — but once `package_lifecycle` left `ironclaw_host_api`,
+keeping `hosted_mcp` there would have required `host_api -> extension_contracts`,
+and `host_api` may hold no internal dependency at all. `hosted_mcp` lives here,
+which is also where the charter puts it: it is registration input describing
+what an installable extension *is*, and the module's own doc already says the
+extension host owns every behavior around it.
+
+WS1.4 then split the coupling the only way the one-way street allows.
+`package_lifecycle` went to `ironclaw_product_contracts` (PROPOSAL §6.1.3, which
+names its UI projections explicitly), and the one type `hosted_mcp` structurally
+needs — `LifecyclePackageId` — stayed on this side in the new `lifecycle_id`
+module, with `package_lifecycle` importing it from below. The alternative,
+dragging `hosted_mcp` up into `product_contracts` with the projections, would
+have handed `ironclaw_mcp`, `ironclaw_extensions`, and `ironclaw_auth` a
+product-tier edge — exactly what §6.1.2 exists to prevent.
 
 ## Resolved placements (WS1.4)
 

@@ -39,7 +39,13 @@ pub fn extend_builtin_first_party_package(
         .manifest
         .capabilities
         .push(tool_permission_manifest()?);
-    ExtensionPackage::from_manifest(package.manifest, package.root)
+    let root = package
+        .materialized_root()
+        .map_err(|error| ExtensionError::InvalidManifest {
+            reason: format!("built-in package requires a materialized root: {error}"),
+        })?
+        .clone();
+    ExtensionPackage::from_manifest(package.manifest, root)
 }
 
 pub fn insert_handler(

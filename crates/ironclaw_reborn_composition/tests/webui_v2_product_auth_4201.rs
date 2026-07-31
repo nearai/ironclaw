@@ -1182,6 +1182,7 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
             scope: caller_scope_with_invocation_and_thread(InvocationId::new(), thread_id.clone()),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("google".to_string()).unwrap(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: auth_url,
                 expires_at,
@@ -1309,6 +1310,7 @@ async fn challenge_for_gate_cancelled_flow_returns_none() {
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("google".to_string()).unwrap(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: auth_url,
                 expires_at,
@@ -1385,6 +1387,7 @@ async fn challenge_for_gate_threadless_flow_returns_none_for_thread_scope() {
             scope: caller_scope_with_invocation(InvocationId::new()),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("google".to_string()).unwrap(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new(
                     "https://accounts.google.com/o/oauth2/auth".to_string(),
@@ -1465,6 +1468,7 @@ async fn challenge_for_gate_wrong_tenant_returns_none() {
             scope: caller_scope_with_invocation(InvocationId::new()),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("google".to_string()).unwrap(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: auth_url,
                 expires_at,
@@ -1542,6 +1546,7 @@ async fn challenge_for_gate_returns_manual_token_view_for_seeded_flow() {
             scope: caller_scope_with_invocation_and_thread(InvocationId::new(), thread_id.clone()),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("slack".to_string()).unwrap(),
+            requester_extension: None,
             challenge: AuthChallenge::ManualTokenRequired {
                 interaction_id: AuthInteractionId::new(),
                 provider: AuthProviderId::new("slack".to_string()).unwrap(),
@@ -1623,6 +1628,7 @@ async fn challenge_for_gate_returns_other_kind_view_for_setup_required_flow() {
             scope: caller_scope_with_invocation_and_thread(InvocationId::new(), thread_id.clone()),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("github".to_string()).unwrap(),
+            requester_extension: None,
             challenge: AuthChallenge::SetupRequired {
                 provider: AuthProviderId::new("github".to_string()).unwrap(),
                 message: "GitHub app not installed".to_string(),

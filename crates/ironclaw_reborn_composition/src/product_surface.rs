@@ -195,10 +195,6 @@ pub(crate) fn build_product_surface_with_channel_connection(
             lifecycle_service.with_extension_management(runtime.extension_management.clone());
         lifecycle_service =
             lifecycle_service.with_channel_config(runtime.channel_config_service.clone());
-        if let Some(runtime_http_egress) = &runtime.runtime_http_egress {
-            lifecycle_service =
-                lifecycle_service.with_runtime_http_egress(runtime_http_egress.clone());
-        }
         lifecycle_service = lifecycle_service.with_runtime_credential_accounts(
             runtime
                 .product_auth

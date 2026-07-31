@@ -13,15 +13,16 @@ use serde::Serialize;
 
 use crate::ProductCommandContext;
 
+pub use ironclaw_extension_contracts::lifecycle_id::{LifecycleBlockerRef, LifecyclePackageId};
 pub use ironclaw_product_contracts::package_lifecycle::{
-    ChannelConnectionRequirement, LifecycleBlockerRef, LifecycleChannelDirections,
-    LifecycleCommandKind, LifecycleExtensionCredentialRequirement,
-    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstallScope,
-    LifecycleInstalledExtensionSummary, LifecyclePackageId, LifecyclePackageKind,
-    LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, LifecycleSkillSource,
-    LifecycleSkillSummary, project_public_lifecycle_states, public_lifecycle_response_json,
+    ChannelConnectionRequirement, LifecycleChannelDirections, LifecycleCommandKind,
+    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
+    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
+    LifecycleExtensionSummary, LifecycleInstallScope, LifecycleInstalledExtensionSummary,
+    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload,
+    LifecycleProductResponse, LifecycleReadinessBlocker, LifecycleSearchExtensionSummary,
+    LifecycleSkillSource, LifecycleSkillSummary, project_public_lifecycle_states,
+    public_lifecycle_response_json,
 };
 
 const LIFECYCLE_REF_MAX_BYTES: usize = 512;

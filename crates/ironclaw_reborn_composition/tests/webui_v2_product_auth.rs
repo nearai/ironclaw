@@ -494,6 +494,7 @@ fn google_test_engine() -> Arc<ironclaw_auth::AuthEngine> {
         vendor: "google".to_string(),
         recipe,
         token_exchange_resource: None,
+        protected_resource_metadata_url: None,
     })
 }
 
@@ -1376,6 +1377,7 @@ async fn product_auth_oauth_flow_status_hides_cross_scope_flow_as_not_found() {
             scope: other_scope,
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("github").expect("provider"),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .expect("authorization url"),

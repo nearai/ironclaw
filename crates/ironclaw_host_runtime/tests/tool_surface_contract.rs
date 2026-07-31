@@ -381,6 +381,10 @@ async fn visible_surface_trusts_descriptions_only_from_registry_installs() {
         registry_from_manifest_source(ECHO_MANIFEST, ManifestSource::InstalledLocal),
         Arc::new(GrantAuthorizer),
     );
+    let user_registered_runtime = runtime_with(
+        registry_from_manifest_source(ECHO_MANIFEST, ManifestSource::UserRegistered),
+        Arc::new(GrantAuthorizer),
+    );
     let request = || {
         visible_request(context_with_grants([(
             capability_id("echo.say"),
@@ -393,6 +397,10 @@ async fn visible_surface_trusts_descriptions_only_from_registry_installs() {
         .await
         .unwrap();
     let local_surface = local_runtime.visible_capabilities(request()).await.unwrap();
+    let user_registered_surface = user_registered_runtime
+        .visible_capabilities(request())
+        .await
+        .unwrap();
 
     assert_eq!(
         registry_surface.capabilities[0].description_trust,
@@ -400,6 +408,10 @@ async fn visible_surface_trusts_descriptions_only_from_registry_installs() {
     );
     assert_eq!(
         local_surface.capabilities[0].description_trust,
+        CapabilityDescriptionTrust::Untrusted
+    );
+    assert_eq!(
+        user_registered_surface.capabilities[0].description_trust,
         CapabilityDescriptionTrust::Untrusted
     );
 }

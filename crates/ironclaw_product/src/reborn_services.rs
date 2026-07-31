@@ -290,6 +290,10 @@ pub const LLM_ACTIVE_SET_CAPABILITY: ProductCapabilityDescriptor =
 pub const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
 pub const EXTENSION_INSTALL_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(EXTENSION_INSTALL_CAPABILITY_ID);
+pub const EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID: &str =
+    "builtin.extension_register_hosted_mcp";
+pub const EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID);
 pub const EXTENSION_IMPORT_CAPABILITY_ID: &str = "builtin.extension_import";
 pub const EXTENSION_IMPORT_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(EXTENSION_IMPORT_CAPABILITY_ID);

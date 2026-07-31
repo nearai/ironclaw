@@ -695,6 +695,7 @@ async fn lifecycle_dispatch_fence_failure_stays_retryable() {
         kind: AuthFlowKind::IntegrationCredential,
         status: AuthFlowStatus::Completed,
         provider: AuthProviderId::new("github").expect("provider"),
+        requester_extension: None,
         challenge: None,
         continuation: AuthContinuationRef::LifecycleActivation {
             package_ref: crate::LifecyclePackageRef::new("github-extension").expect("package ref"),
@@ -740,6 +741,7 @@ async fn create_test_flow(
             scope,
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("test-provider").expect("provider"),
+            requester_extension: None,
             challenge: AuthChallenge::SetupRequired {
                 provider: AuthProviderId::new("test-provider").expect("provider"),
                 message: "test".to_string(),

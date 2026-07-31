@@ -125,8 +125,9 @@ pub(super) fn compose_provider_client(
     runtime_ports: ProductAuthProviderRuntimePorts,
     admin_configuration_credentials: AdminConfigurationCredentialSlot,
     first_party_bundles: &[ironclaw_extension_host::FirstPartyPackageBundle],
+    installation_store: Arc<dyn ExtensionInstallationStorePort>,
 ) -> Result<OAuthProviderComposition, RebornBuildError> {
-    let recipes: Arc<dyn AuthRecipeResolver> = Arc::new(StaticAuthRecipeResolver::new(
+    let static_recipes = Arc::new(StaticAuthRecipeResolver::new(
         ironclaw_extension_host::AvailableExtensionCatalog::bundled_vendor_recipes(
             first_party_bundles,
         )
@@ -137,7 +138,7 @@ pub(super) fn compose_provider_client(
 
     let mut client_credentials = CompositionClientCredentials::default();
     for config in &configs {
-        register_vendor_client_config(&mut client_credentials, recipes.as_ref(), config);
+        register_vendor_client_config(&mut client_credentials, static_recipes.as_ref(), config);
     }
     client_credentials.with_admin_configuration(admin_configuration_credentials);
     let callback_base = dcr_callback
@@ -158,7 +159,12 @@ pub(super) fn compose_provider_client(
         });
 
     compose_auth_engine(
-        recipes,
+        Arc::new(CompositionAuthRecipeResolver {
+            static_recipes,
+            installed_recipes: ironclaw_extension_host::InstalledManifestAuthRecipeResolver::new(
+                installation_store,
+            ),
+        }),
         client_credentials,
         callback_base,
         secret_store,
@@ -166,9 +172,36 @@ pub(super) fn compose_provider_client(
     )
 }
 
+/// Routes built-in callers to bundled recipes and installed callers to their
+/// own durable manifest. These paths must never fall back across the requester
+/// boundary: doing so would let an installed extension borrow another recipe.
+#[derive(Clone, Debug)]
+struct CompositionAuthRecipeResolver {
+    static_recipes: Arc<StaticAuthRecipeResolver>,
+    installed_recipes: ironclaw_extension_host::InstalledManifestAuthRecipeResolver,
+}
+
+#[async_trait::async_trait]
+impl AuthRecipeResolver for CompositionAuthRecipeResolver {
+    async fn resolve(
+        &self,
+        requester_extension: Option<&ExtensionId>,
+        vendor: &str,
+    ) -> Option<ironclaw_auth::ResolvedVendorAuthRecipe> {
+        match requester_extension {
+            Some(requester_extension) => {
+                self.installed_recipes
+                    .resolve(Some(requester_extension), vendor)
+                    .await
+            }
+            None => self.static_recipes.resolve(None, vendor).await,
+        }
+    }
+}
+
 fn register_vendor_client_config(
     credentials: &mut CompositionClientCredentials,
-    recipes: &dyn AuthRecipeResolver,
+    recipes: &StaticAuthRecipeResolver,
     config: &OAuthProviderBackendConfig,
 ) {
     use secrecy::ExposeSecret as _;
