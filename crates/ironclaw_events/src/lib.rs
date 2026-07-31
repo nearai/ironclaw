@@ -38,7 +38,6 @@
 mod cursor;
 mod error;
 mod in_memory;
-mod jsonl;
 mod runtime_event;
 mod security_audit;
 mod sink;
@@ -48,7 +47,6 @@ pub use error::EventError;
 pub use in_memory::{
     InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
 };
-pub use jsonl::{parse_jsonl, replay_jsonl};
 pub use runtime_event::{
     RuntimeEvent, RuntimeEventId, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND,
     UNCLASSIFIED_HOOK_LABEL, deserialize_trusted_runtime_event,

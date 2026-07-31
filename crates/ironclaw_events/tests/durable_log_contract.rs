@@ -10,7 +10,7 @@ use ironclaw_events::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventCursor,
     EventError, EventLogEntry, EventReplay, EventSink, EventStreamKey, InMemoryAuditSink,
     InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink, ReadScope, RuntimeEvent,
-    RuntimeEventKind, parse_jsonl, replay_jsonl, sanitize_error_kind,
+    RuntimeEventKind, sanitize_error_kind,
 };
 use ironclaw_host_api::{
     action::Action,
@@ -809,99 +809,6 @@ async fn durable_audit_sink_appends_records_to_durable_log() {
     assert_eq!(replay.entries.len(), 1);
     assert_eq!(replay.entries[0].cursor, EventCursor::new(1));
     assert_eq!(replay.entries[0].record.decision.kind, "deny");
-}
-
-#[tokio::test]
-async fn parse_jsonl_round_trips_runtime_events() {
-    let scope = local_scope("alice", Some("default"));
-    let event = RuntimeEvent::dispatch_requested(scope, capability_id());
-    let line = serde_json::to_vec(&event).expect("serialize event");
-    let mut bytes = line;
-    bytes.push(b'\n');
-
-    let parsed: Vec<RuntimeEvent> = parse_jsonl(&bytes).expect("parse jsonl");
-    assert_eq!(parsed.len(), 1);
-    assert_eq!(parsed[0].event_id, event.event_id);
-}
-
-#[tokio::test]
-async fn parse_jsonl_rejects_malformed_line_rather_than_silently_skipping() {
-    let bytes = b"{\"not\":\"a runtime event\"}\nsomething not even json\n";
-    let result: Result<Vec<RuntimeEvent>, _> = parse_jsonl(bytes);
-    assert!(matches!(result, Err(EventError::Serialize { .. })));
-}
-
-#[tokio::test]
-async fn replay_jsonl_advances_cursor_with_limit() {
-    let scope = local_scope("alice", Some("default"));
-    let mut bytes = Vec::new();
-    for _ in 0..5 {
-        let event = RuntimeEvent::dispatch_requested(scope.clone(), capability_id());
-        bytes.extend(serde_json::to_vec(&event).expect("serialize"));
-        bytes.push(b'\n');
-    }
-
-    let first: ironclaw_events::EventReplay<RuntimeEvent> =
-        replay_jsonl(&bytes, None, 2).expect("first replay");
-    assert_eq!(first.entries.len(), 2);
-    assert_eq!(first.next_cursor, EventCursor::new(2));
-
-    let second: ironclaw_events::EventReplay<RuntimeEvent> =
-        replay_jsonl(&bytes, Some(first.next_cursor), 10).expect("second replay");
-    assert_eq!(second.entries.len(), 3);
-    assert_eq!(second.next_cursor, EventCursor::new(5));
-}
-
-#[tokio::test]
-async fn replay_jsonl_with_zero_limit_is_rejected() {
-    let bytes = b"";
-    let result: Result<ironclaw_events::EventReplay<RuntimeEvent>, _> =
-        replay_jsonl(bytes, None, 0);
-    assert!(matches!(
-        result,
-        Err(EventError::InvalidReplayRequest { .. })
-    ));
-}
-
-#[tokio::test]
-async fn replay_jsonl_rejects_malformed_line_rather_than_silently_skipping() {
-    let scope = local_scope("alice", Some("default"));
-    let event = RuntimeEvent::dispatch_requested(scope, capability_id());
-    let mut bytes = serde_json::to_vec(&event).expect("serialize event");
-    bytes.push(b'\n');
-    bytes.extend_from_slice(b"something not even json\n");
-
-    let result: Result<ironclaw_events::EventReplay<RuntimeEvent>, _> =
-        replay_jsonl(&bytes, None, 1);
-    assert!(matches!(result, Err(EventError::Serialize { .. })));
-}
-
-#[tokio::test]
-async fn replay_jsonl_with_future_cursor_returns_replay_gap() {
-    // Symmetric to the in-memory log: a JSONL-backed durable log must not
-    // silently echo a cursor beyond the file head. Without this, a future
-    // filesystem JSONL backend would accept stale or foreign cursors and
-    // hide records once new lines are appended.
-    let scope = local_scope("alice", Some("default"));
-    let mut bytes = Vec::new();
-    for _ in 0..2 {
-        let event = RuntimeEvent::dispatch_requested(scope.clone(), capability_id());
-        bytes.extend(serde_json::to_vec(&event).expect("serialize"));
-        bytes.push(b'\n');
-    }
-
-    let result: Result<ironclaw_events::EventReplay<RuntimeEvent>, _> =
-        replay_jsonl(&bytes, Some(EventCursor::new(99)), 10);
-    match result {
-        Err(EventError::ReplayGap {
-            requested,
-            earliest,
-        }) => {
-            assert_eq!(requested, EventCursor::new(99));
-            assert_eq!(earliest, EventCursor::new(2));
-        }
-        other => panic!("expected ReplayGap, got {other:?}"),
-    }
 }
 
 #[tokio::test]

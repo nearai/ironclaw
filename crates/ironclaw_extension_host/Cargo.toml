@@ -18,6 +18,7 @@ layer = "products"
 # downstream integration tests. Zero-byte in production.
 test-support = [
     "dep:ironclaw_first_party_extensions",
+    "ironclaw_auth/test-support",
     "ironclaw_filesystem/test-support",
     "ironclaw_host_api/test-support",
     "ironclaw_processes/test-support",
@@ -85,6 +86,7 @@ serde_json = "1"
 [dev-dependencies]
 # Property testing for the shared ingress verifier (#6524 workstream 9).
 proptest = "1"
+ironclaw_auth = { path = "../ironclaw_auth", features = ["test-support"] }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }
 ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }

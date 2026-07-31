@@ -15,36 +15,17 @@ layer = "loops"
 [package.metadata.dist]
 dist = false
 
-[features]
-default = ["registry", "catalog"]
-registry = ["dep:tempfile"]
-catalog = ["dep:reqwest", "dep:urlencoding", "dep:futures"]
-
 [dependencies]
 async-trait = "0.1"
-chrono = { version = "0.4", features = ["serde"] }
-hex = "0.4"
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
-libc = "0.2"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_norway = "0.9"
-sha2 = "0.11"
 thiserror = "2"
-tokio = { version = "1", features = ["sync", "process", "fs"] }
+tokio = { version = "1", features = ["sync"] }
 tracing = "0.1"
-url = "2"
-
-# Optional (catalog feature)
-futures = { version = "0.3", optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"], optional = true }
-urlencoding = { version = "2", optional = true }
-
-# Optional (registry feature — tempfile needed for dev-dep in tests, but also
-# the registry module itself uses no extra deps beyond tokio::fs)
-tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
 # FaultInjecting decorator: test store fault paths through the real store.

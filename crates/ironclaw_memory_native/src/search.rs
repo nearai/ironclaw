@@ -2,7 +2,7 @@
 
 use ironclaw_host_api::error::HostApiError;
 
-use crate::path::MemoryDocumentPath;
+use ironclaw_memory::MemoryDocumentPath;
 
 /// Upper bound on the requested final result count. Keeps a faulty caller
 /// from translating `usize::MAX` into an unbounded SQL `LIMIT`.
@@ -321,7 +321,7 @@ pub(crate) fn fuse_memory_search_results(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::path::MemoryDocumentPath;
+    use ironclaw_memory::MemoryDocumentPath;
 
     fn ranked(_chunk_key: &str, relative_path: &str, rank: u32) -> RankedMemorySearchResult {
         RankedMemorySearchResult {

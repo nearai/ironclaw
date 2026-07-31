@@ -8,15 +8,17 @@ use ironclaw_host_api::{
     path::VirtualPath,
     resource::ResourceScope,
 };
-use ironclaw_memory_native::{
-    MemoryBackend, MemoryBackendCapabilities, MemoryContext, MemoryDocumentPath,
-    MemorySearchRequest, MemorySearchResult, MemoryServiceErrorKind, MemoryWriteOutcome,
-};
-use ironclaw_memory_native::{
+use ironclaw_memory::{MemoryContext, MemoryDocumentPath, MemoryServiceErrorKind};
+use ironclaw_memory::{
     MemoryContextProfileId, MemoryInteractionMessage, MemoryInteractionRole, MemoryInvocation,
     MemoryService, MemoryServiceContextRequest, MemoryServiceProfileSetRequest,
     MemoryServiceReadRequest, MemoryServiceRecordRequest, MemoryServiceSearchRequest,
-    MemoryServiceTreeRequest, MemoryServiceWriteRequest, NativeMemoryService,
+    MemoryServiceTreeRequest, MemoryServiceWriteRequest,
+};
+use ironclaw_memory_native::NativeMemoryService;
+use ironclaw_memory_native::{
+    MemoryBackend, MemoryBackendCapabilities, MemorySearchRequest, MemorySearchResult,
+    MemoryWriteOutcome,
 };
 use serde_json::{Value, json};
 
