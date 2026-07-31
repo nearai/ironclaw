@@ -5,8 +5,8 @@
 //! a parallel encryption scheme.
 
 use aes_gcm::{
-    Aes256Gcm, KeyInit, Nonce,
-    aead::{Aead, Generate, Payload},
+    Aes256Gcm, KeyInit,
+    aead::{Aead, Generate, Nonce, Payload},
 };
 use hkdf::Hkdf;
 use secrecy::{ExposeSecret, SecretString};
@@ -137,10 +137,11 @@ impl SecretsCrypto {
         let cipher = Aes256Gcm::new_from_slice(&derived_key)
             .map_err(|error| SecretError::DecryptionFailed(error.to_string()))?;
         let (nonce_bytes, ciphertext) = encrypted_value.split_at(NONCE_SIZE);
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let nonce = Nonce::<Aes256Gcm>::try_from(nonce_bytes)
+            .map_err(|_| SecretError::DecryptionFailed("invalid nonce length".to_string()))?;
         let plaintext = cipher
             .decrypt(
-                nonce,
+                &nonce,
                 Payload {
                     msg: ciphertext,
                     aad,
@@ -386,6 +387,19 @@ mod tests {
 
     use super::{SecretsCrypto, credential_account_aad};
     use crate::CredentialAccountId;
+
+    #[test]
+    fn aes_gcm_nonce_generation_round_trips_plaintext() {
+        let crypto = SecretsCrypto::new("0123456789abcdef0123456789abcdef".into()).unwrap();
+        let aad = b"secret-aad";
+        let (ciphertext, salt) = crypto.encrypt(b"secret-payload", aad).unwrap();
+
+        assert_ne!(ciphertext, b"secret-payload");
+        assert_eq!(
+            crypto.decrypt(&ciphertext, &salt, aad).unwrap().expose(),
+            "secret-payload"
+        );
+    }
 
     #[test]
     fn credential_account_ciphertext_is_bound_to_owner_scope_and_account() {
