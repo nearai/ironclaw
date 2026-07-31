@@ -2656,6 +2656,14 @@ pub(crate) async fn ensure_lifecycle_package_registered(
             .await
             .map_err(map_extension_error),
         Some(current) if current == &package => Ok(()),
+        // Only a hosted-MCP package is refreshed from its persisted contract:
+        // that is the catalog this helper exists to re-publish after
+        // discovery. Rebuilding any other extension loses whatever its own
+        // loader contributed beyond the stored manifest — a v3 channel
+        // extension has its `product_adapter.inbound` host API supplied at
+        // load time, so overwriting it here drops the inbound declaration and
+        // activation stops raising the channel connection requirement.
+        Some(_) if record.resolved().mcp.is_none() => Ok(()),
         Some(_) => lifecycle.update(package).await.map_err(map_extension_error),
     }
 }

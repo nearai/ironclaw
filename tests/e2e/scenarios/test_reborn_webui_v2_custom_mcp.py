@@ -140,7 +140,18 @@ async def _open_custom_mcp_page(
             installations.append(body)
             state = "active" if auth_kind == "no_auth" else "setup_needed"
             installed[:] = [_installed_extension(auth_kind, state)]
-            await fulfill(route, {"success": True, "message": "Custom weather MCP installed"})
+            await fulfill(
+                route,
+                {
+                    "success": True,
+                    "message": "Custom weather MCP installed",
+                    # Production returns the lifecycle phase here; the configure
+                    # modal renders its credential prompts from it, so a bare
+                    # success body leaves the secrets view unrendered.
+                    "phase": state,
+                    "package_ref": {"kind": "extension", "id": "custom-weather-mcp"},
+                },
+            )
             return
         if path.endswith("/setup") and request.method == "GET":
             package_id = unquote(path.removeprefix("/api/webchat/v2/extensions/").removesuffix("/setup"))

@@ -1891,7 +1891,7 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     let _env_guard = RuntimeEnvGuard::with([
         ("NEARAI_SESSION_TOKEN", None),
         ("NEARAI_API_KEY", None),
-        ("NEARAI_BASE_URL", None),
+        ("NEARAI_BASE_URL", Some("https://cloud-api.nearai.example")),
     ])
     .await;
     let root = tempfile::tempdir().expect("tempdir");
@@ -2040,7 +2040,7 @@ async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
     let _env_guard = RuntimeEnvGuard::with([
         ("NEARAI_SESSION_TOKEN", None),
         ("NEARAI_API_KEY", None),
-        ("NEARAI_BASE_URL", None),
+        ("NEARAI_BASE_URL", Some("https://cloud-api.nearai.example")),
     ])
     .await;
     let root = tempfile::tempdir().expect("tempdir");
@@ -2469,7 +2469,9 @@ async fn env_trace_recording_attaches_recorder_factory_only_when_enabled() {
 /// the real caller (`build_reborn_runtime`) instead.
 #[tokio::test]
 async fn provider_factory_runs_during_production_boot() {
-    let _env_guard = RuntimeEnvGuard::with([("NEARAI_BASE_URL", None)]).await;
+    let _env_guard =
+        RuntimeEnvGuard::with([("NEARAI_BASE_URL", Some("https://cloud-api.nearai.example"))])
+            .await;
     let root = tempfile::tempdir().expect("tempdir");
     let session_dir = tempfile::tempdir().expect("session tempdir");
     let standalone_root = root.path().join("standalone");
@@ -2538,7 +2540,7 @@ async fn standalone_runtime_startup_uses_stored_nearai_api_key_after_restart() {
     let _env_guard = RuntimeEnvGuard::with([
         ("NEARAI_SESSION_TOKEN", None),
         ("NEARAI_API_KEY", None),
-        ("NEARAI_BASE_URL", None),
+        ("NEARAI_BASE_URL", Some("https://cloud-api.nearai.example")),
     ])
     .await;
     let (base_url, auth_rx) = start_nearai_auth_capture_server().await;
