@@ -13,7 +13,7 @@ use ironclaw_skills::{
 use ironclaw_turns::run_profile::{LoopRunContext, SkillVisibility};
 use parking_lot::Mutex as ParkingMutex;
 use tokio::sync::Mutex as AsyncMutex;
-use tracing::debug;
+use tracing::warn;
 
 use crate::{
     SkillBundleDescriptor, SkillBundleId, SkillBundleProvenance, SkillBundleSource,
@@ -244,25 +244,48 @@ where
             Err(error) => return Err(map_filesystem_error(error)),
         };
 
+        // Truncate at the cap and keep going, rather than failing the whole root.
+        //
+        // Returning `BundleScanLimitExceeded` here made ONE root over its limit remove every
+        // skill in that root from the model's view -- a catalog that grew past the cap lost
+        // all of its skills at once, with no signal to the model and only a propagated error
+        // to the operator. Partial discovery plus a warning is strictly better: the skills
+        // under the cap stay usable and the truncation is visible in the logs.
         let mut directory_entries = Vec::new();
+        let mut skipped_over_limit = 0usize;
         for entry in entries {
             if entry.file_type == FileType::Directory {
-                directory_entries.push(entry);
-                if directory_entries.len() > self.max_bundles_per_root {
-                    return Err(SkillBundleSourceError::BundleScanLimitExceeded);
+                if directory_entries.len() >= self.max_bundles_per_root {
+                    skipped_over_limit += 1;
+                    continue;
                 }
+                directory_entries.push(entry);
             }
+        }
+        if skipped_over_limit > 0 {
+            warn!(
+                source_kind = %root.source_kind(),
+                root = %root.root().as_str(),
+                limit = self.max_bundles_per_root,
+                skipped = skipped_over_limit,
+                "skill bundle root exceeds the per-root scan limit; \
+                 returning the first {} bundles and skipping the rest",
+                self.max_bundles_per_root,
+            );
         }
 
         let skill_md_file = SkillFilePath::skill_md();
         for entry in directory_entries {
             let bundle_id = match SkillBundleId::new(root.source_kind(), &entry.name) {
                 Ok(bundle_id) => bundle_id,
-                Err(_) => {
-                    debug!(
+                Err(error) => {
+                    // Was `debug!`, which in practice means invisible: a skill present on
+                    // disk simply never appeared and nothing said why.
+                    warn!(
                         bundle_name = %entry.name,
                         source_kind = %root.source_kind(),
-                        "skipping invalid skill bundle directory name"
+                        error = ?error,
+                        "skipping skill bundle: directory name is not a valid skill id"
                     );
                     continue;
                 }
@@ -274,10 +297,13 @@ where
             {
                 Ok(description) => description,
                 Err(error) if is_skippable_manifest_error(&error) => {
-                    debug!(
+                    // Also raised from `debug!`. This covers the common authoring mistake of a
+                    // directory name that disagrees with the manifest `name:` field, which
+                    // fails closed and otherwise looks identical to the skill not existing.
+                    warn!(
                         bundle_id = %bundle_id,
                         error = ?error,
-                        "skipping invalid skill bundle manifest"
+                        "skipping skill bundle: its manifest could not be validated"
                     );
                     continue;
                 }
@@ -1237,8 +1263,14 @@ mod tests {
         assert_eq!(error, SkillBundleSourceError::DuplicateSourceKind);
     }
 
+    /// Over the per-root cap, discovery returns the bundles that fit instead of failing.
+    ///
+    /// This previously asserted `BundleScanLimitExceeded`, i.e. that one root exceeding its
+    /// limit removed EVERY skill in that root from the model's view. A catalog that grew past
+    /// the cap lost all of its skills at once, with no signal to the model. Partial discovery
+    /// plus a warning keeps the skills under the cap usable.
     #[tokio::test]
-    async fn filesystem_source_enforces_bundle_scan_limit() {
+    async fn filesystem_source_returns_partial_results_over_the_scan_limit() {
         let (root, source) = mounted_source();
         let source = source.with_max_bundles_per_root(1);
         write_root(
@@ -1254,11 +1286,15 @@ mod tests {
         )
         .await;
 
-        let error = source
+        let descriptors = source
             .list_skill_bundles(&run_context().await)
             .await
-            .unwrap_err();
-        assert_eq!(error, SkillBundleSourceError::BundleScanLimitExceeded);
+            .expect("over the scan limit must degrade to partial results, not lose the root");
+        assert_eq!(
+            descriptors.len(),
+            1,
+            "the bundles that fit under the cap stay discoverable"
+        );
     }
 
     #[tokio::test]

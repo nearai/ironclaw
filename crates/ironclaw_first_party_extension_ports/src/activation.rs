@@ -1321,6 +1321,10 @@ fn select_skill_activations(
 
     for skill in explicit {
         let candidate = candidate_for_loaded_skill(skill, &active_candidates)?;
+        if let Some(reason) = unmet_requirements_refusal(candidate) {
+            feedback.push(reason);
+            continue;
+        }
         let key = (
             candidate.descriptor.id().source_kind(),
             candidate.loaded.manifest.name.clone(),
@@ -1382,17 +1386,86 @@ fn select_skill_activations(
     })
 }
 
+/// Refuse a skill whose declared requirements are not met, and say which ones.
+///
+/// `requires.bins`, `requires.env` and `requires.config` were parsed into the manifest and
+/// then never consulted on the activation path -- `check_requirements` existed but its only
+/// callers were inside `SkillRegistry`, which has no consumers outside its own crate. So a
+/// skill declaring a binary it needs was offered, activated cleanly, and failed later in the
+/// shell with nothing connecting the failure back to the unmet requirement.
+///
+/// Gated at ACTIVATION time, not listing time. Listing-time gating would probe the filesystem
+/// and environment once per visible skill on every prompt build -- three probes across every
+/// candidate -- and needs a caching design first. At activation it runs only for the handful
+/// of skills actually being loaded, so the cost argument does not apply.
+///
+/// Staying unusable is the correct outcome; the fix is that the model now learns why and can
+/// adapt, instead of meeting it as an unexplained shell failure several steps later.
+fn unmet_requirements_refusal(candidate: &ActivationCandidate) -> Option<String> {
+    let gating = ironclaw_skills::check_requirements_sync(&candidate.loaded.manifest.requires);
+    if gating.passed {
+        return None;
+    }
+    Some(format!(
+        "{}: not activated because its requirements are unmet: {}",
+        feedback_skill_name(&candidate.loaded.manifest.name),
+        gating.failures.join("; ")
+    ))
+}
+
+/// Explain why a requested skill could not be activated, in terms the model can act on.
+///
+/// Two outcomes are distinguishable and were previously collapsed into one string:
+///
+/// * the name resolved to a real skill that is not `Trusted` -- retrying with a different
+///   name will never work, the skill needs promoting, so say that;
+/// * the name resolved to nothing at all -- the only case where "not available" was accurate.
+///
+/// The distinction matters because the first case is the routine outcome of the model doing
+/// exactly what the listing told it to: the listing filters on visibility only, while
+/// activation requires `Trusted`, and tenant-shared and URL-installed skills are `Installed`.
+/// The model was told to activate a skill and then refused with no way to tell whether it had
+/// picked a bad name or hit a permission wall.
+///
+/// Deliberately does NOT enumerate available alternatives, tempting as that is:
+/// `load_named_activation_candidate_set` scopes the candidate set to the requested names, so
+/// at this point nothing else has been loaded and any "available: ..." list would be empty.
+/// Offering alternatives needs a wider descriptor load, which belongs with the `skill_search`
+/// work in #4428 rather than being smuggled in here.
+fn refusal_reason(name: &str, eligible: &[&ActivationCandidate]) -> String {
+    let display = feedback_skill_name(name);
+    match eligible
+        .iter()
+        .find(|candidate| candidate.loaded.manifest.name.eq_ignore_ascii_case(name))
+    {
+        Some(candidate) => format!(
+            "{display}: found, but its trust is {:?} and activation requires Trusted; it must be \
+             promoted before it can be used",
+            candidate.loaded.trust
+        ),
+        None => format!("{display}: no skill with that name is available to activate"),
+    }
+}
+
 fn select_named_skill_activations(
     skill_names: &[String],
     candidates: &[ActivationCandidate],
     config: &SkillActivationSelectorConfig,
     satisfied_setup_markers: &HashSet<String>,
 ) -> Result<SkillActivationSelection, SkillActivationSelectionError> {
-    let active_candidates =
-        candidates_with_unsatisfied_setup_markers(candidates, satisfied_setup_markers)
-            .into_iter()
-            .filter(|candidate| candidate.loaded.trust == SkillTrust::Trusted)
-            .collect::<Vec<_>>();
+    // Kept separately from `active_candidates` so a refusal can say WHY. Previously a skill
+    // that existed but was not `Trusted` was filtered out here and then reported with the
+    // same "requested skill is not available" string as a name that does not exist at all.
+    // The model cannot act on that: one case means "try a different name", the other means
+    // "this skill needs promoting and no name will work". Tenant-shared and URL-installed
+    // skills are `Installed`, and the listing filters on visibility only, so this is the
+    // routine outcome of the model doing exactly what the listing told it to.
+    let eligible = candidates_with_unsatisfied_setup_markers(candidates, satisfied_setup_markers);
+    let active_candidates = eligible
+        .iter()
+        .copied()
+        .filter(|candidate| candidate.loaded.trust == SkillTrust::Trusted)
+        .collect::<Vec<_>>();
     let mut activations = Vec::new();
     let mut selected_keys = HashSet::new();
     let mut feedback = Vec::new();
@@ -1406,12 +1479,13 @@ fn select_named_skill_activations(
             .find(|candidate| candidate.loaded.manifest.name.eq_ignore_ascii_case(name))
             .copied()
         else {
-            feedback.push(format!(
-                "{}: requested skill is not available",
-                feedback_skill_name(name)
-            ));
+            feedback.push(refusal_reason(name, &eligible));
             continue;
         };
+        if let Some(reason) = unmet_requirements_refusal(candidate) {
+            feedback.push(reason);
+            continue;
+        }
         let key = (
             candidate.descriptor.id().source_kind(),
             candidate.loaded.manifest.name.clone(),
@@ -2824,7 +2898,88 @@ mod tests {
         assert!(plan.selection.activations.is_empty());
         assert_eq!(
             plan.selection.feedback,
-            vec!["installed-helper: requested skill is not available"]
+            vec![
+                "installed-helper: found, but its trust is Installed and activation requires \
+                 Trusted; it must be promoted before it can be used"
+            ],
+            "a refusal must say WHY: 'not available' is indistinguishable from a bad name, and \
+             the two need opposite responses from the model"
+        );
+    }
+
+    /// An unknown name is refused with a message that says the name did not resolve, kept
+    /// distinct from the trust refusal above because the two need opposite responses.
+    #[tokio::test]
+    async fn an_unknown_name_is_refused_as_a_name_problem() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "citation-management",
+            &skill_md(
+                "citation-management",
+                "Citations",
+                &["cite"],
+                "CITE_SENTINEL",
+            ),
+        )]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let context = run_context().await;
+
+        let plan = selectable
+            .activate_skills_for_run(&context, &["citation-manager".to_string()])
+            .await
+            .expect("an unknown name is a refusal, not an error");
+
+        assert!(plan.selection.activations.is_empty());
+        let feedback = plan.selection.feedback.join(" ");
+        assert!(
+            feedback.contains("no skill with that name"),
+            "a bad name and a trust wall must read differently: {feedback}"
+        );
+        assert!(
+            !feedback.contains("trust"),
+            "must not blame trust for a name that did not resolve: {feedback}"
+        );
+    }
+
+    /// A skill declaring a binary that cannot exist is refused *and explained*. Staying
+    /// unusable is correct; the fix is that the model learns why instead of discovering it as
+    /// an unexplained shell failure several steps later.
+    #[tokio::test]
+    async fn an_unmet_binary_requirement_blocks_activation_and_says_which() {
+        let manifest = concat!(
+            "---\n",
+            "name: needs-binary\n",
+            "description: Requires a binary that does not exist\n",
+            "requires:\n",
+            "  bins:\n",
+            "    - ironclaw-absent-binary-for-test\n",
+            "---\n\n",
+            "NEEDS_BINARY_SENTINEL\n",
+        );
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "needs-binary",
+            manifest,
+        )]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let context = run_context().await;
+
+        let plan = selectable
+            .activate_skills_for_run(&context, &["needs-binary".to_string()])
+            .await
+            .expect("an unmet requirement is a refusal, not an error");
+
+        assert!(
+            plan.selection.activations.is_empty(),
+            "a skill whose required binary is absent must not activate"
+        );
+        let feedback = plan.selection.feedback.join(" ");
+        assert!(feedback.contains("requirements are unmet"), "{feedback}");
+        assert!(
+            feedback.contains("ironclaw-absent-binary-for-test"),
+            "the refusal must name the missing requirement: {feedback}"
         );
     }
 
@@ -2845,7 +3000,7 @@ mod tests {
 
         assert_eq!(
             plan.selection.feedback,
-            vec!["<invalid skill name>: requested skill is not available"]
+            vec!["<invalid skill name>: no skill with that name is available to activate"]
         );
     }
 
