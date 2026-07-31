@@ -272,12 +272,12 @@ where
                 .then_with(|| b.project_id.as_str().cmp(a.project_id.as_str()))
         });
         projects.truncate(limit);
-        Ok(ProjectList {
+        Ok(ProjectList::new(
             projects,
             total_projects,
             active_projects,
             archived_projects,
-        })
+        ))
     }
 
     async fn list_members(

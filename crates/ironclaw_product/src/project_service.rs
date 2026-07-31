@@ -108,12 +108,12 @@ impl ProjectService for RebornProjectService {
             };
             projects.push(project_info(record, role));
         }
-        Ok(RebornListProjectsResponse {
+        Ok(RebornListProjectsResponse::new(
             projects,
             total_projects,
             active_projects,
             archived_projects,
-        })
+        ))
     }
 
     async fn create_project(
@@ -523,12 +523,12 @@ mod tests {
                 .count();
             let mut projects = self.list.clone();
             projects.truncate(limit);
-            Ok(ProjectList {
+            Ok(ProjectList::new(
                 projects,
                 total_projects,
                 active_projects,
                 archived_projects,
-            })
+            ))
         }
         async fn list_members(
             &self,

@@ -321,6 +321,22 @@ pub struct ProjectList {
     pub archived_projects: usize,
 }
 
+impl ProjectList {
+    pub fn new(
+        projects: Vec<ProjectRecord>,
+        total_projects: usize,
+        active_projects: usize,
+        archived_projects: usize,
+    ) -> Self {
+        Self {
+            projects,
+            total_projects,
+            active_projects,
+            archived_projects,
+        }
+    }
+}
+
 /// Persistence contract for projects and their membership grants.
 ///
 /// The sole implementation ([`FilesystemProjectRepository`]) persists over the
