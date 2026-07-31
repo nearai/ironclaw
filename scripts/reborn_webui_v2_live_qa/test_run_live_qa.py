@@ -9405,7 +9405,28 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         ):
             captured_envs[reborn_home.name] = env
             Path(env["IRONCLAW_TRACE_OUTPUT"]).write_text(
-                json.dumps({"model_name": "test", "steps": [{"type": "user_input"}]}),
+                json.dumps(
+                    {
+                        "model_name": "test",
+                        "usage": {
+                            "input_tokens": 10,
+                            "output_tokens": 2,
+                            "cache_read_input_tokens": 4,
+                            "cache_creation_input_tokens": 0,
+                            "total_cost_usd": "0.0001",
+                        },
+                        "steps": [
+                            {
+                                "response": {
+                                    "type": "text",
+                                    "content": "done",
+                                    "input_tokens": 10,
+                                    "output_tokens": 2,
+                                }
+                            }
+                        ],
+                    }
+                ),
                 encoding="utf-8",
             )
             return object(), f"http://127.0.0.1/{reborn_home.name}"
@@ -9472,6 +9493,117 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
             # The per-case trace directory is created eagerly by the helper.
             self.assertTrue((output_dir / "llm-traces").is_dir())
+            payload = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+            for result in payload["results"]:
+                self.assertEqual(
+                    result["details"]["metrics"],
+                    {
+                        "model_call_count": 1,
+                        "tool_call_count": 0,
+                        "input_tokens": 10,
+                        "output_tokens": 2,
+                        "cache_read_tokens": 4,
+                        "uncached_input_tokens": 6,
+                        "cost_usd": "0.0001",
+                    },
+                )
+
+    def test_case_llm_trace_metrics_count_calls_and_aggregate_usage(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trace_path = Path(tmpdir) / "case.json"
+            trace_path.write_text(
+                json.dumps(
+                    {
+                        "model_name": "test-model",
+                        "usage": {
+                            "input_tokens": 180,
+                            "output_tokens": 35,
+                            "cache_read_input_tokens": 70,
+                            "cache_creation_input_tokens": 20,
+                            "total_cost_usd": "0.00123",
+                        },
+                        "steps": [
+                            {
+                                "response": {
+                                    "type": "user_input",
+                                    "content": "private prompt must not escape",
+                                }
+                            },
+                            {
+                                "response": {
+                                    "type": "tool_calls",
+                                    "tool_calls": [
+                                        {"name": "one", "arguments": {"secret": "x"}},
+                                        {"name": "two", "arguments": {"secret": "y"}},
+                                    ],
+                                    "input_tokens": 80,
+                                    "output_tokens": 20,
+                                }
+                            },
+                            {
+                                "response": {
+                                    "type": "text",
+                                    "content": "private answer must not escape",
+                                    "input_tokens": 100,
+                                    "output_tokens": 15,
+                                }
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            metrics = run_live_qa.parse_case_llm_trace_metrics(trace_path)
+
+        self.assertEqual(
+            metrics,
+            {
+                "model_call_count": 2,
+                "tool_call_count": 2,
+                "input_tokens": 180,
+                "output_tokens": 35,
+                "cache_read_tokens": 70,
+                "uncached_input_tokens": 110,
+                "cost_usd": "0.00123",
+            },
+        )
+        self.assertNotIn("private", json.dumps(metrics))
+        self.assertNotIn("one", json.dumps(metrics))
+
+    def test_case_llm_trace_metrics_keep_missing_provider_usage_unknown(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trace_path = Path(tmpdir) / "legacy-case.json"
+            trace_path.write_text(
+                json.dumps(
+                    {
+                        "model_name": "legacy",
+                        "steps": [
+                            {
+                                "response": {
+                                    "type": "text",
+                                    "content": "answer",
+                                    "input_tokens": 12,
+                                    "output_tokens": 3,
+                                }
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            metrics = run_live_qa.parse_case_llm_trace_metrics(trace_path)
+
+        self.assertEqual(metrics["model_call_count"], 1)
+        self.assertEqual(metrics["tool_call_count"], 0)
+        self.assertEqual(metrics["input_tokens"], 12)
+        self.assertEqual(metrics["output_tokens"], 3)
+        self.assertIsNone(metrics["cache_read_tokens"])
+        self.assertIsNone(metrics["uncached_input_tokens"])
+        self.assertIsNone(metrics["cost_usd"])
 
     def test_run_cases_fails_successful_model_case_when_trace_is_missing(self):
         async def fake_case(_ctx: run_live_qa.LiveQaContext) -> run_live_qa.ProbeResult:
@@ -9532,6 +9664,18 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertTrue(result["details"]["blocking"])
         self.assertEqual(result["details"]["failure_category"], "trace_harvest")
         self.assertIn("missing or invalid", result["details"]["error"])
+        self.assertEqual(
+            result["details"]["metrics"],
+            {
+                "model_call_count": None,
+                "tool_call_count": None,
+                "input_tokens": None,
+                "output_tokens": None,
+                "cache_read_tokens": None,
+                "uncached_input_tokens": None,
+                "cost_usd": None,
+            },
+        )
 
     def test_run_cases_blocks_slack_connect_without_personal_product_auth(self):
         async def fake_case(_ctx: run_live_qa.LiveQaContext) -> run_live_qa.ProbeResult:

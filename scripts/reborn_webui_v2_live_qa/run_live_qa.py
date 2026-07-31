@@ -812,6 +812,113 @@ def validate_case_llm_trace(output_dir: Path, case_name: str) -> Path:
     return trace_path
 
 
+def parse_case_llm_trace_metrics(trace_path: Path) -> dict[str, object]:
+    """Extract privacy-safe scalar metrics from one complete per-case trace.
+
+    Model calls are response-bearing ``text``/``tool_calls`` steps; user-input
+    markers are deliberately excluded. Tool calls are counted from every item
+    in each response's full ``tool_calls`` list, so the count is not bounded by
+    any checkpoint diagnostic ring. Legacy traces predate aggregate provider
+    usage: their call counts and step token totals remain exact, while cache and
+    cost fields stay unknown instead of being reported as zero.
+    """
+    try:
+        payload = json.loads(trace_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LiveQaError(f"LLM trace metrics are missing or invalid: {exc}") from exc
+    steps = payload.get("steps") if isinstance(payload, dict) else None
+    if not isinstance(steps, list):
+        raise LiveQaError("LLM trace metrics require a steps list")
+
+    model_call_count = 0
+    tool_call_count = 0
+    step_input_tokens = 0
+    step_output_tokens = 0
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        response = step.get("response")
+        if not isinstance(response, dict):
+            continue
+        response_type = response.get("type")
+        if response_type not in {"text", "tool_calls"}:
+            continue
+        model_call_count += 1
+        input_tokens = response.get("input_tokens")
+        output_tokens = response.get("output_tokens")
+        if isinstance(input_tokens, int) and not isinstance(input_tokens, bool):
+            step_input_tokens += max(0, input_tokens)
+        if isinstance(output_tokens, int) and not isinstance(output_tokens, bool):
+            step_output_tokens += max(0, output_tokens)
+        if response_type == "tool_calls" and isinstance(response.get("tool_calls"), list):
+            tool_call_count += len(response["tool_calls"])
+
+    usage = payload.get("usage")
+    has_provider_usage = isinstance(usage, dict)
+
+    def usage_int(name: str) -> int | None:
+        if not isinstance(usage, dict):
+            return None
+        value = usage.get(name)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return None
+        return value
+
+    input_tokens = usage_int("input_tokens") if has_provider_usage else None
+    output_tokens = usage_int("output_tokens") if has_provider_usage else None
+    cache_read_tokens = (
+        usage_int("cache_read_input_tokens") if has_provider_usage else None
+    )
+    if input_tokens is None:
+        input_tokens = step_input_tokens
+    if output_tokens is None:
+        output_tokens = step_output_tokens
+    uncached_input_tokens = (
+        max(0, input_tokens - cache_read_tokens)
+        if cache_read_tokens is not None
+        else None
+    )
+    cost_usd = usage.get("total_cost_usd") if isinstance(usage, dict) else None
+    if not isinstance(cost_usd, str) or not cost_usd.strip():
+        cost_usd = None
+
+    return {
+        "model_call_count": model_call_count,
+        "tool_call_count": tool_call_count,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "uncached_input_tokens": uncached_input_tokens,
+        "cost_usd": cost_usd,
+    }
+
+
+def _zero_case_metrics() -> dict[str, object]:
+    """Metrics for a case known not to have invoked the model."""
+    return {
+        "model_call_count": 0,
+        "tool_call_count": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "uncached_input_tokens": 0,
+        "cost_usd": "0",
+    }
+
+
+def _unavailable_case_metrics() -> dict[str, object]:
+    """Honest shape for an interrupted model case with no complete trace."""
+    return {
+        "model_call_count": None,
+        "tool_call_count": None,
+        "input_tokens": None,
+        "output_tokens": None,
+        "cache_read_tokens": None,
+        "uncached_input_tokens": None,
+        "cost_usd": None,
+    }
+
+
 async def start_reborn_server(
     binary: Path,
     reborn_home: Path,
@@ -8704,6 +8811,7 @@ async def run_cases(args: argparse.Namespace) -> int:
             f"ironclaw binary missing at {binary}; rerun without --skip-build"
         )
     results: list[ProbeResult] = []
+    invoked_cases: set[str] = set()
     trace_exports: list[dict[str, object]] = []
     first_base_url = ""
     for case_index, name in enumerate(selected_cases):
@@ -9023,6 +9131,7 @@ async def run_cases(args: argparse.Namespace) -> int:
                 write_preflight(args.output_dir, prepared_home)
                 shutil.copyfile(preflight_path, case_preflight_path)
             print(f"[reborn-webui-v2-live-qa] running case={name}", flush=True)
+            invoked_cases.add(name)
             result = await _run_case_with_retries(
                 CASES[name].fn,
                 ctx,
@@ -9079,30 +9188,33 @@ async def run_cases(args: argparse.Namespace) -> int:
                 break
         finally:
             stop_process(proc)
-            if (
-                completed_result is not None
-                and completed_result.success
-                and case_spec.expects_llm_trace
-            ):
+            if completed_result is not None and case_spec.expects_llm_trace:
                 try:
                     trace_path = validate_case_llm_trace(args.output_dir, name)
                     completed_result.details["llm_trace_path"] = str(trace_path)
+                    completed_result.details["metrics"] = parse_case_llm_trace_metrics(
+                        trace_path
+                    )
                 except LiveQaError as exc:
-                    completed_result.success = False
-                    completed_result.details.update(
-                        {
-                            "blocking": True,
-                            "failure_class": "infrastructure",
-                            "failure_category": "trace_harvest",
-                            "failure_status": "failed",
-                            "error": str(exc),
-                        }
-                    )
-                    print(
-                        f"[reborn-webui-v2-live-qa] case={name} success=False "
-                        "blocked=trace_harvest",
-                        flush=True,
-                    )
+                    if completed_result.success:
+                        completed_result.success = False
+                        completed_result.details.update(
+                            {
+                                "blocking": True,
+                                "failure_class": "infrastructure",
+                                "failure_category": "trace_harvest",
+                                "failure_status": "failed",
+                                "error": str(exc),
+                            }
+                        )
+                        print(
+                            f"[reborn-webui-v2-live-qa] case={name} success=False "
+                            "blocked=trace_harvest",
+                            flush=True,
+                        )
+                    # Preserve an existing case failure. A failed model run can
+                    # terminate before the recorder publishes a complete step,
+                    # so missing metrics are honest rather than trace_harvest.
             trace_export = export_case_trace(args.output_dir, name, prepared_home.path)
             trace_exports.append(trace_export)
             print(
@@ -9110,6 +9222,19 @@ async def run_cases(args: argparse.Namespace) -> int:
                 f"entries={trace_export['entry_count']}",
                 flush=True,
             )
+    for result in results:
+        if "metrics" in result.details:
+            continue
+        result_case = str(result.details.get("case") or "")
+        result_spec = CASES.get(result_case)
+        model_was_not_invoked = (
+            result_spec is not None and not result_spec.expects_llm_trace
+        ) or result_case not in invoked_cases
+        result.details["metrics"] = (
+            _zero_case_metrics()
+            if model_was_not_invoked
+            else _unavailable_case_metrics()
+        )
     results_path = write_results(args.output_dir, results, first_base_url)
     trace_index_path = write_trace_index(args.output_dir, trace_exports)
     green_explanation_path = write_green_run_explanation(args.output_dir, results)
