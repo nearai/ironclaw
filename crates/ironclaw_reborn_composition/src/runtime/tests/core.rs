@@ -3597,19 +3597,15 @@ async fn hosted_mcp_activation_stays_pending_until_preparation_completes() {
         )
         .await
         .expect("install Notion MCP");
-    // Hosted-MCP discovery belongs to the preparation seam, which the
-    // prechecked helper deliberately bypasses. Activation must then FAIL
-    // CLOSED rather than publish a guessed tool catalog: a hosted-MCP package
-    // whose only capability is the host-internal connection template has
-    // nothing callable to bind.
-    let error = extension_management
+    // Hosted-MCP discovery belongs to pending preparation, not activation
+    // mode selection. The prechecked helper bypasses that product seam, so
+    // activation remains visibly pending instead of publishing a guessed tool
+    // catalog.
+    let activation = extension_management
         .activate_with_prechecked_credentials_for_test(notion_ref)
         .await
-        .expect_err("activation without discovery must fail closed");
-    assert!(
-        format!("{error:?}").contains("published no callable tools"),
-        "expected the empty-catalog bind rejection, got: {error:?}"
-    );
+        .expect("pending hosted-MCP activation returns a lifecycle response");
+    assert_eq!(activation.phase, InstallationState::Installed);
 
     runtime.shutdown().await.expect("runtime shutdown");
 }

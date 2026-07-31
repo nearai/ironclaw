@@ -1440,18 +1440,19 @@ async fn standalone_notion_mcp_stays_pending_without_preparation() {
         .install(notion_ref.clone(), &caller)
         .await
         .expect("install Notion MCP");
-    // Activation must FAIL CLOSED without discovery: the only bundled
-    // capability is the host-internal connection template, so there is
-    // nothing callable to bind. This is the shared lifecycle's pre-existing
-    // contract; registration does not add a separate pending state for it.
-    let error = extension_management
+    extension_management
         .activate_with_prechecked_credentials_for_user_for_test(notion_ref, &caller)
         .await
-        .expect_err("activation without discovery must fail closed");
-    assert!(
-        format!("{error:?}").contains("published no callable tools"),
-        "expected the empty-catalog bind rejection, got: {error:?}"
-    );
+        .expect("pending Notion activation returns a lifecycle response");
+    let projection = extension_management
+        .project(
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion")
+                .expect("valid Notion ref"),
+            &caller,
+        )
+        .await
+        .expect("project pending Notion installation");
+    assert_eq!(projection.phase, InstallationState::Installed);
 }
 
 #[tokio::test]
