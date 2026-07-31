@@ -66,6 +66,32 @@ impl ProcessJournalCommitObserver for RecordingProcessObserver {
     }
 }
 
+/// Recording observer whose callback suspends before it records.
+///
+/// Delivery therefore cannot complete within the flusher's own scheduling slot,
+/// so a store that answered its callers before delivery finished would let them
+/// observe a commit the observer has not seen yet.
+#[derive(Default)]
+struct SuspendingProcessObserver {
+    commits: Mutex<Vec<ProcessJournalCommit>>,
+}
+
+#[async_trait]
+impl ProcessJournalCommitObserver for SuspendingProcessObserver {
+    fn process_observer_id(&self) -> &'static str {
+        "suspending-process-observer"
+    }
+
+    async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String> {
+        tokio::task::yield_now().await;
+        self.commits
+            .lock()
+            .map_err(|_| "observer mutex poisoned".to_string())?
+            .push(commit);
+        Ok(())
+    }
+}
+
 struct FailingProcessObserver;
 
 #[async_trait]
@@ -1625,6 +1651,147 @@ async fn observer_failure_retries_until_durable_cursor_is_acknowledged() {
         .expect("subscribe after acknowledged replay");
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert_eq!(after_restart.attempts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn group_committed_submissions_deliver_every_entry_once_before_returning() {
+    let store = Arc::new(ProcessJournalStore::new(
+        in_memory_backed_processes_filesystem(),
+    ));
+    let observer = Arc::new(SuspendingProcessObserver::default());
+    store
+        .subscribe_process_observer(observer.clone())
+        .expect("subscribe observer");
+    let scope = scope();
+    // Materialize the store and start the group-commit funnel so the
+    // submissions below are all queued before the flusher drains them.
+    let warmup = submit_internal_process(store.as_ref(), &scope, ProcessId::new()).await;
+
+    let process_ids = (0..32).map(|_| ProcessId::new()).collect::<Vec<_>>();
+    let submissions = process_ids.iter().copied().map(|process_id| {
+        let store = Arc::clone(&store);
+        let observer = Arc::clone(&observer);
+        let scope = scope.clone();
+        async move {
+            let snapshot = submit_internal_process(store.as_ref(), &scope, process_id).await;
+            // Read-your-writes: a caller that reads projections right after
+            // this call returns must never miss its own commit.
+            let delivered = observer
+                .commits
+                .lock()
+                .expect("observer commits")
+                .iter()
+                .any(|commit| commit.state.process_id == process_id);
+            assert!(
+                delivered,
+                "observer must have seen {process_id} before its submission returned"
+            );
+            snapshot
+        }
+    });
+    let snapshots = futures::future::join_all(submissions).await;
+    assert_eq!(snapshots.len(), process_ids.len());
+
+    let commits = observer.commits.lock().expect("observer commits");
+    assert_eq!(
+        commits.len(),
+        process_ids.len() + 1,
+        "every committed entry is delivered exactly once"
+    );
+    let mut previous = 0;
+    for commit in commits.iter() {
+        assert!(
+            commit.state.journal_cursor.0 > previous,
+            "observer deliveries must be strictly ordered by cursor"
+        );
+        previous = commit.state.journal_cursor.0;
+    }
+    let delivered = commits
+        .iter()
+        .map(|commit| commit.state.process_id)
+        .collect::<Vec<_>>();
+    for process_id in process_ids
+        .iter()
+        .chain(std::iter::once(&warmup.process_id))
+    {
+        assert_eq!(
+            delivered
+                .iter()
+                .filter(|delivered| *delivered == process_id)
+                .count(),
+            1,
+            "{process_id} must be delivered exactly once"
+        );
+    }
+}
+
+#[tokio::test]
+async fn group_commit_isolates_a_rejected_command_from_its_batch() {
+    let store = Arc::new(ProcessJournalStore::new(
+        in_memory_backed_processes_filesystem(),
+    ));
+    let scope = scope();
+    let leased_process_id = ProcessId::new();
+    submit_internal_process(store.as_ref(), &scope, leased_process_id).await;
+    let claim = store
+        .claim_next_processes(ClaimProcessesRequest {
+            worker_id: ProcessWorkerId::from_trusted(ProcessId::new().as_uuid().to_string()),
+            scope_filter: Some(scope.clone()),
+            process_id_filter: None,
+            process_kind_filter: None,
+            max_processes: 1,
+        })
+        .await
+        .expect("claim process")
+        .pop()
+        .expect("claimed process");
+
+    let rejected = {
+        let store = Arc::clone(&store);
+        async move {
+            store
+                .complete_process(ProcessStateTransitionRequest {
+                    lease: ProcessLeaseRequest {
+                        process_id: leased_process_id,
+                        worker_id: claim.worker_id,
+                        lease_token: ProcessLeaseToken::from_trusted(
+                            ProcessId::new().as_uuid().to_string(),
+                        ),
+                    },
+                    metadata: None,
+                })
+                .await
+        }
+    };
+    let accepted_ids = (0..8).map(|_| ProcessId::new()).collect::<Vec<_>>();
+    let accepted = futures::future::join_all(accepted_ids.iter().copied().map(|process_id| {
+        let store = Arc::clone(&store);
+        let scope = scope.clone();
+        async move { submit_internal_process(store.as_ref(), &scope, process_id).await }
+    }));
+    // Both futures are queued before the flusher runs, so the rejected command
+    // and the valid submissions share one group-commit transaction.
+    let (rejected, accepted) = tokio::join!(rejected, accepted);
+
+    let error = rejected.expect_err("wrong lease must fail");
+    assert!(error.to_string().contains("lease is invalid"));
+    for (process_id, snapshot) in accepted_ids.iter().zip(accepted.iter()) {
+        assert_eq!(&snapshot.process_id, process_id);
+        assert_eq!(snapshot.status, ProcessLifecycleStatus::Queued);
+    }
+    let persisted = store
+        .process_snapshots(&scope)
+        .await
+        .expect("read persisted process snapshots")
+        .into_iter()
+        .map(|snapshot| snapshot.process_id)
+        .collect::<Vec<_>>();
+    for process_id in &accepted_ids {
+        assert!(
+            persisted.contains(process_id),
+            "a batch member rejected for an invalid lease must not drop {process_id}"
+        );
+    }
 }
 
 #[tokio::test]

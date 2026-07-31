@@ -23,10 +23,12 @@ use crate::{
 };
 
 mod keys;
+mod references;
 use keys::{
     index_key, index_name, lineage_scope_key, ordered_index, owner_scope_key, process_kind_key,
     process_status_key, scope_owner_key, scoped_path,
 };
+pub(super) use references::LoadReferences;
 
 const MATERIALIZED_PREFIX: &str = "/processes/materialized";
 const MATERIALIZED_KIND: &str = "process_materialized";
@@ -72,19 +74,6 @@ pub(super) struct LoadedRows {
     rows: HashMap<VirtualPath, MaterializedRow>,
     versions: HashMap<VirtualPath, RecordVersion>,
     pub(super) initialized: bool,
-}
-
-#[derive(Default)]
-pub(super) struct LoadReferences {
-    pub(super) process_ids: Vec<ProcessId>,
-    pub(super) tree_roots: Vec<ProcessId>,
-    pub(super) dependencies: Vec<(ProcessId, ProcessId)>,
-    pub(super) checkpoints: Vec<ProcessCheckpointId>,
-    pub(super) submission_idempotency_key: Option<String>,
-    pub(super) control_idempotency_key: Option<String>,
-    pub(super) active_conflict: Option<(ResourceScope, ProcessKind)>,
-    pub(super) claim: Option<(ClaimProcessesRequest, ProcessConcurrencyLimits)>,
-    pub(super) recover_expired: Option<RecoverExpiredProcessLeasesRequest>,
 }
 
 pub(super) fn retryable_transaction_error(error: &ironclaw_filesystem::FilesystemError) -> bool {
@@ -319,27 +308,34 @@ where
                 })
         })
         .unwrap_or_default();
-    for (collection, key) in [
-        ("control", references.control_idempotency_key.as_ref()),
-        ("control", oldest_control_key.as_ref()),
-        ("submission", references.submission_idempotency_key.as_ref()),
-        ("submission", oldest_submission_key.as_ref()),
-    ] {
-        if let Some(key) = key {
-            let path = hashed_scoped_path(collection, key)?;
-            push_if_present(filesystem, &mut records, &path).await?;
-        }
+    let idempotency_keys = references
+        .control_idempotency_keys
+        .iter()
+        .map(|key| ("control", key))
+        .chain(oldest_control_key.iter().map(|key| ("control", key)))
+        .chain(
+            references
+                .submission_idempotency_keys
+                .iter()
+                .map(|key| ("submission", key)),
+        )
+        .chain(oldest_submission_key.iter().map(|key| ("submission", key)))
+        .collect::<Vec<_>>();
+    for (collection, key) in idempotency_keys {
+        let path = hashed_scoped_path(collection, key)?;
+        push_if_present(filesystem, &mut records, &path).await?;
     }
     for process_id in &references.process_ids {
         let path = process_scoped_path(*process_id)?;
         push_if_present(filesystem, &mut records, &path).await?;
     }
-    if let Some((scope, process_kind)) = &references.active_conflict {
+    for (scope, process_kind) in &references.active_conflicts {
         records.extend(query_active_conflict(filesystem, scope, process_kind, 1).await?);
     }
-    if let Some((request, limits)) = &references.claim
-        && request.process_id_filter.is_none()
-    {
+    for (request, limits) in &references.claims {
+        if request.process_id_filter.is_some() {
+            continue;
+        }
         let candidates = query_claim_candidates(filesystem, request).await?;
         records.extend(candidates.clone());
         let snapshots = candidates
@@ -368,7 +364,7 @@ where
             );
         }
     }
-    if let Some(request) = &references.recover_expired {
+    for request in &references.recover_expired {
         records.extend(query_expired_processes(filesystem, request).await?);
     }
     for root_process_id in &references.tree_roots {

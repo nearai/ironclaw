@@ -16,7 +16,7 @@ use ironclaw_host_api::{ids::ProcessId, path::ScopedPath, resource::ResourceScop
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 
 use crate::ProcessRuntimePort;
 use crate::journal::{
@@ -39,6 +39,7 @@ use crate::journal::{
 use crate::types::{invalid_path, same_scope_owner};
 
 mod command;
+mod flusher;
 mod migration;
 mod observer;
 mod rows;
@@ -168,6 +169,8 @@ where
     migration: Arc<Mutex<()>>,
     materialized_ready: Arc<AtomicBool>,
     observers: Arc<StdMutex<Vec<RegisteredProcessObserver>>>,
+    /// Group-commit funnel, started on the first write so `new` stays sync.
+    flusher: Arc<OnceCell<flusher::FlusherHandle>>,
     lease_duration: Duration,
     concurrency_limits: ProcessConcurrencyLimits,
 }
@@ -182,6 +185,7 @@ where
             migration: Arc::clone(&self.migration),
             materialized_ready: Arc::clone(&self.materialized_ready),
             observers: Arc::clone(&self.observers),
+            flusher: Arc::clone(&self.flusher),
             lease_duration: self.lease_duration,
             concurrency_limits: self.concurrency_limits.clone(),
         }
@@ -198,8 +202,23 @@ where
             migration: Arc::new(Mutex::new(())),
             materialized_ready: Arc::new(AtomicBool::new(false)),
             observers: Arc::new(StdMutex::new(Vec::new())),
+            flusher: Arc::new(OnceCell::new()),
             lease_duration: DEFAULT_PROCESS_LEASE_DURATION,
             concurrency_limits: ProcessConcurrencyLimits::default(),
+        }
+    }
+
+    /// A handle whose funnel slot is empty.
+    ///
+    /// The flusher and delivery tasks own a store handle. Sharing the funnel's
+    /// `OnceCell` with them would make the command sender reachable from the
+    /// task that reads it, so the channel would never close and the tasks would
+    /// outlive every real store handle. Detached handles are used only for
+    /// reads and observer replay, never to submit commands.
+    fn detached(&self) -> Self {
+        Self {
+            flusher: Arc::new(OnceCell::new()),
+            ..self.clone()
         }
     }
 
@@ -216,7 +235,10 @@ where
     async fn submit_process_inner(
         &self,
         request: SubmitProcessRequest,
-    ) -> Result<(JournaledProcessSnapshot, bool), ProcessJournalStoreError> {
+    ) -> Result<(JournaledProcessSnapshot, bool), ProcessJournalStoreError>
+    where
+        F: Send + Sync + 'static,
+    {
         match self
             .execute(StoredProcessCommand::Submit(Box::new(request)))
             .await?
@@ -226,115 +248,41 @@ where
         }
     }
 
+    /// Submit one lifecycle command to the group-commit funnel and wait for its
+    /// durable outcome.
+    ///
+    /// The funnel batches concurrent commands into one transaction; see
+    /// [`flusher`] for why the write path and observer delivery run on separate
+    /// tasks.
     async fn execute(
         &self,
         command: StoredProcessCommand,
-    ) -> Result<StoredCommandOutcome, ProcessJournalStoreError> {
+    ) -> Result<StoredCommandOutcome, ProcessJournalStoreError>
+    where
+        F: Send + Sync + 'static,
+    {
         self.ensure_materialized().await?;
-        let references = command.load_references()?;
-        'transaction: for attempt in 0..MAX_TRANSACTION_RETRIES {
-            let mut loaded = match rows::load(self.filesystem.as_ref(), &references).await {
-                Ok(loaded) => loaded,
-                Err(ProcessJournalStoreError::Filesystem(error))
-                    if rows::retryable_transaction_error(&error) =>
-                {
-                    rows::retry_transaction(attempt).await;
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-            let mut state = std::mem::take(&mut loaded.state);
-            let prefix = processes_prefix()?;
-            // Determine the exact number of journal entries before touching the
-            // global cursor allocator. Polling an empty queue used to reserve
-            // `max_processes` cursors despite producing no entries, so idle
-            // supervisors continuously contended with real submissions.
-            let mut preview = state.clone();
-            preview.apply_command(command.clone())?;
-            let reservation_count = command.cursor_reservation_count(preview.journal.len());
-            let sequence_path = self
-                .filesystem
-                .resolve(&ResourceScope::system(), &process_journal_sequence_path()?)?;
-            let mut txn = match self
-                .filesystem
-                .begin(&ResourceScope::system(), &prefix)
-                .await
-            {
-                Ok(txn) => txn,
-                Err(error) if rows::retryable_transaction_error(&error) => {
-                    rows::retry_transaction(attempt).await;
-                    continue;
-                }
-                Err(error) => return Err(error.into()),
-            };
-            let mut first_cursor = None;
-            if reservation_count > 0 {
-                for _ in 0..reservation_count {
-                    let reserved = match txn.reserve_sequence(&sequence_path).await {
-                        Ok(reserved) => reserved,
-                        Err(error) if rows::retryable_transaction_error(&error) => {
-                            txn.rollback().await;
-                            rows::retry_transaction(attempt).await;
-                            continue 'transaction;
-                        }
-                        Err(error) => {
-                            txn.rollback().await;
-                            return Err(error.into());
-                        }
-                    };
-                    first_cursor.get_or_insert(reserved.get());
-                }
-            }
-            if let Some(first_cursor) = first_cursor {
-                state.next_cursor = first_cursor;
-            }
-            // Reserve cursors and persist their journal/materialized rows in
-            // one transaction. The sequence row therefore serializes commit
-            // order: an observer can never advance past a lower cursor that
-            // was reserved by a writer which has not committed yet.
-            let outcome = match state.apply_command(command.clone()) {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    txn.rollback().await;
-                    return Err(error);
-                }
-            };
-            let entries = std::mem::take(&mut state.journal);
-            let result = async {
-                rows::persist(self.filesystem.as_ref(), txn.as_mut(), &loaded, &state).await?;
-                rows::persist_journal(self.filesystem.as_ref(), txn.as_mut(), entries.as_slice())
-                    .await?;
-                Ok::<(), ProcessJournalStoreError>(())
-            }
-            .await;
-            match result {
-                Ok(()) => match txn.commit().await {
-                    Ok(()) => return Ok(outcome),
-                    Err(error) if rows::retryable_transaction_error(&error) => {
-                        rows::retry_transaction(attempt).await;
-                    }
-                    Err(error) => return Err(error.into()),
-                },
-                Err(ProcessJournalStoreError::Filesystem(error))
-                    if rows::retryable_transaction_error(&error) =>
-                {
-                    txn.rollback().await;
-                    rows::retry_transaction(attempt).await;
-                }
-                Err(error) => {
-                    txn.rollback().await;
-                    return Err(error);
-                }
-            }
+        let (responder, response) = tokio::sync::oneshot::channel();
+        let queued = flusher::QueuedCommand {
+            command,
+            responder,
+            awaits_observer_delivery: !observer::inside_observer_delivery(),
+        };
+        if self.flusher().await.submit(queued).is_err() {
+            return Err(flusher::backend_busy(self));
         }
-        Err(ProcessJournalStoreError::Filesystem(
-            FilesystemError::BackendBusy {
-                path: self
-                    .filesystem
-                    .resolve(&ResourceScope::system(), &processes_prefix()?)?,
-                operation: ironclaw_filesystem::FilesystemOperation::BeginTxn,
-            },
-        ))
+        response
+            .await
+            .unwrap_or_else(|_| Err(flusher::backend_busy(self)))
+    }
+
+    async fn flusher(&self) -> &flusher::FlusherHandle
+    where
+        F: Send + Sync + 'static,
+    {
+        self.flusher
+            .get_or_init(|| async { flusher::spawn(self.detached()) })
+            .await
     }
 
     async fn load_process(
@@ -697,11 +645,10 @@ where
         &self,
         request: SubmitProcessRequest,
     ) -> Result<JournaledProcessSnapshot, Self::Error> {
-        let (snapshot, changed) = self.submit_process_inner(request).await?;
-        if changed {
-            self.notify_process_commit(snapshot.clone(), ProcessJournalKind::Submitted, None)
-                .await;
-        }
+        // Observer delivery is driven from the journal by the group-commit
+        // funnel, so it happens before this call returns without the wrapper
+        // replaying each outcome.
+        let (snapshot, _changed) = self.submit_process_inner(request).await?;
         Ok(snapshot)
     }
 
@@ -719,16 +666,12 @@ where
             self.execute(StoredProcessCommand::Submit(Box::new(request.submission)))
                 .await?
         };
-        let StoredCommandOutcome::Submitted(snapshot, changed) = outcome else {
+        let StoredCommandOutcome::Submitted(snapshot, _changed) = outcome else {
             return Err(unexpected_outcome(
                 "submit_process_with_checkpoint",
                 outcome,
             ));
         };
-        if changed {
-            self.notify_process_commit(snapshot.clone(), ProcessJournalKind::Submitted, None)
-                .await;
-        }
         Ok(snapshot)
     }
 }
@@ -787,10 +730,6 @@ where
             StoredCommandOutcome::Claimed(claimed) => claimed,
             outcome => return Err(unexpected_outcome("claim", outcome)),
         };
-        for process in &claimed {
-            self.notify_process_commit(process.state.clone(), ProcessJournalKind::Claimed, None)
-                .await;
-        }
         Ok(claimed)
     }
 
@@ -815,8 +754,6 @@ where
             StoredCommandOutcome::Heartbeat(snapshot) => snapshot,
             outcome => return Err(unexpected_outcome("heartbeat", outcome)),
         };
-        self.notify_process_commit(snapshot.clone(), ProcessJournalKind::Heartbeat, None)
-            .await;
         Ok(snapshot.journal_cursor)
     }
 
@@ -831,16 +768,6 @@ where
             StoredCommandOutcome::Recovered(response) => response,
             outcome => return Err(unexpected_outcome("recover_expired", outcome)),
         };
-        for snapshot in &response.recovered {
-            let kind = match snapshot.status {
-                ProcessLifecycleStatus::Queued => ProcessJournalKind::Resumed,
-                ProcessLifecycleStatus::Cancelled => ProcessJournalKind::Cancelled,
-                ProcessLifecycleStatus::Failed => ProcessJournalKind::Failed,
-                _ => ProcessJournalKind::RecoveryRequired,
-            };
-            self.notify_process_commit(snapshot.clone(), kind, None)
-                .await;
-        }
         Ok(response)
     }
 
@@ -1024,18 +951,13 @@ where
         &self,
         mutation: ProcessControlMutation,
     ) -> Result<ProcessControlResult, ProcessJournalStoreError> {
-        let reason = mutation.reason.clone();
-        let (result, committed_kind) = match self
+        let (result, _committed_kind) = match self
             .execute(StoredProcessCommand::Control(mutation))
             .await?
         {
             StoredCommandOutcome::Controlled(result, kind) => (result, kind),
             outcome => return Err(unexpected_outcome("control", outcome)),
         };
-        if let Some(kind) = committed_kind {
-            self.notify_process_commit(result.state.clone(), kind, reason)
-                .await;
-        }
         Ok(result)
     }
 
@@ -1044,7 +966,6 @@ where
         request: ProcessLeaseRequest,
         mutation: ProcessTransitionMutation,
     ) -> Result<JournaledProcessSnapshot, ProcessJournalStoreError> {
-        let kind = mutation.kind;
         let snapshot = match self
             .execute(StoredProcessCommand::LeasedTransition { request, mutation })
             .await?
@@ -1052,8 +973,6 @@ where
             StoredCommandOutcome::Transitioned(snapshot) => snapshot,
             outcome => return Err(unexpected_outcome("leased_transition", outcome)),
         };
-        self.notify_process_commit(snapshot.clone(), kind, None)
-            .await;
         Ok(snapshot)
     }
 }
