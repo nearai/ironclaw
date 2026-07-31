@@ -487,6 +487,14 @@ mod tests {
         assert!(on_content.contains("tool_describe"));
         assert!(on_content.contains("tool_call"));
         assert!(on_content.contains("Tool Discovery"));
+        assert!(
+            on_content.contains("When `tool_search` is present"),
+            "bridged-mode guidance must be conditional on the outgoing surface actually advertising tool_search"
+        );
+        assert!(
+            on_content.contains("When `tool_search` is absent"),
+            "below-threshold guidance must direct the model to use the complete direct surface"
+        );
     }
 
     #[tokio::test]

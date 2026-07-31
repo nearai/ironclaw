@@ -71,8 +71,16 @@ Rules for a roll-up job that is (or may become) required:
 2. Tolerate `skipped` only for jobs that are event- or scope-gated by design;
    anything that ran must have succeeded.
 3. Assert expected coverage where feasible — the Code Style roll-up fails if a
-   merge-queue/push run's clippy matrix is missing any of the three feature
-   lanes, so a "green but slim" regression cannot come back silently.
+   merge-queue/push run's clippy matrix is missing any required feature lane,
+   so a "green but slim" regression cannot come back silently.
+
+Code Style deliberately consolidates formatting, dependency policy, static
+guards, panic checks, and composition-budget checks into one
+`fast-checks` job. These checks complete in seconds to a few minutes and do not
+benefit from separate runners; keeping them together bounds a code-changing
+pull request to at most six active Code Style jobs while preserving every
+command. Clippy, WebUI checks, and CLI smoke remain separate because they are
+expensive or independently scope-gated.
 
 ## Reborn release and manual compile preflight
 

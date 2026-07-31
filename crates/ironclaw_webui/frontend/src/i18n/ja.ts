@@ -1123,7 +1123,7 @@ registerPack("ja", {
   "admin.users.token": "トークン",
   "admin.users.jobsCount": "{count} ジョブ",
   "admin.users.suspendTitle": "ユーザーを停止",
-  "admin.users.suspendDesc": "ユーザーの認証をブロックします。続行しますか？",
+  "admin.users.suspendDesc": "「{name}」の認証をブロックします。続行しますか？",
   "admin.users.tokenNamePrompt": "{name} のトークン名:",
   "admin.users.tokenCreated": "トークンを作成しました",
   "admin.users.tokenCreatedDesc": "今すぐコピーしてください — 再表示されません。",
@@ -1212,6 +1212,9 @@ registerPack("ja", {
   "logs.entryCount": "{count} 件",
   "logs.pausedBadge": "● 一時停止中",
   "logs.empty": "ログエントリを待機中…",
+  "logs.loadOlder": "過去のログを読み込む",
+  "logs.retentionLimitReached":
+    "最新のログ {count} 件を表示しています。ライブ更新を一時停止するか、フィルターを絞って安定した範囲を確認してください。",
   "common.recent": "最近",
   "common.searchChats": "チャットを検索...",
   "common.gatewaySession": "ゲートウェイセッション",

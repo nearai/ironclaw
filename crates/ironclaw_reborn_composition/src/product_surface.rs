@@ -18,7 +18,8 @@ use ironclaw_host_api::{
 use ironclaw_operator::OperatorServiceLifecycle;
 use ironclaw_product::ProjectionStream;
 use ironclaw_product::{
-    ChannelConnectionService, OperatorStatusService, RebornAutomationProductService,
+    ChannelConnectionService, OperatorStatusService, ProjectScopedAttachmentLander,
+    ProjectScopedAttachmentReader, ProjectScopedFilesystemReader, RebornAutomationProductService,
     RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
     RebornOperatorStatusState, RebornServices as ProductRebornServices, RebornSkillContentResponse,
     RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
@@ -37,10 +38,7 @@ use crate::{
         RebornOutboundPreferencesService, outbound_delivery_synthetic_provider,
         outbound_delivery_target_set_operator_tool_info,
     },
-    support::fs::{
-        MountScopedFilesystemReader, ProjectScopedAttachmentLander, ProjectScopedAttachmentReader,
-        ProjectScopedFilesystemReader,
-    },
+    support::fs::MountScopedFilesystemReader,
 };
 use ironclaw_extension_host::ExtensionHostLifecycleProductService;
 use ironclaw_extension_host::admin_configuration::AdminConfigurationViewProvider;

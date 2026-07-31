@@ -19,6 +19,12 @@ pub enum OutboundError {
     AccessDenied,
     #[error("outbound delivery not found")]
     DeliveryNotFound,
+    #[error("reply attachment intents are already sealed for this run")]
+    ReplyAttachmentIntentsSealed,
+    #[error("reply attachment metadata conflicts with an existing path")]
+    ReplyAttachmentIntentConflict,
+    #[error("reply attachment intent budget exceeded")]
+    ReplyAttachmentIntentLimitExceeded,
     /// Compare-and-swap precondition failed on the underlying filesystem. The
     /// caller observed a stale `RecordVersion`; a bounded retry loop should
     /// re-read the current entry and re-apply the transformation. Distinct

@@ -389,9 +389,14 @@ impl RebornRuntimeStores {
     pub(crate) fn read_write_workspace_filesystem(
         &self,
     ) -> Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
+        let attachment_mounts = crate::runtime_mounts::workspace_mount_view(
+            ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
+            &[],
+        )
+        .ok()?;
         Some(Arc::new(ScopedFilesystem::with_fixed_view(
             Arc::clone(&self.extension_filesystem),
-            self.workspace_mounts.clone(),
+            attachment_mounts,
         )))
     }
 
@@ -512,10 +517,9 @@ impl RebornRuntimeStores {
     #[cfg(feature = "test-support")]
     fn standalone_workspace_attachment_reader_for_test(
         &self,
-    ) -> Option<Arc<crate::support::fs::ProjectScopedAttachmentReader<CompositeRootFilesystem>>>
-    {
+    ) -> Option<Arc<ironclaw_product::ProjectScopedAttachmentReader<CompositeRootFilesystem>>> {
         Some(Arc::new(
-            crate::support::fs::ProjectScopedAttachmentReader::new(Arc::clone(
+            ironclaw_product::ProjectScopedAttachmentReader::new(Arc::clone(
                 &self.workspace_filesystem,
             )),
         ))
@@ -542,7 +546,7 @@ impl RebornRuntimeStores {
         let read_write_workspace_filesystem = self.read_write_workspace_filesystem()?;
         Some(AttachmentTestSupport {
             read_port,
-            lander: Arc::new(crate::support::fs::ProjectScopedAttachmentLander::new(
+            lander: Arc::new(ironclaw_product::ProjectScopedAttachmentLander::new(
                 read_write_workspace_filesystem,
             )),
         })

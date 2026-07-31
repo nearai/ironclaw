@@ -131,6 +131,11 @@ the Reborn WebChat v2 or OpenAI-compatible API surface. The manifest may use
 pytest node IDs to include only the Reborn binary/API checks from a broader
 scenario file.
 
+That lane builds the shipping binary under branch-aware LLVM instrumentation,
+fails if the run emits zero profile files, and uploads
+`reborn-shipping-binary-e2e-coverage`. A passing Pytest result without binary
+coverage is therefore not a passing coverage lane.
+
 Do not add legacy `ironclaw` gateway tests to that manifest, even if they run
 with `ENGINE_V2=true`. Those are compatibility/runtime E2E tests. Direct
 Emulate provider-contract tests are also excluded from the Reborn coverage gate

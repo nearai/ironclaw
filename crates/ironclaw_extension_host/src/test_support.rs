@@ -459,3 +459,25 @@ impl RestrictedEgress for DenyAllEgress {
         Err(RestrictedEgressError::PolicyDenied)
     }
 }
+
+/// Records pairing outcomes the generic sink observes. An ordinary double now
+/// that the observer is a trait; shared so the sink contract tests and the
+/// composition-side pairing-service tests assert against one implementation.
+pub struct RecordingPairingOutcomeObserver {
+    pub outcomes: Arc<std::sync::Mutex<Vec<crate::channel_pairing::ChannelPairingConsumeOutcome>>>,
+}
+
+#[async_trait]
+impl crate::extension_ingress::ChannelPairingOutcomeObserver for RecordingPairingOutcomeObserver {
+    async fn observe_pairing_outcome(
+        &self,
+        _conversation: ironclaw_product::ExternalConversationRef,
+        _event_id: ironclaw_product::ExternalEventId,
+        outcome: crate::channel_pairing::ChannelPairingConsumeOutcome,
+    ) {
+        match self.outcomes.lock() {
+            Ok(mut outcomes) => outcomes.push(outcome),
+            Err(poisoned) => poisoned.into_inner().push(outcome),
+        }
+    }
+}

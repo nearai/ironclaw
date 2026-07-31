@@ -1123,7 +1123,7 @@ registerPack("ko", {
   "admin.users.token": "토큰",
   "admin.users.jobsCount": "{count}개 작업",
   "admin.users.suspendTitle": "사용자 정지",
-  "admin.users.suspendDesc": "사용자가 인증할 수 없게 됩니다. 계속할까요?",
+  "admin.users.suspendDesc": "\"{name}\" 사용자가 인증할 수 없게 됩니다. 계속할까요?",
   "admin.users.tokenNamePrompt": "{name}의 토큰 이름:",
   "admin.users.tokenCreated": "토큰 생성됨",
   "admin.users.tokenCreatedDesc": "지금 복사하세요 — 다시 표시되지 않습니다.",
@@ -1212,6 +1212,9 @@ registerPack("ko", {
   "logs.entryCount": "{count}개 항목",
   "logs.pausedBadge": "● 일시 중지됨",
   "logs.empty": "로그 항목 대기 중…",
+  "logs.loadOlder": "이전 로그 불러오기",
+  "logs.retentionLimitReached":
+    "최근 로그 {count}개를 표시하고 있습니다. 안정적인 범위를 확인하려면 실시간 업데이트를 일시 중지하거나 필터를 좁히세요.",
   "common.recent": "최근",
   "common.searchChats": "채팅 검색...",
   "common.gatewaySession": "게이트웨이 세션",

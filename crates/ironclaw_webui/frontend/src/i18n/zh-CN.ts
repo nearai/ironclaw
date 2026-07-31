@@ -1123,7 +1123,7 @@ registerPack("zh-CN", {
   "admin.users.token": "令牌",
   "admin.users.jobsCount": "{count} 个任务",
   "admin.users.suspendTitle": "停用用户",
-  "admin.users.suspendDesc": "这将阻止用户进行身份验证。继续？",
+  "admin.users.suspendDesc": "这将阻止“{name}”进行身份验证。继续？",
   "admin.users.tokenNamePrompt": "为 {name} 的令牌命名：",
   "admin.users.tokenCreated": "令牌已创建",
   "admin.users.tokenCreatedDesc": "请立即复制 — 之后不会再次显示。",
@@ -1212,6 +1212,9 @@ registerPack("zh-CN", {
   "logs.entryCount": "{count} 条目",
   "logs.pausedBadge": "● 已暂停",
   "logs.empty": "等待日志条目…",
+  "logs.loadOlder": "加载更早的日志",
+  "logs.retentionLimitReached":
+    "正在显示最近的 {count} 条日志。请暂停实时更新或缩小筛选范围，以检查稳定的日志区间。",
   "common.recent": "最近对话",
   "common.searchChats": "搜索对话...",
   "common.gatewaySession": "网关会话",

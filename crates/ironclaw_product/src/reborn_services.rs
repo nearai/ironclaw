@@ -21,7 +21,6 @@ use crate::{
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::future::try_join_all;
-use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{
     AuthFlowStatus, AuthProductScope, AuthProviderId, CredentialAccountId,
     CredentialAccountProjection, CredentialAccountStatus, CredentialAccountUpdateBinding,
@@ -29,6 +28,7 @@ use ironclaw_auth::{
 };
 use ironclaw_common::{AutomationName, AutomationNameError};
 use ironclaw_host_api::{
+    attachment::InboundAttachment,
     capability::{EffectKind, GrantConstraints, PermissionMode},
     ids::{
         ActivityId, AgentId, CapabilityId, ExtensionId, InvocationId, ProjectId, ResultRef,
@@ -108,6 +108,7 @@ mod product_commands;
 mod project_fs;
 mod projects;
 mod run_artifact;
+mod thread_artifact;
 mod trace_credits;
 mod types;
 mod views;
@@ -200,6 +201,10 @@ pub use projects::{
 pub use run_artifact::{
     RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornRunArtifact, RebornRunArtifactRequest,
     RunArtifactLogs, RunArtifactMessage, RunArtifactRedaction, RunArtifactToolCall,
+};
+pub use thread_artifact::{
+    RebornThreadArtifact, RebornThreadArtifactRequest, THREAD_ARTIFACT_MAX_MESSAGES,
+    THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW,
 };
 pub use types::{
     RebornAccountBindingSource, RebornAttachmentBytes, RebornAttachmentRequest, RebornAuthAccount,
@@ -2314,6 +2319,12 @@ impl ProductCapabilityDescriptor {
 /// used only to disambiguate the storage path; the implementation writes
 /// through the same `MountView` the agent's file tools resolve through, so
 /// landed bytes are readable by `file_read`/`list_dir` in later turns.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AttachmentCleanupReport {
+    pub scanned_batches: usize,
+    pub deleted_batches: usize,
+}
+
 #[async_trait]
 pub trait InboundAttachmentLander: Send + Sync {
     async fn land(
@@ -2322,6 +2333,34 @@ pub trait InboundAttachmentLander: Send + Sync {
         message_id: &str,
         attachments: Vec<InboundAttachment>,
     ) -> Result<Vec<AttachmentRef>, ProductSurfaceError>;
+
+    /// Remove one complete batch previously returned by [`Self::land`].
+    ///
+    /// The inbound workflow calls this only when durable message acceptance
+    /// fails after landing. Implementations must constrain deletion to the
+    /// batch represented by `attachments`; they must never sweep unrelated
+    /// workspace paths.
+    async fn rollback(
+        &self,
+        thread_scope: &ThreadScope,
+        attachments: &[AttachmentRef],
+    ) -> Result<(), ProductSurfaceError>;
+
+    /// Reconcile old committed batches against an exhaustive set of durable
+    /// attachment storage keys for this exact thread scope.
+    ///
+    /// Callers must skip this operation when their reference scan was
+    /// truncated. The complete snapshot may include attachment domains the
+    /// implementation does not own, such as agent-created outbound workspace
+    /// files; implementations ignore those references and fail closed when no
+    /// owned reference proves the snapshot usable. Implementations keep a
+    /// reconciliation window and bounded filesystem scan so recent in-flight
+    /// work and unrelated workspace paths are never removed.
+    async fn cleanup_stale(
+        &self,
+        thread_scope: &ThreadScope,
+        referenced_storage_keys: &[String],
+    ) -> Result<AttachmentCleanupReport, ProductSurfaceError>;
 }
 
 /// Reads a landed attachment's bytes back for the WebUI bytes endpoint. The
@@ -3916,6 +3955,12 @@ where
                 let artifact = self.build_run_artifact(caller, request).await?;
                 views::view_page(artifact)
             }
+            id if id == THREAD_ARTIFACT_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(ProductSurfaceError::internal_from)?;
+                let artifact = self.build_thread_artifact(caller, request).await?;
+                views::view_page(artifact)
+            }
             id if id == GLOBAL_AUTO_APPROVE_VIEW.id => {
                 let _: RebornGlobalAutoApproveRequest = serde_json::from_value(query.params)
                     .map_err(ProductSurfaceError::internal_from)?;
@@ -4127,10 +4172,17 @@ where
             .await?;
         // dispatch-exempt: read-only, already-authorized workspace file download
         // through the service's own port — not an in-turn mutating tool call.
-        reader
+        let file = reader
             .read_file(&thread_scope, &request.path)
             .await
-            .map_err(map_project_fs_error)
+            .map_err(map_project_fs_error)?;
+        Ok(ProjectFsFile {
+            path: file.path.as_str().to_string(),
+            filename: file.filename,
+            mime_type: file.mime_type,
+            size_bytes: file.bytes.len() as u64,
+            bytes: file.bytes,
+        })
     }
 
     async fn list_fs_mounts(

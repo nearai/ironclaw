@@ -40,6 +40,9 @@
 //!   actor-scoped final-reply destination for one run. The record contains
 //!   metadata only and is revalidated against current target authority before
 //!   provider egress.
+//! - `/outbound/reply-attachment-intents/<scope-and-run-hash>.json` — ordered,
+//!   bounded workspace-file metadata explicitly registered for one final
+//!   assistant reply. Records are sealed before transcript finalization.
 //! - `/outbound/run-final-reply-handoffs/<event-cursor>-<turn-run-id>.json` —
 //!   minimal rebuildable projection keys for completed-run delivery. The
 //!   sibling metadata cursor records how far the authoritative turn-event log
@@ -56,7 +59,7 @@ use ironclaw_filesystem::{
     ScopedFilesystem, VersionedEntry, cas_update,
 };
 use ironclaw_host_api::{
-    ids::{TenantId, ThreadId, UserId},
+    ids::{RunId, TenantId, ThreadId, UserId},
     path::ScopedPath,
     resource::ResourceScope,
 };
@@ -64,6 +67,7 @@ use ironclaw_turns::{EventCursor as TurnEventCursor, TurnActor, TurnScope};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::reply_attachment_intents::validate_reply_attachment_intents;
 use crate::validation::{
     validate_advance_request, validate_communication_preference, validate_delivery_attempt,
     validate_delivery_identity, validate_delivery_status_request, validate_policy,
@@ -75,10 +79,11 @@ use crate::{
     DeliveredGateRouteStore, DeliveryDefaultScope, LoadSubscriptionCursorRequest,
     MAX_RUN_DELIVERY_CLEANUP_RECORDS, MAX_RUN_FINAL_REPLY_HANDOFF_PAGE, OutboundDeliveryAttempt,
     OutboundDeliveryId, OutboundDeliveryStatus, OutboundError, OutboundStateStorePort,
-    ProjectionSubscriptionId, ProjectionSubscriptionRecord, RunDeliveryCleanupRecord,
-    RunDeliveryCleanupRequest, RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord,
-    RunFinalReplyTargetRequest, ThreadNotificationPolicy, TriggeredRunDeliveryRecord,
-    TriggeredRunDeliveryStore, UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
+    ProjectionSubscriptionId, ProjectionSubscriptionRecord, ReplyAttachmentIntent,
+    ReplyAttachmentIntentPort, RunDeliveryCleanupRecord, RunDeliveryCleanupRequest,
+    RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord, RunFinalReplyTargetRequest,
+    ThreadNotificationPolicy, TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore,
+    UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
     WriteCommunicationPreferenceRequest,
 };
 
@@ -123,6 +128,7 @@ const TRIGGERED_RUN_DELIVERY_ROOT: &str = "/outbound/triggered-run-delivery";
 const DELIVERED_GATE_ROUTES_ROOT: &str = "/outbound/delivered-gate-routes";
 const DELIVERED_GATE_ROUTES_CONV_IDX_ROOT: &str = "/outbound/delivered-gate-routes/conv-idx";
 const RUN_DELIVERY_CLEANUP_ROOT: &str = "/outbound/run-delivery-cleanup";
+const REPLY_ATTACHMENT_INTENTS_ROOT: &str = "/outbound/reply-attachment-intents";
 const RUN_FINAL_REPLY_TARGETS_ROOT: &str = "/outbound/run-final-reply-targets";
 const RUN_FINAL_REPLY_HANDOFFS_ROOT: &str = "/outbound/run-final-reply-handoffs";
 const RUN_FINAL_REPLY_HANDOFF_CURSOR_PATH: &str =
@@ -139,6 +145,42 @@ struct RunFinalReplyHandoffCursorRecord {
 struct RunDeliveryCleanupSnapshot {
     request: RunDeliveryCleanupRequest,
     records: Vec<RunDeliveryCleanupRecord>,
+}
+
+const REPLY_ATTACHMENT_INTENT_SCHEMA_VERSION: u8 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplyAttachmentIntentScope {
+    tenant_id: String,
+    user_id: String,
+    agent_id: Option<String>,
+    project_id: Option<String>,
+    mission_id: Option<String>,
+    thread_id: Option<String>,
+}
+
+impl From<&ResourceScope> for ReplyAttachmentIntentScope {
+    fn from(scope: &ResourceScope) -> Self {
+        Self {
+            tenant_id: scope.tenant_id.to_string(),
+            user_id: scope.user_id.to_string(),
+            agent_id: scope.agent_id.as_ref().map(ToString::to_string),
+            project_id: scope.project_id.as_ref().map(ToString::to_string),
+            mission_id: scope.mission_id.as_ref().map(ToString::to_string),
+            thread_id: scope.thread_id.as_ref().map(ToString::to_string),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplyAttachmentIntentEnvelope {
+    schema_version: u8,
+    scope: ReplyAttachmentIntentScope,
+    run_id: RunId,
+    intents: Vec<ReplyAttachmentIntent>,
+    sealed: bool,
 }
 
 /// Filesystem-backed outbound store. Construct with a [`ScopedFilesystem`]
@@ -541,6 +583,108 @@ where
             record: request.record,
             version,
         })
+    }
+}
+
+#[async_trait]
+impl<F> ReplyAttachmentIntentPort for OutboundStateStore<F>
+where
+    F: RootFilesystem,
+{
+    async fn register(
+        &self,
+        scope: &ResourceScope,
+        run_id: &RunId,
+        intent: ReplyAttachmentIntent,
+    ) -> Result<(), OutboundError> {
+        intent.validate()?;
+        let stable_scope = ReplyAttachmentIntentScope::from(scope);
+        let path = reply_attachment_intent_path(&stable_scope, run_id)?;
+        self.ensure_tenant_id_index(scope, &reply_attachment_intents_root()?)
+            .await?;
+
+        cas_update(
+            self.filesystem.as_ref(),
+            scope,
+            &path,
+            decode_reply_attachment_intent_envelope,
+            encode_reply_attachment_intent_envelope,
+            move |current: Option<ReplyAttachmentIntentEnvelope>| {
+                let stable_scope = stable_scope.clone();
+                let run_id = *run_id;
+                let intent = intent.clone();
+                async move {
+                    let mut envelope = current.unwrap_or_else(|| ReplyAttachmentIntentEnvelope {
+                        schema_version: REPLY_ATTACHMENT_INTENT_SCHEMA_VERSION,
+                        scope: stable_scope.clone(),
+                        run_id,
+                        intents: Vec::new(),
+                        sealed: false,
+                    });
+                    validate_reply_attachment_intent_envelope(&envelope, &stable_scope, &run_id)?;
+                    if envelope.sealed {
+                        return Err(OutboundError::ReplyAttachmentIntentsSealed);
+                    }
+                    if let Some(existing) = envelope
+                        .intents
+                        .iter()
+                        .find(|existing| existing.path == intent.path)
+                    {
+                        return if existing == &intent {
+                            Ok(CasApply::no_op(envelope, ()))
+                        } else {
+                            Err(OutboundError::ReplyAttachmentIntentConflict)
+                        };
+                    }
+                    envelope.intents.push(intent);
+                    validate_reply_attachment_intents(&envelope.intents)?;
+                    Ok(CasApply::new(envelope, ()))
+                }
+            },
+        )
+        .await
+        .map_err(map_reply_attachment_intent_cas_error)
+    }
+
+    async fn seal(
+        &self,
+        scope: &ResourceScope,
+        run_id: &RunId,
+    ) -> Result<Vec<ReplyAttachmentIntent>, OutboundError> {
+        let stable_scope = ReplyAttachmentIntentScope::from(scope);
+        let path = reply_attachment_intent_path(&stable_scope, run_id)?;
+        self.ensure_tenant_id_index(scope, &reply_attachment_intents_root()?)
+            .await?;
+
+        cas_update(
+            self.filesystem.as_ref(),
+            scope,
+            &path,
+            decode_reply_attachment_intent_envelope,
+            encode_reply_attachment_intent_envelope,
+            move |current: Option<ReplyAttachmentIntentEnvelope>| {
+                let stable_scope = stable_scope.clone();
+                let run_id = *run_id;
+                async move {
+                    let mut envelope = current.unwrap_or_else(|| ReplyAttachmentIntentEnvelope {
+                        schema_version: REPLY_ATTACHMENT_INTENT_SCHEMA_VERSION,
+                        scope: stable_scope.clone(),
+                        run_id,
+                        intents: Vec::new(),
+                        sealed: false,
+                    });
+                    validate_reply_attachment_intent_envelope(&envelope, &stable_scope, &run_id)?;
+                    let intents = envelope.intents.clone();
+                    if envelope.sealed {
+                        return Ok(CasApply::no_op(envelope, intents));
+                    }
+                    envelope.sealed = true;
+                    Ok(CasApply::new(envelope, intents))
+                }
+            },
+        )
+        .await
+        .map_err(map_reply_attachment_intent_cas_error)
     }
 }
 
@@ -1265,6 +1409,74 @@ fn run_final_reply_target_path(
 ) -> Result<ScopedPath, OutboundError> {
     ScopedPath::new(format!("{RUN_FINAL_REPLY_TARGETS_ROOT}/{run_id}.json"))
         .map_err(|_| OutboundError::Backend)
+}
+
+fn reply_attachment_intent_path(
+    scope: &ReplyAttachmentIntentScope,
+    run_id: &RunId,
+) -> Result<ScopedPath, OutboundError> {
+    let serialized =
+        serde_json::to_vec(&(scope, run_id)).map_err(|_| OutboundError::Serialization)?;
+    let digest = hex::encode(Sha256::digest(serialized));
+    ScopedPath::new(format!("{REPLY_ATTACHMENT_INTENTS_ROOT}/{digest}.json"))
+        .map_err(|_| OutboundError::Backend)
+}
+
+fn reply_attachment_intents_root() -> Result<ScopedPath, OutboundError> {
+    ScopedPath::new(REPLY_ATTACHMENT_INTENTS_ROOT).map_err(|_| OutboundError::Backend)
+}
+
+fn decode_reply_attachment_intent_envelope(
+    bytes: &[u8],
+) -> Result<ReplyAttachmentIntentEnvelope, OutboundError> {
+    let envelope: ReplyAttachmentIntentEnvelope =
+        serde_json::from_slice(bytes).map_err(|_| OutboundError::Serialization)?;
+    validate_reply_attachment_intent_envelope_contents(&envelope)?;
+    Ok(envelope)
+}
+
+fn encode_reply_attachment_intent_envelope(
+    envelope: &ReplyAttachmentIntentEnvelope,
+) -> Result<Entry, OutboundError> {
+    validate_reply_attachment_intent_envelope_contents(envelope)?;
+    let body = serde_json::to_vec(envelope).map_err(|_| OutboundError::Serialization)?;
+    Ok(Entry::bytes(body)
+        .with_content_type(ContentType::json())
+        .with_indexed(
+            tenant_id_index_key(),
+            IndexValue::Text(envelope.scope.tenant_id.clone()),
+        ))
+}
+
+fn validate_reply_attachment_intent_envelope_contents(
+    envelope: &ReplyAttachmentIntentEnvelope,
+) -> Result<(), OutboundError> {
+    if envelope.schema_version != REPLY_ATTACHMENT_INTENT_SCHEMA_VERSION {
+        return Err(OutboundError::Serialization);
+    }
+    validate_reply_attachment_intents(&envelope.intents)
+}
+
+fn validate_reply_attachment_intent_envelope(
+    envelope: &ReplyAttachmentIntentEnvelope,
+    expected_scope: &ReplyAttachmentIntentScope,
+    expected_run_id: &RunId,
+) -> Result<(), OutboundError> {
+    validate_reply_attachment_intent_envelope_contents(envelope)?;
+    if &envelope.scope != expected_scope || &envelope.run_id != expected_run_id {
+        return Err(OutboundError::AccessDenied);
+    }
+    Ok(())
+}
+
+fn map_reply_attachment_intent_cas_error(error: CasUpdateError<OutboundError>) -> OutboundError {
+    match error {
+        CasUpdateError::Apply(error) => error,
+        CasUpdateError::Timeout
+        | CasUpdateError::RetriesExhausted
+        | CasUpdateError::CasUnsupported
+        | CasUpdateError::Backend(_) => OutboundError::Backend,
+    }
 }
 
 fn run_delivery_cleanup_path(

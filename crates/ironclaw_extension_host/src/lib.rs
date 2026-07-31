@@ -58,6 +58,7 @@ pub mod first_party_package;
 pub mod generic_host;
 pub mod host_api_contracts;
 mod hosted_mcp_discovery_authority;
+pub mod inbound_batches;
 pub mod ingress;
 pub mod install_policy;
 pub mod ironhub;
@@ -195,6 +196,7 @@ pub use generic_host::{
     boot_installation_records, build_generic_extension_host, effective_resolved_for_package,
 };
 pub use host_api_contracts::product_extension_host_api_contract_registry;
+pub use inbound_batches::FilesystemInboundBatchStore;
 pub use install_policy::{
     RemoveDecision, decide_install_on_existing, decide_remove, derive_owner,
     ensure_caller_may_operate, install_scope_for_owner,

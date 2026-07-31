@@ -171,7 +171,7 @@ impl ModelsEndpoint {
         let mut body = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| LlmError::InvalidResponse {
+            let chunk = chunk.map_err(|e| LlmError::StreamInterrupted {
                 provider: self.provider_id.clone(),
                 reason: format!("could not read models response: {e}"),
             })?;
@@ -380,7 +380,7 @@ impl<M: CompletionModel> RigAdapter<M> {
         // does not carry; it is a known limitation of this adapter, not a
         // claim it makes.
         let Some(terminal_frame) = stream.response.as_ref() else {
-            return Err(LlmError::InvalidResponse {
+            return Err(LlmError::StreamInterrupted {
                 provider: self.model_name.clone(),
                 reason: "stream ended before the provider's terminal frame".to_string(),
             });

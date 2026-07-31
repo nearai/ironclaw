@@ -9,6 +9,209 @@ use ironclaw_host_api::{
 use tempfile::tempdir;
 
 #[tokio::test]
+async fn local_create_subtree_atomic_publishes_the_complete_batch() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+
+    let mut root = DiskFilesystem::new();
+    root.mount_local(
+        VirtualPath::new("/projects").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+
+    let prefix = VirtualPath::new("/projects/project1/attachments/message-1").unwrap();
+    let versions = root
+        .create_subtree_atomic(
+            &prefix,
+            vec![
+                AtomicSubtreeEntry {
+                    path: VirtualPath::new("/projects/project1/attachments/message-1/0-alpha.txt")
+                        .unwrap(),
+                    entry: Entry::bytes(b"alpha".to_vec()),
+                },
+                AtomicSubtreeEntry {
+                    path: VirtualPath::new("/projects/project1/attachments/message-1/1-beta.txt")
+                        .unwrap(),
+                    entry: Entry::bytes(b"beta".to_vec()),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        versions,
+        vec![
+            RecordVersion::from_backend(0),
+            RecordVersion::from_backend(0)
+        ]
+    );
+    assert_eq!(
+        std::fs::read(
+            storage
+                .path()
+                .join("project1/attachments/message-1/0-alpha.txt"),
+        )
+        .unwrap(),
+        b"alpha"
+    );
+    assert_eq!(
+        std::fs::read(
+            storage
+                .path()
+                .join("project1/attachments/message-1/1-beta.txt"),
+        )
+        .unwrap(),
+        b"beta"
+    );
+}
+
+#[tokio::test]
+async fn in_memory_create_subtree_atomic_publishes_the_complete_batch() {
+    let root = InMemoryBackend::new();
+    let prefix = VirtualPath::new("/projects/project1/attachments/message-1").unwrap();
+    let first = VirtualPath::new("/projects/project1/attachments/message-1/0-alpha.txt").unwrap();
+    let second = VirtualPath::new("/projects/project1/attachments/message-1/1-beta.txt").unwrap();
+
+    let versions = root
+        .create_subtree_atomic(
+            &prefix,
+            vec![
+                AtomicSubtreeEntry {
+                    path: first.clone(),
+                    entry: Entry::bytes(b"alpha".to_vec()),
+                },
+                AtomicSubtreeEntry {
+                    path: second.clone(),
+                    entry: Entry::bytes(b"beta".to_vec()),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        versions,
+        vec![
+            RecordVersion::from_backend(1),
+            RecordVersion::from_backend(1)
+        ]
+    );
+    assert_eq!(root.read_file(&first).await.unwrap(), b"alpha");
+    assert_eq!(root.read_file(&second).await.unwrap(), b"beta");
+}
+
+#[tokio::test]
+async fn in_memory_create_subtree_atomic_rejects_an_outside_path_without_partial_write() {
+    let root = InMemoryBackend::new();
+    let prefix = VirtualPath::new("/projects/project1/attachments/message-1").unwrap();
+    let first = VirtualPath::new("/projects/project1/attachments/message-1/0-alpha.txt").unwrap();
+
+    let error = root
+        .create_subtree_atomic(
+            &prefix,
+            vec![
+                AtomicSubtreeEntry {
+                    path: first.clone(),
+                    entry: Entry::bytes(b"alpha".to_vec()),
+                },
+                AtomicSubtreeEntry {
+                    path: VirtualPath::new("/projects/project2/escaped.txt").unwrap(),
+                    entry: Entry::bytes(b"escaped".to_vec()),
+                },
+            ],
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, FilesystemError::PathOutsideMount { .. }));
+    assert!(root.get(&first).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn in_memory_create_subtree_atomic_rejects_an_existing_prefix_without_overwrite() {
+    let root = InMemoryBackend::new();
+    let prefix = VirtualPath::new("/projects/project1/attachments/message-1").unwrap();
+    let first = VirtualPath::new("/projects/project1/attachments/message-1/0-alpha.txt").unwrap();
+    root.create_subtree_atomic(
+        &prefix,
+        vec![AtomicSubtreeEntry {
+            path: first.clone(),
+            entry: Entry::bytes(b"original".to_vec()),
+        }],
+    )
+    .await
+    .unwrap();
+
+    let error = root
+        .create_subtree_atomic(
+            &prefix,
+            vec![AtomicSubtreeEntry {
+                path: first.clone(),
+                entry: Entry::bytes(b"replacement".to_vec()),
+            }],
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, FilesystemError::VersionMismatch { .. }));
+    assert_eq!(root.read_file(&first).await.unwrap(), b"original");
+}
+
+#[tokio::test]
+async fn in_memory_create_subtree_atomic_rejects_an_empty_batch() {
+    let root = InMemoryBackend::new();
+    let prefix = VirtualPath::new("/projects/project1/attachments/message-1").unwrap();
+
+    let error = root
+        .create_subtree_atomic(&prefix, Vec::new())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        FilesystemError::Backend {
+            operation: FilesystemOperation::CreateSubtreeAtomic,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn in_memory_create_subtree_atomic_rejects_duplicate_paths_without_writing() {
+    let root = InMemoryBackend::new();
+    let prefix = VirtualPath::new("/projects/project1/attachments/message-1").unwrap();
+    let file = VirtualPath::new("/projects/project1/attachments/message-1/0-alpha.txt").unwrap();
+
+    let error = root
+        .create_subtree_atomic(
+            &prefix,
+            vec![
+                AtomicSubtreeEntry {
+                    path: file.clone(),
+                    entry: Entry::bytes(b"alpha".to_vec()),
+                },
+                AtomicSubtreeEntry {
+                    path: file.clone(),
+                    entry: Entry::bytes(b"replacement".to_vec()),
+                },
+            ],
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        FilesystemError::Backend {
+            operation: FilesystemOperation::CreateSubtreeAtomic,
+            ..
+        }
+    ));
+    assert!(root.get(&file).await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn scoped_read_resolves_mount_view_and_reads_bytes() {
     let storage = tempdir().unwrap();
     std::fs::create_dir_all(storage.path().join("project1")).unwrap();

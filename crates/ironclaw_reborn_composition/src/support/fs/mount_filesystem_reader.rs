@@ -22,12 +22,10 @@ use ironclaw_filesystem::{DirEntry, FilesystemError, RootFilesystem, ScopedFiles
 use ironclaw_host_api::{path::ScopedPath, resource::ResourceScope};
 use ironclaw_product::{
     FilesystemBrowseReader, FsMount, ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat,
+    file_name_of, guard_readable_file, map_filesystem_error, map_kind, mime_for_path,
 };
 
 use crate::runtime_mounts::{BROWSE_MEMORY_ALIAS, WORKSPACE_ALIAS};
-use crate::support::fs::project_filesystem_reader::{
-    file_name_of, guard_readable_file, map_filesystem_error, map_kind, mime_for_path,
-};
 
 /// Browses the agent's internal filesystem across mounts on behalf of an
 /// already-authorized caller, over a read-only scoped filesystem.
@@ -166,10 +164,10 @@ impl<F: RootFilesystem> FilesystemBrowseReader for MountScopedFilesystemReader<F
         let mime_type = mime_for_path(&scoped_str);
         let filename = file_name_of(&scoped_str);
         Ok(ProjectFsFile {
-            size_bytes: bytes.len() as u64,
             path: Self::relativize(alias, &scoped_str),
             filename,
             mime_type,
+            size_bytes: bytes.len() as u64,
             bytes,
         })
     }

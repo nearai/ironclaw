@@ -21,6 +21,7 @@ futures-util = "0.3"
 dirs = "6"
 hex = "0.4"
 ironclaw_approvals = { path = "../ironclaw_approvals" }
+ironclaw_attachments = { path = "../ironclaw_attachments" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 # `sandbox_process::connect` reads the `IRONCLAW_REBORN_DOCKER_HOST` override
@@ -92,6 +93,8 @@ ironclaw_event_projections = { path = "../ironclaw_event_projections" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }
 # shared TestDispatcher double
 ironclaw_host_api = { path = "../ironclaw_host_api", features = ["test-support"] }
+# Enables the sanctioned in-memory-backed outbound store constructor for tests.
+ironclaw_outbound = { path = "../ironclaw_outbound", features = ["test-support"] }
 # Enables the in-memory-backed process store constructors for tests only.
 ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
 # Enables the in-memory-backed run-state/approval store constructors for tests only.

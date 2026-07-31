@@ -12,34 +12,35 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::{
+    ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsStat,
+};
 use async_trait::async_trait;
 use ironclaw_attachments::DEFAULT_MAX_ATTACHMENT_BYTES;
 use ironclaw_filesystem::{
     DirEntry, FileStat, FileType, FilesystemError, RootFilesystem, ScopedFilesystem,
 };
-use ironclaw_host_api::path::ScopedPath;
-use ironclaw_product::{
-    ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
-    ProjectFsStat,
-};
+use ironclaw_host_api::{attachment::WorkspaceFile, path::ScopedPath};
 use ironclaw_threads::ThreadScope;
 
-use crate::runtime_mounts::WORKSPACE_ALIAS;
+use ironclaw_attachments::WORKSPACE_ALIAS;
 
 const DEFAULT_OCTET_STREAM: &str = "application/octet-stream";
 
 /// Reads directory listings and file bytes from a project-scoped workspace
 /// filesystem on behalf of an already-authorized caller.
-pub(crate) struct ProjectScopedFilesystemReader<F: RootFilesystem> {
+pub struct ProjectScopedFilesystemReader<F: RootFilesystem> {
     filesystem: Arc<ScopedFilesystem<F>>,
     workspace_alias: String,
-    /// Upper bound on a single download. Shares the inbound attachment ceiling
-    /// so generated files and uploads observe the same 25 MiB limit.
+    /// Upper bound on a single read through this reader. Defaults to the
+    /// browse/download ceiling; the delivery-scoped instance is constructed
+    /// with the tighter outbound attachment budget instead, so the two are
+    /// deliberately not the same number.
     max_read_bytes: u64,
 }
 
 impl<F: RootFilesystem> ProjectScopedFilesystemReader<F> {
-    pub(crate) fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self {
             filesystem,
             workspace_alias: WORKSPACE_ALIAS.to_string(),
@@ -47,8 +48,7 @@ impl<F: RootFilesystem> ProjectScopedFilesystemReader<F> {
         }
     }
 
-    #[cfg(test)]
-    fn with_max_read_bytes(filesystem: Arc<ScopedFilesystem<F>>, max_read_bytes: u64) -> Self {
+    pub fn with_max_read_bytes(filesystem: Arc<ScopedFilesystem<F>>, max_read_bytes: u64) -> Self {
         Self {
             filesystem,
             workspace_alias: WORKSPACE_ALIAS.to_string(),
@@ -115,7 +115,7 @@ impl<F: RootFilesystem> ProjectFilesystemReader for ProjectScopedFilesystemReade
         &self,
         thread_scope: &ThreadScope,
         path: &str,
-    ) -> Result<ProjectFsFile, ProjectFsError> {
+    ) -> Result<WorkspaceFile, ProjectFsError> {
         let scope = thread_scope.to_resource_scope();
         let file = self.confine(path)?;
         let stat = self
@@ -144,9 +144,8 @@ impl<F: RootFilesystem> ProjectFilesystemReader for ProjectScopedFilesystemReade
         let path_str = file.as_str().to_string();
         let filename = file_name_of(&path_str);
         let mime_type = mime_for_path(&path_str);
-        Ok(ProjectFsFile {
-            size_bytes: bytes.len() as u64,
-            path: path_str,
+        Ok(WorkspaceFile {
+            path: file,
             filename,
             mime_type,
             bytes,
@@ -181,7 +180,7 @@ impl<F: RootFilesystem> ProjectFilesystemReader for ProjectScopedFilesystemReade
 
 /// Reject anything that is not a downloadable, non-sensitive, in-budget regular
 /// file before its bytes are materialized.
-pub(crate) fn guard_readable_file(stat: &FileStat, max_bytes: u64) -> Result<(), ProjectFsError> {
+pub fn guard_readable_file(stat: &FileStat, max_bytes: u64) -> Result<(), ProjectFsError> {
     if stat.sensitive {
         return Err(ProjectFsError::Denied);
     }
@@ -197,7 +196,7 @@ pub(crate) fn guard_readable_file(stat: &FileStat, max_bytes: u64) -> Result<(),
     Ok(())
 }
 
-pub(crate) fn map_kind(file_type: FileType) -> ProjectFsEntryKind {
+pub fn map_kind(file_type: FileType) -> ProjectFsEntryKind {
     match file_type {
         FileType::File => ProjectFsEntryKind::File,
         FileType::Directory => ProjectFsEntryKind::Directory,
@@ -210,11 +209,11 @@ fn file_name_str(path: &str) -> Option<&str> {
     path.rsplit('/').find(|segment| !segment.is_empty())
 }
 
-pub(crate) fn file_name_of(path: &str) -> Option<String> {
+pub fn file_name_of(path: &str) -> Option<String> {
     file_name_str(path).map(|segment| segment.to_string())
 }
 
-pub(crate) fn mime_for_path(path: &str) -> String {
+pub fn mime_for_path(path: &str) -> String {
     file_name_str(path)
         .and_then(|name| {
             name.rsplit_once('.')
@@ -226,7 +225,7 @@ pub(crate) fn mime_for_path(path: &str) -> String {
 
 /// Map a substrate filesystem error to the sanitized port error. Host paths and
 /// backend reasons never cross this boundary.
-pub(crate) fn map_filesystem_error(error: FilesystemError) -> ProjectFsError {
+pub fn map_filesystem_error(error: FilesystemError) -> ProjectFsError {
     match error {
         FilesystemError::NotFound { .. } => ProjectFsError::NotFound,
         FilesystemError::PermissionDenied { .. }
@@ -316,7 +315,7 @@ mod tests {
             .await
             .expect("reading the seeded file succeeds");
         assert_eq!(file.bytes, b"a,b,c");
-        assert_eq!(file.size_bytes, 5);
+        assert_eq!(file.size_bytes(), 5);
         assert_eq!(file.filename.as_deref(), Some("report.csv"));
         assert_eq!(file.mime_type, "text/csv");
     }

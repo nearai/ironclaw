@@ -724,6 +724,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         );
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        reply_attachment_intent_port: None,
         gate_record_store: None,
         process_system,
         thread_service: Arc::new(thread_service.clone()),
@@ -894,6 +895,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         );
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        reply_attachment_intent_port: None,
         gate_record_store: None,
         process_system,
         thread_service: Arc::new(thread_service.clone()),
@@ -1080,6 +1082,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         );
     let error = match build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        reply_attachment_intent_port: None,
         gate_record_store: None,
         process_system,
         thread_service: Arc::new(thread_service.clone()),

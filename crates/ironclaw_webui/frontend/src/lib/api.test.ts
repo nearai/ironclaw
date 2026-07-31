@@ -13,6 +13,8 @@ import {
   listAutomations,
   listThreads,
   pauseAutomation,
+  queryLogs,
+  queryOperatorLogs,
   renameAutomation,
   resumeAutomation,
   setupExtension,
@@ -139,6 +141,33 @@ test("listAutomations propagates api errors from the automations route", async (
     assert.equal(error.body, "temporarily unavailable");
     return true;
   });
+});
+
+test("log queries forward abort signals to both caller and operator endpoints", async () => {
+  const calls = [];
+  const controller = new AbortController();
+  globalThis.sessionStorage = {
+    getItem: () => "token-1",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.window = { location: { origin: "http://localhost" } };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return new Response(JSON.stringify({ logs: { entries: [] } }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  await queryLogs({ cursor: "caller-cursor", signal: controller.signal });
+  await queryOperatorLogs({ cursor: "operator-cursor", signal: controller.signal });
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].path, "/api/webchat/v2/logs?cursor=caller-cursor");
+  assert.equal(calls[0].options.signal, controller.signal);
+  assert.equal(calls[1].path, "/api/webchat/v2/operator/logs?cursor=operator-cursor");
+  assert.equal(calls[1].options.signal, controller.signal);
 });
 
 test("listThreads can request approval-only threads", async () => {
