@@ -31,6 +31,7 @@ use ironclaw_host_runtime::memory_provider::MemoryServiceResolver;
 use ironclaw_host_runtime::{
     FirstPartyCapabilityHandler, MemoryBackedUserProfileSource, NativeMemoryToolHandler,
 };
+use ironclaw_loop_contracts::MemoryPromptContextService;
 use ironclaw_loop_host::HostUserProfileSource;
 use ironclaw_memory::{MemoryService, PromptWriteSafetyEventSink};
 #[cfg(feature = "memory-mem0")]
@@ -38,7 +39,6 @@ use ironclaw_memory_mem0::{
     MEM0_MEMORY_EXTENSION_ID, Mem0Config, Mem0HttpTransport, Mem0MemoryService, Mem0Transport,
 };
 use ironclaw_memory_native::NativeMemoryService;
-use ironclaw_turns::run_profile::MemoryPromptContextService;
 #[cfg(feature = "memory-mem0")]
 use secrecy::ExposeSecret;
 use secrecy::SecretString;
@@ -439,8 +439,8 @@ pub(crate) struct MemoryBackedUserProfileSourceAdapter(pub(crate) MemoryBackedUs
 impl HostUserProfileSource for MemoryBackedUserProfileSourceAdapter {
     async fn resolve_user_profile(
         &self,
-        run_context: &ironclaw_turns::run_profile::LoopRunContext,
-    ) -> Option<ironclaw_turns::run_profile::UserProfileContext> {
+        run_context: &ironclaw_loop_contracts::LoopRunContext,
+    ) -> Option<ironclaw_loop_contracts::UserProfileContext> {
         self.0.resolve_user_profile(run_context).await
     }
 }

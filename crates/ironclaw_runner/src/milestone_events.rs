@@ -6,14 +6,12 @@ use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId},
     resource::ResourceScope,
 };
-use ironclaw_threads::ThreadScope;
-use ironclaw_turns::{
-    TurnRunId,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, HookDecisionSummary, LoopHostMilestone,
-        LoopHostMilestoneKind, LoopHostMilestoneSink,
-    },
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, HookDecisionSummary, LoopHostMilestone,
+    LoopHostMilestoneKind, LoopHostMilestoneSink,
 };
+use ironclaw_threads::ThreadScope;
+use ironclaw_turns::TurnRunId;
 
 const MODEL_CAPABILITY_ID: &str = "loop.model";
 const ASSISTANT_REPLY_CAPABILITY_ID: &str = "loop.assistant_reply";
@@ -415,14 +413,12 @@ mod tests {
         result_meta::FailureKind,
         runtime::RuntimeKind,
     };
-    use ironclaw_threads::ThreadScope;
-    use ironclaw_turns::{
-        CapabilityActivityId, TurnId, TurnScope,
-        run_profile::{
-            HookDecisionSummary, LoopDriverId, LoopHostMilestone, LoopRecoveryClass,
-            LoopRecoveryDisposition, LoopRecoveryStage, LoopSafeSummary,
-        },
+    use ironclaw_loop_contracts::{
+        HookDecisionSummary, LoopDriverId, LoopHostMilestone, LoopRecoveryClass,
+        LoopRecoveryDisposition, LoopRecoveryStage, LoopSafeSummary,
     };
+    use ironclaw_threads::ThreadScope;
+    use ironclaw_turns::{CapabilityActivityId, TurnId, TurnScope};
 
     const HOOK_HEX_ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 

@@ -2019,7 +2019,7 @@ mod tests {
     /// `config set` command verbatim.
     #[test]
     fn provider_instance_not_configured_safe_summary_validates_and_diagnostic_names_config_set() {
-        ironclaw_turns::run_profile::LoopSafeSummary::new(
+        ironclaw_loop_contracts::LoopSafeSummary::new(
             PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY,
         )
         .expect("fixed safe_summary must pass the strict LoopSafeSummary validator");

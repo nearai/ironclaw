@@ -695,7 +695,7 @@ async fn cancellation_after_capability_batch_preserves_completed_result() {
             resolutions: vec![resolution::completed(
                 result_ref.clone(),
                 "completed before cancellation".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,

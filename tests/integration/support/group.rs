@@ -59,6 +59,10 @@ use ironclaw_filesystem::CompositeRootFilesystem;
 use ironclaw_host_api::{ids::UserId, resource::ResourceScope};
 use ironclaw_llm::testing::{provider_chain_over, provider_chain_over_with_fallback};
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
+use ironclaw_loop_contracts::{
+    CommunicationContextProvider, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
+    ModelProfileId,
+};
 use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilitySurfaceProfileResolver, HostManagedModelGateway,
     HostUserProfileSource, JsonSpawnSubagentInputCodec, ModelCostTable, SubagentSpawnLimits,
@@ -95,10 +99,6 @@ use ironclaw_runner::subagent::{
 };
 use ironclaw_runner::turn_scheduler::TurnRunSchedulerHandle;
 use ironclaw_threads::SessionThreadService;
-use ironclaw_turns::run_profile::{
-    CommunicationContextProvider, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
-    ModelProfileId,
-};
 use ironclaw_turns::{
     AgentTurnProcessRuntime, AgentTurnRuntimePort, InMemoryTurnEventSink, LoopCheckpointStore,
     ProcessLoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope,

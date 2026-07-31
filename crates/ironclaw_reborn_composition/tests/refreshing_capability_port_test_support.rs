@@ -39,6 +39,12 @@ use ironclaw_host_runtime::{
     RuntimeInvocation, RuntimeStatusRequest, VisibleCapability, VisibleCapabilityAccess,
     VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
+use ironclaw_loop_contracts::RunProfileResolver;
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, InMemoryLoopHostMilestoneSink,
+    InMemoryRunProfileResolver, LoopRequest, LoopRunContext, ProviderToolCall,
+    RegisterProviderToolCallRequest, RunProfileResolutionRequest,
+};
 use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityWriteResult, LoopCapabilityInputResolver,
     LoopCapabilityResultWriter,
@@ -55,12 +61,7 @@ use ironclaw_reborn_composition::test_support::{
     PROJECT_CREATE_CAPABILITY_ID, RESULT_READ_CAPABILITY_ID, RefreshingCapabilityPortTestParts,
     create_refreshing_capability_port_for_test,
 };
-use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, InMemoryLoopHostMilestoneSink,
-    InMemoryRunProfileResolver, LoopRequest, LoopRunContext, ProviderToolCall,
-    RegisterProviderToolCallRequest, RunProfileResolutionRequest,
-};
-use ironclaw_turns::{RunProfileResolver, TurnId, TurnRunId, TurnScope};
+use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
 /// Echoes a runtime-visible capability for every grant in the request's
 /// context, so `capability_id_filter` narrowing (applied upstream of this
@@ -763,7 +764,7 @@ async fn additional_provider_trust_is_forwarded_to_visible_request() {
     // Construction already triggers one `visible_capabilities` refresh; drive
     // a second one explicitly through the public port API so the assertion
     // exercises the same seam a real loop run would.
-    port.visible_capabilities(ironclaw_turns::run_profile::VisibleCapabilityRequest)
+    port.visible_capabilities(ironclaw_loop_contracts::VisibleCapabilityRequest)
         .await
         .expect("visible capabilities refresh");
 
@@ -857,7 +858,7 @@ async fn multi_entry_collection_knobs_round_trip() {
     // capability_execution_mount_overrides: invoke both and check each one's
     // ExecutionContext carries ITS OWN override mount, not the other's.
     async fn invoke(
-        port: &dyn ironclaw_turns::run_profile::LoopCapabilityPort,
+        port: &dyn ironclaw_loop_contracts::LoopCapabilityPort,
         provider_tool_name: &str,
     ) {
         let tool_call = ProviderToolCall {
@@ -905,7 +906,7 @@ async fn multi_entry_collection_knobs_round_trip() {
 
     // additional_provider_trust: both entries land in the observed
     // visible_capabilities provider-trust map.
-    port.visible_capabilities(ironclaw_turns::run_profile::VisibleCapabilityRequest)
+    port.visible_capabilities(ironclaw_loop_contracts::VisibleCapabilityRequest)
         .await
         .expect("visible capabilities refresh");
     let observed = runtime.visible_provider_trust();

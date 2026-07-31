@@ -6,15 +6,15 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
+use ironclaw_loop_contracts::{LoopBlockedKind, LoopCheckpointKind};
 use ironclaw_loop_host::RunCancellationFactory;
 use ironclaw_threads::{
     MessageKind, MessageStatus, SessionThreadService, ThreadHistory, ThreadHistoryRequest,
     ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
 };
 use ironclaw_turns::{
-    AgentTurnRuntimePort, GetLoopCheckpointRequest, GetRunStateRequest, LoopBlockedKind,
-    LoopCheckpointKind, LoopGateRef, LoopMessageRef, LoopResultRef, TurnError, TurnId, TurnRunId,
-    TurnScope, TurnStatus,
+    AgentTurnRuntimePort, GetLoopCheckpointRequest, GetRunStateRequest, LoopGateRef,
+    LoopMessageRef, LoopResultRef, TurnError, TurnId, TurnRunId, TurnScope, TurnStatus,
 };
 
 pub use ironclaw_turns::loop_exit::{

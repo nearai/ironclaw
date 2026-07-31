@@ -12,13 +12,12 @@ mod checkpoint_state;
 mod coordinator;
 pub mod events;
 mod external_tool_catalog;
+pub mod host_managed_ports;
 pub mod loop_exit;
-mod origin;
 pub mod process_projection;
 pub mod product_context;
 mod request;
 mod response;
-pub mod run_profile;
 pub mod runner;
 mod status;
 #[cfg(any(test, feature = "test-support"))]
@@ -35,8 +34,7 @@ pub use agent_turn_runtime::{
     active_run_ref_state,
 };
 pub use checkpoint_state::{
-    GetLoopCheckpointRequest, LoopCheckpointRecord, LoopCheckpointStore,
-    MAX_CHECKPOINT_STATE_PAYLOAD_BYTES, PutLoopCheckpointRequest, RedactedCheckpointPayload,
+    GetLoopCheckpointRequest, LoopCheckpointRecord, LoopCheckpointStore, PutLoopCheckpointRequest,
 };
 pub use coordinator::{
     AllowAllTurnAdmissionPolicy, DefaultTurnCoordinator, NoopTurnRunWakeNotifier,
@@ -62,21 +60,20 @@ pub use external_tool_catalog::{
 // them only so its own consumers keep one import for the kernel API they
 // already depend on. A crate that needs *only* vocabulary must depend on
 // `ironclaw_host_api` directly — see this crate's CLAUDE.md.
+pub use host_managed_ports::{HostManagedLoopModelPort, HostManagedLoopPromptPort};
 pub use ironclaw_host_api::turn::{
-    AcceptedMessageRef, BlockedReason, CapabilityActivityId, EventCursor, GateKind, IdempotencyKey,
-    LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, ModelInvalidOutputDetailReason,
-    ReplyTargetBindingRef, RunOriginAdapter, RunProfileId, RunProfileRequest, RunProfileVersion,
-    SanitizedCancelReason, SanitizedFailure, SourceBindingRef, TurnActor, TurnCheckpointId,
-    TurnGateRef, TurnId, TurnLeaseToken, TurnOwner, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
+    AcceptedMessageRef, BlockedReason, CapabilityActivityId, EventCursor, GateKind,
+    GateResumeDisposition, IdempotencyKey, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef,
+    ModelInvalidOutputDetailReason, ProductTurnContext, ReplyTargetBindingRef, RunOriginAdapter,
+    RunProfileId, RunProfileRequest, RunProfileVersion, SanitizedCancelReason, SanitizedFailure,
+    SourceBindingRef, TurnActor, TurnCheckpointId, TurnGateRef, TurnId, TurnLeaseToken,
+    TurnOriginKind, TurnOwner, TurnRunId, TurnRunnerId, TurnScope, TurnStatus, TurnSurfaceType,
 };
 pub use loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
-    FinalCheckpointEvidenceRequest, LoopBlocked, LoopBlockedKind, LoopCancelled,
-    LoopCancelledReasonKind, LoopCompleted, LoopCompletionKind, LoopExit, LoopExitApplier,
-    LoopExitEvidencePort, LoopExitMapping, LoopExitValidationDecision, LoopExitViolation,
-    LoopExitViolationKind, LoopFailed, LoopFailureKind,
+    FinalCheckpointEvidenceRequest, LoopExitApplier, LoopExitEvidencePort, LoopExitMapping,
+    LoopExitValidationDecision, LoopExitViolation, LoopExitViolationKind,
 };
-pub use origin::{ProductTurnContext, TurnOriginKind, TurnSurfaceType};
 pub use process_projection::{
     AGENT_TURN_PROCESS_KIND, AgentTurnProcessCommitObserver, AgentTurnProcessMetadata,
     AgentTurnProcessRuntime, AgentTurnProcessStateMetadata, ProcessJournalStoreTurnAdapter,
@@ -84,25 +81,11 @@ pub use process_projection::{
     claimed_turn_run_from_process_claim, turn_run_state_from_process_snapshot,
 };
 pub use request::{
-    CancelRunRequest, GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition,
-    ResumeTurnRequest, RetryTurnRequest, SubmitChildRunRequest, SubmitTurnRequest, TurnTimestamp,
+    CancelRunRequest, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
+    RetryTurnRequest, SubmitChildRunRequest, SubmitTurnRequest, TurnTimestamp,
 };
 pub use response::{
     CancelRunResponse, ResumeTurnResponse, RetryTurnResponse, SubmitTurnResponse, ThreadBusy,
-};
-pub use run_profile::{
-    AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
-    AgentLoopDriverRunRequest, CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy,
-    CheckpointSchemaId, CommunicationRuntimeContext, ConcurrencyClass, ConnectedChannelSummary,
-    ConnectedChannelsState, ContextProfileId, DeliveryTargetState, DeliveryTargetSummary,
-    EmptyMemoryPromptContextService, InMemoryRunProfileRegistry, InMemoryRunProfileResolver,
-    LoopCheckpointKind, LoopCheckpointStateRef, LoopDriverId, MemoryPromptContextRequest,
-    MemoryPromptContextService, ModelProfileId, PrivilegedRunProfileDimension,
-    RedactedRunProfileProvenance, RedactedRunProfileSource, ResolvedRunProfile,
-    ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
-    RunProfileRegistryError, RunProfileRequestAuthority, RunProfileResolutionError,
-    RunProfileResolutionRequest, RunProfileResolver, RunProfileSourceLayer, RunProfileSourceRef,
-    RunnerPoolId, RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
 };
 pub use status::{
     AdmissionRejection, AdmissionRejectionReason, TurnActiveRunRefState, TurnCapacityResource,

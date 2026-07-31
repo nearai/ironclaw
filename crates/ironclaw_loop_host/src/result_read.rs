@@ -13,16 +13,16 @@ use ironclaw_host_api::{
     resolution::Resolution,
     result_meta::FailureKind,
 };
-use ironclaw_threads::{
-    MessageKind, MessageStatus, ReadToolResultRecordRequest, SessionThreadError,
-    SessionThreadService, TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadHistoryRequest, ThreadScope,
-    ToolResultReferenceEnvelope,
-};
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputIssue,
     CapabilityProgress, ConcurrencyHint, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
     ModelVisibleArtifact, ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail,
     ToolObservationStatus, resolution, sanitize_model_visible_text,
+};
+use ironclaw_threads::{
+    MessageKind, MessageStatus, ReadToolResultRecordRequest, SessionThreadError,
+    SessionThreadService, TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadHistoryRequest, ThreadScope,
+    ToolResultReferenceEnvelope,
 };
 
 /// Test-support wrap: layers the synthetic `result_read` capability onto
@@ -36,13 +36,13 @@ use ironclaw_turns::run_profile::{
 /// ships zero bytes in production builds.
 #[cfg(feature = "test-support")]
 pub fn wrap_result_read_capability_for_test(
-    inner: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    inner: Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
     thread_service: Arc<dyn SessionThreadService>,
     fallback_user_id: UserId,
-    run_context: ironclaw_turns::run_profile::LoopRunContext,
+    run_context: ironclaw_loop_contracts::LoopRunContext,
     input_resolver: Arc<dyn crate::LoopCapabilityInputResolver>,
     result_writer: Arc<dyn crate::LoopCapabilityResultWriter>,
-) -> Result<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>, AgentLoopHostError> {
+) -> Result<Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>, AgentLoopHostError> {
     crate::wrap_synthetic_capabilities(
         inner,
         vec![result_read_capability(
@@ -74,7 +74,7 @@ const RESULT_READ_MIN_BYTES: u64 = 4;
 const RESULT_READ_MAX_BYTES: u64 = TOOL_RESULT_RECORD_READ_MAX_BYTES as u64;
 
 fn thread_scope_for_run(
-    run_context: &ironclaw_turns::run_profile::LoopRunContext,
+    run_context: &ironclaw_loop_contracts::LoopRunContext,
     fallback_user_id: &UserId,
 ) -> Option<ThreadScope> {
     let resource = run_context.scope.to_resource_scope();

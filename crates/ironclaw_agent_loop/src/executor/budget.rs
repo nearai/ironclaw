@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_turns::{LoopExit, LoopFailureKind};
+use ironclaw_loop_contracts::{LoopExit, LoopFailureKind};
 
 use crate::state::{CheckpointKind, LoopExecutionState, TerminalWarningObservation};
 

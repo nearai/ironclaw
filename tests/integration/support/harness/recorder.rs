@@ -5,9 +5,9 @@ use ironclaw_host_api::turn::TurnGateRef;
 use ironclaw_host_api::{
     http::RuntimeHttpEgressRequest, ids::CapabilityId, resource::ResourceScope,
 };
+use ironclaw_loop_contracts::LoopRequest;
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_resources::ResourceGovernor;
-use ironclaw_turns::run_profile::LoopRequest;
 
 use super::super::doubles::RecordingTestCapabilityPort;
 use super::{HarnessResult, HostRuntimeCapabilityHarness};

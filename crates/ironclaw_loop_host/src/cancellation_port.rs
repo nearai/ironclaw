@@ -9,13 +9,13 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, LoopCancelReasonKind, LoopCancellationPort,
+    LoopCancellationSignal,
+};
 use ironclaw_turns::{
     AgentTurnRuntimePort, GetRunStateRequest, TurnRunId, TurnRunState, TurnRunWake,
     TurnRunWakeNotifier, TurnScope, TurnStatus,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, LoopCancelReasonKind, LoopCancellationPort,
-        LoopCancellationSignal,
-    },
 };
 use parking_lot::RwLock;
 use tokio::sync::Notify;

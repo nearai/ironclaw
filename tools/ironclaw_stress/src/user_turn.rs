@@ -26,6 +26,7 @@ use ironclaw_llm::{
     ChatMessage, CompletionRequest, LlmError, LlmProvider, SessionManager,
     build_static_provider_chain, resolve_llm_config_from_env,
 };
+use ironclaw_loop_contracts::LoopCheckpointStateRef;
 use ironclaw_processes::{
     ClaimProcessesRequest, ProcessCheckpointRef, ProcessJournalStore, ProcessKind,
     ProcessLeaseRequest, ProcessStateTransitionRequest, ProcessSuspension, ProcessSuspensionKind,
@@ -42,8 +43,8 @@ use ironclaw_threads::{
     UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    DefaultTurnCoordinator, LoopCheckpointStateRef, ResumeTurnPrecondition, ResumeTurnRequest,
-    SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError, TurnErrorCategory,
+    DefaultTurnCoordinator, ResumeTurnPrecondition, ResumeTurnRequest, SubmitTurnRequest,
+    SubmitTurnResponse, TurnCoordinator, TurnError, TurnErrorCategory,
     claimed_turn_run_from_process_claim, runner::ClaimedTurnRun,
 };
 use serde::{Deserialize, Serialize};

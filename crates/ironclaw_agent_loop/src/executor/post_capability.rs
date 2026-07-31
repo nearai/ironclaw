@@ -106,7 +106,8 @@ mod tests {
     use std::sync::Arc;
 
     use ironclaw_host_api::ids::CapabilityId;
-    use ironclaw_turns::{LoopExit, LoopExitId, LoopFailureKind, run_profile::CompactionInitiator};
+    use ironclaw_host_api::turn::LoopExitId;
+    use ironclaw_loop_contracts::{CompactionInitiator, LoopExit, LoopFailureKind};
 
     use crate::state::LoopExecutionState;
     use crate::strategies::CompactionForceStrategy;

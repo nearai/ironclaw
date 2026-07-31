@@ -8,8 +8,8 @@ use ironclaw_host_api::turn::{
     TurnStatus,
 };
 use ironclaw_host_api::{ids::ThreadId, state::LifecyclePublicState};
+use ironclaw_loop_contracts::LoopModelUsage;
 use ironclaw_threads::{SessionThreadRecord, SummaryArtifact, ThreadMessageRecord};
-use ironclaw_turns::run_profile::LoopModelUsage;
 use ironclaw_turns::{CancelRunResponse, ResumeTurnResponse, RetryTurnResponse, TurnRunState};
 use secrecy::SecretString;
 use serde::ser::SerializeStruct;

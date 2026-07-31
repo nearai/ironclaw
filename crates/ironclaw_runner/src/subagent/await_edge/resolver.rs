@@ -16,6 +16,7 @@ use ironclaw_host_api::ids::UserId;
 use ironclaw_host_api::turn::{IdempotencyKey, TurnRunId, TurnScope, TurnStatus};
 #[cfg(test)]
 use ironclaw_host_api::turn::{TurnActor, TurnGateRef};
+use ironclaw_loop_contracts::{AgentLoopHostError, LoopRunContext};
 #[cfg(test)]
 use ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID;
 use ironclaw_loop_host::{AwaitEdgeSettler, ResolveOutcome};
@@ -28,7 +29,6 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     AgentTurnSpawnTreeRuntimePort, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
     TurnCoordinator, TurnError, TurnLifecycleEvent, TurnRunRecord,
-    run_profile::{AgentLoopHostError, LoopRunContext},
 };
 
 use super::{AwaitEdge, AwaitEdgeState, EdgeTerminalKind, store::AwaitEdgeStore};
@@ -560,7 +560,7 @@ where
             .await
             .map_err(|error| {
                 AgentLoopHostError::new(
-                    ironclaw_turns::run_profile::AgentLoopHostErrorKind::Unavailable,
+                    ironclaw_loop_contracts::AgentLoopHostErrorKind::Unavailable,
                     error.to_string(),
                 )
             })
@@ -880,7 +880,7 @@ mod tests {
             _write: ironclaw_loop_host::CapabilityResultWrite<'_>,
         ) -> Result<ironclaw_loop_host::CapabilityWriteResult, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
-                ironclaw_turns::run_profile::AgentLoopHostErrorKind::Unavailable,
+                ironclaw_loop_contracts::AgentLoopHostErrorKind::Unavailable,
                 "not exercised by reconstruct_edge tests",
             ))
         }
@@ -924,7 +924,7 @@ mod tests {
         child_thread_id: &ironclaw_host_api::ids::ThreadId,
         child_run_id: TurnRunId,
         parent_run_id: TurnRunId,
-        resolved_run_profile: ironclaw_turns::run_profile::ResolvedRunProfile,
+        resolved_run_profile: ironclaw_loop_contracts::ResolvedRunProfile,
     ) -> TurnRunRecord {
         TurnRunRecord {
             run_id: child_run_id,
@@ -1354,7 +1354,7 @@ mod tests {
             _write: ironclaw_loop_host::CapabilityResultWrite<'_>,
         ) -> Result<ironclaw_loop_host::CapabilityWriteResult, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
-                ironclaw_turns::run_profile::AgentLoopHostErrorKind::InvalidInvocation,
+                ironclaw_loop_contracts::AgentLoopHostErrorKind::InvalidInvocation,
                 "write is not used by await-edge update test",
             ))
         }
@@ -1368,7 +1368,7 @@ mod tests {
             let byte_len = serde_json::to_vec(&output)
                 .map_err(|error| {
                     AgentLoopHostError::new(
-                        ironclaw_turns::run_profile::AgentLoopHostErrorKind::Unavailable,
+                        ironclaw_loop_contracts::AgentLoopHostErrorKind::Unavailable,
                         error.to_string(),
                     )
                 })?

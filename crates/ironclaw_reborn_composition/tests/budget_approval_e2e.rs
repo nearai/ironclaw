@@ -109,7 +109,7 @@ fn budget_gate_id_from_ref(gate_ref: &TurnGateRef) -> BudgetGateId {
 fn pause_inducing_cost_table() -> Arc<dyn ModelCostTable> {
     let mut table = StaticModelCostTable::new();
     table.insert(
-        ironclaw_turns::run_profile::ModelProfileId::new("interactive_model").unwrap(),
+        ironclaw_loop_contracts::ModelProfileId::new("interactive_model").unwrap(),
         ModelCost {
             input_per_token: rust_decimal_macros::dec!(0.05),
             output_per_token: rust_decimal_macros::dec!(0.10),

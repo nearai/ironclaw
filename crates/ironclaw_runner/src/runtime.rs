@@ -4,6 +4,11 @@ use std::{error::Error, fmt, sync::Arc};
 
 use ironclaw_events::SecurityAuditSink;
 use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_loop_contracts::{
+    AgentLoopDriverError, AgentLoopHostError, CommunicationContextProvider,
+    InstructionSafetyContext, LoopCapabilityPort, LoopHostMilestoneSink, LoopModelBudgetAccountant,
+    LoopModelPolicyGuard, LoopRunContext, MemoryPromptContextService, RunProfileResolver,
+};
 use ironclaw_loop_host::{
     AgentTurnRunCancellationFactory, AwaitEdgeSettler, AwaitEdgeWriter,
     CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier, HostIdentityContextSource,
@@ -20,15 +25,9 @@ use ironclaw_outbound::ReplyAttachmentIntentPort;
 use ironclaw_processes::ProcessTransitionPort;
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::{
-    AgentLoopDriverError, AgentTurnProcessCommitObserver, AgentTurnRuntimePort,
-    AgentTurnSpawnTreeRuntimePort, DefaultTurnCoordinator, LoopCheckpointStore, RunProfileResolver,
-    TurnCommittedEventObserver, TurnEventSink, TurnRunWakeNotifier, TurnSpawnTreePort,
-    loop_exit::LoopExitEvidencePort,
-    run_profile::{
-        AgentLoopHostError, CommunicationContextProvider, InstructionSafetyContext,
-        LoopCapabilityPort, LoopHostMilestoneSink, LoopModelBudgetAccountant, LoopModelPolicyGuard,
-        LoopRunContext, MemoryPromptContextService,
-    },
+    AgentTurnProcessCommitObserver, AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort,
+    DefaultTurnCoordinator, LoopCheckpointStore, TurnCommittedEventObserver, TurnEventSink,
+    TurnRunWakeNotifier, TurnSpawnTreePort, loop_exit::LoopExitEvidencePort,
 };
 
 use crate::{
@@ -731,7 +730,7 @@ where
         Arc::new(PerSurfaceCapabilityDenyDecorator::new(
             global_denied,
             vec![(
-                ironclaw_turns::run_profile::CapabilitySurfaceProfileId::new(
+                ironclaw_loop_contracts::CapabilitySurfaceProfileId::new(
                     crate::planned_driver_factory::SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID,
                 )
                 .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?,
@@ -975,15 +974,13 @@ mod tests {
         TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
         TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
     };
-    use ironclaw_turns::{
-        InMemoryRunProfileResolver, RunProfileResolver, TurnId, TurnRunId, TurnScope,
-        run_profile::{
-            AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView,
-            CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRequest,
-            LoopRequestBatch, LoopRunContext, RunProfileResolutionRequest,
-            VisibleCapabilityRequest, VisibleCapabilitySurface,
-        },
+    use ironclaw_loop_contracts::{
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView,
+        CapabilitySurfaceVersion, ConcurrencyHint, InMemoryRunProfileResolver, LoopCapabilityPort,
+        LoopRequest, LoopRequestBatch, LoopRunContext, RunProfileResolutionRequest,
+        RunProfileResolver, VisibleCapabilityRequest, VisibleCapabilitySurface,
     };
+    use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
     use ironclaw_loop_host::{
         CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
@@ -1093,7 +1090,7 @@ mod tests {
     }
 
     fn test_run_context_with_resolved_profile(
-        resolved: ironclaw_turns::run_profile::ResolvedRunProfile,
+        resolved: ironclaw_loop_contracts::ResolvedRunProfile,
     ) -> LoopRunContext {
         let tenant_id = TenantId::new("tenant-runtime-test").unwrap();
         let agent_id = AgentId::new("agent-runtime-test").unwrap();
@@ -1499,7 +1496,7 @@ mod tests {
                 .with_decorator(Arc::new(PerSurfaceCapabilityDenyDecorator::new(
                     global_denied,
                     vec![(
-                ironclaw_turns::run_profile::CapabilitySurfaceProfileId::new(
+                ironclaw_loop_contracts::CapabilitySurfaceProfileId::new(
                     crate::planned_driver_factory::SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID,
                 )
                 .unwrap(),
@@ -1556,7 +1553,7 @@ mod tests {
                 .with_decorator(Arc::new(PerSurfaceCapabilityDenyDecorator::new(
                     Vec::new(),
                     vec![(
-                ironclaw_turns::run_profile::CapabilitySurfaceProfileId::new(
+                ironclaw_loop_contracts::CapabilitySurfaceProfileId::new(
                     crate::planned_driver_factory::SCHEDULED_TRIGGER_CAPABILITY_SURFACE_PROFILE_ID,
                 )
                 .unwrap(),

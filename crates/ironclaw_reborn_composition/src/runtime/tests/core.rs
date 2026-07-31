@@ -534,6 +534,11 @@ use ironclaw_host_api::{
     },
     scope::Principal,
 };
+use ironclaw_loop_contracts::{
+    InMemoryRunProfileResolver, LoopCapabilityPort, LoopRunContext, ModelProfileId,
+    ProviderToolCall, RegisterProviderToolCallRequest, RunProfileResolutionRequest,
+    RunProfileResolver, SkillVisibility, VisibleCapabilityRequest,
+};
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
@@ -560,11 +565,6 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     AllowAllTurnAdmissionPolicy, GetRunStateRequest, SubmitChildRunRequest, SubmitTurnRequest,
     SubmitTurnResponse,
-    run_profile::{
-        InMemoryRunProfileResolver, LoopCapabilityPort, LoopRunContext, ModelProfileId,
-        ProviderToolCall, RegisterProviderToolCallRequest, RunProfileResolutionRequest,
-        RunProfileResolver, SkillVisibility, VisibleCapabilityRequest,
-    },
 };
 use rust_decimal_macros::dec;
 
@@ -1567,7 +1567,7 @@ async fn nearai_auth_capture_server_rejects_missing_content_length() {
 
 fn nearai_gateway_test_request() -> HostManagedModelRequest {
     HostManagedModelRequest {
-        model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("interactive_model")
+        model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("interactive_model")
             .expect("model profile id"),
         messages: vec![ironclaw_loop_host::HostManagedModelMessage {
             role: HostManagedModelMessageRole::User,
@@ -6339,7 +6339,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
         async fn stream_model_with_capabilities(
             &self,
             _request: HostManagedModelRequest,
-            capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+            capabilities: Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
         ) -> Result<HostManagedModelResponse, HostManagedModelError> {
             let call_index = {
                 let mut calls = self.calls.lock().expect("multi-tool gateway lock poisoned");

@@ -10,10 +10,10 @@ use super::*;
 use crate::TurnEventProjectionFromProcessJournal;
 use crate::{
     AcceptedMessageRef, AllowAllTurnAdmissionPolicy, CapabilityActivityId, EventCursor,
-    IdempotencyKey, InMemoryRunProfileResolver, ReplyTargetBindingRef, RunProfileId,
-    RunProfileVersion, SourceBindingRef, TurnActor, TurnGateRef, TurnId, TurnRunProfile, TurnScope,
-    events::TurnEventProjectionSource,
+    IdempotencyKey, ReplyTargetBindingRef, RunProfileId, RunProfileVersion, SourceBindingRef,
+    TurnActor, TurnGateRef, TurnId, TurnRunProfile, TurnScope, events::TurnEventProjectionSource,
 };
+use ironclaw_loop_contracts::InMemoryRunProfileResolver;
 
 fn scope() -> TurnScope {
     TurnScope::new(
@@ -638,7 +638,7 @@ async fn retry_rejects_checkpoint_rejection_without_creating_a_process() {
         &turn_scope,
         run_id,
         None,
-        crate::LoopFailureKind::CheckpointRejected.as_str(),
+        ironclaw_loop_contracts::LoopFailureKind::CheckpointRejected.as_str(),
     )
     .await;
 
@@ -804,7 +804,7 @@ async fn retry_rejects_final_checkpoint_without_creating_a_process() {
             created_at: Utc::now(),
             link_to_process: true,
             metadata: serde_json::json!({
-                "kind": crate::run_profile::LoopCheckpointKind::Final,
+                "kind": ironclaw_loop_contracts::LoopCheckpointKind::Final,
             }),
         })
         .await
@@ -909,7 +909,7 @@ async fn retry_rebinds_checkpoint_through_the_real_process_store() {
             link_to_process: true,
             metadata: serde_json::json!({
                 "source": "retry-test",
-                "kind": crate::run_profile::LoopCheckpointKind::BeforeModel,
+                "kind": ironclaw_loop_contracts::LoopCheckpointKind::BeforeModel,
             }),
         })
         .await
@@ -1313,7 +1313,7 @@ fn runner_outcomes_map_to_process_outcomes() {
     let failure = crate::SanitizedFailure::new("runner_failed").expect("failure");
     let blocked = TurnRunnerOutcome::Blocked {
         checkpoint_id: TurnCheckpointId::new(),
-        state_ref: crate::run_profile::LoopCheckpointStateRef::new(
+        state_ref: ironclaw_loop_contracts::LoopCheckpointStateRef::new(
             "checkpoint:state-process-journal".to_string(),
         )
         .expect("state ref"),

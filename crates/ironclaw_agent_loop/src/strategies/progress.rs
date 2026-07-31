@@ -26,7 +26,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub(crate) use ironclaw_turns::run_profile::normalize_for_hash;
+pub(crate) use ironclaw_loop_contracts::normalize_for_hash;
 
 /// Stable, normalized hash of a tool/capability call's arguments.
 ///

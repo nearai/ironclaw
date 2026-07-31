@@ -40,6 +40,9 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_llm::Role;
+use ironclaw_loop_contracts::{
+    CommunicationContextProvider, InstructionSafetyContext, LoopHostMilestone,
+};
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product::{
     ConversationBindingService, DefaultProductSurface, ProductConversationRouteKind,
@@ -49,9 +52,6 @@ use ironclaw_product::{ProductInboundAck, ProductTriggerReason};
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_threads::ThreadScope;
-use ironclaw_turns::run_profile::{
-    CommunicationContextProvider, InstructionSafetyContext, LoopHostMilestone,
-};
 use ironclaw_turns::{
     AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, GateResumeDisposition,
     ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnRunState,

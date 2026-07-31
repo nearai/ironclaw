@@ -613,7 +613,7 @@ pub enum RebornCompositionError {
     #[error("reborn turn substrate failed: {0}")]
     Turn(#[from] TurnError),
     #[error("reborn run-profile resolver substrate failed: {0}")]
-    RunProfile(#[from] ironclaw_turns::run_profile::RunProfileRegistryError),
+    RunProfile(#[from] ironclaw_loop_contracts::RunProfileRegistryError),
     #[error("production tenant-sandbox process backend requires a tenant sandbox process binding")]
     MissingTenantSandboxProcessPort,
     #[error(

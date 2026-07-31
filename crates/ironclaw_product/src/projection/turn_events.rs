@@ -22,15 +22,14 @@ use ironclaw_host_api::{
     approval::ApprovalRequest,
     ids::{InvocationId, UserId},
 };
+use ironclaw_loop_contracts::{
+    SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest, SystemInferenceTaskId,
+    SystemPromptId, SystemPromptSource, SystemTaskKind, sanitize_model_visible_text,
+};
 use ironclaw_turns::{
     GetRunStateRequest, TurnBlockedGateKind, TurnCoordinator, TurnError, TurnEventKind,
     TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
     TurnEventProjectionSource, TurnEventReducerService, TurnLifecycleEvent,
-    run_profile::{
-        SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,
-        SystemInferenceTaskId, SystemPromptId, SystemPromptSource, SystemTaskKind,
-        sanitize_model_visible_text,
-    },
 };
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 

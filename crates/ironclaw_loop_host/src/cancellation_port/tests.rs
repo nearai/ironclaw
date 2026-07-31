@@ -7,13 +7,14 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_turns::run_profile::{LoopCancelReasonKind, LoopCancellationPort};
+use ironclaw_loop_contracts::{AgentLoopHostError, RunProfileResolver};
+use ironclaw_loop_contracts::{LoopCancelReasonKind, LoopCancellationPort};
 use ironclaw_turns::{
     AcceptedMessageRef, AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, EventCursor,
     GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-    RunProfileResolver, RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
-    TurnActor, TurnAdmissionPolicy, TurnError, TurnId, TurnRunId, TurnRunState, TurnRunWake,
-    TurnRunWakeNotifier, TurnScope, TurnStatus, run_profile::AgentLoopHostError,
+    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnAdmissionPolicy, TurnError, TurnId, TurnRunId, TurnRunState, TurnRunWake,
+    TurnRunWakeNotifier, TurnScope, TurnStatus,
 };
 
 use super::{

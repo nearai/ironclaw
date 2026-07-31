@@ -33,6 +33,11 @@ use ironclaw_host_api::{
     ids::{CapabilityId, InvocationId, ProviderToolName, ThreadId},
     resource::ResourceScope,
 };
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, CapabilityCallCandidate, CapabilityInputRef, CapabilitySurfaceVersion,
+    LoopBlockedKind, LoopCheckpointKind, LoopHostMilestone, LoopHostMilestoneKind,
+    LoopHostMilestoneSink, LoopRequest, ParentLoopOutput, ProviderToolCallReplay,
+};
 use ironclaw_loop_host::{
     EmptyUserProfileSource, HostIdentityContextSource, HostManagedModelRequest,
     JsonSpawnSubagentInputCodec,
@@ -70,14 +75,8 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort, CancelRunRequest,
-    GetLoopCheckpointRequest, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStore,
-    ProcessLoopCheckpointStore, ResumeTurnRequest, RetryTurnRequest, RetryTurnResponse,
-    TurnCoordinator, TurnError, TurnRunRecord, TurnRunState,
-    run_profile::{
-        AgentLoopHostError, CapabilityCallCandidate, CapabilityInputRef, CapabilitySurfaceVersion,
-        LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopRequest,
-        ParentLoopOutput, ProviderToolCallReplay,
-    },
+    GetLoopCheckpointRequest, LoopCheckpointStore, ProcessLoopCheckpointStore, ResumeTurnRequest,
+    RetryTurnRequest, RetryTurnResponse, TurnCoordinator, TurnError, TurnRunRecord, TurnRunState,
 };
 use serde_json::json;
 
@@ -112,7 +111,7 @@ pub struct RebornBinaryE2EHarness {
     thread_harness: RebornThreadHarness,
     model_gateway: RebornTraceReplayModelGateway,
     capability_recorder: HarnessCapabilityRecorder,
-    milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+    milestone_sink: Arc<ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink>,
     runtime_event_log: Arc<InMemoryDurableEventLog>,
     scheduler_handle: Option<TurnRunSchedulerHandle>,
     scheduler_notifier: Arc<SchedulerTurnRunWakeNotifier>,
@@ -793,7 +792,7 @@ impl RebornBinaryE2EHarness {
             ProcessLoopCheckpointStore::new(process_system.checkpoints()),
         );
         let milestone_sink =
-            Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+            Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
         let runtime_event_log = Arc::new(InMemoryDurableEventLog::new());
         let durable_milestone_sink = Arc::new(DurableLoopHostMilestoneSink::new(
             Arc::clone(&runtime_event_log) as Arc<dyn ironclaw_events::DurableEventLog>,
@@ -951,7 +950,7 @@ impl RebornBinaryE2EHarness {
         thread_harness: RebornThreadHarness,
         model_gateway: RebornTraceReplayModelGateway,
         capability_recorder: HarnessCapabilityRecorder,
-        milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+        milestone_sink: Arc<ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink>,
         runtime_event_log: Arc<InMemoryDurableEventLog>,
         composition: RebornRuntimeLoopComposition<
             dyn SessionThreadService,
@@ -1419,7 +1418,7 @@ impl RebornBinaryE2EHarness {
 
 #[derive(Clone)]
 struct HarnessLoopHostMilestoneSink {
-    recorded: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+    recorded: Arc<ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink>,
     durable: Arc<DurableLoopHostMilestoneSink>,
 }
 
@@ -1525,7 +1524,7 @@ impl LoopExitEvidencePort for HarnessLoopExitEvidencePort {
         scope: &TurnScope,
         turn_id: ironclaw_turns::TurnId,
         run_id: TurnRunId,
-    ) -> Result<Option<ironclaw_turns::LoopCheckpointKind>, TurnError> {
+    ) -> Result<Option<ironclaw_loop_contracts::LoopCheckpointKind>, TurnError> {
         self.inner
             .latest_checkpoint_kind(scope, turn_id, run_id)
             .await

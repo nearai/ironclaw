@@ -97,10 +97,7 @@ pub trait HostFactory: Send + Sync {
     async fn create_host(
         &self,
         claimed: &ClaimedTurnRun,
-    ) -> Result<
-        Box<dyn ironclaw_turns::run_profile::AgentLoopDriverHost + Send + Sync>,
-        HostFactoryError,
-    >;
+    ) -> Result<Box<dyn ironclaw_loop_contracts::AgentLoopDriverHost + Send + Sync>, HostFactoryError>;
 }
 
 /// Error returned when host construction fails.

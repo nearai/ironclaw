@@ -39,6 +39,12 @@ mod tests {
         SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
         SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
     };
+    use ironclaw_loop_contracts::{
+        CapabilityApprovalResume, CapabilityCallCandidate, CapabilityInputIssue,
+        CapabilityInputRef, CapabilityResumeToken, InMemoryLoopHostMilestoneSink,
+        InMemoryRunProfileResolver, LoopRequest, RegisterProviderToolCallRequest,
+        RunProfileResolutionRequest, RunProfileResolver, VisibleCapabilityRequest,
+    };
     use ironclaw_loop_host::{
         CapabilityWriteResult, DurablePersistence, HostManagedModelError,
         HostManagedModelErrorKind, HostManagedModelRequest, HostManagedModelResponse,
@@ -57,15 +63,6 @@ mod tests {
         InMemorySessionThreadService, MessageKind, PutToolResultRecordRequest,
         RedactMessageRequest, SessionThreadService, ThreadHistoryRequest, ThreadScope,
         ToolResultSafeSummary,
-    };
-    use ironclaw_turns::{
-        RunProfileResolutionRequest, RunProfileResolver,
-        run_profile::{
-            CapabilityApprovalResume, CapabilityCallCandidate, CapabilityInputIssue,
-            CapabilityInputRef, CapabilityResumeToken, InMemoryLoopHostMilestoneSink,
-            InMemoryRunProfileResolver, LoopRequest, RegisterProviderToolCallRequest,
-            VisibleCapabilityRequest,
-        },
     };
 
     use crate::outbound::{
@@ -1409,7 +1406,7 @@ mod tests {
             .as_ref()
             .expect("write result carries a first-look observation");
         match &observation.detail {
-            ironclaw_turns::run_profile::ToolObservationDetail::ResultReference {
+            ironclaw_loop_contracts::ToolObservationDetail::ResultReference {
                 preview: Some(preview),
                 total_bytes,
                 next_offset,
@@ -1514,7 +1511,7 @@ mod tests {
             .as_ref()
             .expect("write result carries a first-look observation");
         let (preview, next_offset) = match &observation.detail {
-            ironclaw_turns::run_profile::ToolObservationDetail::ResultReference {
+            ironclaw_loop_contracts::ToolObservationDetail::ResultReference {
                 preview: Some(preview),
                 next_offset: Some(next_offset),
                 item_count: None,
@@ -1714,7 +1711,7 @@ mod tests {
             observation.summary
         );
         match &observation.detail {
-            ironclaw_turns::run_profile::ToolObservationDetail::ResultReference {
+            ironclaw_loop_contracts::ToolObservationDetail::ResultReference {
                 item_count: Some(count),
                 next_offset: Some(_),
                 total_bytes: Some(total_bytes),
@@ -1760,7 +1757,7 @@ mod tests {
             singleton_observation.summary
         );
         match &singleton_observation.detail {
-            ironclaw_turns::run_profile::ToolObservationDetail::ResultReference {
+            ironclaw_loop_contracts::ToolObservationDetail::ResultReference {
                 item_count: Some(count),
                 next_offset: Some(_),
                 ..
@@ -1852,7 +1849,7 @@ mod tests {
             .expect("first-look observation")
             .detail
         {
-            ironclaw_turns::run_profile::ToolObservationDetail::ResultReference {
+            ironclaw_loop_contracts::ToolObservationDetail::ResultReference {
                 next_offset: Some(next_offset),
                 ..
             } => *next_offset,
@@ -2822,7 +2819,7 @@ mod tests {
         // terminal `HostUnavailable` that kills the whole run. Re-run that exact
         // validation here so a summary that interpolated the delimiter-bearing
         // project name (the regression) fails this test.
-        ironclaw_turns::run_profile::LoopSafeSummary::new(done.summary.as_str().to_string())
+        ironclaw_loop_contracts::LoopSafeSummary::new(done.summary.as_str().to_string())
             .expect("capability safe summary must pass result-ref validation");
         let result_ref = completed_loop_result_ref(&done);
         let output = capability_io
@@ -5702,7 +5699,7 @@ mod tests {
         );
 
         let batch_result = port
-            .invoke_capability_batch(ironclaw_turns::run_profile::LoopRequestBatch {
+            .invoke_capability_batch(ironclaw_loop_contracts::LoopRequestBatch {
                 invocations: vec![
                     invocation_for_candidate(&candidate1),
                     invocation_for_candidate(&candidate2),
@@ -5713,7 +5710,7 @@ mod tests {
         if let Err(ref error) = batch_result {
             assert_ne!(
                 error.kind,
-                ironclaw_turns::run_profile::AgentLoopHostErrorKind::StaleSurface,
+                ironclaw_loop_contracts::AgentLoopHostErrorKind::StaleSurface,
                 "invoke_capability_batch must not fail with StaleSurface: {error:?}"
             );
         }

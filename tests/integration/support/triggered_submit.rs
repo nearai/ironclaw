@@ -26,6 +26,7 @@ use ironclaw_conversations::{
 use ironclaw_host_api::turn::{TurnGateRef, TurnRunId, TurnScope, TurnStatus};
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
+use ironclaw_loop_contracts::ModelProfileId;
 use ironclaw_loop_host::HostManagedModelGateway;
 use ironclaw_runner::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
 use ironclaw_triggers::{
@@ -34,7 +35,6 @@ use ironclaw_triggers::{
     TriggerInboundContentRef, TriggerMaterializedPrompt, TrustedTriggerFireSubmitOutcome,
     TrustedTriggerSubmitRequest,
 };
-use ironclaw_turns::run_profile::ModelProfileId;
 use ironclaw_turns::{GateResumeDisposition, ResumeTurnPrecondition, TurnRunState};
 
 use super::builder::{INTERACTIVE_MODEL_PROFILE, RebornIntegrationHarness};

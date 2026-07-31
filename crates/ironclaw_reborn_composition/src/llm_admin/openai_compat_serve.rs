@@ -21,6 +21,7 @@ use ironclaw_host_api::{
         ProductSurfaceStreamRequest,
     },
 };
+use ironclaw_loop_contracts::LoopModelUsage;
 use ironclaw_product::{
     LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, RebornTimelineRequest,
     TIMELINE_VIEW,
@@ -59,7 +60,6 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, GetRunStateRequest,
     ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnError, TurnErrorCategory,
-    run_profile::LoopModelUsage,
 };
 use sha2::{Digest, Sha256};
 

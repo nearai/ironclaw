@@ -49,8 +49,8 @@ pub const HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY: &str = "host_stage_unavailable_
 pub const HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY: &str = "host_stage_unavailable_unknown";
 
 pub(crate) const MODEL_CREDITS_EXHAUSTED_REASON_KIND:
-    ironclaw_turns::run_profile::AgentLoopHostErrorReasonKind =
-    ironclaw_turns::run_profile::AgentLoopHostErrorReasonKind::ModelCreditsExhausted;
+    ironclaw_loop_contracts::AgentLoopHostErrorReasonKind =
+    ironclaw_loop_contracts::AgentLoopHostErrorReasonKind::ModelCreditsExhausted;
 
 pub(crate) fn host_stage_unavailable_category(reason: &str) -> &'static str {
     let stage = reason

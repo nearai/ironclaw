@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use ironclaw_host_api::turn::{TurnActor, TurnScope};
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
     ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
 };

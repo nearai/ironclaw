@@ -95,7 +95,7 @@ impl std::fmt::Display for SafeSummary {
 }
 
 /// The canonical safe-summary redaction rule — the single definition.
-/// `ironclaw_turns::run_profile::host::validate_loop_safe_summary` and
+/// `ironclaw_loop_contracts::host::validate_loop_safe_summary` and
 /// `ironclaw_memory_native`'s memory-snippet validator DELEGATE here (the turns
 /// copy keeps only its `INPUT_ENCODE_HUMAN_SUMMARY` sentinel bypass, a
 /// loop-input-encoding concern; memory_native layers extra snippet-specific

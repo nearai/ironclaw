@@ -1,10 +1,8 @@
 //! Host-owned input queue contract for Reborn loop input ports.
 
 use async_trait::async_trait;
-use ironclaw_turns::{
-    TurnRunId,
-    run_profile::{LoopInput, LoopInputAckToken, LoopInputCursorToken},
-};
+use ironclaw_loop_contracts::{LoopInput, LoopInputAckToken, LoopInputCursorToken};
+use ironclaw_turns::TurnRunId;
 use thiserror::Error;
 
 /// Host-owned input queue surface.

@@ -12,12 +12,13 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_approvals::GateRecordStorePort;
 use ironclaw_host_api::{gate_record::GateRecord, ids::GateRef, resource::ResourceScope};
+use ironclaw_loop_contracts::{
+    AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopBlocked,
+    LoopBlockedKind, LoopExit,
+};
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_processes::ProcessTransitionPort;
-use ironclaw_turns::{
-    AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopBlocked,
-    LoopBlockedKind, LoopExit, TurnError, TurnStatus, runner::ClaimedTurnRun,
-};
+use ironclaw_turns::{TurnError, TurnStatus, runner::ClaimedTurnRun};
 use tracing::{debug, error, warn};
 
 /// The loop-facing routing-ref prefix an auth gate carries

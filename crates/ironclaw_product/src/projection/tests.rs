@@ -30,15 +30,15 @@ use ironclaw_host_api::{
     runtime::RuntimeKind,
     scope::Principal,
 };
+use ironclaw_loop_contracts::{
+    LoopSafeSummary, SystemInferenceError, SystemInferencePort, SystemInferenceRequest,
+    SystemInferenceResponse, SystemInferenceTaskId, SystemTaskKind,
+};
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, EventCursor as TurnEventCursor, GetRunStateRequest,
     ResumeTurnRequest, ResumeTurnResponse, SubmitTurnRequest, SubmitTurnResponse,
     TurnBlockedGateKind, TurnBlockedGateMetadata, TurnError, TurnEventKind, TurnEventPage,
     TurnLifecycleEvent, TurnRunState,
-    run_profile::{
-        LoopSafeSummary, SystemInferenceError, SystemInferencePort, SystemInferenceRequest,
-        SystemInferenceResponse, SystemInferenceTaskId, SystemTaskKind,
-    },
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
