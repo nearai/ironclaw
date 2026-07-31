@@ -99,10 +99,7 @@ where
             .filter(|activation| requested_names.contains(&activation.name.to_ascii_lowercase()))
             .map(|activation| activation.name.clone())
             .collect::<Vec<_>>();
-        let output = serde_json::json!({
-            "activated": activated,
-            "count": activated.len(),
-        });
+        let output = build_activation_output(&activated, &plan.selection.feedback);
         let write_result = invocation
             .result_writer
             .write_capability_result(CapabilityResultWrite {
@@ -254,9 +251,93 @@ fn diagnostic_failure(error_kind: FailureKind, safe_summary: String) -> Resoluti
     )
 }
 
+/// Build the model-visible result for `skill_activate`.
+///
+/// Extracted so the contract is unit-testable: the result previously carried only
+/// `{activated, count}` and **discarded `plan.selection.feedback` entirely**, so every refusal
+/// reason the selector builds was constructed and then thrown away. The model saw
+/// `{"activated":[],"count":0}` and had to guess whether it had used a bad name, hit a trust
+/// wall, or tripped an unmet requirement -- three situations needing three different responses.
+///
+/// Measured on the missing/unusable fixtures, every refusal was silent, so improving the reason
+/// *text* moved nothing until the delivery was fixed too.
+///
+/// Routine "activated after model selection" confirmations are filtered out: next to
+/// `activated` they are noise, and they would dilute the refusals that matter.
+fn build_activation_output(activated: &[String], feedback: &[String]) -> serde_json::Value {
+    let notes = feedback
+        .iter()
+        .filter(|note| !note.contains("activated after model selection"))
+        .cloned()
+        .collect::<Vec<_>>();
+    if notes.is_empty() {
+        serde_json::json!({
+            "activated": activated,
+            "count": activated.len(),
+        })
+    } else {
+        serde_json::json!({
+            "activated": activated,
+            "count": activated.len(),
+            "not_activated": notes,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refusal must reach the MODEL, not just the live projection. Without this the reason is
+    /// built and dropped, and the model sees an empty result it cannot act on.
+    #[test]
+    fn a_refusal_reason_is_surfaced_to_the_model() {
+        let output = build_activation_output(
+            &[],
+            &[
+                "trust-probe: found, but its trust is Installed and activation requires Trusted"
+                    .to_string(),
+            ],
+        );
+        assert_eq!(output["count"], 0);
+        let notes = output["not_activated"]
+            .as_array()
+            .expect("a refusal must carry its reason to the model");
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].as_str().unwrap().contains("trust is Installed"));
+    }
+
+    /// A clean activation stays exactly as it was: no empty field, no extra noise.
+    #[test]
+    fn a_successful_activation_carries_no_not_activated_field() {
+        let output = build_activation_output(
+            &["citation-management".to_string()],
+            &["citation-management: activated after model selection".to_string()],
+        );
+        assert_eq!(output["count"], 1);
+        assert!(
+            output.get("not_activated").is_none(),
+            "a routine confirmation is noise next to `activated`: {output}"
+        );
+    }
+
+    /// Mixed outcome: what loaded and what did not, in one result.
+    #[test]
+    fn a_mixed_result_reports_both_what_loaded_and_what_did_not() {
+        let output = build_activation_output(
+            &["pdf".to_string()],
+            &[
+                "pdf: activated after model selection".to_string(),
+                "xlsx: not activated because its requirements are unmet: required binary not \
+                 found: soffice"
+                    .to_string(),
+            ],
+        );
+        assert_eq!(output["count"], 1);
+        let notes = output["not_activated"].as_array().unwrap();
+        assert_eq!(notes.len(), 1, "only the refusal is forwarded: {output}");
+        assert!(notes[0].as_str().unwrap().contains("soffice"));
+    }
 
     #[test]
     fn parse_skill_activate_names_rejects_missing_names_field() {
