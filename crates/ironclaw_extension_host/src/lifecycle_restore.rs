@@ -240,11 +240,29 @@ pub fn prepare_install(
         &contracts,
         Some(manifest_hash.clone()),
     )?
-    .with_initial_preparation(if available.resolved_manifest.mcp.is_some() {
-        ironclaw_extensions::PreparationRequirement::Required
-    } else {
-        ironclaw_extensions::PreparationRequirement::Ready
-    })
+    // "Required" means nothing model-visible until discovery succeeds
+    // (Notion: only a host-internal mcp_server template). `mcp.is_some()`
+    // alone is the wrong test — NEAR AI ships a static model-visible
+    // `nearai.web_search` tool and must activate without discovery. The
+    // visible-capability exemption only applies to a genuine hosted-MCP
+    // package (manifest runtime `Mcp`, per the v3 `[mcp]`/`[runtime]`
+    // exclusivity in `ironclaw_extensions::v3`): a package whose tools come
+    // from an unrelated runtime (e.g. a wasm capability provider) is not
+    // exempted from discovery just because it happens to also carry an
+    // `[mcp]` declaration.
+    .with_initial_preparation(
+        if available.resolved_manifest.mcp.is_some()
+            && (package_visible_capability_ids(&available.package).is_empty()
+                || !matches!(
+                    available.resolved_manifest.runtime,
+                    ironclaw_extensions::ExtensionRuntimeV2::Mcp { .. }
+                ))
+        {
+            ironclaw_extensions::PreparationRequirement::Required
+        } else {
+            ironclaw_extensions::PreparationRequirement::Ready
+        },
+    )
     .with_removal_cleanup_requirements(available.cleanup_requirements.clone());
     let manifest_record = match retained_definition {
         Some(retained)

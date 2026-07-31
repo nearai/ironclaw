@@ -65,10 +65,17 @@ impl HostedMcpPreparationService {
     ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
         let endpoint =
             crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint::parse(&request.endpoint)
-                .map_err(|_| crate::hosted_mcp_manifest::name_unavailable())?;
-        let extension_id =
-            ironclaw_host_api::hosted_mcp::hosted_mcp_extension_id(&request.desired_id)
-                .map_err(|_| crate::hosted_mcp_manifest::name_unavailable())?;
+                .map_err(|error| {
+                    tracing::debug!(?error, "hosted MCP registration rejected: invalid endpoint");
+                    crate::hosted_mcp_manifest::name_unavailable()
+                })?;
+        let extension_id = ironclaw_host_api::hosted_mcp::hosted_mcp_extension_id(
+            &request.desired_id,
+        )
+        .map_err(|error| {
+            tracing::debug!(%error, "hosted MCP registration rejected: invalid desired id");
+            crate::hosted_mcp_manifest::name_unavailable()
+        })?;
         let package_ref = ironclaw_product::LifecyclePackageRef::new(
             ironclaw_product::LifecyclePackageKind::Extension,
             extension_id.as_str(),
@@ -114,7 +121,7 @@ impl HostedMcpPreparationService {
     ) -> Result<Option<LifecycleProductResponse>, ProductSurfaceFailure> {
         let (extension_id, installation_id) =
             crate::product_lifecycle::extension_ids_from_package_ref(package_ref)?;
-        let (installation, manifest, package, max_tools) = {
+        let (installation, manifest, package, max_tools, best_effort) = {
             let _guard = self.operation_lock.lock().await;
             let installation = self
                 .load_installation(&extension_id, &installation_id)
@@ -126,11 +133,18 @@ impl HostedMcpPreparationService {
                 .await
                 .map_err(crate::product_lifecycle::map_extension_installation_error)?
                 .ok_or_else(crate::hosted_mcp_manifest::name_unavailable)?;
-            if manifest.initial_preparation() == ironclaw_extensions::PreparationRequirement::Ready
-            {
+            let best_effort = manifest.initial_preparation()
+                == ironclaw_extensions::PreparationRequirement::Ready;
+            if best_effort && manifest.resolved().mcp.is_none() {
+                // No `[mcp]` declaration at all: nothing to discover, ever.
                 self.sync_lifecycle_package(&extension_id).await?;
                 return Ok(None);
             }
+            // `best_effort` here means `Ready` with `[mcp]` still declared
+            // (e.g. NEAR AI, which ships a static model-visible template tool
+            // so activation never depends on live discovery). It gets the
+            // same discovery attempt below as a `Required` package; only the
+            // handling of a failed attempt differs (see below).
             let max_tools = manifest
                 .resolved()
                 .mcp
@@ -140,12 +154,69 @@ impl HostedMcpPreparationService {
                     reason: "no preparation strategy is composed for this package".to_string(),
                 })?;
             let package = self.lifecycle_package(&extension_id).await?;
-            (installation, manifest, package, max_tools)
+            (installation, manifest, package, max_tools, best_effort)
         };
 
-        let requirements = package_runtime_credential_auth_requirements(&package);
+        let outcome = self
+            .attempt_hosted_mcp_preparation(
+                package_ref,
+                &extension_id,
+                scope,
+                credential_gate,
+                &installation,
+                &manifest,
+                &package,
+                max_tools,
+                best_effort,
+            )
+            .await;
+        if !best_effort {
+            return outcome;
+        }
+        if let Err(error) = outcome {
+            // silent-ok: a `Ready` package (NEAR AI-shaped: `[mcp]` plus a
+            // static visible template tool) ships its static catalog
+            // precisely so activation does not depend on a reachable MCP
+            // server. Treating a failed discovery attempt as fatal here
+            // reintroduced a real production regression — hosted MCP
+            // preparation failing with a transient `network_error` escalated
+            // to a fatal `RebornBuildError::InvalidConfig` and broke offline
+            // composition builds. `activate_inner`'s own credential check
+            // still blocks activation if credentials are genuinely missing,
+            // so swallowing here only forgoes the *live* catalog refresh, not
+            // the safety checks.
+            tracing::debug!(
+                extension_id = extension_id.as_str(),
+                %error,
+                "hosted MCP opportunistic discovery failed; continuing with the static catalog"
+            );
+        }
+        // A `Some(response)` outcome (e.g. missing credentials, OAuth setup
+        // needed) is likewise not surfaced here for the same reason: it is
+        // "discovery didn't happen," not "activation must stop."
+        self.sync_lifecycle_package(&extension_id).await?;
+        Ok(None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    // arch-exempt: too_many_args, mirrors the parameter set `prepare_if_pending`
+    // already gathered under its operation-lock guard; no aggregation owns
+    // these together yet, tracked with the hosted-MCP preparation service.
+    async fn attempt_hosted_mcp_preparation(
+        &self,
+        package_ref: &LifecyclePackageRef,
+        extension_id: &ironclaw_host_api::ids::ExtensionId,
+        scope: ResourceScope,
+        credential_gate: &dyn ExtensionActivationCredentialGate,
+        installation: &ExtensionInstallation,
+        manifest: &ExtensionManifestRecord,
+        package: &ExtensionPackage,
+        max_tools: u32,
+        best_effort: bool,
+    ) -> Result<Option<LifecycleProductResponse>, ProductSurfaceFailure> {
+        let requirements = package_runtime_credential_auth_requirements(package);
         if let ExtensionActivationCredentialReadiness::Missing(missing) =
-            credential_gate.credential_readiness(&package).await?
+            credential_gate.credential_readiness(package).await?
         {
             return Ok(Some(
                 crate::product_lifecycle::activation_credentials_incomplete_response(
@@ -168,7 +239,7 @@ impl HostedMcpPreparationService {
             .ok_or_else(|| ProductSurfaceFailure::InvalidBindingRequest {
                 reason: "hosted MCP registration has no discovery capability".to_string(),
             })?;
-        let network_policy = crate::mcp::hosted_mcp_network_policy(&package).ok_or_else(|| {
+        let network_policy = crate::mcp::hosted_mcp_network_policy(package).ok_or_else(|| {
             ProductSurfaceFailure::InvalidBindingRequest {
                 reason: "hosted MCP discovery endpoint is invalid".to_string(),
             }
@@ -187,7 +258,7 @@ impl HostedMcpPreparationService {
                     &scope,
                     &capability_id,
                     requirement,
-                    &extension_id,
+                    extension_id,
                 )
                 .await
             {
@@ -206,7 +277,7 @@ impl HostedMcpPreparationService {
             }
         }
         let discovered = match crate::discover_hosted_mcp_package_with_policy(
-            &package,
+            package,
             max_tools,
             scope.clone(),
             ports.runtime_http_egress(),
@@ -267,12 +338,7 @@ impl HostedMcpPreparationService {
                     _ => return Err(crate::hosted_mcp_manifest::name_unavailable()),
                 };
                 return self
-                    .checkpoint_auth_preparation(
-                        package_ref,
-                        &extension_id,
-                        &installation,
-                        enriched,
-                    )
+                    .checkpoint_auth_preparation(package_ref, extension_id, installation, enriched)
                     .await;
             }
             Err(crate::HostedMcpDiscoveryError::CredentialsRejected(_)) => {
@@ -301,18 +367,31 @@ impl HostedMcpPreparationService {
                 .with_definition_retention(manifest.definition_retention())
         })
         .map_err(crate::product_lifecycle::map_extension_installation_error)?;
-        let incarnation = installation
-            .incarnation_id()
-            .ok_or_else(crate::hosted_mcp_manifest::name_unavailable)?;
-        self.installation_store
-            .finalize_preparation(
-                installation.installation_id(),
-                incarnation,
-                installation.manifest_ref(),
-                finalized.clone(),
-            )
-            .await
-            .map_err(crate::product_lifecycle::map_extension_installation_error)?;
+        if best_effort {
+            // `finalize_preparation` asserts a `Required` -> `Ready` pending
+            // lease (`take_v2_preparation_lease` rejects any installation
+            // whose persisted `initial_preparation` isn't already
+            // `Required`). A best-effort refresh runs on a package that is
+            // already `Ready`, so there is no pending lease to finalize —
+            // persist the refreshed catalog as a plain upsert instead.
+            self.installation_store
+                .upsert_manifest_and_installation(finalized.clone(), installation.clone())
+                .await
+                .map_err(crate::product_lifecycle::map_extension_installation_error)?;
+        } else {
+            let incarnation = installation
+                .incarnation_id()
+                .ok_or_else(crate::hosted_mcp_manifest::name_unavailable)?;
+            self.installation_store
+                .finalize_preparation(
+                    installation.installation_id(),
+                    incarnation,
+                    installation.manifest_ref(),
+                    finalized.clone(),
+                )
+                .await
+                .map_err(crate::product_lifecycle::map_extension_installation_error)?;
+        }
         if finalized.manifest().source == ManifestSource::UserRegistered {
             self.catalog
                 .write()
@@ -321,7 +400,7 @@ impl HostedMcpPreparationService {
                     crate::hosted_mcp_manifest::available_package(&finalized)?,
                 ]));
         }
-        self.sync_lifecycle_package(&extension_id).await?;
+        self.sync_lifecycle_package(extension_id).await?;
         Ok(None)
     }
 
@@ -412,7 +491,6 @@ impl HostedMcpPreparationService {
                 authorization_server_metadata,
                 scopes: Vec::new(),
                 client_profile_id,
-                dcr_policy_allowed: true,
             })
             .await
             .map_err(crate::hosted_mcp_manifest::oauth_admission_error)?;
@@ -446,8 +524,11 @@ impl HostedMcpPreparationService {
                 timeout_ms: Some(10_000),
             })
             .await
-            .map_err(|_| ProductSurfaceFailure::Transient {
-                reason: "hosted MCP OAuth metadata fetch failed".to_string(),
+            .map_err(|error| {
+                tracing::debug!(%error, "hosted MCP OAuth metadata fetch failed");
+                ProductSurfaceFailure::Transient {
+                    reason: "hosted MCP OAuth metadata fetch failed".to_string(),
+                }
             })?;
         if response.status != 200 || response.body.len() as u64 > BODY_LIMIT {
             return Err(ProductSurfaceFailure::InvalidBindingRequest {

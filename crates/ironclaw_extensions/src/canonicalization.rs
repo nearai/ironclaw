@@ -42,17 +42,27 @@ pub fn canonicalize_installation_rows(
                     extension_id: extension_id.clone(),
                 });
             }
-            let incarnation_id = first.incarnation_id().cloned();
-            if rows
-                .iter()
-                .any(|row| row.incarnation_id() != incarnation_id.as_ref())
-            {
-                return Err(
-                    ExtensionInstallationError::ConflictingInstallationIncarnation {
-                        extension_id: extension_id.clone(),
-                    },
-                );
+            // A conflict is only real when two rows share an `installation_id` but
+            // disagree on `incarnation_id`. Rows with distinct `installation_id`s are
+            // the legitimate legacy multi-row shape (each minted its own fresh
+            // incarnation) and must be allowed to merge.
+            for (i, row) in rows.iter().enumerate() {
+                for other in &rows[i + 1..] {
+                    if row.installation_id() == other.installation_id()
+                        && row.incarnation_id() != other.incarnation_id()
+                    {
+                        return Err(
+                            ExtensionInstallationError::ConflictingInstallationIncarnation {
+                                extension_id: extension_id.clone(),
+                            },
+                        );
+                    }
+                }
             }
+            let incarnation_id = rows
+                .iter()
+                .max_by_key(|row| row.updated_at())
+                .and_then(|row| row.incarnation_id().cloned());
             let owner = if rows.iter().any(|row| row.owner().is_tenant()) {
                 InstallationOwner::Tenant
             } else {

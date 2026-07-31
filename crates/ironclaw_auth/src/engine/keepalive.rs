@@ -588,6 +588,119 @@ mod tests {
         assert!(!is_refreshable(&no_refresh));
     }
 
+    #[tokio::test]
+    async fn sweep_refreshes_extension_owned_account_only_when_extension_context_is_threaded() {
+        // Regression pin (extension-owned keepalive refresh silently never
+        // firing): before this fix, sweep_once resolved recipes by vendor
+        // alone and never carried `owner_extension` into the resolver call.
+        // A real installed-manifest resolver fails closed when the
+        // requester extension is absent (`AuthRecipeResolver::resolve`'s
+        // documented contract), so an extension-owned hosted-MCP account
+        // would never resolve a recipe, never appear in the due list, and
+        // never refresh again — with no error, log, or test failure
+        // anywhere. This test drives the real caller seam (`sweep_once`,
+        // the entry point used by `tick_once`/`run_keepalive_sweep`) with a
+        // resolver shaped like that real contract.
+        let now = Utc::now();
+        let extension = ExtensionId::new("acme-mcp").unwrap();
+
+        let mut account = candidate("acme-mcp-vendor", now - chrono::Duration::days(10));
+        account.ownership = CredentialOwnership::ExtensionOwned;
+        account.owner_extension = Some(extension.clone());
+
+        let recipe: ironclaw_host_api::recipe::VendorAuthRecipe =
+            serde_json::from_value(serde_json::json!({
+                "method": "oauth2_code",
+                "display_name": "Acme MCP",
+                "authorization_endpoint": "https://auth.acme.example/authorize",
+                "token_endpoint": "https://auth.acme.example/token",
+                "scopes": [],
+                "client_credentials": { "client_id_handle": "acme_client_id" },
+                "token_response": { "access_token": "/access_token" },
+                "refresh": { "keepalive_idle_seconds": 604_800 },
+            }))
+            .expect("recipe parses");
+        let resolved = crate::engine::ResolvedVendorAuthRecipe {
+            vendor: "acme-mcp-vendor".to_string(),
+            recipe,
+            token_exchange_resource: None,
+            protected_resource_metadata_url: None,
+        };
+
+        /// Shaped like a real installed-manifest resolver: only resolves
+        /// this vendor's recipe for its owning extension, and fails closed
+        /// (returns `None`) for any other requester — including `None`.
+        #[derive(Debug)]
+        struct ExtensionScopedResolver {
+            extension: ExtensionId,
+            recipe: crate::engine::ResolvedVendorAuthRecipe,
+        }
+        #[async_trait]
+        impl AuthRecipeResolver for ExtensionScopedResolver {
+            async fn resolve(
+                &self,
+                requester_extension: Option<&ExtensionId>,
+                vendor: &str,
+            ) -> Option<crate::engine::ResolvedVendorAuthRecipe> {
+                if requester_extension == Some(&self.extension) && vendor == self.recipe.vendor {
+                    Some(self.recipe.clone())
+                } else {
+                    None
+                }
+            }
+        }
+
+        struct FixedSource(CredentialAccount);
+        #[async_trait]
+        impl KeepaliveCandidateSource for FixedSource {
+            async fn list_keepalive_candidates(&self) -> Vec<CredentialAccount> {
+                vec![self.0.clone()]
+            }
+        }
+
+        #[derive(Default)]
+        struct RecordingRefresh {
+            requests: tokio::sync::Mutex<Vec<CredentialRefreshRequest>>,
+        }
+        #[async_trait]
+        impl KeepaliveRefreshPort for RecordingRefresh {
+            async fn refresh_account(
+                &self,
+                request: CredentialRefreshRequest,
+            ) -> Result<CredentialRefreshReport, AuthProductError> {
+                self.requests.lock().await.push(request);
+                Err(AuthProductError::MalformedConfig)
+            }
+        }
+
+        let refresh = Arc::new(RecordingRefresh::default());
+        let deps = KeepaliveSweepDeps {
+            candidates: Arc::new(FixedSource(account)),
+            recipes: Arc::new(ExtensionScopedResolver {
+                extension: extension.clone(),
+                recipe: resolved,
+            }),
+            refresh: refresh.clone(),
+            leader_lock: Arc::new(AlwaysLeaderKeepaliveLock),
+        };
+        let settings = KeepaliveSweepSettings::enabled();
+        let cancel = CancellationToken::new();
+
+        sweep_once(&deps, &settings, &cancel, now).await;
+
+        let requests = refresh.requests.lock().await;
+        assert_eq!(
+            requests.len(),
+            1,
+            "extension-owned account must be swept, not silently dropped"
+        );
+        assert_eq!(
+            requests[0].requester_extension.as_ref(),
+            Some(&extension),
+            "refresh request must carry the owning extension so the resolver can find its recipe"
+        );
+    }
+
     #[test]
     fn jitter_is_disabled_when_max_is_zero() {
         assert_eq!(jitter_delay(Duration::ZERO), Duration::ZERO);

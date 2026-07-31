@@ -575,9 +575,19 @@ where
 
         if !(200..300).contains(&response.status) {
             if is_mcp_auth_response_status(response.status) {
-                return Err(McpClientError::AuthChallenge {
-                    challenge: mcp_auth_challenge_from_response(&response),
-                });
+                // Bare `AuthRequired` when the response gives us nothing to
+                // act on; `AuthChallenge` only when it actually carries
+                // WWW-Authenticate/resource-metadata to resolve.
+                let challenge = mcp_auth_challenge_from_response(&response);
+                return Err(
+                    if challenge.www_authenticate_metadata.is_empty()
+                        && challenge.protected_resource_metadata.is_empty()
+                    {
+                        McpClientError::AuthRequired
+                    } else {
+                        McpClientError::AuthChallenge { challenge }
+                    },
+                );
             }
             return Err(McpClientError::client(response_error(
                 McpResponseErrorCause::HttpStatus(response.status),
@@ -802,22 +812,45 @@ where
             )));
         }
 
+        // The first page's plan is built before `initialize_session` runs (not
+        // inside the loop below) so the planner observes `tools/list` before
+        // `initialize`/`notifications/initialized`, matching the original
+        // single-page discovery ordering that callers and tests depend on.
+        // Only pages after the first are planned lazily inside the loop, once
+        // a `nextCursor` is known.
+        let first_tools_list_id = self.next_request_id();
+        let first_tools_list_plan = self.plan_json_rpc(
+            &request,
+            Some(first_tools_list_id),
+            McpJsonRpcMethod::ToolsList,
+            None,
+        )?;
+        validate_staged_credential_injections(&first_tools_list_plan.plan.credential_injections)
+            .map_err(McpClientError::client)?;
+
         let mut usage = self.initialize_session(&request, &session_key).await?;
         let mut discovered = Vec::new();
         let mut accepted_catalog_bytes = 0usize;
         let mut cursor = None;
+        let mut pending_plan = Some(first_tools_list_plan);
         for page in 1..=MAX_MCP_TOOLS_LIST_PAGES {
-            let tools_list_id = self.next_request_id();
-            let tools_list_plan = self.plan_json_rpc(
-                &request,
-                Some(tools_list_id),
-                McpJsonRpcMethod::ToolsList,
-                cursor
-                    .as_ref()
-                    .map(|cursor| serde_json::json!({ "cursor": cursor })),
-            )?;
-            validate_staged_credential_injections(&tools_list_plan.plan.credential_injections)
-                .map_err(McpClientError::client)?;
+            let tools_list_plan = match pending_plan.take() {
+                Some(plan) => plan,
+                None => {
+                    let tools_list_id = self.next_request_id();
+                    let plan = self.plan_json_rpc(
+                        &request,
+                        Some(tools_list_id),
+                        McpJsonRpcMethod::ToolsList,
+                        cursor
+                            .as_ref()
+                            .map(|cursor| serde_json::json!({ "cursor": cursor })),
+                    )?;
+                    validate_staged_credential_injections(&plan.plan.credential_injections)
+                        .map_err(McpClientError::client)?;
+                    plan
+                }
+            };
 
             let tools = self
                 .send_planned_json_rpc(&request, &session_key, tools_list_plan)
@@ -1163,11 +1196,7 @@ fn parse_tools_list_result(
     manifest_max_tools: u32,
 ) -> Result<Vec<HostedMcpDiscoveredTool>, String> {
     const MAX_TOOL_NAME_BYTES: usize = 128;
-    // Real hosted catalogs may use several kilobytes to document one tool.
-    // Keep descriptions exact while bounding each value consistently with
-    // schema strings; the response-body and catalog-count limits remain the
-    // aggregate memory and prompt-size ceilings.
-    const MAX_TOOL_DESCRIPTION_BYTES: usize = 16 * 1024;
+    const MAX_TOOL_DESCRIPTION_BYTES: usize = 2048;
     const MAX_SCHEMA_DEPTH: u8 = 32;
     const MAX_SCHEMA_NODES: usize = 8192;
     const MAX_SCHEMA_STRING_BYTES: usize = 16 * 1024;
@@ -1183,11 +1212,19 @@ fn parse_tools_list_result(
         return Err(invalid_tool_list(McpInvalidToolListCause::TooManyTools));
     }
 
-    // Catalog acceptance is atomic. Discovery must neither truncate provider
-    // metadata nor publish a partial subset: callers need an exact snapshot of
-    // the accepted remote catalog before lifecycle replaces a generation.
+    // Catalog acceptance distinguishes shape-only defects from security/bounds
+    // violations. A single tool with a shape-only defect (an unsupported name,
+    // an invalid description, or malformed annotations) is dropped from this
+    // generation and recorded, so one malformed entry cannot brick an otherwise
+    // valid integration that has no prior generation to fall back to. A
+    // security/bounds violation (missing or unsafe input schema — checked first
+    // per tool so a co-occurring cosmetic defect cannot downgrade it — or a
+    // catalog that overflows the host cap) still rejects the whole generation
+    // with a stable safe subcause; the previous published generation, if any,
+    // remains authoritative until a complete bounded catalog is discovered.
     let mut published = Vec::with_capacity(tools.len());
-    for tool in tools {
+    let mut first_skipped_cause: Option<McpInvalidToolListCause> = None;
+    for (index, tool) in tools.iter().enumerate() {
         match classify_discovered_tool(
             tool,
             MAX_TOOL_NAME_BYTES,
@@ -1200,9 +1237,26 @@ fn parse_tools_list_result(
         {
             DiscoveredToolClassification::Published(discovered) => published.push(discovered),
             DiscoveredToolClassification::SkippedShapeViolation(cause) => {
-                return Err(invalid_tool_list(cause));
+                first_skipped_cause.get_or_insert(cause);
+                // Bounded, provider-neutral record: the tool index and stable
+                // cause token only — never the raw provider-supplied content.
+                tracing::debug!(
+                    tool_index = index,
+                    skip_cause = cause.stable_token(),
+                    "skipping shape-nonconforming hosted MCP tool from discovery catalog"
+                );
             }
         }
+    }
+    if published.is_empty()
+        && let Some(cause) = first_skipped_cause
+    {
+        // Every advertised tool was shape-nonconforming: there is nothing to
+        // publish, so fail this generation non-retryably with a stable subcause
+        // rather than activating on an empty catalog. An empty provider list
+        // (no tools advertised, nothing skipped) is left as an empty result the
+        // caller treats as "no tools discovered yet".
+        return Err(invalid_tool_list(cause));
     }
     Ok(published)
 }
@@ -1361,8 +1415,10 @@ fn is_unsupported_description_char(value: char) -> bool {
     value.is_control() && !matches!(value, '\n' | '\r' | '\t')
 }
 
-/// Validate descriptive metadata without changing it. Hosted discovery
-/// publishes accepted descriptions byte-for-byte rather than truncating them.
+/// Preserve a provider's otherwise-valid tool catalog when only descriptive
+/// prose exceeds the host display/prompt budget. Names and schemas remain
+/// fail-closed because truncating either could change capability semantics;
+/// descriptions are presentation metadata and can be safely bounded.
 fn bound_mcp_tool_description(value: &str, max_bytes: usize) -> Option<String> {
     if value.chars().any(is_unsupported_description_char) {
         return None;
@@ -1370,7 +1426,21 @@ fn bound_mcp_tool_description(value: &str, max_bytes: usize) -> Option<String> {
     if value.len() <= max_bytes {
         return Some(value.to_string());
     }
-    None
+
+    const TRUNCATION_MARKER: &str = "...";
+    if max_bytes <= TRUNCATION_MARKER.len() {
+        return Some(".".repeat(max_bytes));
+    }
+
+    let mut end = max_bytes - TRUNCATION_MARKER.len();
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    let prefix = value.get(..end)?;
+    let mut bounded = String::with_capacity(max_bytes);
+    bounded.push_str(prefix);
+    bounded.push_str(TRUNCATION_MARKER);
+    Some(bounded)
 }
 
 fn parse_tool_annotations(
@@ -2035,13 +2105,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_tools_list_result_rejects_description_that_would_require_truncation() {
+    fn parse_tools_list_result_bounds_utf8_description_at_character_boundary() {
         let mut tool = valid_tool("search", json!({"type": "object"}));
         tool["description"] = json!("🔧".repeat(600));
 
-        let error = parse_tools_list_result(&json!({ "tools": [tool] }), 128)
-            .expect_err("discovery must not truncate remote descriptions");
-        assert_eq!(error, "mcp_invalid_tool_list: invalid_description");
+        let tools = parse_tools_list_result(&json!({ "tools": [tool] }), 128)
+            .expect("descriptive prose must not invalidate the catalog");
+        let description = &tools[0].description;
+
+        assert!(description.len() <= 2_048);
+        assert!(description.ends_with("..."));
+        assert!(description.is_char_boundary(description.len()));
     }
 
     #[test]
@@ -2108,16 +2182,38 @@ mod tests {
     }
 
     #[test]
-    fn parse_tools_list_result_rejects_shape_invalid_tool_without_partial_success() {
+    #[tracing_test::traced_test]
+    fn parse_tools_list_result_skips_shape_invalid_tools_and_publishes_bounded_remainder() {
+        // A real MCP server can advertise a mostly-valid catalog alongside a
+        // few shape-nonconforming entries (an uppercase tool name, a
+        // control-char description). Those individual tools are dropped and
+        // recorded, but the remaining valid tools must still publish so one
+        // malformed entry cannot brick the whole integration on first install.
         let mut tools = (0..24)
             .map(|index| valid_tool(&format!("tool-{index}"), json!({"type": "object"})))
             .collect::<Vec<_>>();
         tools[5]["name"] = json!("UppercaseName");
         tools[10]["description"] = json!("bad\u{0000}description");
 
-        let error = parse_tools_list_result(&json!({ "tools": tools }), 128)
-            .expect_err("discovery must not publish a partial catalog");
-        assert_eq!(error, "mcp_invalid_tool_list: invalid_tool_name");
+        let published = parse_tools_list_result(&json!({ "tools": tools }), 128)
+            .expect("a bounded catalog must survive a few shape-nonconforming tools");
+
+        assert_eq!(published.len(), 22);
+        assert!(
+            published.iter().all(|tool| tool.name != "UppercaseName"),
+            "the uppercase-named tool must not be published"
+        );
+        assert!(
+            published.iter().any(|tool| tool.name == "tool-0"),
+            "valid tools before the skipped entries must still publish"
+        );
+        assert!(
+            published.iter().any(|tool| tool.name == "tool-23"),
+            "valid tools after the skipped entries must still publish"
+        );
+        assert!(logs_contain("skipping shape-nonconforming hosted MCP tool"));
+        assert!(logs_contain("invalid_tool_name"));
+        assert!(logs_contain("invalid_description"));
     }
 
     #[test]
@@ -2139,7 +2235,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_tools_list_result_fails_when_first_tool_is_shape_invalid() {
+    fn parse_tools_list_result_fails_when_every_tool_is_shape_invalid() {
         // When nothing survives the shape filter there is nothing to publish,
         // so discovery still fails non-retryably with a stable subcause rather
         // than activating on an empty catalog.

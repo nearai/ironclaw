@@ -108,7 +108,6 @@ pub struct OAuthRecipeAdmissionRequest {
     pub authorization_server_metadata: AuthorizationServerAdmissionMetadata,
     pub scopes: Vec<String>,
     pub client_profile_id: Option<String>,
-    pub dcr_policy_allowed: bool,
 }
 
 /// Narrow, policy-only admission. Network discovery remains mediated by the
@@ -245,9 +244,6 @@ where
                     registration_endpoint.ok_or(AuthProductError::MalformedConfig)?;
                 super::dcr::validate_endpoint_origin(registration, expected_as_metadata)?;
                 super::http::https_endpoint_host(registration)?;
-                if !request.dcr_policy_allowed {
-                    return Err(AuthProductError::MalformedConfig);
-                }
                 None
             }
         };
@@ -271,8 +267,14 @@ where
             token_response: TokenResponseMap {
                 access_token: BoundedJsonPointer::new("/access_token")
                     .map_err(|_| AuthProductError::MalformedConfig)?,
-                refresh_token: None,
-                expires_in: None,
+                refresh_token: Some(
+                    BoundedJsonPointer::new("/refresh_token")
+                        .map_err(|_| AuthProductError::MalformedConfig)?,
+                ),
+                expires_in: Some(
+                    BoundedJsonPointer::new("/expires_in")
+                        .map_err(|_| AuthProductError::MalformedConfig)?,
+                ),
                 scope: None,
             },
             identity: None,
@@ -344,7 +346,6 @@ mod tests {
             },
             scopes: vec!["read".into()],
             client_profile_id: None,
-            dcr_policy_allowed: true,
         }
     }
     async fn admit(
@@ -356,7 +357,25 @@ mod tests {
     }
     #[tokio::test]
     async fn valid_dcr_and_www_advertisement_admit() {
-        assert!(admit(request()).await.is_ok());
+        let resolved = admit(request()).await.expect("valid request admits");
+        // Regression pin: a hosted-MCP OAuth account must be able to refresh
+        // after the initial exchange, not just authenticate once. The
+        // admitted recipe's token_response map is the only place that
+        // capability is declared — if it dropped `refresh_token`/
+        // `expires_in`, the exchange path would have nothing to persist as
+        // the account's refresh secret and every later refresh would fail
+        // closed forever with no admission-time error.
+        let VendorAuthRecipe::Oauth2Code(recipe) = &resolved.recipe else {
+            panic!("DCR admission always produces an oauth2_code recipe");
+        };
+        assert!(
+            recipe.token_response.refresh_token.is_some(),
+            "admitted recipe must capture refresh_token so the account can be kept alive"
+        );
+        assert!(
+            recipe.token_response.expires_in.is_some(),
+            "admitted recipe must capture expires_in so keepalive/expiry accounting works"
+        );
     }
     #[tokio::test]
     async fn dedicated_header_advertisement_admits() {
@@ -651,7 +670,6 @@ mod tests {
             authorization_server_metadata: authorization,
             scopes: Vec::new(),
             client_profile_id: None,
-            dcr_policy_allowed: true,
         })
         .await
         .expect("Notion-compatible OAuth metadata should be admitted");
@@ -696,12 +714,6 @@ mod tests {
         let mut r = request();
         r.authorization_server_metadata.registration_endpoint =
             Some(https("https://evil.example/register"));
-        assert!(admit(r).await.is_err());
-    }
-    #[tokio::test]
-    async fn dcr_policy_off_rejects() {
-        let mut r = request();
-        r.dcr_policy_allowed = false;
         assert!(admit(r).await.is_err());
     }
     #[tokio::test]

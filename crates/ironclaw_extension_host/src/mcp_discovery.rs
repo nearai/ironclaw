@@ -121,9 +121,20 @@ fn classify_mcp_client_error(error: ironclaw_mcp::McpClientError) -> HostedMcpDi
         ironclaw_mcp::McpClientError::AuthChallenge { challenge } => {
             HostedMcpDiscoveryError::CredentialsRejected(challenge)
         }
-        ironclaw_mcp::McpClientError::AuthRequired => {
-            HostedMcpDiscoveryError::Transient("auth_required_without_challenge".to_string())
-        }
+        // The host-runtime egress sanitizer strips `WWW-Authenticate` and only
+        // re-adds `protected-resource-metadata` when it contained an
+        // extractable OAuth `resource_metadata=` location (see
+        // `ironclaw_host_runtime::egress::sanitize::sanitize_runtime_response`).
+        // A plain bearer server's 401 never advertises that, so it legitimately
+        // arrives here as `AuthRequired` with no metadata — it is still a
+        // credential rejection, never a retryable transport failure.
+        ironclaw_mcp::McpClientError::AuthRequired => HostedMcpDiscoveryError::CredentialsRejected(
+            ironclaw_host_api::hosted_mcp::McpAuthChallenge {
+                status: 401,
+                www_authenticate_metadata: Vec::new(),
+                protected_resource_metadata: Vec::new(),
+            },
+        ),
         ironclaw_mcp::McpClientError::InvalidToolCatalog { reason } => {
             HostedMcpDiscoveryError::Permanent(reason)
         }

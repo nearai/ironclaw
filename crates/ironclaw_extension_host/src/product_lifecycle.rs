@@ -1,6 +1,6 @@
 // arch-exempt: large_file, shared extension removal convergence and compatibility tests, plan #6329
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Weak},
 };
 
@@ -821,6 +821,19 @@ impl ExtensionLifecycleManager {
             .await
             .map_err(map_extension_installation_error)?;
         let activation_errors = self.installation_activation_errors().await?;
+        let preparation_by_extension: BTreeMap<ExtensionId, PreparationRequirement> = self
+            .installation_store
+            .list_manifests()
+            .await
+            .map_err(map_extension_installation_error)?
+            .into_iter()
+            .map(|manifest| {
+                (
+                    manifest.extension_id().clone(),
+                    manifest.initial_preparation(),
+                )
+            })
+            .collect();
         let mut summaries = Vec::with_capacity(installations.len());
         for installation in installations {
             // #5459 P1: a caller's list is tenant-shared entries plus their
@@ -842,9 +855,13 @@ impl ExtensionLifecycleManager {
                 };
                 available
             };
-            let preparation = self
-                .persisted_initial_preparation(installation.extension_id())
-                .await?;
+            // silent-ok: an id with no persisted manifest was never registered as
+            // preparation-gated, so `Ready` is the same default the per-row
+            // `persisted_initial_preparation` read returns for a missing manifest.
+            let preparation = preparation_by_extension
+                .get(installation.extension_id())
+                .copied()
+                .unwrap_or(PreparationRequirement::Ready);
             summaries.push(LifecycleInstalledExtensionSummary {
                 summary: available.summary(),
                 phase: installation_state_for_installation(
@@ -1543,16 +1560,6 @@ impl ExtensionLifecycleManager {
         );
         response.message = Some(message);
         Ok(response)
-    }
-
-    pub async fn package_requires_hosted_mcp_discovery(
-        &self,
-        package_ref: &LifecyclePackageRef,
-    ) -> Result<bool, ProductSurfaceFailure> {
-        let _ = package_ref;
-        // Kept as a compatibility query for callers that have not yet moved
-        // to aggregate readiness. Discovery is never an activation branch.
-        Ok(false)
     }
 
     /// Remove an installed extension. This is the single convergence point both

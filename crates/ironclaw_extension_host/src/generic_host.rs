@@ -327,6 +327,15 @@ impl ExtensionLoader for CompositionExtensionLoader {
             .to_internal(source)
             .map_err(|error| load_error(format!("resolved contract rebuild failed: {error}")))?;
         let declares_channel = ctx.resolved.channel.is_some();
+        // Mirrors `check_binding`'s own declared-tools test (entrypoint.rs):
+        // a resolved contract with no `[[tools]]` and no `[mcp]` declares no
+        // tool surface at all. A package in that shape (e.g. a channel-only
+        // first-party extension like Telegram) has nothing to bind, so the
+        // lane binder must not be asked to produce an adapter for it — the
+        // lane binder always succeeds with a (possibly empty-routed) tool
+        // adapter, which would then fail the binding-rule check with
+        // `UndeclaredToolAdapter` even though nothing is actually bound.
+        let declares_tools = !ctx.resolved.tools.is_empty() || ctx.resolved.mcp.is_some();
 
         if let ironclaw_extensions::ExtensionRuntimeV2::FirstParty { service } =
             &ctx.resolved.runtime
@@ -343,14 +352,19 @@ impl ExtensionLoader for CompositionExtensionLoader {
             .map_err(|error| load_error(format!("manifest rebuild failed: {error}")))?;
         let package = rebuild_package_from_resolved(manifest, &ctx.resolved, &ctx.extension_id)
             .map_err(load_error)?;
-        let adapter = self
-            .binder
-            .bind_package(Arc::new(package))
-            .map_err(|error| match error {
-                ExtensionToolBindError::MissingRuntimeBackend { runtime } => load_error(format!(
-                    "no runtime backend is configured for {runtime:?} extensions"
-                )),
-            })?;
+        let adapter = if declares_tools {
+            Some(
+                self.binder
+                    .bind_package(Arc::new(package))
+                    .map_err(|error| match error {
+                        ExtensionToolBindError::MissingRuntimeBackend { runtime } => load_error(
+                            format!("no runtime backend is configured for {runtime:?} extensions"),
+                        ),
+                    })?,
+            )
+        } else {
+            None
+        };
         Ok(LoadedExtension::new(Box::new(LaneEntrypoint {
             adapter,
             // A channel-declaring extension binds its REAL channel adapter
@@ -537,16 +551,19 @@ fn resolve_package_root(
 }
 
 /// Entrypoint over a lane-bound tool adapter (wasm / mcp / script /
-/// first-party-registry packages).
+/// first-party-registry packages). `adapter` is `None` for a resolved
+/// contract that declares no tool surface at all (e.g. a channel-only
+/// first-party extension) — the lane binder is never invoked for those, so
+/// there is nothing to report as bound.
 struct LaneEntrypoint {
-    adapter: Arc<dyn ToolAdapter>,
+    adapter: Option<Arc<dyn ToolAdapter>>,
     channel: Option<Arc<dyn ChannelAdapter>>,
 }
 
 impl ExtensionEntrypoint for LaneEntrypoint {
     fn bind(&self, _ctx: crate::BindContext) -> Result<ExtensionBindings, BindError> {
         Ok(ExtensionBindings {
-            tools: Some(Arc::clone(&self.adapter)),
+            tools: self.adapter.clone(),
             channel: self.channel.clone(),
         })
     }

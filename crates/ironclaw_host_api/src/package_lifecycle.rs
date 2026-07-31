@@ -190,6 +190,8 @@ pub enum LifecycleProductAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleCommandKind {
+    /// Kept only so `LifecycleProductAction::command_kind()` stays total; deliberately absent from `ALL`.
+    /// Not reachable as a chat command — registration is WebUI-only via `EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY`.
     ExtensionRegisterHostedMcp,
     ExtensionSearch,
     ExtensionList,
@@ -204,8 +206,7 @@ pub enum LifecycleCommandKind {
 }
 
 impl LifecycleCommandKind {
-    pub const ALL: [Self; 11] = [
-        Self::ExtensionRegisterHostedMcp,
+    pub const ALL: [Self; 10] = [
         Self::ExtensionSearch,
         Self::ExtensionList,
         Self::ExtensionInstall,
