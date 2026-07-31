@@ -111,4 +111,4 @@ mutants.out/
 mutants.out.old/
 
 # for a local typescript app, but don't want to push with main repo
-app/
+/app/

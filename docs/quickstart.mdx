@@ -4,66 +4,83 @@ description: Create your first Agent in minutes
 icon: rocket
 ---
 
-This guide will get you from zero to a running IronClaw instance in under 10 minutes.
-
-IronClaw ships as a single binary. You install it, run one setup command, and open the
-web interface in your browser.
+This guide covers both ways to run IronClaw: spin up a private instance on the Agent Hub with no installation, or install the binary on your own machine.
 
 ---
 
-## Setting Up Your Agent
+## Agent Hub (Recommended)
 
-<Steps>
+The fastest way to use IronClaw — no setup, no installation.
 
-<Step title="Get IronClaw">
+### 1. Sign in
 
-<Tabs>
-  <Tab title="Local">
-    Best for personal use on your own machine. Everything runs locally and no separate
-    database server is required. For hosted or multi-user setups, see
-    [Storage](/capabilities/database).
+Go to [agent.near.ai](https://agent.near.ai/) and log in. Once logged in, create a new IronClaw agent. A private instance is provisioned for you.
 
-    ```bash
-    curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.sh | sh
-    ```
+<Accordion title="SSH Key">
+You will need to provide an SSH key to connect to your private instance. If you don't have one:
 
-    On Windows, use the PowerShell installer:
+```bash
+ssh-keygen -t rsa -b 4096 -C "you@example.com"
+cat ~/.ssh/id_rsa.pub
+```
 
-    ```powershell
-    irm https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.ps1 | iex
-    ```
-  </Tab>
+</Accordion>
 
-  <Tab title="Agent Hub">
-  Go to https://agent.near.ai/ and login with your preferred method, then create an IronClaw agent in a private instance.
+<Accordion title="Issues Connecting?">
+Add your SSH key to your device's SSH agent before connecting:
 
-  Once your private instance is ready, you can connect to your agent's private instance through `SSH` using the address provided in the [Agent Dashboard](https://agent.near.ai/):
+```bash
+ssh-add ~/.ssh/id_rsa
+```
 
-  ```bash
-  ssh -p <PORT> liquid-horse@agent2.near.ai
-  ```
+</Accordion>
 
-  <Accordion title="SSH Key">
+### 2. Talk to your agent
 
-  To use IronClaw, you will need to provide an SSH key. If you don't have one, you can generate it using the following command in your terminal:
+Your agent is already running. You have two ways to interact:
 
-  ```bash
-  ssh-keygen -t rsa -b 4096 -C "you@example.com"
-  cat ~/.ssh/id_rsa.pub
-  ```
+**Web interface (recommended):** Your [Agent Dashboard](https://agent.near.ai/) shows a web gateway link — open it in your browser for the full IronClaw WebChat experience.
 
-  </Accordion>
+```
+https://<instance-id>.agents.near.ai
+```
 
-  <Accordion title="Issues Connecting?">
-  Remember to add your SSH key to your device's SSH agent before connecting:
+**Terminal:** Connect via SSH using the details shown in your dashboard, then start a chat session:
 
-  ```bash
-  ssh-add ~/.ssh/id_rsa
-  ```
+```bash
+ssh -p <PORT> liquid-horse@agent2.near.ai
+ironclaw chat
+```
 
-  </Accordion>
-  </Tab>
-</Tabs>
+For one-shot commands:
+
+```bash
+ironclaw run -m "Summarize my last three emails"
+```
+
+### 3. Manage your agent
+
+Use the [Agent Dashboard](https://agent.near.ai/) to start, stop, or restart your instance. Updates are handled automatically by the platform.
+
+---
+
+## Installing locally
+
+For personal use on your own machine with full control.
+
+### 1. Install IronClaw
+
+Install the single binary:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.sh | sh
+```
+
+On Windows, use the PowerShell installer:
+
+```powershell
+irm https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.ps1 | iex
+```
 
 Verify the install:
 
@@ -71,13 +88,9 @@ Verify the install:
 ironclaw --version
 ```
 
-</Step>
+### 2. Run setup
 
-<Step title="Run Setup">
-
-Run the setup command once. It creates your IronClaw home directory, writes a starter
-configuration, provisions a web login token, and asks which inference provider and model
-you want to use.
+Create your IronClaw home directory, provision a login token, and choose your inference provider:
 
 ```bash
 ironclaw onboard
@@ -97,7 +110,7 @@ the full list of supported providers.
 
 <Accordion title="What onboarding creates">
 
-Everything lives under `~/.ironclaw/reborn`:
+Everything lives under `~/.ironclaw`:
 
 | File | Purpose |
 | --- | --- |
@@ -126,9 +139,7 @@ Use `--dry-run` to see exactly what would be written without touching the filesy
 
 </Accordion>
 
-</Step>
-
-<Step title="Start the Agent">
+### 3. Start the agent
 
 Start the web interface:
 
@@ -157,16 +168,14 @@ Print your configuration paths and read the token back:
 
 ```bash
 ironclaw config path
-cat ~/.ironclaw/reborn/webui-token
+cat ~/.ironclaw/webui-token
 ```
 
 Then visit `http://127.0.0.1:3000/login?token=<token>`.
 
 </Accordion>
 
-</Step>
-
-<Step title="Talk with your Agent">
+### 4. Chat with your agent
 
 Type a message in the chat and the agent will respond. From here you can also reach
 Projects, Jobs, Routines, and Settings from the sidebar.
@@ -178,14 +187,10 @@ ironclaw repl
 ironclaw run -m "Summarize my last three emails"
 ```
 
-</Step>
-
-<Step title="Keep It Running">
+### 5. Keep it running
 
 To have IronClaw start automatically in the background, install it as a system service
-(launchd on macOS, systemd on Linux). Skip this step on a NEAR AI hosted instance — the
-agent already runs for you, and `ironclaw service` does not work there. Use the
-[Agent Dashboard](https://agent.near.ai/) to start, stop, or restart it.
+(launchd on macOS, systemd on Linux):
 
 <Warning>
 Stop the foreground `ironclaw serve` first. The service runs `serve` too, so starting it
@@ -199,19 +204,13 @@ ironclaw service start
 ironclaw service status
 ```
 
-</Step>
-
-<Step title="Update IronClaw">
+### 6. Update IronClaw
 
 Update to the latest release:
 
 ```bash
 ironclaw-update
 ```
-
-</Step>
-
-</Steps>
 
 ---
 
