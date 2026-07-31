@@ -101,8 +101,8 @@ pub const REBORN_TOOL_DISCLOSURE_ENV: &str = "REBORN_TOOL_DISCLOSURE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolDisclosureMode {
-    #[default]
     Off,
+    #[default]
     Bridged,
 }
 
@@ -125,10 +125,9 @@ impl ToolDisclosureMode {
         }
     }
 
-    /// Progressive tool disclosure defaults **off** — an unset, empty, or
-    /// unrecognized `REBORN_TOOL_DISCLOSURE` leaves the request path
-    /// byte-identical to the pre-disclosure behavior. Only an explicit
-    /// `REBORN_TOOL_DISCLOSURE=bridged` opts into the bridged path.
+    /// Progressive tool disclosure defaults to bridged for unset or empty
+    /// configuration. Explicit `off` remains the rollback path, while
+    /// unrecognized values fail closed to `Off`.
     fn from_raw(raw: Option<&str>) -> Self {
         match raw {
             Some(value) if value.eq_ignore_ascii_case("off") => Self::Off,
@@ -137,12 +136,12 @@ impl ToolDisclosureMode {
                 tracing::debug!(
                     target: "ironclaw::reborn::runtime",
                     env = REBORN_TOOL_DISCLOSURE_ENV,
-                    "unrecognized REBORN_TOOL_DISCLOSURE value; falling back to default Off"
+                    "unrecognized REBORN_TOOL_DISCLOSURE value; falling back to Off"
                 );
                 Self::Off
             }
-            // unset / empty -> default off (byte-identical request path).
-            _ => Self::Off,
+            // Unset / empty follows the production default.
+            _ => Self::default(),
         }
     }
 
@@ -992,20 +991,20 @@ mod tests {
     };
 
     #[test]
-    fn tool_disclosure_mode_defaults_off_with_bridged_opt_in() {
+    fn tool_disclosure_mode_defaults_bridged_with_off_kill_switch() {
         use super::ToolDisclosureMode;
-        assert_eq!(ToolDisclosureMode::default(), ToolDisclosureMode::Off);
-        // Default off: unset / empty / unrecognized resolve to Off so the
-        // request path stays byte-identical. Only explicit `bridged` opts in.
+        assert_eq!(ToolDisclosureMode::default(), ToolDisclosureMode::Bridged);
+        // Unset / empty use the production default. Invalid configuration and
+        // explicit `off` fail closed to the rollback path.
         // `is_bridged()` is what gates whether the gateway attaches the decorator.
         assert!(
-            !ToolDisclosureMode::from_raw(None).is_bridged(),
-            "unset must default OFF (byte-identical request path)"
+            ToolDisclosureMode::from_raw(None).is_bridged(),
+            "unset must enable progressive disclosure"
         );
-        assert!(!ToolDisclosureMode::from_raw(Some("")).is_bridged());
+        assert!(ToolDisclosureMode::from_raw(Some("")).is_bridged());
         assert!(
             !ToolDisclosureMode::from_raw(Some("garbage")).is_bridged(),
-            "unrecognized values must fall back to the default Off"
+            "unrecognized values must fail closed to Off"
         );
         assert!(ToolDisclosureMode::from_raw(Some("bridged")).is_bridged());
         assert!(ToolDisclosureMode::from_raw(Some("BRIDGED")).is_bridged());

@@ -186,6 +186,35 @@ async fn explicit_off_surfaces_the_flat_wide_tool_list() {
     }
 }
 
+/// The production default enables progressive disclosure for a wide catalog.
+/// The unit contract in `ironclaw_runner::runtime` separately proves that an
+/// unset or empty environment value resolves to this default.
+#[tokio::test]
+async fn production_default_defers_wide_catalog_to_bridge_meta_tools() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_production_default()
+        .with_github_issue_tools()
+        .script([RebornScriptedReply::text("done")])
+        .build()
+        .await
+        .expect("production-default disclosure harness builds");
+
+    harness.submit_turn("hello").await.expect("turn completes");
+
+    for bridge in [TOOL_SEARCH_NAME, TOOL_DESCRIBE_NAME, TOOL_CALL_NAME] {
+        harness
+            .assert_model_tools_contains(bridge)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("production default must advertise bridge {bridge:?}: {error}")
+            });
+    }
+    harness
+        .assert_model_tools_excludes(FLAT_GITHUB_TOOL_NAME)
+        .await
+        .expect("production default defers the flat wide catalog");
+}
+
 /// General harnesses pin Off rather than inheriting the production environment,
 /// so unrelated integration tests remain stable when the production default can
 /// safely change after the authorization prerequisite lands.
