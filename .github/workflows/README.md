@@ -249,6 +249,11 @@ alerts can target dedicated channels.
 When adding a new workflow that runs on `push` to `main`, add its workflow
 `name:` to the watched list in `main-ci-slack-alerts.yml`.
 
+Code Coverage uses same-ref concurrency with cancellation. When merges land
+faster than coverage completes, only the newest cumulative `main` commit keeps
+running; superseded post-merge coverage runs do not consume runners needed by
+pull requests.
+
 ## Reborn-only release policy
 
 For #6160, `ironclaw-release.yml` uses cargo-dist to publish only the canonical Reborn

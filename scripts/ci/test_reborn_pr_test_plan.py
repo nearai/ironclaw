@@ -327,6 +327,11 @@ class RebornPrTestPlanTests(unittest.TestCase):
             workflow,
         )
 
+    def test_main_coverage_cancels_superseded_commits(self) -> None:
+        workflow = (ROOT / ".github/workflows/coverage.yml").read_text()
+        self.assertIn("group: code-coverage-${{ github.ref }}", workflow)
+        self.assertIn("cancel-in-progress: true", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
