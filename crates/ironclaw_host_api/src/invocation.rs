@@ -14,7 +14,7 @@
 //! near-identical request shapes across the crate graph (§1.1):
 //! `CapabilityInvocation` (`ironclaw_turns`), `RuntimeCapabilityRequest`
 //! (`ironclaw_host_runtime`), `CapabilityInvocationRequest`
-//! (`ironclaw_capabilities`) and `RuntimeAdapterRequest` (`ironclaw_dispatcher`).
+//! and `RuntimeAdapterRequest` (both `ironclaw_capabilities`).
 //! The live names are `LoopRequest`, runtime tuple parts, direct
 //! `CapabilityHost` parameters, and the private runtime-lane request.
 //! The field-level diff shows only

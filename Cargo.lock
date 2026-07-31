@@ -3592,6 +3592,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-test",
 ]
 
 [[package]]
@@ -3630,43 +3631,6 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "ironclaw_dispatcher"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "ironclaw_capabilities",
- "ironclaw_events",
- "ironclaw_host_api",
- "ironclaw_resources",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-test",
-]
-
-[[package]]
-name = "ironclaw_embeddings"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "aws-config",
- "aws-sdk-bedrockruntime",
- "aws-smithy-types",
- "ironclaw_llm",
- "lru",
- "reqwest 0.12.28",
- "secrecy",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -4551,7 +4515,6 @@ dependencies = [
  "ironclaw_capabilities",
  "ironclaw_common",
  "ironclaw_conversations",
- "ironclaw_embeddings",
  "ironclaw_event_projections",
  "ironclaw_events",
  "ironclaw_extension_host",
@@ -5020,7 +4983,7 @@ name = "ironclaw_wasm"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "ironclaw_dispatcher",
+ "ironclaw_capabilities",
  "ironclaw_events",
  "ironclaw_extensions",
  "ironclaw_filesystem",

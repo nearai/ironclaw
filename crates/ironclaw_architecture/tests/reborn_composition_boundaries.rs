@@ -23,7 +23,6 @@ const SUBSTRATE_CRATES: &[&str] = &[
     "ironclaw_resources",
     "ironclaw_trust",
     "ironclaw_capabilities",
-    "ironclaw_dispatcher",
     "ironclaw_processes",
     "ironclaw_secrets",
     "ironclaw_network",

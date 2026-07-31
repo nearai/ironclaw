@@ -48,7 +48,6 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | Crate directory | Package | Human context |
 | --- | --- | --- |
 | `ironclaw_capabilities` | `ironclaw_capabilities` | Caller-facing capability invocation host. Coordinates authorization, approvals, process transitions, and neutral runtime dispatch. |
-| `ironclaw_dispatcher` | `ironclaw_dispatcher` | Composition-only runtime dispatch contracts. Wires validated extension descriptors to runtime lanes; it does not parse manifests or grant authority. |
 | `ironclaw_processes` | `ironclaw_processes` | Host-tracked background process lifecycle. Owns lifecycle mechanics, not capability policy. |
 | `ironclaw_scripts` | `ironclaw_scripts` | Script/CLI capability runner contracts. Executes declared commands through a host-selected backend. |
 | `ironclaw_mcp` | `ironclaw_mcp` | Adapts manifest-declared MCP tools into IronClaw capabilities without granting ambient filesystem, secret, or network authority. |
@@ -104,7 +103,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 - **Authorization or approval behavior**: use `ironclaw_authorization` for policy decisions and `ironclaw_approvals` for approval lease resolution.
 - **Secret storage or leasing**: use `ironclaw_secrets`; do not put SQL or crypto details in engine, gateway, or runtime lanes.
 - **Network or filesystem access**: use `ironclaw_network` or `ironclaw_filesystem`; runtimes should ask host services instead of bypassing them.
-- **WASM, MCP, or script execution**: use the corresponding runtime-lane crate plus `ironclaw_capabilities`/`ironclaw_dispatcher` for coordination.
+- **WASM, MCP, or script execution**: use the corresponding runtime-lane crate plus `ironclaw_capabilities` for coordination.
 - **Hook behavior or prompt snippet trust labeling**: use `ironclaw_hooks` for hook contracts/dispatch and `ironclaw_prompt_envelope` for model-facing snippet wrapping.
 - **Extension lifecycle (install/readiness/remove)**: use `ironclaw_extensions`; do not parse manifests or reimplement registration in runtime or UI crates.
 - **Reborn composition or boot config**: use `ironclaw_reborn_composition` and `ironclaw_reborn_config`; keep `main.rs`/CLI entry points thin.

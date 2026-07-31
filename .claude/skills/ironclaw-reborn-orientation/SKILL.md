@@ -17,7 +17,7 @@ The corrected map, verified against HEAD on 2026-07-02 by a full architecture au
 
 ## The legacy enclave (easy to mistake for current architecture)
 
-Five crates in `crates/` serve **only** the v1 monolith: `ironclaw_engine` (a complete second agent loop — boundary tests forbid Reborn crates from using it), `ironclaw_tui`, `ironclaw_gateway`, `ironclaw_oauth`, `ironclaw_embeddings`. Verify any crate's status before building on it: `python3 -c ...` is overkill — just check who depends on it: `grep -rl "<crate_name>" crates/*/Cargo.toml Cargo.toml`. If the only consumer is the root package, it's v1-only.
+Four crates in `crates/` serve **only** the v1 monolith: `ironclaw_engine` (a complete second agent loop — boundary tests forbid Reborn crates from using it), `ironclaw_tui`, `ironclaw_gateway`, `ironclaw_oauth`. Verify any crate's status before building on it: `python3 -c ...` is overkill — just check who depends on it: `grep -rl "<crate_name>" crates/*/Cargo.toml Cargo.toml`. If the only consumer is the root package, it's v1-only.
 
 ## Discovery procedure (graph may be absent — don't stall)
 

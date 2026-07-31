@@ -9,7 +9,7 @@
 # Usage:
 #   ./scripts/mutation-audit.sh -p ironclaw_event_projections \
 #       crates/ironclaw_event_projections/src/runtime_projection.rs
-#   ./scripts/mutation-audit.sh -p ironclaw_dispatcher            # whole package
+#   ./scripts/mutation-audit.sh -p ironclaw_capabilities          # whole package
 #
 # Options (env vars):
 #   MUT_JOBS=3          Parallel mutants (default: 3)

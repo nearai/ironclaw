@@ -54,7 +54,7 @@ is_shared_test_path() {
     crates/ironclaw_prompt_envelope/*|crates/ironclaw_hooks/*|crates/ironclaw_first_party_extensions/*|crates/ironclaw_llm/*)
       return 0
       ;;
-    crates/ironclaw_embeddings/*|crates/ironclaw_safety/*|crates/ironclaw_skills/*|crates/ironclaw_oauth/*)
+    crates/ironclaw_safety/*|crates/ironclaw_skills/*|crates/ironclaw_oauth/*)
       return 0
       ;;
     *)

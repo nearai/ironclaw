@@ -48,8 +48,8 @@ and policy engine, consumed only by the root `ironclaw` crate through
 `src/bridge/`. It is **not part of Reborn**: the dependency-boundary tests
 forbid Reborn crates from importing it, and nothing else in this document
 describes it. Do not build new Reborn behavior on it; it retires with the
-monolith. `ironclaw_tui`, `ironclaw_gateway`, and `ironclaw_embeddings` are
-in the same v1-only category despite living in `crates/`. The v1 loopback
+monolith. `ironclaw_tui` and `ironclaw_gateway` are in the same v1-only
+category despite living in `crates/`. The v1 loopback
 OAuth transport is folded into `ironclaw_auth::oauth` until v1 retires.
 
 ## Mental Model

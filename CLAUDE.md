@@ -207,7 +207,6 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 | Module | Spec |
 |--------|------|
 | `crates/ironclaw_llm/` | `crates/ironclaw_llm/CLAUDE.md` |
-| `crates/ironclaw_embeddings/` | `crates/ironclaw_embeddings/AGENTS.md` |
 | `crates/ironclaw_filesystem/` | `crates/ironclaw_filesystem/CLAUDE.md` |
 | `crates/ironclaw_webui/` | `crates/ironclaw_webui/CLAUDE.md` |
 | `crates/ironclaw_reborn_composition/` | `crates/ironclaw_reborn_composition/CLAUDE.md` |

@@ -110,12 +110,15 @@ run_architecture() {
 }
 
 run_runtimes() {
-  run_test ironclaw_dispatcher boundary_contract
-  run_test ironclaw_dispatcher dispatch_contract
-  run_test ironclaw_dispatcher event_dispatch_contract
+  # The `ironclaw_dispatcher` re-export shim was deleted in WS8; these two
+  # suites moved to the crate that owns `RuntimeDispatcher` unchanged. Its
+  # third suite (boundary_contract) only pinned the shim's own shape and went
+  # with it.
+  run_test ironclaw_capabilities runtime_dispatch_contract
+  run_test ironclaw_capabilities runtime_dispatch_event_contract
   # main's runtime_dispatcher_integration / vertical_slice_contract test the
   # retired RuntimeAdapter<F, G> architecture; the ToolResolver/BoundCapabilityAdapter
-  # pipeline is pinned by the three dispatcher contract suites above.
+  # pipeline is pinned by the two dispatch contract suites above.
   run_test ironclaw_wasm wasm_dispatch_integration
   run_test ironclaw_wasm wasm_http_adapter_contract
   run_test ironclaw_wasm wit_tool_runtime_contract

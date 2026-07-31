@@ -1,5 +1,8 @@
 //! Dispatch event semantics at the resolver seam (part of TOOL-3).
 //!
+//! Moved here from the deleted `ironclaw_dispatcher` compatibility shim (WS8);
+//! the `RuntimeDispatcher` under test lives in `ironclaw_capabilities::dispatch`.
+//!
 //! The event sequence, best-effort sink behavior, and redacted failure kinds
 //! are unchanged by the prebound-resolver cutover: `dispatch_requested` →
 //! `runtime_selected` (from the resolved binding's provider/runtime) →
@@ -9,7 +12,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_dispatcher::*;
+use ironclaw_capabilities::{
+    BoundCapabilityAdapter, ResolvedCapability, RuntimeAdapterResult, RuntimeDispatcher,
+    ToolResolver,
+};
 use ironclaw_events::*;
 use ironclaw_host_api::{
     authorized::Authorized,

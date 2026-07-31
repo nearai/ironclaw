@@ -113,10 +113,14 @@ jobs:
           MUT_JOBS: "3"
           MUT_OUT: target/nightly-mutation
           MUT_TIMEOUT: "300"
+        # Re-pointed in WS8: this used to target `ironclaw_dispatcher/src/lib.rs`,
+        # which had been reduced to a pure `pub use` re-export shim (zero
+        # mutable statements, so zero mutants) before being deleted outright.
+        # The dispatch routing logic it was meant to audit lives here.
         run: >-
           scripts/mutation-audit.sh
-          -p ironclaw_dispatcher
-          crates/ironclaw_dispatcher/src/lib.rs
+          -p ironclaw_capabilities
+          crates/ironclaw_capabilities/src/dispatch.rs
       - name: Upload mutation triage queue
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

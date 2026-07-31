@@ -18,13 +18,10 @@
 #   reason = "why this whole crate is out of scope for this report"
 #   issue  = "https://github.com/nearai/ironclaw/issues/5657"   # required: tracking issue
 
-# Three crates below are v1-only (consumed exclusively by root `ironclaw`, no
+# The two crates below are v1-only (consumed exclusively by root `ironclaw`, no
 # crates/*/Cargo.toml dependents); already covered by .github/workflows/test.yml ("Tests (Legacy)"). Tracked by #5657.
-
-[[exemption]]
-crate  = "ironclaw_embeddings"
-reason = "v1-only: consumed only by root `ironclaw` (src/app.rs, src/tools/builtin/memory.rs, src/workspace/mod.rs, src/config/{mod,embeddings}.rs); no crates/* dependents. Covered by \"Tests (Legacy)\"."
-issue  = "https://github.com/nearai/ironclaw/issues/5657"
+# (`ironclaw_embeddings` was the third; its crate was deleted in WS8, so its
+# exemption went with it.)
 
 [[exemption]]
 crate  = "ironclaw_gateway"

@@ -2,7 +2,13 @@
 
 Date: 2026-04-24
 Status: V1 contract slice
-Crate: `crates/ironclaw_dispatcher`
+Crate: `crates/ironclaw_capabilities` (module `dispatch`)
+
+> **2026-07-30 (WS8).** The `ironclaw_dispatcher` crate this contract was
+> written against had already been reduced to a 14-line `pub use` shim over
+> `ironclaw_capabilities` and was deleted. The contract below is unchanged and
+> now binds `ironclaw_capabilities::dispatch`; read every `ironclaw_dispatcher`
+> mention in the prose as naming that module.
 
 ---
 
@@ -91,12 +97,12 @@ normal dependencies on concrete runtime crates.
 
 Implementation evidence:
 
-- `crates/ironclaw_dispatcher/src/lib.rs` defines `RuntimeDispatcher`,
+- `crates/ironclaw_capabilities/src/dispatch.rs` defines `RuntimeDispatcher`,
   `ToolResolver`, and `BoundCapabilityAdapter`.
 - `crates/ironclaw_host_api/src/dispatch.rs` defines the sealed
   `CapabilityDispatcher::dispatch_json(Authorized)` port and internal
   `CapabilityDispatchRequest`.
-- `crates/ironclaw_dispatcher/tests/dispatch_contract.rs` covers sealed-lane
+- `crates/ironclaw_capabilities/tests/runtime_dispatch_contract.rs` covers sealed-lane
   mismatch rejection, `None` mount preservation, resolver misses, and prepared
   reservation validation.
 

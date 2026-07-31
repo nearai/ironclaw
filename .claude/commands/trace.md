@@ -11,7 +11,7 @@ Trace the flow of `$ARGUMENTS` through the IronClaw codebase. Map every file and
 
 Discovery order: `bash scripts/codebase-graph.sh status` once — if the graph is FRESH and the codebase-memory MCP is connected, use `trace_path(mode="cross_service"|"data_flow")`; otherwise fall back to the anchors + recipes below without stalling.
 
-New features and almost all current work are **Reborn** (`crates/`). Trace v1 (`src/`) only when the symptom is explicitly in the legacy monolith (v1 gateway UI, TUI, engine-v2 bridge). If the graph is missing/stale/unavailable and you're unsure which stack owns the symptom: `grep -rn --include='*.rs' "<symptom>" crates/ | head` first, `src/` second. The legacy enclave (`ironclaw_engine`, `ironclaw_tui`, `ironclaw_gateway`, `ironclaw_oauth`, `ironclaw_embeddings`) is v1 despite living in `crates/`.
+New features and almost all current work are **Reborn** (`crates/`). Trace v1 (`src/`) only when the symptom is explicitly in the legacy monolith (v1 gateway UI, TUI, engine-v2 bridge). If the graph is missing/stale/unavailable and you're unsure which stack owns the symptom: `grep -rn --include='*.rs' "<symptom>" crates/ | head` first, `src/` second. The legacy enclave (`ironclaw_engine`, `ironclaw_tui`, `ironclaw_gateway`, `ironclaw_oauth`) is v1 despite living in `crates/`.
 
 ## Reborn flow anchors (verify with the recipe beside each — do not trust this table blindly)
 

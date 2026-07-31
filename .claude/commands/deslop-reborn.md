@@ -24,7 +24,7 @@ a legitimate Reborn target. Otherwise pick one per §1.
 - **Reborn-only.** New feature and quality work targets the Reborn stack in `crates/`, never the v1
   `src/` monolith (root CLAUDE.md, "Where to Build — Reborn-First"). This loop only touches `crates/`
   Reborn crates. It must **skip the legacy enclave** — crates that serve *only* the retiring v1
-  monolith (`ironclaw_tui`, `ironclaw_gateway`, `ironclaw_oauth`, `ironclaw_embeddings`; `ironclaw_engine`
+  monolith (`ironclaw_tui`, `ironclaw_gateway`, `ironclaw_oauth`; `ironclaw_engine`
   is already removed). Don't trust that hardcoded list — it drifts. Verify each candidate's status
   with the orientation recipe (§1) before picking it.
 - **Local gate reality.** You can prove `cargo fmt`, `cargo clippy`, per-crate `cargo test -p <crate>`,
