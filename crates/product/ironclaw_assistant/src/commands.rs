@@ -107,7 +107,7 @@ const COMMAND_SPECS: &[ProductCommandSpec] = &[
             audience: CommandAudience::User,
             title: "Model",
             description: "Show or switch the active LLM provider and model",
-            usage: "/model [<model> | set-provider <provider> [--model <model>]]",
+            usage: "/model [<model> | set <model> | set-provider <provider> [--model <model>]]",
         },
         parse: parse_model_command,
     },
