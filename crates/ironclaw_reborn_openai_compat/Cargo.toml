@@ -22,6 +22,7 @@ ironclaw_attachments = { path = "../ironclaw_attachments", version = "0.1.0" }
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version = "0.1.0" }
 ironclaw_product = { path = "../ironclaw_product", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

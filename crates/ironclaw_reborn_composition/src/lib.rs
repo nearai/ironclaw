@@ -117,9 +117,9 @@ pub use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
 };
-/// Channel-adapter and codec contracts re-exported for the assembling
-/// binary's [`ChannelExtensionBinding`] construction.
-pub use ironclaw_product::{ChannelAdapter, NormalizedInboundMessage};
+/// The channel-adapter contract the assembling binary implements is reached at
+/// its owner, `ironclaw_extension_contracts::channel_adapter` — WS1.4 deleted
+/// the re-export chain that gave it a second import path through here.
 pub use ironclaw_product::{
     ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
     RebornChannelConnectStrategy,

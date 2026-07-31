@@ -17,7 +17,8 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{ids::CapabilityId, tool_adapter::RestrictedEgress};
+use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
+use ironclaw_host_api::ids::CapabilityId;
 use tokio::sync::Mutex;
 
 use crate::active::{

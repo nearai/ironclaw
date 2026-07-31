@@ -57,6 +57,7 @@ use axum::http::{Request, StatusCode};
 use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
+use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
 use ironclaw_extension_host::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
@@ -67,8 +68,6 @@ use ironclaw_extension_host::extension_ingress::{
 use ironclaw_extension_host::ingress::{
     InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError,
 };
-use ironclaw_host_api::product_surface::ChannelInboundProductSurface;
-use ironclaw_host_api::product_surface::ProductSurfaceCaller;
 use ironclaw_host_api::{
     action::NetworkPolicy,
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
@@ -86,7 +85,7 @@ use ironclaw_loop_host::{
 };
 use ironclaw_outbound::OutboundDeliveryStatus;
 use ironclaw_product::{
-    AdapterInstallationId, ChannelAdapter, InboundOutcome, ParsedProductInbound, ProductAdapterId,
+    AdapterInstallationId, InboundOutcome, ParsedProductInbound, ProductAdapterId,
     ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProtocolAuthEvidence,
     UserMessagePayload, VerifiedInbound,
 };
@@ -94,6 +93,8 @@ use ironclaw_product::{
     ChannelConnectionNoticePolicy, ConversationBindingService, ResolveBindingRequest,
     RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
 };
+use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_reborn_composition::{ChannelHostAssemblyTestWiring, RebornRuntime};
 use ironclaw_threads::FinalizedAssistantMessageByRunRequest;
 use ironclaw_turns::{GetRunStateRequest, TurnCoordinator, TurnRunId, TurnScope, TurnStatus};

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::routing::{delete, get, post, put};
-use ironclaw_host_api::product_surface::{
+use ironclaw_product_contracts::surface::{
     BoundProductSurface, ProductSurface, ProductSurfaceCaller,
 };
 use serde::Serialize;

@@ -348,6 +348,31 @@ fn reborn_crate_dependency_boundaries_hold() {
             .collect::<Vec<_>>(),
     );
 
+    // PROPOSAL §11.2.3 contracts purity — `ironclaw_product_contracts`.
+    //
+    // The product tier's contract crate defines the `ProductSurface` membrane
+    // and the wire DTOs that cross it, so WebUI, the OpenAI-compatible adapter,
+    // the operator surface, `extension_host`, and channel packages can compile
+    // against the product boundary without compiling `ironclaw_product`
+    // (§6.1.3). It may name `ironclaw_host_api` and — the one-way street
+    // §6.1.3 grants explicitly, "for channel-facing DTO reuse" —
+    // `ironclaw_extension_contracts`. Never product, never operator, never the
+    // extension host. An allowlist, not a blocklist, for the same reason as the
+    // two tiers above: a list of today's offenders cannot stop tomorrow's.
+    let product_contracts_allowed = [
+        "ironclaw_product_contracts",
+        "ironclaw_extension_contracts",
+        "ironclaw_host_api",
+    ];
+    assert_no_normal_workspace_deps(
+        &dependencies,
+        "ironclaw_product_contracts",
+        workspace_ironclaw_crates(&dependencies)
+            .into_iter()
+            .filter(|name| !product_contracts_allowed.contains(name))
+            .collect::<Vec<_>>(),
+    );
+
     for rule in boundary_rules() {
         assert_no_normal_workspace_deps(&dependencies, rule.crate_name, rule.forbidden);
     }
@@ -387,6 +412,7 @@ fn reborn_contracts_crates_hold_no_framework_dependencies() {
         "ironclaw_extension_contracts",
         "ironclaw_host_api",
         "ironclaw_loop_contracts",
+        "ironclaw_product_contracts",
         "ironclaw_prompt_envelope",
     ];
 
@@ -655,6 +681,7 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
         "crates/ironclaw_host_api/src",
         "crates/ironclaw_host_runtime/src",
         "crates/ironclaw_product/src",
+        "crates/ironclaw_product_contracts/src",
         "crates/ironclaw_webui/src",
         "crates/ironclaw_telegram_extension/src",
         "crates/ironclaw_slack_extension/src",
@@ -757,6 +784,11 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             "ironclaw_first_party_extensions",
             "ironclaw_host_api",
             "ironclaw_operator",
+            // Same class again — the product tier's half of the neutral
+            // contracts, added by WS1.4. The `models` command speaks the
+            // operator LLM menu vocabulary (`operator_llm`) and the
+            // `extension` command's lifecycle projection now lives here.
+            "ironclaw_product_contracts",
             "ironclaw_reborn_composition",
             "ironclaw_reborn_config",
             "ironclaw_reborn_traces",
@@ -764,7 +796,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             "ironclaw_slack_extension",
             "ironclaw_telegram_extension",
         ],
-        "ironclaw should enter Reborn through ironclaw_reborn_composition (assembled runtime), ironclaw_operator (operator/admin control-plane), ironclaw_host_api (neutral provider DTO contracts), ironclaw_extension_contracts (the extension tier's half of those neutral contracts, since WS1.3), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), ironclaw_auth (auth-owned contracts used by binary-assembled first-party credential wiring), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract) and concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw should enter Reborn through ironclaw_reborn_composition (assembled runtime), ironclaw_operator (operator/admin control-plane), ironclaw_host_api (neutral provider DTO contracts), ironclaw_extension_contracts (the extension tier's half of those neutral contracts, since WS1.3), ironclaw_product_contracts (the product tier's half, since WS1.4), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), ironclaw_auth (auth-owned contracts used by binary-assembled first-party credential wiring), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract) and concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,
@@ -3087,6 +3119,44 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_product",
                 "ironclaw_reborn_composition",
+                "ironclaw_scripts",
+                "ironclaw_slack_extension",
+                "ironclaw_telegram_extension",
+                "ironclaw_turns",
+                "ironclaw_wasm",
+                "ironclaw_webui",
+            ],
+        },
+        BoundaryRule {
+            // The product-tier contract stays a leaf of the contracts family.
+            // The allowlist in `reborn_crate_dependency_boundaries_hold` is the
+            // authority; this rule names the edges whose appearance would be
+            // most damaging, so the failure message says which invariant broke:
+            // `ironclaw_product` (the `ProductSurface` *implementation* and all
+            // admission/delivery workflow — the single thing this crate exists
+            // so its collaborators never have to compile), `ironclaw_operator`
+            // and `ironclaw_extension_host` (the two crates whose ports it
+            // declares, so the inversion cannot silently re-invert), and
+            // `ironclaw_webui`/`ironclaw_host_ingress` (a transport edge would
+            // mean HTTP had reached the contracts tier).
+            crate_name: "ironclaw_product_contracts",
+            forbidden: vec![
+                "ironclaw_auth",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_extension_host",
+                "ironclaw_extensions",
+                "ironclaw_first_party_extensions",
+                "ironclaw_host_ingress",
+                "ironclaw_host_runtime",
+                "ironclaw_loop_host",
+                "ironclaw_mcp",
+                "ironclaw_operator",
+                "ironclaw_outbound",
+                "ironclaw_product",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_openai_compat",
+                "ironclaw_runner",
                 "ironclaw_scripts",
                 "ironclaw_slack_extension",
                 "ironclaw_telegram_extension",

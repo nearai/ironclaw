@@ -47,5 +47,8 @@ uuid = { version = "1", features = ["v4"] }
 # been removed pending the post-#3352 fixture port — re-add those when
 # the contract suite returns.
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0", features = ["test-support", "host-auth-mint"] }
+# The exported channel-adapter conformance suite moved here with
+# `ChannelAdapter` (WS1.4); `tests/channel_conformance.rs` runs it.
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0", features = ["test-support"] }
 tokio = { version = "1", features = ["macros", "rt", "sync"] }
 uuid = { version = "1", features = ["v4", "serde"] }

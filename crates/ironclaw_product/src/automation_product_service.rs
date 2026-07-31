@@ -7,10 +7,9 @@ use crate::{
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, TriggerRunThreadScope,
 };
-use ironclaw_host_api::{
-    Timestamp,
-    ids::ThreadId,
-    product_surface::{ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind},
+use ironclaw_host_api::{Timestamp, ids::ThreadId};
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
 use ironclaw_triggers::{
     ActiveHoldProjection, ActiveHoldReason, TriggerActiveRunLookup, TriggerError, TriggerId,

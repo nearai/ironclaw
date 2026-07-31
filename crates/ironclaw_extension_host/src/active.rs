@@ -8,15 +8,16 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::extension::{
     Extension, ExtensionContract, ExtensionInstanceId, ExtensionRuntimeIdentity,
 };
+use ironclaw_extension_contracts::tool_adapter::ToolAdapter;
 use ironclaw_extensions::ResolvedExtensionManifest;
 use ironclaw_host_api::{
     capability::CapabilityDescriptor, ids::CapabilityId, runtime::TrustClass,
-    tool_adapter::ToolAdapter, trust::RequestedTrustClass,
+    trust::RequestedTrustClass,
 };
-use ironclaw_product::ChannelAdapter;
 
 /// One activated extension's bound behavior plus its resolved contract.
 pub struct ActiveExtension {

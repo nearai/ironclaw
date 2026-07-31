@@ -1,8 +1,9 @@
 use super::*;
-use crate::product_adapter::auth::AuthRequirement;
-use crate::product_adapter::external::{
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentKind,
 };
+use ironclaw_host_api::product_adapter::auth::AuthRequirement;
 
 #[test]
 fn user_message_payload_round_trips_and_filters_requested_model() {
@@ -288,12 +289,12 @@ fn envelope_is_built_from_trusted_context() {
 
 #[test]
 fn channel_attachment_refs_must_match_descriptors_and_stay_transient() {
-    let descriptor = crate::product_adapter::external::ProductAttachmentDescriptor::new(
+    let descriptor = ironclaw_extension_contracts::external::ProductAttachmentDescriptor::new(
         "file-1",
         "application/pdf",
         Some("report.pdf".to_string()),
         Some(4),
-        crate::product_adapter::external::ProductAttachmentKind::Document,
+        ironclaw_extension_contracts::external::ProductAttachmentKind::Document,
     )
     .expect("descriptor");
     let source = ChannelAttachmentRef {
@@ -323,12 +324,12 @@ fn channel_attachment_refs_must_match_descriptors_and_stay_transient() {
 
     // Mismatched refs fail closed before any transfer authority exists.
     let mismatched = ChannelAttachmentRef {
-        descriptor: crate::product_adapter::external::ProductAttachmentDescriptor::new(
+        descriptor: ironclaw_extension_contracts::external::ProductAttachmentDescriptor::new(
             "other-file",
             "application/pdf",
             None,
             None,
-            crate::product_adapter::external::ProductAttachmentKind::Document,
+            ironclaw_extension_contracts::external::ProductAttachmentKind::Document,
         )
         .expect("descriptor"),
         vendor_ref: "other".to_string(),
@@ -469,8 +470,9 @@ fn rewritten_user_message_rejects_non_user_message_envelope() {
 
 #[test]
 fn failed_auth_cannot_build_context() {
-    let evidence =
-        ProtocolAuthEvidence::failed(crate::product_adapter::ProtocolAuthFailure::Missing);
+    let evidence = ProtocolAuthEvidence::failed(
+        ironclaw_host_api::product_adapter_error::ProtocolAuthFailure::Missing,
+    );
     assert!(
         TrustedInboundContext::from_verified_evidence(
             ProductAdapterId::new("telegram_v2").expect("valid"),

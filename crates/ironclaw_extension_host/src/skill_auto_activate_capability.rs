@@ -14,7 +14,6 @@ use ironclaw_host_api::{
     dispatch::RuntimeDispatchErrorKind,
     error::HostApiError,
     ids::CapabilityId,
-    product_surface::ProductSurfaceCaller,
     resource::{ResourceEstimate, ResourceProfile, ResourceUsage},
 };
 use ironclaw_host_runtime::{
@@ -22,6 +21,7 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 use ironclaw_product::{RebornSkillActionResponse, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID};
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 
 pub fn extend_builtin_first_party_package(
     mut package: ExtensionPackage,

@@ -40,14 +40,12 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
-use ironclaw_host_api::{
-    ids::{AgentId, ProjectId, TenantId, UserId},
-    product_surface::ProductSurface,
-};
 use ironclaw_host_ingress::{
     ProtectedRouteMount, PublicRouteDrains, PublicRouteMount, SplitRouteMount,
 };
+use ironclaw_product_contracts::surface::ProductSurface;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -59,8 +57,8 @@ use crate::webui_operator_auth::{
 };
 use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
 use crate::webui_ws_origin::{build_websocket_origin_state, enforce_websocket_origin};
-use ironclaw_host_api::product_surface::ProductSurfaceCaller;
 use ironclaw_product::mark_bearer_token_verified_for_tenant;
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use serde::Serialize;
 
 /// Default per-request body limit (14 MiB) — sized to cover ~10 MiB of

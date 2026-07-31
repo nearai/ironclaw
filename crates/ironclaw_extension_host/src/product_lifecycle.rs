@@ -21,7 +21,6 @@ use ironclaw_host_api::{
     http::RuntimeHttpEgress,
     ids::{ExtensionId, UserId, VendorId},
     path::VirtualPath,
-    product_surface::{ProductSurfaceCaller, ProductSurfaceError},
     resource::ResourceScope,
 };
 use ironclaw_product::{
@@ -31,6 +30,7 @@ use ironclaw_product::{
     LifecycleProductPayload, LifecycleProductResponse, LifecycleReadinessBlocker,
     LifecycleSearchExtensionSummary, ProductSurfaceFailure, RebornChannelConnectStrategy,
 };
+use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
 fn unzip_extension_bundle_for_product(

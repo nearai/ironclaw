@@ -27,22 +27,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::extension::ExtensionHostAssemblyConfig;
+use ironclaw_extension_contracts::tool_adapter::{
+    RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
+    ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
+};
 use ironclaw_extensions::{
     ExtensionInstallationError, ExtensionInstallationStorePort, ExtensionManifest,
     ExtensionPackage, ResolvedExtensionManifest,
 };
-use ironclaw_host_api::{
-    path::VirtualPath,
-    tool_adapter::{
-        RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
-        ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
-    },
-};
+use ironclaw_host_api::path::VirtualPath;
 use ironclaw_host_runtime::{ExtensionLaneToolBinder, ExtensionToolBindError};
 use ironclaw_product::{
-    ChannelAdapter, ChannelContext, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope,
-    VerifiedInbound,
+    ChannelContext, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, VerifiedInbound,
 };
 use ironclaw_resources::ResourceGovernor;
 

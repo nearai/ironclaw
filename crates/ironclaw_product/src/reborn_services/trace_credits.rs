@@ -8,10 +8,8 @@
 //! [`ironclaw_reborn_traces::contribution::trace_scope_key`]).
 
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{
-    ids::{TenantId, UserId},
-    product_surface::{ProductSurfaceCaller, ProductSurfaceError},
-};
+use ironclaw_host_api::ids::{TenantId, UserId};
+use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
 use ironclaw_reborn_traces::contribution::{
     AccountLoginLinkError, authorize_manual_review_hold_for_scope, fetch_account_traces,
     mint_account_login_link, read_trace_policy_for_scope, resolve_trace_credentials,

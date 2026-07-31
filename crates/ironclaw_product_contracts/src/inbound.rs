@@ -2,20 +2,21 @@
 
 use std::fmt;
 
-use crate::turn::{AcceptedMessageRef, TurnRunId};
 use chrono::{DateTime, Utc};
+use ironclaw_host_api::turn::{AcceptedMessageRef, TurnRunId};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-use crate::product_adapter::auth::{ProtocolAuthEvidence, VerifiedAuthClaim};
-use crate::product_adapter::channel_adapter::ChannelAttachmentRef;
-use crate::product_adapter::error::ProductAdapterError;
-use crate::product_adapter::external::{
+use crate::outbound::ProjectionCursor;
+use ironclaw_extension_contracts::channel_adapter::ChannelAttachmentRef;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
 };
-use crate::product_adapter::identity::{AdapterInstallationId, ProductAdapterId};
-use crate::product_adapter::outbound::ProjectionCursor;
-use crate::product_adapter::redaction::RedactedString;
+use ironclaw_host_api::product_adapter::auth::{ProtocolAuthEvidence, VerifiedAuthClaim};
+use ironclaw_host_api::product_adapter::identity::{AdapterInstallationId, ProductAdapterId};
+use ironclaw_host_api::product_adapter_error::ProductAdapterError;
+use ironclaw_host_api::product_adapter_error::RedactedString;
 
 const USER_MESSAGE_TEXT_MAX_BYTES: usize = 64 * 1024;
 const REQUESTED_MODEL_MAX_BYTES: usize = 256;
@@ -85,18 +86,6 @@ fn validate_bounded_string(
         )));
     }
     Ok(())
-}
-
-/// Why an adapter is forwarding a group/supergroup/channel message into the
-/// canonical pipeline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProductTriggerReason {
-    DirectChat,
-    BotMention,
-    ReplyToBot,
-    BotCommand,
-    LinkedThreadAction,
 }
 
 /// Optional host-side reclassification for a normalized channel message before
@@ -287,8 +276,8 @@ pub fn classify_channel_inbound_text(
     text: &str,
     trigger: ProductTriggerReason,
 ) -> Option<ChannelInboundClassification> {
-    match crate::product_adapter::interaction_commands::parse_interaction_resolution_text(
-        crate::product_adapter::interaction_commands::strip_wrapping_inline_code(text),
+    match crate::interaction_commands::parse_interaction_resolution_text(
+        crate::interaction_commands::strip_wrapping_inline_code(text),
         trigger,
     ) {
         Ok(Some(ProductInboundPayload::ApprovalResolution(payload))) => {
@@ -765,7 +754,7 @@ impl TrustedInboundContext {
                 .claim()
                 .cloned()
                 .ok_or(ProductAdapterError::Authentication(
-                    crate::product_adapter::ProtocolAuthFailure::Missing,
+                    ironclaw_host_api::product_adapter_error::ProtocolAuthFailure::Missing,
                 ))?;
         let source_channel = ProductSourceChannel::new(adapter_id.as_str())?;
         Ok(Self {
@@ -789,7 +778,7 @@ impl TrustedInboundContext {
                 .claim()
                 .cloned()
                 .ok_or(ProductAdapterError::Authentication(
-                    crate::product_adapter::ProtocolAuthFailure::Missing,
+                    ironclaw_host_api::product_adapter_error::ProtocolAuthFailure::Missing,
                 ))?;
         Ok(Self {
             adapter_id,

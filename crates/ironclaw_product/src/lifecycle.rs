@@ -7,15 +7,13 @@
 
 use async_trait::async_trait;
 use ironclaw_extension_contracts::state::InstallationState;
-use ironclaw_host_api::{
-    ids::{AgentId, ProjectId, TenantId, UserId},
-    product_surface::{ProductSurfaceError, ProductSurfaceErrorCode},
-};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_product_contracts::surface::{ProductSurfaceError, ProductSurfaceErrorCode};
 use serde::Serialize;
 
 use crate::ProductCommandContext;
 
-pub use ironclaw_extension_contracts::package_lifecycle::{
+pub use ironclaw_product_contracts::package_lifecycle::{
     ChannelConnectionRequirement, LifecycleBlockerRef, LifecycleChannelDirections,
     LifecycleCommandKind, LifecycleExtensionCredentialRequirement,
     LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,

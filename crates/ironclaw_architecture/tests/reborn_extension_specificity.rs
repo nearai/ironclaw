@@ -1080,19 +1080,19 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // shrink as the old composition-hosted tests become manifest-driven.
     ("crates/ironclaw_extension_host/Cargo.toml", "slack"),
     (
-        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
+        "crates/ironclaw_extension_contracts/src/auth_prompt.rs",
         "github",
     ),
     (
-        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
+        "crates/ironclaw_extension_contracts/src/auth_prompt.rs",
         "google",
     ),
     (
-        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
+        "crates/ironclaw_extension_contracts/src/auth_prompt.rs",
         "notion",
     ),
     (
-        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
+        "crates/ironclaw_extension_contracts/src/auth_prompt.rs",
         "telegram",
     ),
     ("crates/ironclaw_product/Cargo.toml", "telegram"),

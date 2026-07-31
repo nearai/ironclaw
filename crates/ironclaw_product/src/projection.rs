@@ -1,3 +1,4 @@
+use ironclaw_product_contracts::projection::ProjectionStream;
 // arch-exempt: large_file, mechanical InMemoryOutboundStateStore -> OutboundStateStore<InMemoryBackend> §4.3 store consolidation, no logic change, plan #6168
 use std::{
     sync::{Arc, atomic::AtomicU64},
@@ -9,7 +10,7 @@ use crate::{
     CapabilityActivityViewInput, ExternalActorRef, ExternalConversationRef, ProductAdapterError,
     ProductAdapterId, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
     ProductProjectionItem, ProductProjectionState, ProductSurfaceRejectionKind,
-    ProjectionCursor as ProductProjectionCursor, ProjectionStream, ProjectionStreamSubscription,
+    ProjectionCursor as ProductProjectionCursor, ProjectionStreamSubscription,
     ProjectionSubscriptionRequest, RedactedString,
 };
 use async_trait::async_trait;

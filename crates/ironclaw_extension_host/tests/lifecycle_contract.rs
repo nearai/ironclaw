@@ -15,6 +15,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::tool_adapter::ToolAdapter;
 use ironclaw_extension_host::test_support::{
     FakeChannelAdapter, FakeEgressFactory, FakeLoader, RecordingDrain, mcp_manifest,
     tool_and_channel_manifest,
@@ -23,10 +25,7 @@ use ironclaw_extension_host::{
     ExtensionBindings, ExtensionHost, ExtensionHostDeps, InstallationRecord,
     InstallationRecordStore, LifecycleError, RehydratedInstallationRecordStore,
 };
-use ironclaw_host_api::{
-    ids::ProductKind, invocation::InvocationOrigin, tool_adapter::ToolAdapter,
-};
-use ironclaw_product::ChannelAdapter;
+use ironclaw_host_api::{ids::ProductKind, invocation::InvocationOrigin};
 
 struct Harness {
     host: ExtensionHost,
@@ -375,10 +374,12 @@ async fn snapshot_resolver_serves_activated_tools_and_stops_after_deactivate() {
 #[tokio::test]
 async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
     use ironclaw_capabilities::ToolResolver;
+    use ironclaw_extension_contracts::tool_adapter::{
+        ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
+    };
     use ironclaw_host_api::{
         dispatch::DispatchError,
         ids::{CapabilityId, SecretHandle},
-        tool_adapter::{ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult},
     };
 
     struct AuthGatingAdapter;

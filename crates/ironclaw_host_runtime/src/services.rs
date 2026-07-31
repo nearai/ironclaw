@@ -554,7 +554,7 @@ where
 
     /// The binder the extension host's loaders use to prebind WASM / hosted
     /// MCP / first-party-registry packages to their runtime lanes as
-    /// [`ironclaw_host_api::tool_adapter::ToolAdapter`]s. The lanes stay host-private.
+    /// [`ironclaw_extension_contracts::tool_adapter::ToolAdapter`]s. The lanes stay host-private.
     pub fn extension_lane_tool_binder(&self) -> ExtensionLaneToolBinder {
         ExtensionLaneToolBinder::new(Arc::new(ServiceLanePackageBinder {
             executor: self.runtime_lane_executor(),

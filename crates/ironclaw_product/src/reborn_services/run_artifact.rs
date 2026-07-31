@@ -24,7 +24,7 @@ use super::{
     RebornViewDescriptor, RebornViewProvider, bounded_log_query, map_thread_error,
     parse_run_id_field, parse_thread_id_field,
 };
-use ironclaw_host_api::product_surface::{
+use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
 };
 

@@ -31,15 +31,21 @@
 //!   prevent.
 #![warn(unreachable_pub)]
 
+pub mod auth_prompt;
 pub mod channel;
+pub mod channel_adapter;
 pub mod channel_identity;
+pub mod egress;
 pub mod extension;
+pub mod external;
 pub mod memory;
-pub mod package_lifecycle;
 pub mod preference_target;
 pub mod recipe;
 pub mod state;
 pub mod surface;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+pub mod tool_adapter;
 
 // There is deliberately no flat prelude and no cross-module re-export here.
 // Every contract is reached through the module that owns it —

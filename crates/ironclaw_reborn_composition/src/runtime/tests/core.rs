@@ -523,9 +523,6 @@ use ironclaw_host_api::{
         ActivityId, AgentId, ApprovalRequestId, CapabilityId, InvocationId, TenantId, ThreadId,
         UserId,
     },
-    product_surface::{
-        ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    },
     resolution::Resolution,
     resource::ResourceScope,
     runtime_policy::{
@@ -556,6 +553,9 @@ use ironclaw_product::{
     RebornViewPage, RebornViewQuery, SUBMIT_TURN_COMMAND, approval_gate_ref,
 };
 use ironclaw_product::{ProductOutboundPayload, ProductProjectionItem};
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+};
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
     AppendToolResultReferenceRequest, EnsureThreadRequest, LoadContextMessagesRequest, MessageKind,
@@ -5290,7 +5290,7 @@ async fn production_channel_host_lands_attachment_with_read_write_mount() {
 }
 
 async fn query_webui_extension_setup(
-    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
+    api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
     package_id: &str,
 ) -> RebornSetupExtensionResponse {
@@ -5309,7 +5309,7 @@ async fn query_webui_extension_setup(
 }
 
 async fn invoke_product_command<T, O>(
-    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
+    api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
     command: ProductSurfaceCommandDescriptor<T, O>,
     input: T,
@@ -5319,10 +5319,10 @@ where
     O: serde::de::DeserializeOwned,
 {
     let input = serde_json::to_value(input).map_err(ProductSurfaceError::internal_from)?;
-    let response = ironclaw_host_api::product_surface::ProductSurface::invoke(
+    let response = ironclaw_product_contracts::surface::ProductSurface::invoke(
         api,
         caller,
-        ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
             operation_id: command.capability_id()?,
             input,
             activity_id: ActivityId::new(),
@@ -5333,7 +5333,7 @@ where
 }
 
 async fn invoke_product_capability<T>(
-    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
+    api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
     capability_id: &str,
     input: T,
@@ -5342,10 +5342,10 @@ where
     T: serde::Serialize,
 {
     let input = serde_json::to_value(input).map_err(ProductSurfaceError::internal_from)?;
-    let response = ironclaw_host_api::product_surface::ProductSurface::invoke(
+    let response = ironclaw_product_contracts::surface::ProductSurface::invoke(
         api,
         caller,
-        ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
             operation_id: CapabilityId::new(capability_id).expect("capability id"),
             input,
             activity_id: ActivityId::new(),
@@ -5356,14 +5356,14 @@ where
 }
 
 async fn query_product_surface_page(
-    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
+    api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
     query: RebornViewQuery,
 ) -> Result<RebornViewPage, ProductSurfaceError> {
-    let page = ironclaw_host_api::product_surface::ProductSurface::query(
+    let page = ironclaw_product_contracts::surface::ProductSurface::query(
         api,
         caller,
-        ironclaw_host_api::product_surface::ProductSurfaceQueryRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceQueryRequest {
             view_id: query.view_id,
             input: query.params,
             cursor: query.cursor,
@@ -5383,14 +5383,14 @@ async fn query_product_surface_page(
 }
 
 async fn stream_product_events(
-    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
+    api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
     request: RebornStreamEventsRequest,
 ) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
-    let response = ironclaw_host_api::product_surface::ProductSurface::stream_events(
+    let response = ironclaw_product_contracts::surface::ProductSurface::stream_events(
         api,
         caller,
-        ironclaw_host_api::product_surface::ProductSurfaceStreamRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceStreamRequest {
             stream_id: Some(request.thread_id),
             after_cursor: request
                 .after_cursor
@@ -5408,7 +5408,7 @@ async fn stream_product_events(
 }
 
 async fn submit_webui_extension_setup(
-    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
+    api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
     package_id: &str,
     request: ProductSetupExtensionRequest,
@@ -5437,7 +5437,7 @@ async fn submit_webui_extension_setup(
 }
 
 async fn install_webui_extension_for_setup(
-    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
+    api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
     package_id: &str,
 ) {

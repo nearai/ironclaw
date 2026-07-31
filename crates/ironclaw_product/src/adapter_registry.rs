@@ -11,6 +11,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use ironclaw_extension_contracts::egress::{DeclaredEgressTarget, EgressCredentialHandle};
 use ironclaw_extension_contracts::surface::CapabilitySurfaceKind;
 use ironclaw_extensions::{
     ExtensionInstallationError, ExtensionManifestRecord, ExtensionManifestV2,
@@ -19,8 +20,8 @@ use ironclaw_extensions::{
     ManifestSectionPath, ManifestSource, ManifestV2Error,
 };
 use ironclaw_host_api::product_adapter::{
-    AuthRequirement, DeclaredEgressTarget, EgressCredentialHandle, ProductAdapterCapabilities,
-    ProductAdapterId, ProductCapabilityFlag, ProductSurfaceKind,
+    AuthRequirement, ProductAdapterCapabilities, ProductAdapterId, ProductCapabilityFlag,
+    ProductSurfaceKind,
 };
 use ironclaw_host_api::{
     host_port::HostPortCatalog,

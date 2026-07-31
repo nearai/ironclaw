@@ -52,7 +52,6 @@ use ironclaw_host_api::{
         InvocationId, TenantId, ThreadId, UserId,
     },
     mount::MountView,
-    product_surface::ProductSurface,
     resource::ResourceScope,
     scope::Principal,
 };
@@ -69,7 +68,6 @@ use ironclaw_processes::{
     ProcessConcurrencyClass, ProcessConcurrencyLimits, ProcessGateOwnerMatch, ProcessGateQuery,
     ProcessGateQuerySource, ProcessLifecycleLookupSource, ProcessSuspensionKind,
 };
-use ironclaw_product::ProjectionStream;
 use ironclaw_product::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
     ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
@@ -77,6 +75,8 @@ use ironclaw_product::{
     LifecycleProductSurfaceContext, OutboundPreferencesProductService,
     PersistentApprovalGranteeResolver, RunStateApprovalInteractionReadModel,
 };
+use ironclaw_product_contracts::projection::ProjectionStream;
+use ironclaw_product_contracts::surface::ProductSurface;
 use ironclaw_runner::loop_exit_applier::{
     ApprovalGateEvidenceStore, AwaitDependentRunEvidenceStore, ThreadCheckpointLoopExitEvidencePort,
 };

@@ -5,7 +5,6 @@ use ironclaw_extension_contracts::state::InstallationState;
 use ironclaw_host_api::{
     http::RuntimeHttpEgress,
     ids::{ExtensionId, InvocationId, UserId},
-    product_surface::ProductSurfaceError,
     resource::ResourceScope,
 };
 use ironclaw_product::{
@@ -14,6 +13,7 @@ use ironclaw_product::{
     LifecycleProductService, LifecycleReadinessBlocker, LifecycleSkillSource,
     LifecycleSkillSummary, ProductSurfaceFailure, lifecycle_product_surface_error,
 };
+use ironclaw_product_contracts::surface::ProductSurfaceError;
 #[cfg(test)]
 use ironclaw_skills::build_scoped_skill_management_port;
 use ironclaw_skills::{

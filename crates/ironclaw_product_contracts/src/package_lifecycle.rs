@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use ironclaw_host_api::error::HostApiError;
 
-use crate::{
+use ironclaw_extension_contracts::{
     channel::ChannelPresentation,
     state::{InstallationState, LifecyclePublicState},
     surface::CapabilitySurfaceKind,

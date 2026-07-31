@@ -17,20 +17,22 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
 use ironclaw_extension_host::ingress::{
     ExtensionIngressRouter, InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError,
     IngressConfigurationPort, IngressPortError, IngressSecretsPort, VerificationCandidate,
 };
-use ironclaw_host_api::{ids::SecretHandle, product_surface::ChannelInboundProductSurface};
+use ironclaw_host_api::ids::SecretHandle;
 use ironclaw_product::{
-    AdapterInstallationId, ExternalConversationRef, ExternalEventId, NormalizedInboundMessage,
-    ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductSourceChannel,
-    ProtocolAuthEvidence, classify_channel_inbound_text,
+    AdapterInstallationId, ExternalConversationRef, ExternalEventId, ProductAdapterId,
+    ProductInboundAck, ProductInboundEnvelope, ProductSourceChannel, ProtocolAuthEvidence,
+    classify_channel_inbound_text,
 };
 use ironclaw_product::{
     ChannelInboundSurfaceOutcome, ChannelInboundSurfaceRejectedAdmission,
     ChannelInboundSurfaceRequest,
 };
+use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
 use tokio::task::JoinSet;
 
 use crate::channel_pairing::ChannelPairingConsumeOutcome;
@@ -855,12 +857,13 @@ mod serve_mount {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use ironclaw_host_api::ids::UserId;
-    use ironclaw_host_api::tool_adapter::{
+    use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+    use ironclaw_extension_contracts::tool_adapter::{
         RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
     };
+    use ironclaw_host_api::ids::UserId;
     use ironclaw_product::{
-        AuthResolutionPayload, AuthResolutionResult, ChannelAdapter, ChannelAttachmentRef,
+        AuthResolutionPayload, AuthResolutionResult, ChannelAttachmentRef,
         ChannelInboundClassification, ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
         ExternalActorRef, ExternalConversationRef, ExternalEventId, InboundCommandPayload,
         ParsedProductInbound, ProductAttachmentDescriptor, ProductAttachmentKind,
@@ -953,7 +956,7 @@ mod tests {
             &self,
             request: ChannelInboundSurfaceRequest,
             _channel_adapter: Arc<dyn ChannelAdapter>,
-            _channel_egress: Arc<dyn ironclaw_host_api::tool_adapter::RestrictedEgress>,
+            _channel_egress: Arc<dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress>,
         ) -> ChannelInboundSurfaceOutcome {
             self.transfer_submissions.fetch_add(1, Ordering::SeqCst);
             self.admit_channel_inbound(request).await

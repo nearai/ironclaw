@@ -33,11 +33,6 @@ use ironclaw_host_api::{
         ActivityId, AgentId, CapabilityId, ExtensionId, GateRef, InvocationId, ProjectId,
         ResultRef, TenantId, ThreadId, UserId,
     },
-    product_surface::{
-        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-        ProductSurfaceErrorKind, ProductSurfaceEventSubscription, ProductSurfaceStreamResponse,
-        ProductSurfaceValidationCode,
-    },
     resolution::{
         Blocked, GateWaypoint, Outcome, OutcomeRefs, Resolution, ResultPreviewMeta, ToolVerdict,
     },
@@ -117,6 +112,11 @@ use ironclaw_product::{
     ExternalConversationRef, FinalReplyView, ProductAdapterId, ProductOutboundEnvelope,
     ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
     ProgressKind, ProgressUpdateView, ProjectionCursor,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ProductSurfaceEventSubscription, ProductSurfaceStreamResponse,
+    ProductSurfaceValidationCode,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -1741,9 +1741,11 @@ impl ProductSurface for StubServices {
     async fn invoke(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse, ProductSurfaceError>
-    {
+        request: ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
+        ProductSurfaceError,
+    > {
         if let Some(call_id) = ProductSurfaceCallId::parse(request.operation_id.as_str()) {
             let output = self
                 .record_product_surface_call(
@@ -1752,7 +1754,9 @@ impl ProductSurface for StubServices {
                 )
                 .await?
                 .into_value()?;
-            return Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output });
+            return Ok(
+                ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output },
+            );
         }
 
         let output = StubServices::invoke(
@@ -1764,14 +1768,14 @@ impl ProductSurface for StubServices {
         )
         .await?;
         let output = serde_json::to_value(output).map_err(ProductSurfaceError::internal_from)?;
-        Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
+        Ok(ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output })
     }
 
     async fn query(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+        request: ironclaw_product_contracts::surface::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_product_contracts::surface::ProductSurfaceQueryPage, ProductSurfaceError>
     {
         let page = StubServices::query(
             self,
@@ -1784,7 +1788,7 @@ impl ProductSurface for StubServices {
         )
         .await?;
         Ok(
-            ironclaw_host_api::product_surface::ProductSurfaceQueryPage {
+            ironclaw_product_contracts::surface::ProductSurfaceQueryPage {
                 items: vec![page.payload],
                 next_cursor: page.next_cursor,
             },
@@ -1794,9 +1798,11 @@ impl ProductSurface for StubServices {
     async fn stream_events(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceStreamResponse, ProductSurfaceError>
-    {
+        request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
+        ProductSurfaceError,
+    > {
         let thread_id = request.stream_id.ok_or_else(|| {
             ProductSurfaceError::validation("stream_id", ProductSurfaceValidationCode::MissingField)
         })?;
@@ -1857,7 +1863,7 @@ impl ProductSurface for StubServices {
             None
         };
         Ok(
-            ironclaw_host_api::product_surface::ProductSurfaceStreamResponse {
+            ironclaw_product_contracts::surface::ProductSurfaceStreamResponse {
                 events,
                 next_cursor: None,
                 subscription,

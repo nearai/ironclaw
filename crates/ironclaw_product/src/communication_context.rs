@@ -6,12 +6,12 @@ use crate::{
     RebornOutboundDeliveryTargetStatus,
 };
 use ironclaw_extension_contracts::{state::InstallationState, surface::CapabilitySurfaceKind};
-use ironclaw_host_api::product_surface::ProductSurfaceCaller;
 use ironclaw_host_api::turn::{TurnActor, TurnScope};
 use ironclaw_loop_contracts::{
     CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
     ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
 };
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use tokio::join;
 use tokio::time::timeout;
 
@@ -236,16 +236,13 @@ mod tests {
     };
     use async_trait::async_trait;
     use ironclaw_extension_contracts::{state::InstallationState, surface::CapabilitySurfaceKind};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
     use ironclaw_host_api::turn::{TurnActor, TurnScope};
-    use ironclaw_host_api::{
-        ids::{AgentId, ProjectId, TenantId, UserId},
-        product_surface::{
-            ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-            ProductSurfaceErrorKind,
-        },
-    };
     use ironclaw_loop_contracts::{
         CommunicationContextProvider, ConnectedChannelsState, DeliveryTargetState,
+    };
+    use ironclaw_product_contracts::surface::{
+        ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     };
 
     use super::RuntimeCommunicationContextProvider;

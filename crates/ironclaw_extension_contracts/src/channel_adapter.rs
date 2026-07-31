@@ -15,13 +15,31 @@
 
 use async_trait::async_trait;
 
-use crate::attachment::{InboundAttachment, WorkspaceFile};
-use crate::tool_adapter::RestrictedEgress;
+use ironclaw_host_api::attachment::{InboundAttachment, WorkspaceFile};
+use serde::{Deserialize, Serialize};
 
-use crate::product_adapter::external::{
+use crate::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
 };
-use crate::product_adapter::inbound::ProductTriggerReason;
+use crate::tool_adapter::RestrictedEgress;
+
+/// Why an adapter is forwarding a group/supergroup/channel message into the
+/// canonical pipeline.
+///
+/// Stamped by the adapter on every [`NormalizedInboundMessage`], and carried
+/// unchanged into the product-tier inbound DTOs
+/// (`ironclaw_product_contracts::inbound`) that classify it. It lives on this
+/// side of the membrane because the adapter is what decides it: the product
+/// tier may depend on the extension tier, never the reverse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductTriggerReason {
+    DirectChat,
+    BotMention,
+    ReplyToBot,
+    BotCommand,
+    LinkedThreadAction,
+}
 
 /// A channel adapter: protocol behavior for one extension's channel surface.
 #[async_trait]
@@ -273,7 +291,7 @@ pub enum OutboundPart {
     /// unchanged; each channel adapter owns native rendering while preserving
     /// the same recipe materialization WebUI consumes.
     AuthPrompt {
-        view: Box<crate::product_adapter::AuthPromptView>,
+        view: Box<crate::auth_prompt::AuthPromptView>,
         direct_message: bool,
     },
     /// Remove an earlier delivery in the target conversation (the `Cleanup`
@@ -372,7 +390,7 @@ impl ImmediateResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::product_adapter::ProductAttachmentKind;
+    use crate::external::ProductAttachmentKind;
 
     #[test]
     fn channel_attachment_ref_debug_redacts_the_vendor_reference() {

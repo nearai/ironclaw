@@ -22,10 +22,10 @@ use ironclaw_auth::{AuthProviderId, CredentialAccountId, CredentialAccountServic
 use ironclaw_auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
 use ironclaw_host_api::{
     ids::{AgentId, InvocationId, ProjectId, TenantId, UserId},
-    product_surface::{ProductSurfaceCaller, ProductSurfaceError},
     resource::ResourceScope,
 };
 use ironclaw_product::rejecting_product_surface_error;
+use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
 use ironclaw_webui::{
     ProductAuthRouteState, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
     product_auth_route_mount, webui_v2_app,
@@ -74,21 +74,23 @@ impl RebornAuthContinuationDispatcher for NoopAuthDispatcher {
 struct UnusedServices;
 
 #[async_trait]
-impl ironclaw_host_api::product_surface::ProductSurface for UnusedServices {
+impl ironclaw_product_contracts::surface::ProductSurface for UnusedServices {
     async fn invoke(
         &self,
         _caller: ProductSurfaceCaller,
-        _request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse, ProductSurfaceError>
-    {
+        _request: ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
+        ProductSurfaceError,
+    > {
         Err(rejecting_product_surface_error())
     }
 
     async fn query(
         &self,
         _caller: ProductSurfaceCaller,
-        _request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+        _request: ironclaw_product_contracts::surface::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_product_contracts::surface::ProductSurfaceQueryPage, ProductSurfaceError>
     {
         Err(rejecting_product_surface_error())
     }
@@ -96,9 +98,11 @@ impl ironclaw_host_api::product_surface::ProductSurface for UnusedServices {
     async fn stream_events(
         &self,
         _caller: ProductSurfaceCaller,
-        _request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceStreamResponse, ProductSurfaceError>
-    {
+        _request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
+        ProductSurfaceError,
+    > {
         Err(rejecting_product_surface_error())
     }
 }

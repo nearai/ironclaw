@@ -16,12 +16,11 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_extension_contracts::channel::{ChannelIngressDescriptor, ChannelIngressMethod};
+use ironclaw_extension_contracts::channel_adapter::{ChannelAdapter, NormalizedInboundMessage};
+use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use ironclaw_extensions::ResolvedExtensionManifest;
-use ironclaw_host_api::{ids::SecretHandle, tool_adapter::RestrictedEgress};
-use ironclaw_product::{
-    ChannelAdapter, ChannelError, InboundBatchFragment, InboundOutcome, NormalizedInboundMessage,
-    VerifiedInbound,
-};
+use ironclaw_host_api::ids::SecretHandle;
+use ironclaw_product::{ChannelError, InboundBatchFragment, InboundOutcome, VerifiedInbound};
 use sha2::{Digest, Sha256};
 
 use crate::active::ActiveExtension;

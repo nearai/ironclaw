@@ -14,11 +14,18 @@
 //! parsed inbound with the explicit `NoOp` payload variant, NOT an
 //! out-of-band `None` path.
 
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelAttachmentRef, InboundBatchFragment, NormalizedInboundMessage, ProductTriggerReason,
+};
+use ironclaw_extension_contracts::external::{
+    ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
+    ProductAttachmentKind,
+};
 use ironclaw_host_api::product_adapter::{
-    AdapterInstallationId, ChannelAttachmentRef, ExternalActorRef, ExternalConversationRef,
-    ExternalEventId, InboundBatchFragment, InboundCommandPayload, NormalizedInboundMessage,
-    ParsedProductInbound, ProductAdapterError, ProductAttachmentDescriptor, ProductAttachmentKind,
-    ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence, UserMessagePayload,
+    AdapterInstallationId, ProductAdapterError, ProtocolAuthEvidence,
+};
+use ironclaw_product_contracts::inbound::{
+    InboundCommandPayload, ParsedProductInbound, ProductInboundPayload, UserMessagePayload,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -653,14 +660,16 @@ fn build_payload(
     // shared delivery driver posts to this chat advertises these commands,
     // so they must resolve gates here instead of bouncing off a busy thread
     // as plain user messages (Ben's 2026-07-17 phantom-affordance loop).
-    if let Some(resolution) = ironclaw_host_api::product_adapter::parse_interaction_resolution_text(
-        ironclaw_host_api::product_adapter::strip_wrapping_inline_code(&text),
-        trigger,
-    )
-    .map_err(|err| PayloadParseError::InvalidExternalRef {
-        kind: "interaction_resolution_payload",
-        reason: err.to_string(),
-    })? {
+    if let Some(resolution) =
+        ironclaw_product_contracts::interaction_commands::parse_interaction_resolution_text(
+            ironclaw_product_contracts::interaction_commands::strip_wrapping_inline_code(&text),
+            trigger,
+        )
+        .map_err(|err| PayloadParseError::InvalidExternalRef {
+            kind: "interaction_resolution_payload",
+            reason: err.to_string(),
+        })?
+    {
         return Ok(resolution);
     }
     let attachments = collect_attachments(&message)?;
@@ -1387,7 +1396,7 @@ mod tests {
     fn command_arguments_exceeding_byte_limit_rejected_via_shared_validation() {
         // Defense-in-depth for the same fix: synthesize a command with
         // arguments larger than `COMMAND_ARGUMENTS_MAX_BYTES` (64 KiB
-        // per `ironclaw_host_api::product_adapter::inbound`) and assert the
+        // per `ironclaw_product_contracts::inbound`) and assert the
         // shared validator rejects it through `InboundCommandPayload::new`.
         // 70_000 bytes is comfortably over the 64 * 1024 = 65_536 limit.
         let oversized = "a".repeat(70_000);
@@ -1921,7 +1930,7 @@ mod tests {
     /// parse treated that reply as a plain `UserMessage` — it bounced off
     /// the busy thread with the same hint, forever. The advertised
     /// interaction grammar (shared with Slack via
-    /// `ironclaw_host_api::product_adapter::interaction_commands`) must parse here.
+    /// `ironclaw_product_contracts::interaction_commands`) must parse here.
     #[test]
     fn dm_auth_deny_command_parses_to_auth_resolution_not_user_message() {
         let payload = br#"{
@@ -1937,7 +1946,7 @@ mod tests {
         let parsed =
             parse_telegram_update(payload, &evidence(), &install_id(), &policy()).expect("parses");
         match parsed.payload {
-            ironclaw_host_api::product_adapter::ProductInboundPayload::AuthResolution(
+            ironclaw_product_contracts::inbound::ProductInboundPayload::AuthResolution(
                 resolution,
             ) => {
                 assert_eq!(resolution.auth_request_ref, "gate:auth-abc123");
@@ -1964,7 +1973,7 @@ mod tests {
         assert!(
             matches!(
                 parsed.payload,
-                ironclaw_host_api::product_adapter::ProductInboundPayload::ApprovalResolution(_)
+                ironclaw_product_contracts::inbound::ProductInboundPayload::ApprovalResolution(_)
             ),
             "got {:?}",
             parsed.payload
@@ -1990,7 +1999,7 @@ mod tests {
         assert!(
             matches!(
                 parsed.payload,
-                ironclaw_host_api::product_adapter::ProductInboundPayload::UserMessage(_)
+                ironclaw_product_contracts::inbound::ProductInboundPayload::UserMessage(_)
             ),
             "got {:?}",
             parsed.payload

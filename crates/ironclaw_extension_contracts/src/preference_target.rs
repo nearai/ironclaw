@@ -9,7 +9,9 @@
 //! callers are the generic delivery paths above them.
 
 use ironclaw_host_api::ids::{AgentId, ProjectId};
-use ironclaw_host_api::product_adapter::{AdapterInstallationId, ExternalConversationRef};
+use ironclaw_host_api::product_adapter::AdapterInstallationId;
+
+use crate::external::ExternalConversationRef;
 use ironclaw_host_api::turn::ReplyTargetBindingRef;
 
 /// Everything the host knows when encoding a preference reply-target

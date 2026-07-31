@@ -25,7 +25,6 @@ use ironclaw_auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices}
 use ironclaw_extension_contracts::state::LifecyclePublicState;
 use ironclaw_host_api::{
     ids::{AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId},
-    product_surface::{ProductSurfaceCaller, ProductSurfaceError},
     resource::ResourceScope,
 };
 use ironclaw_product::{
@@ -33,6 +32,7 @@ use ironclaw_product::{
     RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
     RebornExtensionSetupSecret, RebornSetupExtensionResponse, rejecting_product_surface_error,
 };
+use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
 use ironclaw_webui::{
     ProductAuthRouteState, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig,
     product_auth_route_mount, webui_v2_app,
@@ -274,25 +274,27 @@ impl UnusedServices {
 }
 
 #[async_trait]
-impl ironclaw_host_api::product_surface::ProductSurface for UnusedServices {
+impl ironclaw_product_contracts::surface::ProductSurface for UnusedServices {
     async fn invoke(
         &self,
         _caller: ProductSurfaceCaller,
-        _request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse, ProductSurfaceError>
-    {
+        _request: ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
+        ProductSurfaceError,
+    > {
         Err(rejecting_product_surface_error())
     }
 
     async fn query(
         &self,
         _caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+        request: ironclaw_product_contracts::surface::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_product_contracts::surface::ProductSurfaceQueryPage, ProductSurfaceError>
     {
         match request.view_id.as_str() {
             id if id == EXTENSIONS_VIEW.id => Ok(
-                ironclaw_host_api::product_surface::ProductSurfaceQueryPage {
+                ironclaw_product_contracts::surface::ProductSurfaceQueryPage {
                     items: vec![
                         serde_json::to_value(RebornExtensionListResponse {
                             extensions: self.installed_extensions.clone(),
@@ -312,7 +314,7 @@ impl ironclaw_host_api::product_surface::ProductSurface for UnusedServices {
                     LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id)
                         .map_err(ProductSurfaceError::internal_from)?;
                 Ok(
-                    ironclaw_host_api::product_surface::ProductSurfaceQueryPage {
+                    ironclaw_product_contracts::surface::ProductSurfaceQueryPage {
                         items: vec![
                             serde_json::to_value(RebornSetupExtensionResponse {
                                 package_ref,
@@ -351,9 +353,11 @@ impl ironclaw_host_api::product_surface::ProductSurface for UnusedServices {
     async fn stream_events(
         &self,
         _caller: ProductSurfaceCaller,
-        _request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceStreamResponse, ProductSurfaceError>
-    {
+        _request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
+        ProductSurfaceError,
+    > {
         Err(rejecting_product_surface_error())
     }
 }
