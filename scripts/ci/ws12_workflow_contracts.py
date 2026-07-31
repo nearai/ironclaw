@@ -81,7 +81,12 @@ UNCONDITIONAL_SKIP = re.compile(
 # So the pin lives here: extract the `changes`-job regex from the workflow text
 # and replay real paths through it, including a crate nested one level down.
 E2E_WORKFLOW = ".github/workflows/reborn-e2e.yml"
-E2E_SCOPE_REGEX = re.compile(r"grep -Eq '(\^\([^']+\))'")
+# `grep -Eq` and its pattern may be separated by an escaped-newline
+# continuation — a normal way to keep a long guard readable. A guardrail that
+# only understands the one-line form reports a perfectly good guard as missing
+# and fails the build for a formatting choice (.claude/rules/review-discipline.md,
+# "Guardrails are code": checks must handle multiline syntax).
+E2E_SCOPE_REGEX = re.compile(r"grep -Eq(?:[ \t]+|[ \t]*\\\n[ \t]*)'(\^\([^']+\))'")
 E2E_PATHS_GLOB = '- "crates/**"'
 
 # (path, must_be_in_scope)

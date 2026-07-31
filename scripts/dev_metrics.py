@@ -18,9 +18,11 @@ Everything is a *trend* tool: watch direction, not absolutes.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import pathlib
+import shlex
 import statistics
 import subprocess
 import sys
@@ -253,6 +255,22 @@ sys.path.insert(
 from crate_tree import crate_directories, crate_directory  # noqa: E402
 
 
+@functools.lru_cache(maxsize=None)
+def _crate_dirs() -> tuple[str, ...]:
+    """Crate inventory, walked once per process.
+
+    `tier3` needs it four times (composition root, denominator, crate count,
+    architecture crate) and the walk is not free on a developer machine with
+    local build outputs under `crates/`.
+    """
+    return tuple(crate_directories("."))
+
+
+@functools.lru_cache(maxsize=None)
+def _crate_dir(name: str) -> str:
+    return crate_directory(name, ".")
+
+
 def _crate_src_dirs() -> list[str]:
     """Every existing `<crate>/src` tree — the denominator's exact membership.
 
@@ -261,13 +279,13 @@ def _crate_src_dirs() -> list[str]:
     """
     return [
         f"{directory}/src"
-        for directory in crate_directories(".")
+        for directory in _crate_dirs()
         if os.path.isdir(f"{directory}/src")
     ]
 
 
 def composition_src() -> str:
-    return f"{crate_directory(COMPOSITION_CRATE, '.')}/src"
+    return f"{_crate_dir(COMPOSITION_CRATE)}/src"
 
 
 def tree_bytes(commit: str, path: str, suffix: str = ".rs") -> int:
@@ -346,7 +364,7 @@ def tier3(now: datetime) -> dict:
     res["size_trend"] = samples
 
     # ---- current-state snapshot ----
-    res["crate_count"] = len(crate_directories("."))
+    res["crate_count"] = len(_crate_dirs())
     res["composition_kloc_now"] = round(cur_comp_lines / 1000, 1)
     res["v1_src_kloc_now"] = round(_exact_lines(V1_SRC) / 1000, 1)
     res["crates_kloc_now"] = round(_exact_lines(CRATES_SRC) / 1000, 1)
@@ -399,7 +417,7 @@ def _prod_lines(*paths: str) -> int:
     the gate's exact numerator/denominator definition."""
     if not paths:
         return 0
-    roots = " ".join(f"'{path}'" for path in paths)
+    roots = " ".join(shlex.quote(path) for path in paths)
     out = sh(
         f"find {roots} -name '*.rs' -type f 2>/dev/null "
         f"| {{ grep -vE \"{TEST_FILE_RE}\" || true; }} "
@@ -415,7 +433,7 @@ def _governed_pipeline(inner: str) -> str:
     """find composition production files (excl slack/extension_host — the separate
     workstream) piped through `inner` — the exact scope the dispatch ratchet uses."""
     return (
-        f"find '{composition_src()}' -name '*.rs' -type f 2>/dev/null "
+        f"find {shlex.quote(composition_src())} -name '*.rs' -type f 2>/dev/null "
         f"| {{ grep -vE \"{TEST_FILE_RE}\" || true; }} "
         f"| {{ grep -vE '/(slack|extension_host)/' || true; }} "
         f"| tr '\\n' '\\0' | {{ xargs -0 {inner} 2>/dev/null || true; }}"
@@ -439,7 +457,10 @@ def _governed_dyn_types() -> int:
 
 
 def _exact_lines(path: str) -> int:
-    out = sh(f"find {path} -name '*.rs' -type f -print0 | xargs -0 cat 2>/dev/null | wc -l")
+    out = sh(
+        f"find {shlex.quote(path)} -name '*.rs' -type f -print0 "
+        "| xargs -0 cat 2>/dev/null | wc -l"
+    )
     try:
         return int(out.strip().split()[0])
     except (ValueError, IndexError):
@@ -458,12 +479,9 @@ def _files_over(threshold: int) -> list:
 
 
 def _boundary_tests() -> int:
-    f = (
-        f"{crate_directory(ARCHITECTURE_CRATE, '.')}"
-        "/tests/reborn_dependency_boundaries.rs"
-    )
+    f = f"{_crate_dir(ARCHITECTURE_CRATE)}/tests/reborn_dependency_boundaries.rs"
     # grep -c exits 1 when zero matches — that is a valid 0, not a probe failure.
-    out = sh(f"grep -cE '#\\[test\\]' '{f}' 2>/dev/null", ok=(0, 1))
+    out = sh(f"grep -cE '#\\[test\\]' {shlex.quote(f)} 2>/dev/null", ok=(0, 1))
     try:
         return int(out.strip() or 0)
     except ValueError:

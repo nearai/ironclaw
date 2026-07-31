@@ -525,29 +525,51 @@ assert_refusal_with_root \
 # The bash inventory in classify-test-scope.sh and the Python one in
 # scripts/ci/lib/crate_tree.py are two implementations of one rule. Pin them
 # equal so a fix to either cannot leave the other keyed to a stale tree shape.
+#
+# The classifier is *sourced* rather than re-implemented here: reading its own
+# `crate_dirs` and `min_crate_directories` is the only way this file pins the
+# shipping rule instead of a third copy of it, which would keep passing while
+# the classifier's own `find` expression, prune list, or root drifted. stdin is
+# /dev/null so the sourced `while read` loop terminates immediately.
 repo_root_for_inventory="$(cd "${script_dir}/../.." && pwd)"
-bash_inventory="$(
-  find "${repo_root_for_inventory}/crates" -type f -name Cargo.toml \
-    -not -path '*/target/*' -not -path '*/.*' 2>/dev/null \
-    | sed -e "s|^${repo_root_for_inventory}/||" -e 's|/Cargo.toml$||' \
-    | sort
+classifier_state="$(
+  set -euo pipefail
+  # shellcheck disable=SC1090
+  source "${classifier}" </dev/null >/dev/null
+  printf '%s\n---FLOOR---\n%s\n' "${crate_dirs}" "${min_crate_directories}"
 )"
+classifier_inventory="$(printf '%s' "${classifier_state}" | sed -n '1,/---FLOOR---/p' | sed '$d' | grep . | sort)"
+classifier_floor="$(printf '%s' "${classifier_state}" | sed -n '/---FLOOR---/,$p' | tail -1)"
+
 python_inventory="$(
   python3 "${script_dir}/lib/crate_tree.py" "${repo_root_for_inventory}" | sort
 )"
-# The bash side keeps nested manifests in the list (resolution walks outward-in
-# and stops at the outermost hit); the Python side prunes them. Compare the
+python_floor="$(
+  python3 -c "import sys; sys.path.insert(0, '${script_dir}/lib');
+import crate_tree; print(crate_tree.MIN_CRATE_DIRECTORIES)"
+)"
+
+# The classifier keeps nested manifests in its list (resolution walks outward-in
+# and stops at the outermost hit); crate_tree.py prunes them. Compare the
 # outermost sets.
-bash_outermost="$(
-  printf '%s\n' "${bash_inventory}" | awk '
+classifier_outermost="$(
+  printf '%s\n' "${classifier_inventory}" | awk '
     { keep = 1
       for (i = 1; i <= n; i++) if (index($0, kept[i] "/") == 1) { keep = 0; break }
       if (keep) { kept[++n] = $0; print } }'
 )"
-if [ "${bash_outermost}" != "${python_inventory}" ]; then
+if [ "${classifier_outermost}" != "${python_inventory}" ]; then
   printf 'FAIL bash and python crate inventories agree\n' >&2
-  diff <(printf '%s\n' "${bash_outermost}") <(printf '%s\n' "${python_inventory}") >&2 || true
+  diff <(printf '%s\n' "${classifier_outermost}") <(printf '%s\n' "${python_inventory}") >&2 || true
   exit 1
 fi
 printf 'PASS bash and python crate inventories agree (%s crate directories)\n' \
   "$(printf '%s\n' "${python_inventory}" | grep -c .)"
+
+if [ "${classifier_floor}" != "${python_floor}" ]; then
+  printf 'FAIL bash and python discovery floors agree\n' >&2
+  printf 'classifier min_crate_directories=%s crate_tree MIN_CRATE_DIRECTORIES=%s\n' \
+    "${classifier_floor}" "${python_floor}" >&2
+  exit 1
+fi
+printf 'PASS bash and python discovery floors agree (%s)\n' "${python_floor}"

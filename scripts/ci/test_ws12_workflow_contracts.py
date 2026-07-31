@@ -100,6 +100,21 @@ class WorkflowContractSabotageTests(unittest.TestCase):
 
         self.assertTrue(any("must NOT be in scope" in error for error in errors), errors)
 
+    def test_scope_regex_survives_an_escaped_newline_continuation(self) -> None:
+        """A guard split across a line continuation is still a guard.
+
+        Regression for the one-line-only form: it reported this exact workflow
+        as having no scope regex at all, failing the build over a formatting
+        choice (.claude/rules/review-discipline.md — guardrails must handle
+        multiline syntax).
+        """
+        wrapped = self.workflows[E2E_WORKFLOW].replace(
+            "| grep -Eq '^(crates/|", "| grep -Eq \\\n            '^(crates/|"
+        )
+        self.assertNotEqual(wrapped, self.workflows[E2E_WORKFLOW])
+
+        self.assertEqual(validate_e2e_scope_filters(wrapped), [])
+
     def test_missing_scope_regex_fails_loudly(self) -> None:
         sabotaged = self.workflows[E2E_WORKFLOW].replace("grep -Eq '^(crates/|", "true #")
         errors = validate_e2e_scope_filters(sabotaged)

@@ -134,22 +134,6 @@ def crate_directory(name: str, repo_root: str | pathlib.Path = ".") -> str:
     return matches[0]
 
 
-def owning_crate_directory(path: str, crate_dirs: list[str]) -> str | None:
-    """Return the crate directory that owns ``path``, or None.
-
-    ``path`` may be repo-relative or absolute (lcov `SF:` records carry absolute
-    checkout paths), so the match is on a path *segment* boundary rather than a
-    string prefix.
-    """
-
-    for directory in crate_dirs:
-        if path == directory or path.endswith(f"/{directory}"):
-            return directory
-        if path.startswith(f"{directory}/") or f"/{directory}/" in path:
-            return directory
-    return None
-
-
 def main() -> int:
     root = sys.argv[1] if len(sys.argv) > 1 else "."
     try:

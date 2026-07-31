@@ -134,7 +134,13 @@ normalize_crate_path() {
       return 0
       ;;
     */ironclaw_*/*)
-      NORMALIZED_PATH="crates/${tail#*/}"
+      # Drop every family segment ahead of the crate, not just the first, so the
+      # fallback is as depth-independent as the tree lookup above it. Anchored on
+      # the FIRST `ironclaw_` segment (`%%` keeps the shortest prefix): a greedy
+      # match on the last one would fold
+      # `crates/f/ironclaw_events/src/ironclaw_helper.rs` down to
+      # `crates/ironclaw_helper.rs`.
+      NORMALIZED_PATH="crates/${tail#"${tail%%/ironclaw_*}"/}"
       return 0
       ;;
   esac
