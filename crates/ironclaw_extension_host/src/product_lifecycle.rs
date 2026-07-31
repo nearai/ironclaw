@@ -639,7 +639,6 @@ impl ExtensionLifecycleManager {
             let catalog = self.catalog.read().await;
             catalog.resolve(&package_ref)?
         };
-        let has_activatable_surface = package_has_activatable_surface(&available.package);
         // A not-installed package has no installation state; `install_scope`
         // (`None` below) is the not-installed signal, so the neutral `Installed`
         // here is never read as a resting state for an uninstalled package.
@@ -648,7 +647,6 @@ impl ExtensionLifecycleManager {
             .map(|installation| {
                 installation_state_for_installation(
                     installation,
-                    has_activatable_surface,
                     activation_errors.contains_key(installation.extension_id().as_str()),
                 )
             })
@@ -820,7 +818,6 @@ impl ExtensionLifecycleManager {
                 summary: available.summary(),
                 phase: installation_state_for_installation(
                     &installation,
-                    package_has_activatable_surface(&available.package),
                     activation_errors.contains_key(installation.extension_id().as_str()),
                 ),
                 install_scope: Some(install_scope_for_owner(installation.owner())),
@@ -1313,29 +1310,6 @@ impl ExtensionLifecycleManager {
             "activate",
         )?;
         let package = self.lifecycle_package(&extension_id).await?;
-        // A package with nothing to serve cannot activate. Callers that route
-        // through `activate_with_credential_gate` have already had a chance to
-        // resolve the package's capabilities; callers that reach here directly
-        // have not, and binding a package with no operational surface fails
-        // closed further down anyway. Report the installed checkpoint instead
-        // of surfacing that bind error to the caller.
-        //
-        // "Nothing to serve" is derived from the package: no model-visible
-        // capability, no channel, no hooks. A channel-only extension declares
-        // no tools and must still activate, which is why this is not a tool
-        // count alone.
-        let has_activatable_surface = package_has_activatable_surface(&package);
-        if !has_activatable_surface {
-            return Ok(response_with_payload(
-                Some(package_ref),
-                InstallationState::Installed,
-                LifecycleProductPayload::ExtensionActivate {
-                    activated: false,
-                    visible_capability_ids: Vec::new(),
-                    connection_required: None,
-                },
-            ));
-        }
         if let ExtensionActivationCredentialReadiness::Missing(missing) =
             credential_gate.credential_readiness(&package).await?
         {
@@ -2873,33 +2847,10 @@ fn installation_state_for_activation(
 /// stored flag here was read for *every* installation, which is how a
 /// package with nothing left to discover could still be pinned out of
 /// `Active`.
-/// Whether a package has anything it can actually serve once activated:
-/// a model-visible capability, a channel surface, or hooks.
-///
-/// A package whose capabilities are supplied by a later runtime step declares
-/// none until that step completes. Deriving this from the package is what
-/// replaces a stored readiness flag that every installation used to carry.
-/// It is deliberately not a tool count alone — a channel-only extension
-/// declares no tools and must still activate.
-pub(crate) fn package_has_activatable_surface(package: &ExtensionPackage) -> bool {
-    !crate::lifecycle_restore::package_visible_capability_ids(package).is_empty()
-        || package_declares_inbound_product_adapter(package)
-        || !package.manifest.hooks.is_empty()
-}
-
 fn installation_state_for_installation(
     installation: &ExtensionInstallation,
-    has_activatable_surface: bool,
     has_last_error: bool,
 ) -> InstallationState {
-    // Nothing to serve yet: report the installed checkpoint rather than
-    // Active. The durable activation intent is unconditionally `Enabled`, so
-    // without this the caller would be told a package is Active while it
-    // publishes nothing. Mirrors the activation-side guard in
-    // `activate_inner`; a recorded failure still surfaces as `Failed`.
-    if !has_activatable_surface && !has_last_error {
-        return InstallationState::Installed;
-    }
     installation_state_for_activation(installation.activation_state(), has_last_error)
 }
 
@@ -2909,11 +2860,7 @@ async fn search_installation_phase(
     credential_gate: Option<&dyn ExtensionActivationCredentialGate>,
     has_last_error: bool,
 ) -> Result<InstallationState, ProductSurfaceFailure> {
-    let phase = installation_state_for_installation(
-        installation,
-        package_has_activatable_surface(&extension.package),
-        has_last_error,
-    );
+    let phase = installation_state_for_installation(installation, has_last_error);
     if phase == InstallationState::Active
         && !package_runtime_credential_auth_requirements(&extension.package).is_empty()
         && !search_credentials_configured(extension, credential_gate).await?
