@@ -13,6 +13,7 @@ use ironclaw_outbound::{
     OutboundDeliveryTargetSummary, OutboundError,
 };
 use ironclaw_product::RebornOutboundDeliveryTargetId;
+use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_threads::{LoadContextMessagesRequest, MessageKind, ThreadHistoryRequest};
 use ironclaw_turns::{
     ReplyTargetBindingRef, TurnStatus,
@@ -267,6 +268,7 @@ async fn production_reply_attachment_capability_registers_durable_run_intent() {
             "runtime-reply-attachment-owner",
             root.path().join("standalone"),
         ))
+        .with_tool_disclosure(ToolDisclosureMode::Off)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: "runtime-reply-attachment-tenant".to_string(),
             agent_id: "runtime-reply-attachment-agent".to_string(),
@@ -343,6 +345,7 @@ async fn standalone_runtime_selects_outbound_delivery_target_before_trigger_crea
         )
         .with_local_runtime_confirmed_host_home_root(host_home),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-outbound-trigger-tenant".to_string(),
         agent_id: "runtime-outbound-trigger-agent".to_string(),

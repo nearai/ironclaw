@@ -547,6 +547,7 @@ use ironclaw_product::{
     RebornViewPage, RebornViewQuery, SUBMIT_TURN_COMMAND, approval_gate_ref,
 };
 use ironclaw_product::{ProductOutboundPayload, ProductProjectionItem};
+use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
     AppendToolResultReferenceRequest, EnsureThreadRequest, LoadContextMessagesRequest, MessageKind,
@@ -2810,6 +2811,7 @@ async fn build_reborn_runtime_wires_trajectory_observer_through_unified_runtime(
             )),
         ))),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-observer-reject-tenant".to_string(),
         agent_id: "runtime-observer-reject-agent".to_string(),
@@ -3566,6 +3568,7 @@ async fn send_user_message_until_gate_returns_blocked_on_auth_gate() {
         )
         .with_local_runtime_confirmed_host_home_root(host_home),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-auth-gate-tenant".to_string(),
         agent_id: "runtime-auth-gate-agent".to_string(),
@@ -3892,6 +3895,7 @@ async fn standalone_runtime_exposes_host_runtime_capabilities_to_model_calls() {
         )
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-tools-tenant".to_string(),
         agent_id: "runtime-tools-agent".to_string(),
@@ -4036,6 +4040,7 @@ async fn standalone_runtime_forwards_tool_call_trajectory_to_raw_observer() {
         )
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-trajectory-tenant".to_string(),
         agent_id: "runtime-trajectory-agent".to_string(),
@@ -4112,6 +4117,7 @@ async fn standalone_runtime_safe_preview_observer_receives_bounded_payload() {
         )
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-preview-tenant".to_string(),
         agent_id: "runtime-preview-agent".to_string(),
@@ -6455,6 +6461,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
         )
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-multi-tool-surface-tenant".to_string(),
         agent_id: "runtime-multi-tool-surface-agent".to_string(),
