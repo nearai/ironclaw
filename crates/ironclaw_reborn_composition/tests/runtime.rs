@@ -28,6 +28,7 @@ use ironclaw_reborn_composition::{
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, local_runtime_build_input_with_options,
 };
+use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_turns::run_profile::{
     LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
 };
@@ -556,6 +557,7 @@ async fn build_reborn_runtime_wires_third_party_hooks_when_enabled() {
         )
         .with_runtime_policy(standalone_runtime_policy()),
     )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-hooks-tenant".to_string(),
         agent_id: "runtime-hooks-agent".to_string(),
