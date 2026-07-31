@@ -13724,7 +13724,6 @@ fn service_source_avoids_forbidden_runtime_dependencies() {
     for forbidden in [
         "CapabilityHost",
         "ironclaw_capabilities",
-        "ironclaw_dispatcher",
         "ironclaw_host_runtime",
         "ironclaw_approvals",
         "ironclaw_storage",

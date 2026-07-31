@@ -7,7 +7,6 @@ fn approvals_crate_stays_out_of_runtime_and_host_workflow_crates() {
 
     for forbidden in [
         "ironclaw_capabilities",
-        "ironclaw_dispatcher",
         "ironclaw_processes",
         "ironclaw_host_runtime",
         "ironclaw_resources",

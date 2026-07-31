@@ -4,17 +4,19 @@
 
 - No crate-local CLAUDE.md exists yet; use this map plus `Cargo.toml` and source files.
 - Read `src/lib.rs` first, then:
-  - `adapter.rs` — ProductAdapter implementation.
-  - `payload.rs` — Telegram payload parsing/DTO handling.
-  - `render.rs` — Telegram outbound rendering.
+  - `payload.rs` — Telegram Bot API payload normalization/DTO handling.
+  - `render.rs` — Telegram outbound request rendering.
+  - There is no adapter in this crate; the `ChannelAdapter` lives in
+    `ironclaw_telegram_extension`.
 - Read upstream contracts before changing adapter behavior:
   - `crates/ironclaw_product/AGENTS.md`
 
 ## What This Crate Owns
 
-- Telegram WASM v2 ProductAdapter tracer-bullet implementation.
-- Telegram payload parsing and outbound rendering for the adapter contract.
-- Adapter-specific mapping between Telegram shapes and shared ProductAdapter DTOs.
+- The Telegram Bot API **protocol engine**: pure payload normalization and
+  outbound request rendering, with no I/O and no secrets. It is a plain native
+  crate (no WASM target) and contains no adapter.
+- Adapter-specific mapping between Telegram shapes and the shared channel DTOs.
 
 ## Do Not Move In Here
 
