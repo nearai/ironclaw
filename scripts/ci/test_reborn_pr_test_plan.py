@@ -314,8 +314,9 @@ class RebornPrTestPlanTests(unittest.TestCase):
             with self.subTest(provider_operation_shard=shard):
                 self.assertIn(f'shard: "{shard}/4"', workflow)
         self.assertIn("  webui-v2-test-lanes:", workflow)
-        self.assertIn("max-parallel: 6", workflow)
-        self.assertIn("reborn-webui-v2-test-binaries-${{", workflow)
+        self.assertIn("max-parallel: 5", workflow)
+        self.assertIn("reborn-webui-v2-sso-binary-${{", workflow)
+        self.assertIn("reborn-webui-v2-binary-${{", workflow)
         self.assertIn(
             'job_result_ok "webui-v2-test-lanes"',
             workflow,

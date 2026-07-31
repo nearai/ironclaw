@@ -293,18 +293,24 @@ jobs:
           set -euo pipefail
           product_ref="$(git rev-parse HEAD)"
           live_dir="artifacts/reborn-webui-v2-binary"
-          test_dir="artifacts/reborn-webui-v2-test-binaries"
-          mkdir -p "${live_dir}" "${test_dir}/default" "${test_dir}/sso"
-
-          cp target/debug/ironclaw "${test_dir}/default/ironclaw"
-          cp "${CARGO_TARGET_DIR:-target}/e2e-sso/debug/ironclaw" \
-            "${test_dir}/sso/ironclaw"
-          chmod +x "${test_dir}/default/ironclaw" "${test_dir}/sso/ironclaw"
+          sso_dir="artifacts/reborn-webui-v2-sso-binary"
+          mkdir -p "${live_dir}" "${sso_dir}"
 
           # Temporary compatibility member for downstream QA consumers; remove
           # after every consumer invokes the canonical ironclaw binary.
           cp target/debug/ironclaw target/debug/ironclaw-reborn
-          tar -C target/debug -czf "${live_dir}/ironclaw-reborn.tar.gz" ironclaw ironclaw-reborn
+          tar -C target/debug -czf "${live_dir}/ironclaw-reborn.tar.gz" ironclaw ironclaw-reborn &
+          live_package_pid=$!
+          tar -C "${CARGO_TARGET_DIR:-target}/e2e-sso/debug" \
+            -czf "${sso_dir}/ironclaw-sso.tar.gz" ironclaw &
+          sso_package_pid=$!
+          status=0
+          wait "${live_package_pid}" || status=1
+          wait "${sso_package_pid}" || status=1
+          if [[ "${status}" -ne 0 ]]; then
+            echo "Failed to package one or more Reborn E2E binaries" >&2
+            exit "${status}"
+          fi
           (
             cd "${live_dir}"
             sha256sum ironclaw-reborn.tar.gz > ironclaw-reborn.tar.gz.sha256
@@ -316,11 +322,11 @@ jobs:
             > "${live_dir}/manifest.json"
           echo "product_ref=${product_ref}" >> "${GITHUB_OUTPUT}"
 
-      - name: Upload Reborn E2E binaries
+      - name: Upload Reborn SSO test binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: reborn-webui-v2-test-binaries-${{ steps.live_canary_binary.outputs.product_ref }}
-          path: artifacts/reborn-webui-v2-test-binaries/
+          name: reborn-webui-v2-sso-binary-${{ steps.live_canary_binary.outputs.product_ref }}
+          path: artifacts/reborn-webui-v2-sso-binary/
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
@@ -347,7 +353,7 @@ jobs:
       IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE: "1"
     strategy:
       fail-fast: false
-      max-parallel: 6
+      max-parallel: 5
       matrix:
         include:
           - lane: browser
@@ -375,18 +381,35 @@ jobs:
           ref: ${{ inputs.ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || github.sha }}
           persist-credentials: false
 
-      - name: Download Reborn E2E binaries
+      - name: Download default Reborn E2E binary
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: reborn-webui-v2-test-binaries-${{ needs.webui-v2-smoke.outputs.product_ref }}
-          path: artifacts/reborn-webui-v2-test-binaries
+          name: reborn-webui-v2-binary-${{ needs.webui-v2-smoke.outputs.product_ref }}
+          path: artifacts/reborn-webui-v2-binary
+
+      - name: Download Reborn SSO test binary
+        if: matrix.kind == 'browser'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: reborn-webui-v2-sso-binary-${{ needs.webui-v2-smoke.outputs.product_ref }}
+          path: artifacts/reborn-webui-v2-sso-binary
 
       - name: Restore Reborn E2E binaries
         run: |
-          mkdir -p target/debug target/e2e-sso/debug
-          cp artifacts/reborn-webui-v2-test-binaries/default/ironclaw target/debug/ironclaw
-          cp artifacts/reborn-webui-v2-test-binaries/sso/ironclaw target/e2e-sso/debug/ironclaw
-          chmod +x target/debug/ironclaw target/e2e-sso/debug/ironclaw
+          mkdir -p target/debug
+          (
+            cd artifacts/reborn-webui-v2-binary
+            sha256sum -c ironclaw-reborn.tar.gz.sha256
+          )
+          tar -C target/debug -xzf \
+            artifacts/reborn-webui-v2-binary/ironclaw-reborn.tar.gz ironclaw
+          chmod +x target/debug/ironclaw
+          if [[ "${{ matrix.kind }}" == "browser" ]]; then
+            mkdir -p target/e2e-sso/debug
+            tar -C target/e2e-sso/debug -xzf \
+              artifacts/reborn-webui-v2-sso-binary/ironclaw-sso.tar.gz ironclaw
+            chmod +x target/e2e-sso/debug/ironclaw
+          fi
           touch target/debug/.ironclaw-reborn-openai-compat.stamp
 
       - name: Install Python
