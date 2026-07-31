@@ -29,6 +29,9 @@ pub struct SecretSubmitRequest {
 }
 
 impl SecretSubmitRequest {
+    /// Only the in-memory fake validates here; the durable interaction
+    /// service runs its own `validate_secret` at the storage boundary.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn validate_secret(&self) -> Result<(), AuthProductError> {
         let exposed = self.secret.expose_secret();
         if exposed.trim().is_empty() {
@@ -83,6 +86,9 @@ pub trait AuthInteractionService: Send + Sync {
     ) -> Result<bool, AuthProductError>;
 }
 
+/// Pending-interaction record held by the in-memory fake; the durable
+/// service persists its own record shape.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone)]
 pub(crate) struct PendingSecretInteraction {
     pub scope: AuthProductScope,
