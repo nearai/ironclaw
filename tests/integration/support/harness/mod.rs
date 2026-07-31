@@ -71,7 +71,7 @@ pub(crate) use super::doubles::{
     HostRuntimeHarnessCapabilityPortFactory, ParkingCapabilityGate, ParkingHostRuntime,
     RecordingCapabilityResultWriter, RecordingDelegatingCapabilityPort, RecordingHostRuntime,
     RecordingNetworkHttpEgress, RecordingNetworkHttpTransport, RecordingRuntimeHttpEgress,
-    RecordingTestCapabilityPort, StaticCapabilitySurfaceProfileResolver,
+    RecordingTestCapabilityPort, StaticCapabilitySurfaceProfileResolver, VendorResponseRouter,
 };
 pub(crate) use assembly::{
     StandaloneRootMounts, TriggerActiveRunLookupHostRuntime, bundled_extension_provider_trust,

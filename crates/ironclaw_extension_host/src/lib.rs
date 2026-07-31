@@ -61,6 +61,7 @@ mod hosted_mcp_admission;
 mod hosted_mcp_discovery_authority;
 mod hosted_mcp_manifest;
 mod hosted_mcp_preparation;
+pub mod inbound_batches;
 pub mod ingress;
 pub mod install_policy;
 pub mod ironhub;
@@ -200,6 +201,7 @@ pub use generic_host::{
 };
 pub use host_api_contracts::product_extension_host_api_contract_registry;
 pub use hosted_mcp_preparation::HostedMcpPreparationDependencies;
+pub use inbound_batches::FilesystemInboundBatchStore;
 pub use install_policy::{
     RemoveDecision, decide_install_on_existing, decide_remove, derive_owner,
     ensure_caller_may_operate, install_scope_for_owner,

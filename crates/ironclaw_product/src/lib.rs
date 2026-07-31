@@ -62,6 +62,7 @@ mod project_service;
 pub mod projection;
 mod reborn_services;
 mod run_delivery;
+mod scoped_fs;
 mod workflow;
 
 pub use product_auth_prompt::{blocked_auth_flow_canceller, product_auth_challenge_provider};
@@ -145,8 +146,21 @@ pub use extension_account_setup::{
 #[cfg(any(test, feature = "test-support"))]
 pub use fakes::{
     FakeBeforeInboundPolicy, FakeConversationBindingService, FakeIdempotencyLedger,
-    FakeInboundTurnService, rejecting_product_surface_error,
+    FakeInboundTurnService, NoProjectFilesystem, rejecting_product_surface_error,
 };
+pub use scoped_fs::{
+    ProjectScopedAttachmentLander,
+    ProjectScopedAttachmentReader,
+    ProjectScopedFilesystemReader,
+    // Shared scoped-path helpers: the mount-browse reader in composition
+    // derives the same MIME/size/error semantics from them.
+    file_name_of,
+    guard_readable_file,
+    map_filesystem_error,
+    map_kind,
+    mime_for_path,
+};
+
 pub use filesystem_ledger::RebornFilesystemIdempotencyLedger;
 pub use filesystem_ledger::RebornLibSqlIdempotencyLedger;
 pub use filesystem_ledger::RebornPostgresIdempotencyLedger;
@@ -158,29 +172,30 @@ pub use ironclaw_common::{AutomationName, AutomationNameError, MAX_AUTOMATION_NA
 pub use ironclaw_host_api::product_adapter::{
     AdapterInstallationId, ApprovalDecision, ApprovalPromptActionView, ApprovalPromptContextView,
     ApprovalPromptDestinationView, ApprovalPromptDetailView, ApprovalPromptScopeView,
-    ApprovalResolutionPayload, AttachmentRef, AuthPromptChallengeKind, AuthPromptContextView,
-    AuthPromptView, AuthRequirement, AuthResolutionPayload, AuthResolutionResult,
+    ApprovalResolutionPayload, AuthPromptChallengeKind, AuthPromptContextView, AuthPromptView,
+    AuthRequirement, AuthResolutionPayload, AuthResolutionResult,
     CAPABILITY_DISPLAY_KIND_MAX_BYTES, CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES,
     CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
     CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
     CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput, ChannelAdapter,
-    ChannelContext, ChannelError, ChannelInboundClassification, ConnectionPromptContext,
-    DeclaredEgressHost, DeclaredEgressTarget, DeliveryAttemptId, DeliveryReport, DeliveryStatus,
-    EgressCredentialHandle, EgressHeader, EgressMethod, EgressPath, EgressRequest, EgressResponse,
-    ExternalActorRef, ExternalConversationRef, ExternalEventId, FinalReplyView, GatePromptView,
-    ImmediateResponse, InboundCommandPayload, InboundOutcome, InboundRetryDisposition,
-    LinkedThreadActionPayload, MAX_IMMEDIATE_RESPONSE_BYTES, MAX_REPLY_CONTEXT_BYTES,
-    NormalizedInboundMessage, OutboundDeliverySink, OutboundEnvelope, OutboundPart, OutboundTarget,
-    PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
-    PROJECTION_SKILL_NAME_MAX_BYTES, PROJECTION_TEXT_MAX_BYTES, ParsedProductInbound,
-    PartDeliveryOutcome, PreferenceTargetCodec, PreferenceTargetEncodeRequest,
-    ProductAdapterCapabilities, ProductAdapterError, ProductAdapterId, ProductAttachmentDescriptor,
-    ProductAttachmentKind, ProductCapabilityFlag, ProductCommandResultPayload,
-    ProductControlActionPayload, ProductGateKind, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
-    ProductProjectionItem, ProductProjectionReadInput, ProductProjectionState,
-    ProductProjectionSubject, ProductProjectionSubscribeInput, ProductRejection,
-    ProductRejectionDisposition, ProductRejectionKind, ProductRenderOutcome,
+    ChannelAttachmentRef, ChannelContext, ChannelError, ChannelInboundClassification,
+    ConnectionPromptContext, DeclaredEgressHost, DeclaredEgressTarget, DeliveryAttemptId,
+    DeliveryReport, DeliveryStatus, EgressCredentialHandle, EgressHeader, EgressMethod, EgressPath,
+    EgressRequest, EgressResponse, ExternalActorRef, ExternalConversationRef, ExternalEventId,
+    FinalReplyView, GatePromptView, ImmediateResponse, InboundBatchFragment, InboundCommandPayload,
+    InboundOutcome, InboundRetryDisposition, LinkedThreadActionPayload,
+    MAX_IMMEDIATE_RESPONSE_BYTES, MAX_INBOUND_BATCH_REF_BYTES, MAX_INBOUND_BATCH_SETTLE_MILLIS,
+    MAX_REPLY_CONTEXT_BYTES, NormalizedInboundMessage, OutboundDeliverySink, OutboundEnvelope,
+    OutboundPart, OutboundTarget, PROJECTION_SKILL_ACTIVATION_MAX_ITEMS,
+    PROJECTION_SKILL_FEEDBACK_MAX_BYTES, PROJECTION_SKILL_NAME_MAX_BYTES,
+    PROJECTION_TEXT_MAX_BYTES, ParsedProductInbound, PartDeliveryOutcome, PreferenceTargetCodec,
+    PreferenceTargetEncodeRequest, ProductAdapterCapabilities, ProductAdapterError,
+    ProductAdapterId, ProductAttachmentDescriptor, ProductAttachmentKind, ProductCapabilityFlag,
+    ProductCommandResultPayload, ProductControlActionPayload, ProductGateKind, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductOutboundEnvelope, ProductOutboundPayload,
+    ProductOutboundTarget, ProductProjectionItem, ProductProjectionReadInput,
+    ProductProjectionState, ProductProjectionSubject, ProductProjectionSubscribeInput,
+    ProductRejection, ProductRejectionDisposition, ProductRejectionKind, ProductRenderOutcome,
     ProductSlashCommandParseError, ProductSourceChannel, ProductSurfaceKind,
     ProductSurfaceRejectionKind, ProductSynchronousResponse, ProductTriggerReason,
     ProductWorkSummaryPhase, ProgressKind, ProgressUpdateView, ProjectionCursor,
@@ -279,13 +294,13 @@ pub use reborn_services::{
     AUTOMATION_RESUME_COMMAND, AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATIONS_VIEW, ActiveModelReader,
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
-    AdminUserSecretMeta, AdminUserService, AdminUserStatus, AutomationListRequest,
-    AutomationProductService, CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND, ChannelAuthAccountState,
-    ChannelConfigProductService, ChannelConnectionService, ChannelInboundSurfaceAdmission,
-    ChannelInboundSurfaceOutcome, ChannelInboundSurfaceRejectedAdmission,
-    ChannelInboundSurfaceRequest, CodexLoginStart, EXTENSION_ACTIVATE_CAPABILITY,
-    EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY, EXTENSION_IMPORT_CAPABILITY_ID,
-    EXTENSION_INSTALL_CAPABILITY, EXTENSION_INSTALL_CAPABILITY_ID,
+    AdminUserSecretMeta, AdminUserService, AdminUserStatus, AttachmentCleanupReport,
+    AutomationListRequest, AutomationProductService, CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND,
+    ChannelAuthAccountState, ChannelConfigProductService, ChannelConnectionService,
+    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
+    ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest, CodexLoginStart,
+    EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY,
+    EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY, EXTENSION_INSTALL_CAPABILITY_ID,
     EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY, EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
     EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY, EXTENSION_REMOVE_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,

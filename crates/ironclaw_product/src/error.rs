@@ -121,6 +121,10 @@ pub enum ProductSurfaceFailure {
     #[error("before-inbound policy failed: {reason}")]
     BeforeInboundPolicyFailed { reason: String, permanent: bool },
 
+    /// Deferred channel attachment transfer failed before message acceptance.
+    #[error("inbound attachment transfer failed: {reason}")]
+    InboundAttachmentFailed { reason: String, retryable: bool },
+
     /// The action was identified as a duplicate and the prior outcome should be replayed.
     #[error("duplicate action")]
     DuplicateAction {
@@ -190,6 +194,7 @@ pub fn lifecycle_product_surface_error(error: ProductSurfaceFailure) -> ProductS
         | ProductSurfaceFailure::AuthInteractionRejected { .. }
         | ProductSurfaceFailure::AuthContinuationRejected { .. }
         | ProductSurfaceFailure::BeforeInboundPolicyFailed { .. }
+        | ProductSurfaceFailure::InboundAttachmentFailed { .. }
         | ProductSurfaceFailure::DuplicateAction { .. }
         | ProductSurfaceFailure::OutboundTargetNotDirectMessage
         | ProductSurfaceFailure::UnknownInstallation => ProductSurfaceError::internal_invariant(),
@@ -310,6 +315,20 @@ impl From<ProductSurfaceFailure> for ProductAdapterError {
                     }
                 }
             }
+            ProductSurfaceFailure::InboundAttachmentFailed { reason, retryable } => {
+                if retryable {
+                    ProductAdapterError::SurfaceTransient {
+                        reason: RedactedString::new(reason),
+                    }
+                } else {
+                    ProductAdapterError::SurfaceRejected {
+                        kind: ProductSurfaceRejectionKind::InvalidRequest,
+                        status_code: 400,
+                        retryable: false,
+                        reason: RedactedString::new(reason),
+                    }
+                }
+            }
             ProductSurfaceFailure::DuplicateAction { .. } => ProductAdapterError::Internal {
                 detail: RedactedString::new("duplicate action escaped workflow layer"),
             },
@@ -363,6 +382,32 @@ mod tests {
         .into();
         assert!(!err.is_retryable());
         assert!(matches!(err, ProductAdapterError::SurfaceRejected { .. }));
+    }
+
+    #[test]
+    fn attachment_failures_preserve_retryability_without_exposing_provider_detail() {
+        let retryable: ProductAdapterError = ProductSurfaceFailure::InboundAttachmentFailed {
+            reason: "channel attachment transfer failed".into(),
+            retryable: true,
+        }
+        .into();
+        assert!(retryable.is_retryable());
+
+        let permanent: ProductAdapterError = ProductSurfaceFailure::InboundAttachmentFailed {
+            reason: "attachment exceeds the per-file byte limit".into(),
+            retryable: false,
+        }
+        .into();
+        assert!(!permanent.is_retryable());
+        assert!(matches!(
+            permanent,
+            ProductAdapterError::SurfaceRejected {
+                kind: ProductSurfaceRejectionKind::InvalidRequest,
+                status_code: 400,
+                retryable: false,
+                ..
+            }
+        ));
     }
 
     #[test]

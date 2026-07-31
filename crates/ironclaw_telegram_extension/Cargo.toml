@@ -16,19 +16,24 @@ layer = "products"
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-# Production deps only. `tracing` was previously listed here with no call
-# sites in `src/` and has been dropped (Copilot #4). `uuid` moved to
-# dev-deps because its only `src/` references live inside
-# `#[cfg(test)] mod tests {}` blocks. `ironclaw_wasm_product_adapters`
-# moved to dev-deps because it is only referenced from the integration
-# contract test crate, not from the adapter library itself.
+# Production deps only. `tracing` is here for one purpose: the attachment
+# transfer path must retain the cause of a provider parse failure server-side
+# while the user-facing reason stays a fixed literal. `uuid` is here
+# because the multipart boundary must be unpredictable: the payload is
+# attacker-authored, so a boundary derived from it lets a sender force
+# unbounded rescans. `ironclaw_wasm_product_adapters` stays in dev-deps
+# because it is only referenced from the integration contract test crate,
+# not from the adapter library itself.
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_attachments = { path = "../ironclaw_attachments", version = "0.1.0" }
 ironclaw_product = { path = "../ironclaw_product", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 ironclaw_telegram_v2_adapter = { path = "../ironclaw_telegram_v2_adapter", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 ironclaw_product = { path = "../ironclaw_product", version = "0.1.0", features = ["test-support", "host-auth-mint"] }

@@ -512,6 +512,12 @@ impl From<DefaultPlannedRuntimeBuildError> for RebornRuntimeError {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) struct OutboundTestStores {
+    state: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+    reply_attachment_intents: Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort>,
+}
+
 /// Started, running Reborn agent runtime.
 ///
 /// `RebornRuntime` is the single user-facing handle returned by
@@ -559,11 +565,10 @@ pub struct RebornRuntime {
     pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
     pub(crate) owner_user_id: UserId,
     pub(crate) extension_filesystem: Arc<CompositeRootFilesystem>,
-    pub(crate) workspace_mounts: MountView,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) outbound_state: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+    pub(crate) outbound_state: OutboundTestStores,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) triggered_run_delivery: Arc<dyn ironclaw_outbound::TriggeredRunDeliveryStore>,
     #[cfg(any(test, feature = "test-support"))]
@@ -961,11 +966,13 @@ impl RebornRuntime {
         Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
         Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
         Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository>,
+        Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort>,
     )> {
         Some((
-            Arc::clone(&self.outbound_state),
+            Arc::clone(&self.outbound_state.state),
             Arc::clone(&self.delivered_gate_routes),
             Arc::clone(&self.outbound_preferences),
+            Arc::clone(&self.outbound_state.reply_attachment_intents),
         ))
     }
 
@@ -1013,12 +1020,25 @@ impl RebornRuntime {
             identity,
             run_delivery_settings,
         } = wiring;
+        let attachment_filesystem = self.read_write_workspace_filesystem()?;
+        let inbound_attachments: Arc<dyn ironclaw_product::InboundAttachmentLander> =
+            Arc::new(ironclaw_product::ProjectScopedAttachmentLander::new(
+                Arc::clone(&attachment_filesystem),
+            ));
+        let project_filesystem: Arc<dyn ironclaw_product::ProjectFilesystemReader> = Arc::new(
+            ironclaw_product::ProjectScopedFilesystemReader::with_max_read_bytes(
+                attachment_filesystem,
+                ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64,
+            ),
+        );
         let source = crate::extension_host_assembly::ChannelHostAssemblySource {
             generic_host: self.extension_management.generic_host()?,
             ingress_registry: Arc::clone(&self.extension_ingress.as_ref()?.registry),
             workflow_filesystem: self.extension_filesystem.clone(),
+            inbound_attachments,
+            project_filesystem,
             delivery_coordinator: self.delivery_coordinator.clone(),
-            outbound_state: Arc::clone(&self.outbound_state),
+            outbound_state: Arc::clone(&self.outbound_state.state),
             delivered_gate_routes: Arc::clone(&self.delivered_gate_routes),
             outbound_preferences: Arc::clone(&self.outbound_preferences),
             identity_lookup: Arc::clone(&self.channel_identity_store)
@@ -1231,10 +1251,9 @@ impl RebornRuntime {
     #[cfg(feature = "test-support")]
     fn standalone_workspace_attachment_reader_for_test(
         &self,
-    ) -> Option<Arc<crate::support::fs::ProjectScopedAttachmentReader<CompositeRootFilesystem>>>
-    {
+    ) -> Option<Arc<ironclaw_product::ProjectScopedAttachmentReader<CompositeRootFilesystem>>> {
         Some(Arc::new(
-            crate::support::fs::ProjectScopedAttachmentReader::new(
+            ironclaw_product::ProjectScopedAttachmentReader::new(
                 self.read_write_workspace_filesystem()?,
             ),
         ))
@@ -1257,7 +1276,7 @@ impl RebornRuntime {
         let read_write_workspace_filesystem = self.read_write_workspace_filesystem()?;
         Some(crate::factory::AttachmentTestSupport {
             read_port,
-            lander: Arc::new(crate::support::fs::ProjectScopedAttachmentLander::new(
+            lander: Arc::new(ironclaw_product::ProjectScopedAttachmentLander::new(
                 read_write_workspace_filesystem,
             )),
         })
@@ -1299,10 +1318,14 @@ impl RebornRuntime {
         &self,
     ) -> Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
         let extension_filesystem = &self.extension_filesystem;
-        let workspace_mounts = &self.workspace_mounts;
+        let attachment_mounts = crate::runtime_mounts::workspace_mount_view(
+            ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
+            &[],
+        )
+        .ok()?;
         Some(Arc::new(ScopedFilesystem::with_fixed_view(
             Arc::clone(extension_filesystem),
-            workspace_mounts.clone(),
+            attachment_mounts,
         )))
     }
 
@@ -3495,10 +3518,11 @@ pub(crate) async fn build_runtime_with_resource_governor(
         // vision-capable models. Only available when a local runtime (and thus a
         // workspace filesystem) is composed.
         attachment_read_port: Some(
-            Arc::new(crate::support::fs::ProjectScopedAttachmentReader::new(
+            Arc::new(ironclaw_product::ProjectScopedAttachmentReader::new(
                 Arc::clone(&services.workspace_filesystem),
             )) as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>,
         ),
+        reply_attachment_intent_port: Some(Arc::clone(&services.reply_attachment_intents)),
         // §5.2.9 render-from-record: a `GateRecordStore` over the SAME
         // shared `extension_filesystem` + per-user mount view the standalone
         // capability port persists `GateRecord::Auth` into (see
@@ -4018,11 +4042,13 @@ pub(crate) async fn build_runtime_with_resource_governor(
         host_runtime_http_egress: services.host_runtime_http_egress.clone(),
         owner_user_id: services.owner_user_id.clone(),
         extension_filesystem: services.extension_filesystem.clone(),
-        workspace_mounts: services.workspace_mounts.clone(),
         system_extensions_lifecycle_mounts: services.system_extensions_lifecycle_mounts.clone(),
         outbound_preferences: services.outbound_preferences.clone(),
         #[cfg(any(test, feature = "test-support"))]
-        outbound_state: services.outbound_state.clone(),
+        outbound_state: OutboundTestStores {
+            state: services.outbound_state.clone(),
+            reply_attachment_intents: services.reply_attachment_intents.clone(),
+        },
         #[cfg(any(test, feature = "test-support"))]
         triggered_run_delivery: services.triggered_run_delivery.clone(),
         #[cfg(any(test, feature = "test-support"))]

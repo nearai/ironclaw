@@ -118,6 +118,44 @@ use ironclaw_product::BlockedAuthPromptSource;
 mod e2e_auth_challenge;
 use e2e_auth_challenge::FakeAuthChallengeProvider;
 
+/// Lands nothing: these scenarios never carry attachment bytes, but the turn
+/// service still requires the port the production path wires.
+struct InertAttachmentLander;
+
+#[async_trait::async_trait]
+impl ironclaw_product::InboundAttachmentLander for InertAttachmentLander {
+    async fn land(
+        &self,
+        _thread_scope: &ironclaw_threads::ThreadScope,
+        _message_id: &str,
+        _attachments: Vec<ironclaw_host_api::attachment::InboundAttachment>,
+    ) -> Result<
+        Vec<ironclaw_threads::AttachmentRef>,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
+    > {
+        Ok(Vec::new())
+    }
+
+    async fn rollback(
+        &self,
+        _thread_scope: &ironclaw_threads::ThreadScope,
+        _attachments: &[ironclaw_threads::AttachmentRef],
+    ) -> Result<(), ironclaw_host_api::product_surface::ProductSurfaceError> {
+        Ok(())
+    }
+
+    async fn cleanup_stale(
+        &self,
+        _thread_scope: &ironclaw_threads::ThreadScope,
+        _referenced_storage_keys: &[String],
+    ) -> Result<
+        ironclaw_product::AttachmentCleanupReport,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
+    > {
+        Ok(ironclaw_product::AttachmentCleanupReport::default())
+    }
+}
+
 const TENANT: &str = "tenant:slack";
 const AGENT: &str = "agent:slack";
 const PROJECT: &str = "project:slack";
@@ -481,6 +519,15 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
             UserId::new(USER).expect("user"),       // safety: static test user id is valid.
         )),
+        Arc::new(
+            ironclaw_extension_host::FilesystemInboundBatchStore::new(
+                Arc::new(InMemoryBackend::new()),
+                TenantId::new(TENANT).expect("tenant"),
+                UserId::new(USER).expect("user"),
+            )
+            .expect("static inbound batch store configuration"),
+        ),
+        None,
     );
     let delivery_coordinator = Arc::new(DeliveryCoordinator::new(
         Arc::clone(&outbound_store),
@@ -504,6 +551,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
 
     let channel_config = configured_channel_config().await;
     let deps = GenericChannelHostDeps {
+        inbound_attachments: Arc::new(InertAttachmentLander),
         watch: host.snapshot_watch(),
         deployment_channels: Arc::new(ironclaw_extension_host::DeploymentChannelRegistry::default()),
         registry: Arc::clone(&ingress.registry),
@@ -524,6 +572,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         identity_lookup: Some(Arc::clone(&identity_lookup)
             as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>),
         delivery: Some(ChannelHostDeliveryDeps {
+            project_filesystem: Arc::new(ironclaw_product::NoProjectFilesystem),
             coordinator: delivery_coordinator,
             outbound_store,
             route_store: Arc::clone(&route_store),
@@ -1361,6 +1410,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
     let fixture = triggered_delivery_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
+        project_filesystem: Arc::new(ironclaw_product::NoProjectFilesystem),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
         turn_coordinator: coordinator,
@@ -1650,6 +1700,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
     let fixture = triggered_delivery_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
+        project_filesystem: Arc::new(ironclaw_product::NoProjectFilesystem),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
         turn_coordinator: coordinator,
@@ -1782,6 +1833,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
     let fixture = triggered_delivery_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
+        project_filesystem: Arc::new(ironclaw_product::NoProjectFilesystem),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
         turn_coordinator: Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,

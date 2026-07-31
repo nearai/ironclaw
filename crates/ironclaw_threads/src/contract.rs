@@ -851,6 +851,14 @@ mod tests {
             serde_json::from_str::<AttachmentKind>(r#""document""#).unwrap(),
             AttachmentKind::Document
         );
+        assert_eq!(
+            serde_json::to_string(&AttachmentKind::Video).unwrap(),
+            r#""video""#
+        );
+        assert_eq!(
+            serde_json::from_str::<AttachmentKind>(r#""other""#).unwrap(),
+            AttachmentKind::Other
+        );
     }
 
     #[test]

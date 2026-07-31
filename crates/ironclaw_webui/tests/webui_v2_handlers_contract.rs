@@ -3711,14 +3711,14 @@ async fn get_session_returns_caller_identity_and_capabilities() {
         !accept.iter().any(|t| t.contains('*')),
         "accept must not advertise wildcards: {accept:?}"
     );
-    assert_eq!(body["attachments"]["max_count"], expected.max_count);
+    assert_eq!(body["attachments"]["max_count"], expected.budgets.max_count);
     assert_eq!(
         body["attachments"]["max_file_bytes"],
-        expected.max_file_bytes
+        expected.budgets.max_file_bytes
     );
     assert_eq!(
         body["attachments"]["max_total_bytes"],
-        expected.max_total_bytes
+        expected.budgets.max_total_bytes
     );
 }
 

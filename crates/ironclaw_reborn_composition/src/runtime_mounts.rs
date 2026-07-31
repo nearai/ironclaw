@@ -10,7 +10,10 @@ use ironclaw_host_api::{
 };
 use ironclaw_memory::MemoryDocumentScope;
 
-pub(crate) const WORKSPACE_ALIAS: &str = "/workspace";
+// One owner for the workspace mount alias: `ironclaw_attachments` also uses it
+// to decide which model-text references become egress attachments.
+pub(crate) use ironclaw_attachments::WORKSPACE_ALIAS;
+
 const WORKSPACE_TARGET: &str = "/projects/workspace";
 const HOST_ALIAS: &str = "/host";
 const HOST_TARGET: &str = "/projects/host";

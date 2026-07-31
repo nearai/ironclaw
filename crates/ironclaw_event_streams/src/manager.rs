@@ -791,6 +791,9 @@ fn map_outbound_error(error: OutboundError) -> ProjectionStreamError {
         | OutboundError::CasConflict
         | OutboundError::Serialization
         | OutboundError::SubscriptionScopeMismatch
-        | OutboundError::DeliveryNotFound => ProjectionStreamError::Outbound,
+        | OutboundError::DeliveryNotFound
+        | OutboundError::ReplyAttachmentIntentsSealed
+        | OutboundError::ReplyAttachmentIntentConflict
+        | OutboundError::ReplyAttachmentIntentLimitExceeded => ProjectionStreamError::Outbound,
     }
 }

@@ -32,7 +32,7 @@ use async_trait::async_trait;
 use axum::Json;
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
-use ironclaw_attachments::InboundAttachment;
+use ironclaw_host_api::attachment::InboundAttachment;
 use ironclaw_host_api::{
     ids::{ActivityId, ThreadId},
     product_surface::{BoundProductSurface, ProductSurface, ProductSurfaceCaller},

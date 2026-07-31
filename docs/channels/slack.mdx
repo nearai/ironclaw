@@ -184,6 +184,7 @@ that the steps above describe.
         "im:history",
         "im:write",
         "files:read",
+        "files:write",
         "groups:history",
         "mpim:history",
         "commands"
@@ -216,6 +217,11 @@ authorization — searching and posting as the person rather than as the bot. If
 want the bot to participate in channels, you can drop the `user` block and the redirect
 URL with it.
 </Note>
+
+`files:read` lets the bot resolve and download inbound file shares.
+`files:write` lets it return explicitly attached workspace files through
+Slack's external upload flow. IronClaw never uses the retired `files.upload`
+method.
 
 Slack validates the request URL when you save the manifest, so start IronClaw before
 creating the app.

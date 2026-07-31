@@ -21,10 +21,19 @@ use ironclaw_approvals::{
     PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverride,
     ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStorePort,
 };
-use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{
     AuthAccountLastError, AuthAccountState, CredentialAccountId, CredentialAccountProjection,
     CredentialAccountStatus,
+};
+use ironclaw_host_api::{
+    attachment::InboundAttachment,
+    product_surface::{
+        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+        ProductSurfaceErrorKind, ProductSurfaceInvokeRequest, ProductSurfaceStreamRequest,
+        ProductSurfaceValidationCode,
+    },
+    state::{InstallationState, LifecyclePublicState},
+    surface::CapabilitySurfaceKind,
 };
 use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
@@ -37,15 +46,6 @@ use ironclaw_host_api::{
     result_meta::{ResultProgress, TerminateHint},
     safe_summary::SafeSummary,
     scope::Principal,
-};
-use ironclaw_host_api::{
-    product_surface::{
-        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-        ProductSurfaceErrorKind, ProductSurfaceInvokeRequest, ProductSurfaceStreamRequest,
-        ProductSurfaceValidationCode,
-    },
-    state::{InstallationState, LifecyclePublicState},
-    surface::CapabilitySurfaceKind,
 };
 use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_DELETE_SECRET_CAPABILITY_ID,
@@ -2717,7 +2717,7 @@ impl ProjectFilesystemReader for StaticProjectFilesystemReader {
         &self,
         _thread_scope: &ThreadScope,
         _path: &str,
-    ) -> Result<ProjectFsFile, ProjectFsError> {
+    ) -> Result<ironclaw_host_api::attachment::WorkspaceFile, ProjectFsError> {
         Err(ProjectFsError::NotFound)
     }
 
@@ -14456,6 +14456,22 @@ impl InboundAttachmentLander for RecordingLander {
             attachments,
         ));
         Ok(refs)
+    }
+
+    async fn rollback(
+        &self,
+        _thread_scope: &ThreadScope,
+        _attachments: &[AttachmentRef],
+    ) -> Result<(), ProductSurfaceError> {
+        Ok(())
+    }
+
+    async fn cleanup_stale(
+        &self,
+        _thread_scope: &ThreadScope,
+        _referenced_storage_keys: &[String],
+    ) -> Result<ironclaw_product::AttachmentCleanupReport, ProductSurfaceError> {
+        Ok(ironclaw_product::AttachmentCleanupReport::default())
     }
 }
 

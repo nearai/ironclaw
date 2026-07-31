@@ -899,6 +899,10 @@ impl RebornBinaryE2EHarness {
             hook_security_audit_sink: None,
             turn_event_sink: None,
             attachment_read_port: None,
+            reply_attachment_intent_port: Some(Arc::new(
+                ironclaw_outbound::test_support::in_memory_backed_outbound_state_store(),
+            )
+                as Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort>),
             gate_record_store: None,
             scheduler_wake_wiring: None,
         })?;

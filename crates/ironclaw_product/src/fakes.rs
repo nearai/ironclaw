@@ -692,3 +692,38 @@ impl InboundTurnService for FakeInboundTurnService {
             .map(crate::inbound_turn::InboundUserMessageDispatch::Accepted)
     }
 }
+
+/// A project filesystem that holds nothing.
+///
+/// Delivery and channel-host tests that never reference a `/workspace/...`
+/// path still have to supply the reader the coordinator materializes through.
+/// One inert double lives here, beside the trait it implements, so those
+/// suites do not each carry an identical copy.
+pub struct NoProjectFilesystem;
+
+#[async_trait]
+impl crate::ProjectFilesystemReader for NoProjectFilesystem {
+    async fn list_dir(
+        &self,
+        _thread_scope: &ironclaw_threads::ThreadScope,
+        _path: &str,
+    ) -> Result<Vec<crate::ProjectFsEntry>, crate::ProjectFsError> {
+        Err(crate::ProjectFsError::NotFound)
+    }
+
+    async fn read_file(
+        &self,
+        _thread_scope: &ironclaw_threads::ThreadScope,
+        _path: &str,
+    ) -> Result<ironclaw_host_api::attachment::WorkspaceFile, crate::ProjectFsError> {
+        Err(crate::ProjectFsError::NotFound)
+    }
+
+    async fn stat(
+        &self,
+        _thread_scope: &ironclaw_threads::ThreadScope,
+        _path: &str,
+    ) -> Result<crate::ProjectFsStat, crate::ProjectFsError> {
+        Err(crate::ProjectFsError::NotFound)
+    }
+}

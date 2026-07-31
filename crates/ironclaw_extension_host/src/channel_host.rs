@@ -42,13 +42,13 @@ use ironclaw_host_api::{
 use ironclaw_outbound::{CommunicationPreferenceRepository, DeliveredGateRouteStore};
 use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, ExternalEventId, ProductAdapterId,
-    ProductInboundAck, ProductInboundEnvelope,
+    ProductInboundAck, ProductInboundEnvelope, ProjectFilesystemReader,
 };
 use ironclaw_product::{
     ApprovalInteractionService, ApprovalPromptContextSource, AuthInteractionService,
     BlockedAuthFlowCanceller, BlockedAuthPromptSource, ChannelConnectionNoticePolicy,
     ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
-    DeliveryCoordinator, IdempotencyLedger, PreferenceTargetCodec,
+    DeliveryCoordinator, IdempotencyLedger, InboundAttachmentLander, PreferenceTargetCodec,
     ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
     ProductSurfaceFailure, RebornFilesystemIdempotencyLedger, ResolvedProductActorUser,
@@ -255,6 +255,9 @@ pub struct ChannelHostIdentity {
 /// then ingress-only (turns run; nothing watches them for channel replies).
 pub struct ChannelHostDeliveryDeps {
     pub coordinator: Arc<DeliveryCoordinator>,
+    /// Canonical project-filesystem authority the delivery coordinator
+    /// materializes `/workspace/...` references through.
+    pub project_filesystem: Arc<dyn ProjectFilesystemReader>,
     pub outbound_store: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
     pub route_store: Arc<dyn DeliveredGateRouteStore>,
     pub communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
@@ -341,6 +344,9 @@ pub struct GenericChannelHostDeps {
     pub workflow_state: Arc<dyn ChannelWorkflowStateFactory>,
     pub thread_service: Arc<dyn SessionThreadService>,
     pub turn_coordinator: Arc<dyn TurnCoordinator>,
+    /// Lands inbound attachment bytes into the project filesystem before the
+    /// turn starts, so the turn itself begins byte-free with workspace refs.
+    pub inbound_attachments: Arc<dyn InboundAttachmentLander>,
     pub approval_interaction: Option<Arc<dyn ApprovalInteractionService>>,
     pub auth_interaction: Option<Arc<dyn AuthInteractionService>>,
     pub identity: ChannelHostIdentity,
@@ -580,6 +586,7 @@ impl GenericChannelHostAssembly {
             Some(identity.operator_user_id.clone()),
         );
         Some(RunDeliveryServices {
+            project_filesystem: Arc::clone(&delivery.project_filesystem),
             binding_service: Arc::new(TriggeredNoopConversationBindingService),
             thread_service: Arc::clone(&self.deps.thread_service),
             turn_coordinator: Arc::clone(&self.deps.turn_coordinator),
@@ -748,11 +755,14 @@ impl GenericChannelHostAssembly {
 
         let (binding, workflow_state) = self.build_binding(source, extras).await?;
 
-        let inbound = Arc::new(DefaultInboundTurnService::new(
-            Arc::clone(&binding),
-            Arc::clone(&self.deps.thread_service),
-            Arc::clone(&self.deps.turn_coordinator),
-        ));
+        let inbound = Arc::new(
+            DefaultInboundTurnService::new(
+                Arc::clone(&binding),
+                Arc::clone(&self.deps.thread_service),
+                Arc::clone(&self.deps.turn_coordinator),
+            )
+            .with_inbound_attachments(Arc::clone(&self.deps.inbound_attachments)),
+        );
         let mut workflow = DefaultProductSurface::new(
             inbound,
             Arc::clone(&workflow_state.ledger),
@@ -821,7 +831,7 @@ impl GenericChannelHostAssembly {
                 pairing,
                 observer
                     .clone()
-                    .map(ChannelPairingOutcomeObserver::RunDelivery),
+                    .map(|observer| observer as Arc<dyn ChannelPairingOutcomeObserver>),
             );
         }
         let sink = Arc::new(sink);
@@ -1011,6 +1021,7 @@ impl GenericChannelHostAssembly {
             Some(identity.operator_user_id.clone()),
         );
         let services = RunDeliveryServices {
+            project_filesystem: Arc::clone(&delivery.project_filesystem),
             binding_service: binding,
             thread_service: Arc::clone(&self.deps.thread_service),
             turn_coordinator: Arc::clone(&self.deps.turn_coordinator),
@@ -1088,6 +1099,22 @@ impl GenericChannelHostAssembly {
             ReconciledChannel::Generic { observer, .. } => observer.clone(),
             _ => None,
         }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    use std::sync::Arc;
+
+    use ironclaw_product::InboundAttachmentLander;
+
+    use super::GenericChannelHostAssembly;
+
+    /// Return the exact attachment lander captured by production assembly.
+    pub fn inbound_attachment_lander(
+        assembly: &GenericChannelHostAssembly,
+    ) -> Arc<dyn InboundAttachmentLander> {
+        Arc::clone(&assembly.deps.inbound_attachments)
     }
 }
 
@@ -1247,8 +1274,9 @@ impl PostAdmissionObserver for RunDeliveryPostAdmissionObserver {
     }
 }
 
-impl RunDeliveryPostAdmissionObserver {
-    pub async fn observe_pairing_outcome(
+#[async_trait]
+impl ChannelPairingOutcomeObserver for RunDeliveryPostAdmissionObserver {
+    async fn observe_pairing_outcome(
         &self,
         conversation: ExternalConversationRef,
         event_id: ExternalEventId,

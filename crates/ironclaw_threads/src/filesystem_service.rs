@@ -1672,6 +1672,8 @@ where
         &self,
         request: AppendFinalizedAssistantMessageRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let (content, attachments) = request.content.into_parts();
+        crate::contract::validate_attachment_refs(&attachments)?;
         if let Some(existing) = self
             .find_assistant_message_by_run(
                 &request.scope,
@@ -1684,7 +1686,8 @@ where
             if existing.status != MessageStatus::Draft {
                 return Ok(existing);
             }
-            let content = request.content.clone();
+            let content = content.clone();
+            let attachments = attachments.clone();
             let now = Utc::now();
             let finalized = self
                 .apply_message_update(
@@ -1694,8 +1697,8 @@ where
                     |message| {
                         ensure_draft(message)?;
                         message.status = MessageStatus::Finalized;
-                        message.content = Some(content.clone().into_text());
-                        message.attachments = Vec::new();
+                        message.content = Some(content.clone());
+                        message.attachments = attachments.clone();
                         message.updated_at = Some(now);
                         Ok(())
                     },
@@ -1726,8 +1729,8 @@ where
             turn_run_id: Some(request.turn_run_id),
             tool_result_ref: None,
             tool_result_provider_call: None,
-            content: Some(request.content.into_text()),
-            attachments: Vec::new(),
+            content: Some(content),
+            attachments,
             redaction_ref: None,
         };
         self.write_new_message(
@@ -2183,6 +2186,8 @@ where
         message_id: ThreadMessageId,
         content: MessageContent,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let (content, attachments) = content.into_parts();
+        crate::contract::validate_attachment_refs(&attachments)?;
         self.read_thread_versioned(scope, thread_id)
             .await?
             .ok_or_else(|| SessionThreadError::UnknownThread {
@@ -2193,8 +2198,8 @@ where
             .apply_message_update(scope, thread_id, message_id, |message| {
                 ensure_draft(message)?;
                 message.status = MessageStatus::Finalized;
-                message.content = Some(content.clone().into_text());
-                message.attachments = Vec::new();
+                message.content = Some(content.clone());
+                message.attachments = attachments.clone();
                 message.updated_at = Some(now);
                 Ok(())
             })

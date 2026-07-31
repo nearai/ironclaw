@@ -416,9 +416,11 @@ fn pairing_ingress_with_outcomes(
         })
         .with_pairing(
             service as Arc<dyn ChannelPairingInterceptor>,
-            Some(ChannelPairingOutcomeObserver::Recording(Arc::clone(
-                &outcomes,
-            ))),
+            Some(
+                Arc::new(crate::test_support::RecordingPairingOutcomeObserver {
+                    outcomes: Arc::clone(&outcomes),
+                }) as Arc<dyn ChannelPairingOutcomeObserver>,
+            ),
         ),
     );
     (sink, outcomes)
@@ -434,6 +436,8 @@ fn pairing_admission_for(
     actor_id: &str,
 ) -> InboundAdmission {
     InboundAdmission {
+        channel_adapter: Arc::new(crate::test_support::FakeChannelAdapter::default()),
+        channel_egress: None,
         extension_id: EXT.to_string(),
         installation_id: installation_id.to_string(),
         message: direct_message(&format!("/start {}", code.as_str()), actor_id),
