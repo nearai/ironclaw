@@ -63,7 +63,8 @@ The dispatcher contract tests validate:
 - extension discovery returns WASM, Script, and MCP packages
 - dispatcher receives already-authorized sealed `Authorized` witnesses, resolves
   prebound adapters, and validates their sealed `RuntimeLane`
-- higher-level caller workflow stays out of dispatcher crate dev surfaces
+- higher-level caller workflow stays out of the `ironclaw_capabilities::dispatch`
+  module's dev surfaces
 - WASM dispatch goes through `RuntimeDispatcher` and a registered runtime adapter
 - Script dispatch goes through `RuntimeDispatcher` and a registered runtime adapter
 - MCP dispatch goes through `RuntimeDispatcher` and a registered runtime adapter
