@@ -34,6 +34,7 @@
 pub mod channel;
 pub mod channel_identity;
 pub mod extension;
+pub mod hosted_mcp;
 pub mod memory;
 pub mod package_lifecycle;
 pub mod preference_target;

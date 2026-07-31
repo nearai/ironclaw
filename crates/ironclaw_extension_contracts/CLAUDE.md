@@ -20,6 +20,7 @@ Today that is nine modules:
 | `channel` | Channel manifest-surface descriptors: `ChannelDescriptor`, `ChannelIngressDescriptor`, `ChannelEgressDescriptor`, `ChannelPresentation`, connection strategy/notices, and their validators. |
 | `channel_identity` | The channel-identity hooks a host runs around binding: `ChannelConnectionScopeSource`, `ChannelIdentityPostBind(Factory)`, `ChannelIdentityOverride`. |
 | `extension` | `Extension`, `ExtensionContract`, `ExtensionRuntimeIdentity`, `ExtensionInstanceId`, `ExtensionHostAssemblyConfig`. |
+| `hosted_mcp` | Untrusted registration input for user-registered hosted MCP servers: `RegisterHostedMcpRequest`, `HostedMcpEndpoint`, `HostedMcpAuthSelection`, `McpAuthChallenge`, and the auth-metadata extraction helper. |
 | `memory` | The `[memory]` manifest surface: `MemoryDescriptor`, `MemoryLifecycleHook`. |
 | `package_lifecycle` | Package/extension lifecycle projection vocabulary (`Lifecycle*`, `ChannelConnectStrategy`, `ChannelConfigField`). |
 | `preference_target` | `PreferenceTargetCodec` + `PreferenceTargetEncodeRequest` — the one vendor-implemented port here. |
@@ -74,6 +75,19 @@ Three architecture tests hold the line, all runnable with
   exists to prevent, and the extension tier had three live instances of it.
 - `reborn_extension_specificity.rs` — vendor-name scanning, which reaches this
   crate automatically through `cargo metadata`.
+
+## Why `hosted_mcp` lives here
+
+It arrived on `main` with #6930 as `ironclaw_host_api::hosted_mcp` and had to
+move: `hosted_mcp` names `package_lifecycle::LifecyclePackageId` and
+`package_lifecycle` names `hosted_mcp::RegisterHostedMcpRequest`. Mutually
+referencing modules are fine inside one crate — but once `package_lifecycle`
+moved here, keeping `hosted_mcp` in `ironclaw_host_api` would have required
+`host_api -> extension_contracts`, and `host_api` may hold no internal
+dependency at all. Both halves therefore live here, which is also where the
+charter puts them: they are registration input describing what an installable
+extension *is*, and the module's own doc already says the extension host owns
+every behavior around them.
 
 ## Known interim placements
 

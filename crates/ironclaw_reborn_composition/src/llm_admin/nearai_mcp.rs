@@ -5,7 +5,6 @@ use ironclaw_auth::{
     CredentialAccountUpdateBinding,
 };
 use ironclaw_extension_contracts::state::InstallationState;
-use ironclaw_extension_host::ExtensionActivationMode;
 use ironclaw_host_api::{
     ids::{ExtensionId, InvocationId},
     product_surface::{ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind},
@@ -169,14 +168,15 @@ pub(crate) async fn bootstrap_nearai_mcp(
             InstallationState::Installed | InstallationState::Configured
         )
     {
+        let credential_gate = RuntimeExtensionActivationCredentialGate::new(
+            resource_scope.clone(),
+            product_auth.runtime_credential_account_selection_service(),
+        );
         extension_management
             .activate_with_credential_gate(
                 package_ref,
-                ExtensionActivationMode::Static,
-                RuntimeExtensionActivationCredentialGate::new(
-                    resource_scope,
-                    product_auth.runtime_credential_account_selection_service(),
-                ),
+                resource_scope.clone(),
+                &credential_gate,
                 &bootstrap_caller,
             )
             .await

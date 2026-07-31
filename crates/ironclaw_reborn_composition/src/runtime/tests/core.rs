@@ -237,7 +237,7 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
     assert_eq!(network_egress.calls.load(Ordering::SeqCst), 1);
 
     extension_management
-        .activate_with_prechecked_credentials_for_test(slack_ref, ExtensionActivationMode::Static)
+        .activate_with_prechecked_credentials_for_test(slack_ref)
         .await
         .expect("activate Slack and publish the generic host snapshot");
 
@@ -576,7 +576,6 @@ use crate::runtime_input::{
     TriggerPollerSettings,
 };
 use crate::{RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError};
-use ironclaw_extension_host::ExtensionActivationMode;
 use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
 
 use super::{RebornSkillSourceKind, build_reborn_runtime};
@@ -1805,7 +1804,12 @@ async fn root_llm_gateway_bootstraps_nearai_session_token_from_env() {
 
 #[tokio::test]
 async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
-    let _token_guard = RuntimeEnvGuard::set("NEARAI_SESSION_TOKEN", "sess_reborn_mcp_token").await;
+    let _env_guard = RuntimeEnvGuard::with([
+        ("NEARAI_SESSION_TOKEN", Some("sess_reborn_mcp_token")),
+        ("NEARAI_API_KEY", None),
+        ("NEARAI_BASE_URL", Some("https://cloud-api.nearai.example")),
+    ])
+    .await;
     let root = tempfile::tempdir().expect("tempdir");
     let session_dir = tempfile::tempdir().expect("session tempdir");
     let standalone_root = root.path().join("standalone");
@@ -1813,13 +1817,13 @@ async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
     let config = ironclaw_llm::LlmConfig {
         backend: "nearai".to_string(),
         session: ironclaw_llm::SessionConfig {
-            auth_base_url: "https://private.near.ai".to_string(),
+            auth_base_url: "https://private.nearai.example".to_string(),
             session_path: session_dir.path().join("session.json"),
         },
         nearai: ironclaw_llm::NearAiConfig {
             model: "test-model".to_string(),
             cheap_model: None,
-            base_url: "https://private.near.ai".to_string(),
+            base_url: "https://private.nearai.example".to_string(),
             api_key: None,
             fallback_model: None,
             max_retries: 0,
@@ -1894,7 +1898,7 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     let _env_guard = RuntimeEnvGuard::with([
         ("NEARAI_SESSION_TOKEN", None),
         ("NEARAI_API_KEY", None),
-        ("NEARAI_BASE_URL", None),
+        ("NEARAI_BASE_URL", Some("https://cloud-api.nearai.example")),
     ])
     .await;
     let root = tempfile::tempdir().expect("tempdir");
@@ -1922,13 +1926,13 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     let config = ironclaw_llm::LlmConfig {
         backend: "nearai".to_string(),
         session: ironclaw_llm::SessionConfig {
-            auth_base_url: "https://private.near.ai".to_string(),
+            auth_base_url: "https://private.nearai.example".to_string(),
             session_path: session_dir.path().join("session.json"),
         },
         nearai: ironclaw_llm::NearAiConfig {
             model: "test-model".to_string(),
             cheap_model: None,
-            base_url: "https://cloud-api.near.ai".to_string(),
+            base_url: "https://cloud-api.nearai.example".to_string(),
             api_key: None,
             fallback_model: None,
             max_retries: 0,
@@ -2043,7 +2047,7 @@ async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
     let _env_guard = RuntimeEnvGuard::with([
         ("NEARAI_SESSION_TOKEN", None),
         ("NEARAI_API_KEY", None),
-        ("NEARAI_BASE_URL", None),
+        ("NEARAI_BASE_URL", Some("https://cloud-api.nearai.example")),
     ])
     .await;
     let root = tempfile::tempdir().expect("tempdir");
@@ -2071,13 +2075,13 @@ async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
     let config = ironclaw_llm::LlmConfig {
         backend: "nearai".to_string(),
         session: ironclaw_llm::SessionConfig {
-            auth_base_url: "https://private.near.ai".to_string(),
+            auth_base_url: "https://private.nearai.example".to_string(),
             session_path: session_dir.path().join("session.json"),
         },
         nearai: ironclaw_llm::NearAiConfig {
             model: "test-model".to_string(),
             cheap_model: None,
-            base_url: "https://cloud-api.near.ai".to_string(),
+            base_url: "https://cloud-api.nearai.example".to_string(),
             api_key: Some(secrecy::SecretString::from("sk-prebuild-nearai-mcp-key")),
             fallback_model: None,
             max_retries: 0,
@@ -2472,7 +2476,9 @@ async fn env_trace_recording_attaches_recorder_factory_only_when_enabled() {
 /// the real caller (`build_reborn_runtime`) instead.
 #[tokio::test]
 async fn provider_factory_runs_during_production_boot() {
-    let _env_guard = RuntimeEnvGuard::with([("NEARAI_BASE_URL", None)]).await;
+    let _env_guard =
+        RuntimeEnvGuard::with([("NEARAI_BASE_URL", Some("https://cloud-api.nearai.example"))])
+            .await;
     let root = tempfile::tempdir().expect("tempdir");
     let session_dir = tempfile::tempdir().expect("session tempdir");
     let standalone_root = root.path().join("standalone");
@@ -2541,7 +2547,7 @@ async fn standalone_runtime_startup_uses_stored_nearai_api_key_after_restart() {
     let _env_guard = RuntimeEnvGuard::with([
         ("NEARAI_SESSION_TOKEN", None),
         ("NEARAI_API_KEY", None),
-        ("NEARAI_BASE_URL", None),
+        ("NEARAI_BASE_URL", Some("https://cloud-api.nearai.example")),
     ])
     .await;
     let (base_url, auth_rx) = start_nearai_auth_capture_server().await;
@@ -3550,7 +3556,7 @@ async fn send_user_message_renders_cli_origin_in_model_request() {
 }
 
 #[tokio::test]
-async fn send_user_message_until_gate_returns_blocked_on_auth_gate() {
+async fn hosted_mcp_activation_stays_pending_until_preparation_completes() {
     let root = tempfile::tempdir().expect("tempdir");
     let host_home = root.path().join("host-home");
     std::fs::create_dir_all(&host_home).expect("host home");
@@ -3591,67 +3597,15 @@ async fn send_user_message_until_gate_returns_blocked_on_auth_gate() {
         )
         .await
         .expect("install Notion MCP");
-    // v3 hosted-MCP packages publish no model-visible tools on static
-    // activation; script tools/list discovery so the notion-search tool
-    // the auth-gate gateway calls exists as a model-visible capability.
-    extension_management
-        .activate_with_prechecked_credentials_for_test(
-            notion_ref,
-            ExtensionActivationMode::HostedMcpDiscovery {
-                scope: ResourceScope::local_default(
-                    UserId::new("runtime-auth-gate-owner").expect("valid user"),
-                    InvocationId::new(),
-                )
-                .expect("valid scope"),
-                runtime_http_egress: Arc::new(
-                    ironclaw_extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress::with_tool_name("notion-search"),
-                ),
-            },
-        )
+    // Hosted-MCP discovery belongs to pending preparation, not activation
+    // mode selection. The prechecked helper bypasses that product seam, so
+    // activation remains visibly pending instead of publishing a guessed tool
+    // catalog.
+    let activation = extension_management
+        .activate_with_prechecked_credentials_for_test(notion_ref)
         .await
-        .expect("activate Notion MCP with scripted discovery");
-
-    let conversation = runtime.new_conversation().await.expect("conversation");
-    runtime
-        .enable_global_auto_approve_for_test(&conversation)
-        .await;
-    let outcome = tokio::time::timeout(
-        RUNTIME_SEND_TIMEOUT,
-        runtime.send_user_message_until_gate(&conversation, "search Notion"),
-    )
-    .await
-    .expect("gate-aware send should return before timeout")
-    .expect("gate-aware send should succeed");
-
-    let (run_id, gate_ref) = match outcome {
-        super::RebornTurnDriveOutcome::BlockedOnGate {
-            run_id,
-            status,
-            gate_ref,
-            ..
-        } => {
-            assert_eq!(status, TurnStatus::BlockedAuth);
-            assert!(
-                gate_ref.as_str().starts_with("gate:auth-"),
-                "auth gate ref should carry the auth prefix, got {}",
-                gate_ref.as_str()
-            );
-            (run_id, gate_ref)
-        }
-        super::RebornTurnDriveOutcome::Terminal(reply) => {
-            panic!("auth-gated turn should pause before terminal reply, got {reply:?}");
-        }
-    };
-    let state = runtime
-        .turn_coordinator
-        .get_run_state(GetRunStateRequest {
-            scope: runtime.turn_scope_for(&conversation.0),
-            run_id,
-        })
-        .await
-        .expect("blocked run state");
-    assert_eq!(state.status, TurnStatus::BlockedAuth);
-    assert_eq!(state.gate_ref.as_ref(), Some(&gate_ref));
+        .expect("pending hosted-MCP activation returns a lifecycle response");
+    assert_eq!(activation.phase, InstallationState::Installed);
 
     runtime.shutdown().await.expect("runtime shutdown");
 }

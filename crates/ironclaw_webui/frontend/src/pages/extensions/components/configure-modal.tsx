@@ -201,6 +201,7 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
           (secret) => (
             <div key={secret.name}>
               <label
+                htmlFor={`extension-secret-${secret.name}`}
                 className="mb-1.5 flex items-center gap-2 text-sm text-iron-200"
               >
                 {secret.prompt || secret.name}
@@ -241,6 +242,7 @@ export function ConfigureModal({ extension, onClose, onSaved, returnFocusTo }) {
                 : (
               <>
               <input
+                id={`extension-secret-${secret.name}`}
                 type="password"
                 placeholder={secret.provided
                   ? t("extensions.keepSecretPlaceholder")

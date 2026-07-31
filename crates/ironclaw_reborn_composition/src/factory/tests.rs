@@ -11,7 +11,7 @@ use ironclaw_filesystem::FilesystemError;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    action::{NetworkPolicy, NetworkTargetPattern},
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
     ids::{
         CapabilityGrantId, CapabilityId, ExtensionId, InvocationId, RunId, SecretHandle, TenantId,
@@ -45,8 +45,6 @@ use crate::{
     RebornReadinessDiagnostic, RebornReadinessState, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
 };
 use ironclaw_extension_contracts::state::InstallationState;
-use ironclaw_extension_host::ExtensionActivationMode;
-use ironclaw_extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress;
 
 #[test]
 fn libsql_build_resource_governor_guard_requires_singleton_authority() {
@@ -623,7 +621,7 @@ async fn local_dev_extension_host_reserves_runner_bridge_capabilities() {
         .await
         .expect("fixture installs before activation");
     let error = extension_management
-        .activate(package_ref.clone(), ExtensionActivationMode::Static, &owner)
+        .activate(package_ref.clone(), &owner)
         .await
         .expect_err("runner bridge collision must fail activation");
     assert!(
@@ -1306,11 +1304,7 @@ async fn standalone_gsuite_installs_activates_and_dispatches_through_host_runtim
         .await
         .expect("install Gmail");
     extension_management
-        .activate_with_prechecked_credentials_for_user_for_test(
-            gmail_ref,
-            ExtensionActivationMode::Static,
-            &caller,
-        )
+        .activate_with_prechecked_credentials_for_user_for_test(gmail_ref, &caller)
         .await
         .expect("activate Gmail");
     extension_management
@@ -1318,11 +1312,7 @@ async fn standalone_gsuite_installs_activates_and_dispatches_through_host_runtim
         .await
         .expect("install Google Calendar");
     extension_management
-        .activate_with_prechecked_credentials_for_user_for_test(
-            calendar_ref,
-            ExtensionActivationMode::Static,
-            &caller,
-        )
+        .activate_with_prechecked_credentials_for_user_for_test(calendar_ref, &caller)
         .await
         .expect("activate Google Calendar");
 
@@ -1406,7 +1396,7 @@ async fn standalone_gsuite_installs_activates_and_dispatches_through_host_runtim
 }
 
 #[tokio::test]
-async fn standalone_notion_mcp_installs_activates_and_reaches_auth_gate() {
+async fn standalone_notion_mcp_stays_pending_without_preparation() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_runtime_substrate(
         crate::deployment::local_filesystem_build_input_with_profile(
@@ -1451,38 +1441,18 @@ async fn standalone_notion_mcp_installs_activates_and_reaches_auth_gate() {
         .await
         .expect("install Notion MCP");
     extension_management
-        .activate_with_prechecked_credentials_for_user_for_test(
-            notion_ref,
-            ExtensionActivationMode::HostedMcpDiscovery {
-                scope: ResourceScope::local_default(caller.clone(), InvocationId::new())
-                    .expect("valid scope"),
-                runtime_http_egress: Arc::new(
-                    HostedMcpDiscoveryEgress::with_tool_name("notion-search").read_only(),
-                ),
-            },
+        .activate_with_prechecked_credentials_for_user_for_test(notion_ref, &caller)
+        .await
+        .expect("pending Notion activation returns a lifecycle response");
+    let projection = extension_management
+        .project(
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion")
+                .expect("valid Notion ref"),
             &caller,
         )
         .await
-        .expect("activate Notion MCP with scripted discovery");
-
-    let context = notion_mcp_context("notion.notion-search");
-    enable_global_auto_approve_for_context(runtime_surfaces, &context).await;
-    let outcome = services
-        .host_runtime
-        .as_ref()
-        .invoke_capability((
-            context,
-            CapabilityId::new("notion.notion-search").unwrap(),
-            ResourceEstimate::default(),
-            serde_json::json!({ "query": "project notes" }),
-        ))
-        .await
-        .expect("runtime invocation completes");
-
-    let RuntimeCapabilityOutcome::AuthRequired(gate) = outcome else {
-        panic!("expected missing Notion token to open auth gate, got {outcome:?}");
-    };
-    assert_eq!(gate.capability_id.as_str(), "notion.notion-search");
+        .expect("project pending Notion installation");
+    assert_eq!(projection.phase, InstallationState::Installed);
 }
 
 #[tokio::test]
@@ -1511,11 +1481,7 @@ async fn standalone_web_access_installs_activates_and_dispatches_through_host_ru
         .await
         .expect("install Web Access");
     extension_management
-        .activate_with_prechecked_credentials_for_user_for_test(
-            web_access_ref,
-            ExtensionActivationMode::Static,
-            &caller,
-        )
+        .activate_with_prechecked_credentials_for_user_for_test(web_access_ref, &caller)
         .await
         .expect("activate Web Access");
 
@@ -1565,7 +1531,7 @@ fn nearai_bootstrap_input_with_base(
 }
 
 fn nearai_bootstrap_input(owner: &str, root: PathBuf, api_key: &str) -> RebornHostBindings {
-    nearai_bootstrap_input_with_base(owner, root, "https://private.near.ai", api_key)
+    nearai_bootstrap_input_with_base(owner, root, "https://private.nearai.example", api_key)
 }
 
 #[test]
@@ -1947,26 +1913,12 @@ async fn standalone_nearai_mcp_auto_bootstraps_from_injected_config() {
         Some(ironclaw_extensions::CapabilityVisibility::HostInternal)
     );
 
-    // Script live tools/list discovery through the hosted-MCP seam so the
-    // discovered web_search tool surfaces with the connection template's
-    // credential wiring (the injected endpoint override patches
-    // [mcp].server only; the audience derives from that server host).
+    // The canonical activation path no longer selects a discovery lane. The
+    // bootstrap-owned preparation state remains the authority for this package.
     extension_management
-        .activate_with_prechecked_credentials_for_test(
-            nearai_ref,
-            ExtensionActivationMode::HostedMcpDiscovery {
-                scope: ResourceScope::local_default(
-                    UserId::new(owner).unwrap(),
-                    InvocationId::new(),
-                )
-                .expect("valid scope"),
-                runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::with_tool_name(
-                    "web_search",
-                )),
-            },
-        )
+        .activate_with_prechecked_credentials_for_test(nearai_ref)
         .await
-        .expect("scripted NEAR AI discovery activation");
+        .expect("pending NEAR AI activation returns a lifecycle response");
 
     let capabilities = extension_management
         .active_model_visible_capabilities()
@@ -2082,7 +2034,7 @@ async fn standalone_nearai_mcp_rebootstrap_reuses_existing_account() {
     let outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         Some(
             ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
-                "https://private.near.ai",
+                "https://private.nearai.example",
                 secrecy::SecretString::from("nearai-second-key"),
             )
             .expect("valid NEAR AI MCP bootstrap config"),
@@ -2155,7 +2107,7 @@ async fn standalone_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential
     let outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         Some(
             ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
-                "https://private.near.ai",
+                "https://private.nearai.example",
                 secrecy::SecretString::from("nearai-test-key"),
             )
             .expect("valid NEAR AI MCP bootstrap config"),
@@ -2214,7 +2166,7 @@ async fn standalone_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential
 async fn standalone_nearai_mcp_invalid_base_url_fails_build() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
-        "http://private.near.ai",
+        "http://private.nearai.example",
         secrecy::SecretString::from("nearai-test-key"),
     )
     .expect("config shape");
@@ -2775,37 +2727,6 @@ async fn enable_global_auto_approve_for_context(
 
 use crate::approval_test_support::disable_global_auto_approve;
 
-fn notion_mcp_context(capability_id: &str) -> ExecutionContext {
-    let extension_id = ExtensionId::new("caller").expect("valid extension id");
-    let mut context = ExecutionContext::local_default(
-        UserId::new("standalone-test-user").expect("valid user id"),
-        extension_id.clone(),
-        RuntimeKind::Mcp,
-        TrustClass::Sandbox,
-        CapabilitySet {
-            grants: vec![CapabilityGrant {
-                id: CapabilityGrantId::new(),
-                capability: CapabilityId::new(capability_id).expect("valid capability id"),
-                grantee: Principal::Extension(extension_id),
-                issued_by: Principal::HostRuntime,
-                constraints: GrantConstraints {
-                    allowed_effects: notion_mcp_allowed_effects(),
-                    mounts: MountView::new(Vec::new()).expect("valid empty mount view"),
-                    network: notion_mcp_network_policy(),
-                    secrets: vec![SecretHandle::new("mcp_notion_access_token").unwrap()],
-                    resource_ceiling: None,
-                    expires_at: None,
-                    max_invocations: None,
-                },
-            }],
-        },
-        MountView::new(Vec::new()).expect("valid empty mount view"),
-    )
-    .expect("valid execution context");
-    context.run_id = Some(RunId::new());
-    context
-}
-
 fn web_access_context(capability_id: &str) -> ExecutionContext {
     let extension_id = ExtensionId::new("caller").expect("valid extension id");
     let mut context = ExecutionContext::local_default(
@@ -2930,26 +2851,6 @@ fn network_policy() -> NetworkPolicy {
         deny_private_ip_ranges: true,
         max_egress_bytes: None,
     }
-}
-
-fn notion_mcp_network_policy() -> NetworkPolicy {
-    NetworkPolicy {
-        allowed_targets: vec![NetworkTargetPattern {
-            scheme: Some(NetworkScheme::Https),
-            host_pattern: "mcp.notion.com".to_string(),
-            port: None,
-        }],
-        deny_private_ip_ranges: true,
-        max_egress_bytes: None,
-    }
-}
-
-fn notion_mcp_allowed_effects() -> Vec<EffectKind> {
-    vec![
-        EffectKind::DispatchCapability,
-        EffectKind::Network,
-        EffectKind::UseSecret,
-    ]
 }
 
 fn local_host_minimal_approval_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy
@@ -3212,6 +3113,7 @@ async fn completed_lifecycle_activation_continuation_installs_the_extension() {
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider.clone(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .unwrap(),

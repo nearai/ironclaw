@@ -332,6 +332,12 @@ prompt_doc_ref = "prompts/test-lane-binder/run.md"
             runtime_policy: test_policy(),
         };
 
-        assert_eq!(adapter.package.root, root);
+        assert_eq!(
+            adapter
+                .package
+                .materialized_root()
+                .expect("materialized root"),
+            &root
+        );
     }
 }

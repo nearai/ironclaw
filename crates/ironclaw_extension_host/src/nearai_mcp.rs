@@ -1,5 +1,6 @@
 use std::net::IpAddr;
 
+use ironclaw_common::env_helpers::env_or_override;
 use secrecy::{ExposeSecret, SecretString};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,8 +67,7 @@ pub enum NearAiMcpBootstrapConfigError {
 }
 
 pub fn nearai_mcp_endpoint_from_env() -> Result<NearAiMcpEndpoint, String> {
-    let configured_base = std::env::var("NEARAI_BASE_URL")
-        .ok()
+    let configured_base = env_or_override("NEARAI_BASE_URL")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     nearai_mcp_endpoint_from_base(configured_base.as_deref())

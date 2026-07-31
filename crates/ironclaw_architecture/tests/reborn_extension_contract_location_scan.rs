@@ -92,6 +92,12 @@ const FROZEN_CONTRACT_NAMES: &[&str] = &[
     "VendorAuthRecipe",
     // Memory manifest surface.
     "MemoryDescriptor",
+    // Hosted-MCP registration input. Frozen by name because this type is one
+    // half of the `hosted_mcp` <-> `package_lifecycle` mutual reference that
+    // forced both modules into this crate; a future attempt to push it back
+    // into `ironclaw_host_api` re-creates a dependency cycle that crate cannot
+    // legally express.
+    "RegisterHostedMcpRequest",
 ];
 
 /// Names that are governed but whose *definition* the one-home half must not
