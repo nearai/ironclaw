@@ -3,7 +3,6 @@
 // Content hashing moved to `ironclaw_memory`; re-exported below so
 // existing `crate::chunking::content_sha256` / `ironclaw_memory::content_sha256`
 // paths keep resolving.
-pub use ironclaw_memory::{content_bytes_sha256, content_sha256};
 
 /// Configuration for document chunking.
 ///

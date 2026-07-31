@@ -34,7 +34,10 @@ struct FrozenPathCount {
 /// Measured 2026-07-30 against `origin/main` @ `ae0989c37` from
 /// `FROZEN_PATH_COUNTS` below — 82 frozen `(category, kind, path)` entries
 /// totalling 283 suppressed members (both printed by the assertion at the end
-/// of the gate below on failure).
+/// of the gate below on failure). Lowered to 81/282 by the WS0 dead-module
+/// deletion, which removed
+/// `event_projections/src/pending_gate_projection.rs` and its one
+/// test-support method.
 ///
 /// The per-path checks already refuse growth *within* a listed file and refuse
 /// staleness. These two totals close the remaining door: adding a **new** path
@@ -43,8 +46,8 @@ struct FrozenPathCount {
 /// more line in a long list. Both only ever move down; lower them in the same
 /// PR that deletes debt (CHECKLIST WS8 flips `dead_code`/`unreachable_pub` on
 /// workspace-wide once this inventory is gone).
-const WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE: usize = 82;
-const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 283;
+const WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE: usize = 81;
+const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 282;
 
 const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
@@ -207,12 +210,6 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "test-support",
         item_kind: "method",
         path: "crates/ironclaw_auth/src/product_auth/durable/mod.rs",
-        count: 1,
-    },
-    FrozenPathCount {
-        category: "test-support",
-        item_kind: "method",
-        path: "crates/ironclaw_event_projections/src/pending_gate_projection.rs",
         count: 1,
     },
     FrozenPathCount {
