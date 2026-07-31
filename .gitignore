@@ -100,6 +100,10 @@ test-tools/*/wasm-src/target/
 # (#6298/#6305).
 node_modules/
 
+# Built frontend bundles. Scoped per-crate .gitignore files only cover the
+# crate they live in, which let a sibling crate ship 3.5 MB of build output.
+crates/*/frontend/dist/
+
 # cargo-mutants writes its report tree (caught/missed/timeout lists, per-mutant
 # logs, and a copy of each mutated diff) next to the manifest it is run from.
 # It is a regenerable build artifact of a local audit, never source.

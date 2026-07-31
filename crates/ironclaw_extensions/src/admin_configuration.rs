@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use ironclaw_host_api::SecretHandle;
+use ironclaw_host_api::ids::SecretHandle;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

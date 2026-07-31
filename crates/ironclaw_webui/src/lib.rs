@@ -91,7 +91,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{any, get},
 };
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::ids::UserId;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
 use subtle::ConstantTimeEq;

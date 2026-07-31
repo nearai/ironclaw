@@ -6,7 +6,9 @@
 //! `EffectiveTrustClass` values must flow out of policy evaluation in every
 //! non-test build.
 
-use ironclaw_host_api::{EffectKind, PackageId, PackageSource, ResourceCeiling};
+use ironclaw_host_api::{
+    capability::EffectKind, ids::PackageId, resource::ResourceCeiling, trust::PackageSource,
+};
 
 use crate::decision::{
     EffectiveTrustClass, effective_first_party_for_test as effective_first_party_class_for_test,

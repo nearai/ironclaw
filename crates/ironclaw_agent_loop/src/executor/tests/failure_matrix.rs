@@ -59,8 +59,10 @@ enum ExpectedTerminal {
 
 #[derive(Debug, Clone, Copy)]
 enum ExpectedError {
-    HostUnavailable {
+    HostUnavailableWithDiagnostics {
         stage: HostStage,
+        kind: AgentLoopHostErrorKind,
+        safe_summary: &'static str,
     },
     CheckpointRejected {
         stage: CheckpointKind,
@@ -214,12 +216,13 @@ const ROWS: &[MatrixRow] = &[
     MatrixRow {
         label: "TranscriptWriteFailed <- fail_transcript_with",
         setup: FailureSetup::TranscriptWriteFailed,
-        // matrix-divergence: TranscriptWriteFailed enum origin is legacy
-        // text_loop_driver; planned executor maps assistant transcript finalize
-        // failure to HostUnavailable { stage: Transcript } before any LoopExit.
+        // The planned executor must preserve the typed transcript cause while
+        // dropping backend detail that may contain raw reply text or secrets.
         expected_kind: ExpectedTerminal::Error {
-            error: ExpectedError::HostUnavailable {
+            error: ExpectedError::HostUnavailableWithDiagnostics {
                 stage: HostStage::Transcript,
+                kind: AgentLoopHostErrorKind::TranscriptWriteFailed,
+                safe_summary: "assistant transcript write failed",
             },
         },
         expects_explanation: false,
@@ -562,8 +565,9 @@ fn assert_expected_terminal(row: &MatrixRow, observed: &ObservedTerminal) {
                 row.label
             );
             match error {
-                ExpectedError::HostUnavailable {
+                ExpectedError::HostUnavailableWithDiagnostics {
                     stage: HostStage::Transcript,
+                    ..
                 } => {
                     assert_eq!(
                         observed.model_request_count, 1,
@@ -593,7 +597,7 @@ fn assert_expected_terminal(row: &MatrixRow, observed: &ObservedTerminal) {
                         row.label
                     );
                 }
-                ExpectedError::HostUnavailable { .. } => {}
+                ExpectedError::HostUnavailableWithDiagnostics { .. } => {}
             }
         }
         (
@@ -674,14 +678,37 @@ fn assert_expected_error(
     actual: &AgentLoopExecutorError,
 ) {
     match expected {
-        ExpectedError::HostUnavailable { stage } => {
-            assert_eq!(
-                actual,
-                &AgentLoopExecutorError::HostUnavailable { stage },
-                "{}: executor error",
+        ExpectedError::HostUnavailableWithDiagnostics {
+            stage,
+            kind,
+            safe_summary,
+        } => match actual {
+            AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+                stage: actual_stage,
+                kind: actual_kind,
+                safe_summary: actual_summary,
+                detail,
+                ..
+            } => {
+                assert_eq!(actual_stage, &stage, "{}: executor stage", row.label);
+                assert_eq!(actual_kind, &kind, "{}: executor kind", row.label);
+                assert_eq!(
+                    actual_summary.as_str(),
+                    safe_summary,
+                    "{}: safe summary",
+                    row.label
+                );
+                assert_eq!(
+                    detail, &None,
+                    "{}: backend detail must be dropped",
+                    row.label
+                );
+            }
+            other => panic!(
+                "{}: expected HostUnavailableWithDiagnostics, got {other:?}",
                 row.label
-            );
-        }
+            ),
+        },
         ExpectedError::CheckpointRejected {
             stage,
             safe_summary,
@@ -715,14 +742,19 @@ fn assert_explanation_refs(row: &MatrixRow, refs: &[ironclaw_turns::LoopMessageR
     }
 }
 
-fn batch_outcome(outcome: ironclaw_host_api::Resolution) -> ironclaw_host_api::ResolutionBatch {
-    ironclaw_host_api::ResolutionBatch {
+fn batch_outcome(
+    outcome: ironclaw_host_api::resolution::Resolution,
+) -> ironclaw_host_api::resolution::ResolutionBatch {
+    ironclaw_host_api::resolution::ResolutionBatch {
         resolutions: vec![outcome],
         stopped_on_suspension: false,
     }
 }
 
-fn failed_capability(error_kind: FailureKind, safe_summary: &str) -> ironclaw_host_api::Resolution {
+fn failed_capability(
+    error_kind: FailureKind,
+    safe_summary: &str,
+) -> ironclaw_host_api::resolution::Resolution {
     resolution::failed(
         error_kind,
         safe_summary.to_string(),
@@ -733,15 +765,15 @@ fn failed_capability(error_kind: FailureKind, safe_summary: &str) -> ironclaw_ho
 }
 
 fn batch_outcome_stopped(
-    outcome: ironclaw_host_api::Resolution,
-) -> ironclaw_host_api::ResolutionBatch {
-    ironclaw_host_api::ResolutionBatch {
+    outcome: ironclaw_host_api::resolution::Resolution,
+) -> ironclaw_host_api::resolution::ResolutionBatch {
+    ironclaw_host_api::resolution::ResolutionBatch {
         resolutions: vec![outcome],
         stopped_on_suspension: true,
     }
 }
 
-fn no_change_result(result_ref: &str) -> ironclaw_host_api::Resolution {
+fn no_change_result(result_ref: &str) -> ironclaw_host_api::resolution::Resolution {
     resolution::completed(
         LoopResultRef::new(result_ref).expect("valid"),
         "completed without progress".to_string(),

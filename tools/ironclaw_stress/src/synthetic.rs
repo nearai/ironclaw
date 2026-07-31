@@ -1,5 +1,6 @@
 use ironclaw_host_api::{
-    AgentId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+    ids::{AgentId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
+    resource::ResourceScope,
 };
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::TurnScope;

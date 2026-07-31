@@ -153,7 +153,22 @@ fn reborn_dockerfile_keeps_bundled_skills_in_build_context() {
 #[test]
 fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
     let dockerfile = read_repo_file("Dockerfile");
+    let chef_stage = dockerfile
+        .split_once(" AS chef\n")
+        .and_then(|(_, remainder)| remainder.split_once("\nFROM "))
+        .map(|(stage, _)| stage)
+        .expect("Dockerfile must define a chef stage");
+    let cargo_config_copy = chef_stage
+        .find("COPY .cargo/config.toml .cargo/config.toml")
+        .expect("chef stage must copy the repo-wide Cargo configuration");
+    let first_cargo_command = chef_stage
+        .find("cargo ")
+        .expect("chef stage must install cargo-chef");
 
+    assert!(
+        cargo_config_copy < first_cargo_command,
+        "chef stage must copy the Cargo network configuration before running Cargo"
+    );
     assert!(
         dockerfile.contains(
             "cargo chef cook \\\n    --profile dist \\\n    --package ironclaw \\\n    --recipe-path recipe.json"

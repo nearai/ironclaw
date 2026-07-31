@@ -5,7 +5,9 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ActivityId, CapabilityId, ProductSurface, ProductSurfaceCaller, ProductSurfaceError, Resolution,
+    ids::{ActivityId, CapabilityId},
+    product_surface::{ProductSurface, ProductSurfaceCaller, ProductSurfaceError},
+    resolution::Resolution,
 };
 use ironclaw_product::{
     RebornGetRunStateRequest, RebornStreamEventsRequest, RebornStreamEventsResponse,
@@ -140,8 +142,9 @@ impl ProductSurface for ProgrammableProductSurface {
     async fn invoke(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
+    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse, ProductSurfaceError>
+    {
         self.invoke_calls.lock().expect("lock").push(InvokeCall {
             caller: caller.clone(),
             capability: request.operation_id.clone(),
@@ -156,7 +159,7 @@ impl ProductSurface for ProgrammableProductSurface {
             )?;
             let output =
                 serde_json::to_value(output).map_err(ProductSurfaceError::internal_from)?;
-            return Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output });
+            return Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output });
         }
         Err(Self::unavailable())
     }
@@ -164,8 +167,9 @@ impl ProductSurface for ProgrammableProductSurface {
     async fn query(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+    {
         let query = RebornViewQuery {
             view_id: request.view_id,
             params: request.input,
@@ -177,10 +181,12 @@ impl ProductSurface for ProgrammableProductSurface {
         });
         if let Some(handler) = self.query_handler.lock().expect("lock").as_ref() {
             let page = handler(caller, query)?;
-            return Ok(ironclaw_host_api::ProductSurfaceQueryPage {
-                items: vec![page.payload],
-                next_cursor: page.next_cursor,
-            });
+            return Ok(
+                ironclaw_host_api::product_surface::ProductSurfaceQueryPage {
+                    items: vec![page.payload],
+                    next_cursor: page.next_cursor,
+                },
+            );
         }
         Err(Self::unavailable())
     }
@@ -188,13 +194,14 @@ impl ProductSurface for ProgrammableProductSurface {
     async fn stream_events(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceStreamRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+        request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
+    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceStreamResponse, ProductSurfaceError>
+    {
         let stream_request = RebornStreamEventsRequest {
             thread_id: request.stream_id.ok_or_else(|| {
                 ProductSurfaceError::validation(
                     "stream_id",
-                    ironclaw_host_api::ProductSurfaceValidationCode::MissingField,
+                    ironclaw_host_api::product_surface::ProductSurfaceValidationCode::MissingField,
                 )
             })?,
             after_cursor: request
@@ -224,9 +231,12 @@ impl ProductSurface for ProgrammableProductSurface {
             .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()
             .map_err(ProductSurfaceError::internal_from)?;
-        Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
-            events,
-            next_cursor: None,
-        })
+        Ok(
+            ironclaw_host_api::product_surface::ProductSurfaceStreamResponse {
+                events,
+                next_cursor: None,
+                subscription: None,
+            },
+        )
     }
 }

@@ -355,7 +355,7 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use ironclaw_host_api::{TenantId, ThreadId};
+    use ironclaw_host_api::ids::{TenantId, ThreadId};
     use ironclaw_turns::{
         RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
         run_profile::{InMemoryRunProfileResolver, LoopRunContext, PersonalContextPolicy},

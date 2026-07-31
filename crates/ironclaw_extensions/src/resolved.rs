@@ -14,9 +14,13 @@
 //! during rehydration.
 
 use ironclaw_host_api::{
-    ChannelDescriptor, EffectKind, ExtensionId, MemoryDescriptor, PermissionMode,
-    RequestedTrustClass, RuntimeCredentialAccountSetup, SecretHandle, VendorAuthRecipe, VendorId,
-    VirtualPath,
+    capability::{EffectKind, PermissionMode, RuntimeCredentialAccountSetup},
+    channel::ChannelDescriptor,
+    ids::{ExtensionId, SecretHandle, VendorId},
+    memory::MemoryDescriptor,
+    path::VirtualPath,
+    recipe::VendorAuthRecipe,
+    trust::RequestedTrustClass,
 };
 use serde::{Deserialize, Serialize};
 
@@ -127,7 +131,7 @@ pub struct ResolvedHostApiRef {
 /// Serializable mirror of a v2 contract-projected section surface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedSectionSurface {
-    pub kind: ironclaw_host_api::CapabilitySurfaceKind,
+    pub kind: ironclaw_host_api::surface::CapabilitySurfaceKind,
     pub host_api: String,
     pub section: String,
 }

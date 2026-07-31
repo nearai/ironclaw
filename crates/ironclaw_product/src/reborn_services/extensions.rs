@@ -9,8 +9,10 @@ use ironclaw_auth::{
     AuthAccountLastError, AuthAccountState, CredentialAccountStatus, project_auth_account_state,
 };
 use ironclaw_host_api::{
-    CapabilitySurfaceKind, ExtensionId, InstallationState, LifecyclePublicState,
-    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode,
+    ids::ExtensionId,
+    product_surface::{ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode},
+    state::{InstallationState, LifecyclePublicState},
+    surface::CapabilitySurfaceKind,
 };
 
 use crate::{
@@ -520,7 +522,10 @@ mod tests {
         CredentialAccountId, CredentialAccountLabel, CredentialAccountProjection,
         CredentialOwnership,
     };
-    use ironclaw_host_api::{AgentId, CapabilitySurfaceKind, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::{
+        ids::{AgentId, ProjectId, TenantId, UserId},
+        surface::CapabilitySurfaceKind,
+    };
 
     use super::*;
     use crate::reborn_services::StaticChannelConnectionService;
@@ -532,7 +537,7 @@ mod tests {
         LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
         LifecycleSearchExtensionSummary, RebornChannelConnectStrategy,
     };
-    use ironclaw_host_api::{
+    use ironclaw_host_api::product_surface::{
         ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     };
 

@@ -8,7 +8,6 @@ use std::time::Duration as StdDuration;
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
 use ironclaw_conversations::{
     ConversationBindingService as ConversationBindingPort, ExternalActorBindingEpoch,
@@ -16,8 +15,11 @@ use ironclaw_conversations::{
 };
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
-    AgentId, ApprovalRequestId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-    ProjectId, ResourceScope, TenantId, ThreadId, UserId, VirtualPath,
+    attachment::InboundAttachment,
+    ids::{AgentId, ApprovalRequestId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_product::{
     ActionDispatchKind, ActionFingerprintKey, ApprovalInteractionDecision,
@@ -544,8 +546,8 @@ struct TwoRecordDeliveredGateRouteStore {
     records: Vec<ironclaw_outbound::DeliveredGateRouteRecord>,
     captured_args: std::sync::Mutex<
         Vec<(
-            ironclaw_host_api::TenantId,
-            ironclaw_host_api::UserId,
+            ironclaw_host_api::ids::TenantId,
+            ironclaw_host_api::ids::UserId,
             String,
         )>,
     >,
@@ -564,8 +566,8 @@ impl TwoRecordDeliveredGateRouteStore {
     fn captured_args(
         &self,
     ) -> Vec<(
-        ironclaw_host_api::TenantId,
-        ironclaw_host_api::UserId,
+        ironclaw_host_api::ids::TenantId,
+        ironclaw_host_api::ids::UserId,
         String,
     )> {
         self.captured_args.lock().expect("lock").clone()
@@ -589,8 +591,8 @@ impl ironclaw_outbound::DeliveredGateRouteStore for TwoRecordDeliveredGateRouteS
 
     async fn load_delivered_gate_route(
         &self,
-        _tenant_id: &ironclaw_host_api::TenantId,
-        _user_id: &ironclaw_host_api::UserId,
+        _tenant_id: &ironclaw_host_api::ids::TenantId,
+        _user_id: &ironclaw_host_api::ids::UserId,
         _gate_ref: &str,
     ) -> Result<Option<ironclaw_outbound::DeliveredGateRouteRecord>, String> {
         Ok(None)
@@ -598,8 +600,8 @@ impl ironclaw_outbound::DeliveredGateRouteStore for TwoRecordDeliveredGateRouteS
 
     async fn load_delivered_gate_route_by_conversation_fingerprint(
         &self,
-        tenant_id: &ironclaw_host_api::TenantId,
-        user_id: &ironclaw_host_api::UserId,
+        tenant_id: &ironclaw_host_api::ids::TenantId,
+        user_id: &ironclaw_host_api::ids::UserId,
         conversation_fingerprint: &str,
     ) -> Result<Vec<ironclaw_outbound::DeliveredGateRouteRecord>, String> {
         self.captured_args.lock().expect("lock").push((
@@ -612,8 +614,8 @@ impl ironclaw_outbound::DeliveredGateRouteStore for TwoRecordDeliveredGateRouteS
 
     async fn remove_delivered_gate_route(
         &self,
-        _tenant_id: &ironclaw_host_api::TenantId,
-        _user_id: &ironclaw_host_api::UserId,
+        _tenant_id: &ironclaw_host_api::ids::TenantId,
+        _user_id: &ironclaw_host_api::ids::UserId,
         gate_ref: &str,
     ) -> Result<(), String> {
         self.removed
@@ -644,8 +646,8 @@ impl ironclaw_outbound::DeliveredGateRouteStore for FailingRouteStore {
 
     async fn load_delivered_gate_route(
         &self,
-        _tenant_id: &ironclaw_host_api::TenantId,
-        _user_id: &ironclaw_host_api::UserId,
+        _tenant_id: &ironclaw_host_api::ids::TenantId,
+        _user_id: &ironclaw_host_api::ids::UserId,
         _gate_ref: &str,
     ) -> Result<Option<ironclaw_outbound::DeliveredGateRouteRecord>, String> {
         Ok(None)
@@ -653,8 +655,8 @@ impl ironclaw_outbound::DeliveredGateRouteStore for FailingRouteStore {
 
     async fn load_delivered_gate_route_by_conversation_fingerprint(
         &self,
-        _tenant_id: &ironclaw_host_api::TenantId,
-        _user_id: &ironclaw_host_api::UserId,
+        _tenant_id: &ironclaw_host_api::ids::TenantId,
+        _user_id: &ironclaw_host_api::ids::UserId,
         _conversation_fingerprint: &str,
     ) -> Result<Vec<ironclaw_outbound::DeliveredGateRouteRecord>, String> {
         Err("store backend unavailable".to_string())
@@ -662,8 +664,8 @@ impl ironclaw_outbound::DeliveredGateRouteStore for FailingRouteStore {
 
     async fn remove_delivered_gate_route(
         &self,
-        _tenant_id: &ironclaw_host_api::TenantId,
-        _user_id: &ironclaw_host_api::UserId,
+        _tenant_id: &ironclaw_host_api::ids::TenantId,
+        _user_id: &ironclaw_host_api::ids::UserId,
         _gate_ref: &str,
     ) -> Result<(), String> {
         Ok(())

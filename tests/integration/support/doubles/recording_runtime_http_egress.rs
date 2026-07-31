@@ -6,7 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{
+use ironclaw_host_api::http::{
     RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
 };
 

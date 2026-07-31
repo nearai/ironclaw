@@ -50,7 +50,7 @@ use ironclaw_hooks::predicate_state::{
     InvocationKey, MAX_KEYS_PER_TENANT, MAX_SAMPLES_PER_KEY, PredicateBackendError,
     PredicateEventId, PredicateStateBackend, ValueKey, contract,
 };
-use ironclaw_host_api::TenantId;
+use ironclaw_host_api::ids::TenantId;
 use rust_decimal::Decimal;
 use tempfile::TempDir;
 

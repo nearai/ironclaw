@@ -1,4 +1,4 @@
-use ironclaw_host_api::{TenantId, Timestamp};
+use ironclaw_host_api::{Timestamp, ids::TenantId};
 use ironclaw_turns::TurnRunId;
 
 use crate::TriggerId;

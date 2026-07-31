@@ -267,6 +267,7 @@ SEL_V2 = {
     "admin_activate_button_name": "Activate",
     "admin_users_load_more": "[data-testid='admin-users-load-more']",
     "admin_users_load_more_error": "[data-testid='admin-users-load-more-error']",
+    "admin_user_detail_delete": "[data-testid='admin-user-detail-delete']",
     "admin_configuration_group_test_id": "admin-configuration-group",
     "admin_extension_configuration_heading_name": "Extension configuration",
     "admin_slack_configuration_heading_name": "Slack deployment configuration",
@@ -405,6 +406,9 @@ SEL_V2 = {
     "logs_entry_message": "[data-testid='logs-entry-message']",
     "logs_entry_context": "[data-testid='logs-entry-context']",
     "logs_context_chip": "[data-testid='logs-context-chip'][data-context-key='{key}']",
+    "logs_pagination": "[data-testid='logs-pagination']",
+    "logs_load_older": "[data-testid='logs-load-older']",
+    "logs_load_older_error": "[data-testid='logs-load-older-error']",
     "settings_search_placeholder": "Search settings...",
     "settings_import_file": 'input[type="file"][accept=".json,application/json"]',
     "settings_tool_row_for": (

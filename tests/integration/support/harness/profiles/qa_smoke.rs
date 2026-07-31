@@ -7,7 +7,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExtensionId, MountPermissions, RuntimeKind, UserId,
+    capability::EffectKind,
+    ids::{CapabilityId, ExtensionId, UserId},
+    mount::MountPermissions,
+    runtime::RuntimeKind,
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, ECHO_CAPABILITY_ID,

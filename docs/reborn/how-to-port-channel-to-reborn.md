@@ -2,7 +2,7 @@
 
 Use this guide when adding a native host surface or an external protocol
 integration. Reborn has two entry shapes, but both converge on
-`ironclaw_host_api::ProductSurface` for product-facing reads and effects.
+`ironclaw_host_api::product_surface::ProductSurface` for product-facing reads and effects.
 
 ## Choose the boundary
 

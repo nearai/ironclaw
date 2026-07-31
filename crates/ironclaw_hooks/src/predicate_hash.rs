@@ -76,7 +76,7 @@ pub fn value_key_hash(key: &ValueKey) -> Digest {
 mod tests {
     use super::*;
     use crate::identity::{ExtensionId, HookId, HookLocalId, HookVersion};
-    use ironclaw_host_api::TenantId;
+    use ironclaw_host_api::ids::TenantId;
 
     fn hook() -> HookId {
         HookId::derive(

@@ -6,7 +6,25 @@ use ironclaw_filesystem::{
     DiskFilesystem, FaultInjecting, FilesystemOperation, InMemoryBackend, RootFilesystem,
     ScopedFilesystem,
 };
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    Timestamp,
+    action::NetworkPolicy,
+    approval::InvocationFingerprint,
+    capability::{
+        CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
+        PermissionMode,
+    },
+    decision::{Decision, DenyReason},
+    ids::{
+        AgentId, CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId, InvocationId,
+        ProjectId, TenantId, UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{HostPath, MountAlias, VirtualPath},
+    resource::{ResourceCeiling, ResourceEstimate, ResourceScope},
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
 /// The production `CapabilityLeaseStore` over a fresh in-memory backend
@@ -1084,7 +1102,7 @@ async fn filesystem_capability_lease_store_writes_tenant_id_indexed_projection()
     // the store uses so the raw `query` targets the bytes the backend
     // stored. The lease owner prefix is `/authorization/leases/projects/<id>`
     // for our fixture scope.
-    let owner_alias = ironclaw_host_api::ScopedPath::new(format!(
+    let owner_alias = ironclaw_host_api::path::ScopedPath::new(format!(
         "/authorization/leases/projects/{}",
         context.resource_scope.project_id.as_ref().unwrap().as_str()
     ))

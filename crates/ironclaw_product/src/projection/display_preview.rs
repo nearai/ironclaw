@@ -10,8 +10,10 @@ use crate::{
 use async_trait::async_trait;
 use ironclaw_event_projections::{CapabilityActivityProjection, CapabilityActivityStatus};
 use ironclaw_host_api::{
-    CapabilityDisplayOutputPreview, CapabilityDisplayText, CapabilityId, InvocationId,
-    truncate_capability_display_text,
+    dispatch::{
+        CapabilityDisplayOutputPreview, CapabilityDisplayText, truncate_capability_display_text,
+    },
+    ids::{CapabilityId, InvocationId},
 };
 use ironclaw_safety::{
     sanitize_display_text as safety_sanitize_text, sanitize_url_for_display,

@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 
-use ironclaw_host_api::VendorId;
+use ironclaw_host_api::ids::VendorId;
 
 /// One build-time host-owned signal used for provider-instance readiness.
 pub struct ProviderInstanceReadinessInput {

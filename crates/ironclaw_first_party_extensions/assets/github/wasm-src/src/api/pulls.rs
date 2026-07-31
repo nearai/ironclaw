@@ -1,4 +1,5 @@
 use crate::request::github_request;
+use crate::response::compact_pull_request_list;
 use crate::types::{
     Direction, MergeMethod, PrReviewCommentInput, PrReviewEvent, PullRequestCommentSort,
     PullRequestState,
@@ -65,7 +66,7 @@ pub(crate) fn list_pull_requests(
         path.push_str(&format!("&page={}", p));
     }
 
-    github_request("GET", &path, None)
+    github_request("GET", &path, None).and_then(compact_pull_request_list)
 }
 
 // arch-exempt: too_many_args, pull create mirrors GitHub's create-pr payload fields, plan #5171

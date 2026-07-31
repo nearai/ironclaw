@@ -9,7 +9,9 @@ use crate::{
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_host_api::{
-    InvocationId, ResourceScope, RuntimeCredentialAuthRequirement, SecretHandle,
+    decision::RuntimeCredentialAuthRequirement,
+    ids::{InvocationId, SecretHandle},
+    resource::ResourceScope,
 };
 use ironclaw_secrets::{SecretMaterial, SecretStorePort};
 use ironclaw_turns::{TurnRunId, TurnScope};
@@ -24,7 +26,7 @@ pub struct OAuthGateChallengeRequest<'a> {
     pub flow_source: &'a Arc<dyn AuthFlowRecordSource>,
     pub requirements: &'a [RuntimeCredentialAuthRequirement],
     pub scope: &'a TurnScope,
-    pub owner_user_id: &'a ironclaw_host_api::UserId,
+    pub owner_user_id: &'a ironclaw_host_api::ids::UserId,
     pub run_id: TurnRunId,
     pub gate_ref: &'a AuthGateRef,
 }
@@ -292,7 +294,7 @@ impl fmt::Debug for OAuthGateFlowDriver {
 
 pub fn auth_scope_for_blocked_turn(
     scope: &TurnScope,
-    owner_user_id: &ironclaw_host_api::UserId,
+    owner_user_id: &ironclaw_host_api::ids::UserId,
 ) -> AuthProductScope {
     AuthProductScope::new(
         ResourceScope {
@@ -353,7 +355,8 @@ mod tests {
         OAuthAuthorizationUrl, ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
     };
     use ironclaw_host_api::{
-        AgentId, ExtensionId, TenantId, ThreadId, UserId, VendorAuthRecipe, VendorId,
+        ids::{AgentId, ExtensionId, TenantId, ThreadId, UserId, VendorId},
+        recipe::VendorAuthRecipe,
     };
     use ironclaw_secrets::SecretStore;
 
@@ -383,7 +386,7 @@ mod tests {
         async fn resolve(
             &self,
             _vendor: &str,
-            _credentials: &ironclaw_host_api::RecipeClientCredentials,
+            _credentials: &ironclaw_host_api::recipe::RecipeClientCredentials,
         ) -> Result<crate::EngineOAuthClientMaterial, AuthProductError> {
             Ok(crate::EngineOAuthClientMaterial {
                 client_id: crate::OAuthClientId::new("gate-client-id")?,
@@ -400,7 +403,7 @@ mod tests {
         async fn resolve(
             &self,
             _vendor: &str,
-            _credentials: &ironclaw_host_api::RecipeClientCredentials,
+            _credentials: &ironclaw_host_api::recipe::RecipeClientCredentials,
         ) -> Result<crate::EngineOAuthClientMaterial, AuthProductError> {
             Err(AuthProductError::MalformedConfig)
         }
@@ -410,13 +413,13 @@ mod tests {
     struct PanicEgress;
 
     #[async_trait::async_trait]
-    impl ironclaw_host_api::RuntimeHttpEgress for PanicEgress {
+    impl ironclaw_host_api::http::RuntimeHttpEgress for PanicEgress {
         async fn execute(
             &self,
-            _request: ironclaw_host_api::RuntimeHttpEgressRequest,
+            _request: ironclaw_host_api::http::RuntimeHttpEgressRequest,
         ) -> Result<
-            ironclaw_host_api::RuntimeHttpEgressResponse,
-            ironclaw_host_api::RuntimeHttpEgressError,
+            ironclaw_host_api::http::RuntimeHttpEgressResponse,
+            ironclaw_host_api::http::RuntimeHttpEgressError,
         > {
             panic!("gate flow preparation must not reach the vendor");
         }
@@ -474,7 +477,7 @@ mod tests {
                 gate_ref: AuthGateRef::new("gate:vendor-auth").unwrap(),
                 requirement: RuntimeCredentialAuthRequirement {
                     provider: VendorId::new("acmevendor").unwrap(),
-                    setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                    setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                         scopes: vec!["msg:read".to_string()],
                     },
                     requester_extension: ExtensionId::new("acme-messenger-fixture").unwrap(),

@@ -81,7 +81,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use ironclaw_host_api::{ResourceScope, ScopedPath};
+use ironclaw_host_api::{path::ScopedPath, resource::ResourceScope};
 
 use crate::{
     BackendCapabilities, Capability, CasExpectation, Entry, FilesystemError, FilesystemOperation,

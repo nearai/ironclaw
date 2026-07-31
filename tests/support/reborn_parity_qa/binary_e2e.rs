@@ -24,8 +24,10 @@ use ironclaw_event_projections::{
 use ironclaw_events::InMemoryDurableEventLog;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, NetworkPolicy, ProviderToolName, ResourceScope,
-    RuntimeHttpEgressRequest, ThreadId,
+    action::NetworkPolicy,
+    http::RuntimeHttpEgressRequest,
+    ids::{CapabilityId, InvocationId, ProviderToolName, ThreadId},
+    resource::ResourceScope,
 };
 use ironclaw_loop_host::{
     EmptyUserProfileSource, HostIdentityContextSource, HostManagedModelRequest,
@@ -470,7 +472,7 @@ impl RebornBinaryE2EHarness {
     /// exactly what the real turn's binding resolves to later.
     async fn resolve_default_binding_subject_user(
         conversation_id: &str,
-    ) -> HarnessResult<ironclaw_host_api::UserId> {
+    ) -> HarnessResult<ironclaw_host_api::ids::UserId> {
         let ingress = RebornTestIngress::new("reborn-test", "install-1")?;
         let envelope = ingress.verified_text_envelope_with_trigger(
             "extension-lifecycle-actor-probe",
@@ -897,6 +899,10 @@ impl RebornBinaryE2EHarness {
             hook_security_audit_sink: None,
             turn_event_sink: None,
             attachment_read_port: None,
+            reply_attachment_intent_port: Some(Arc::new(
+                ironclaw_outbound::test_support::in_memory_backed_outbound_state_store(),
+            )
+                as Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort>),
             gate_record_store: None,
             scheduler_wake_wiring: None,
         })?;

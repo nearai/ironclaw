@@ -627,6 +627,12 @@ mod tests {
                     "document {} must have a text extractor",
                     format.mime
                 ),
+                AttachmentKind::Video | AttachmentKind::Other => assert_eq!(
+                    format.extractor,
+                    ExtractorId::None,
+                    "binary media {} should have no text extractor",
+                    format.mime
+                ),
             }
         }
     }

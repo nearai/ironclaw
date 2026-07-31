@@ -267,23 +267,30 @@ impl CircuitBreakerProvider {
 ///
 /// Excludes client errors that are the caller's problem, not backend trouble:
 /// `InvalidRequest`, `AuthFailed`, `ContextLengthExceeded`,
-/// `ModelNotAvailable`, `QuotaExceeded`, `Json`.
+/// `ModelNotAvailable`, `QuotaExceeded`, `Json`, completed malformed/empty
+/// responses, and local/unknown I/O failures.
 ///
 /// See also `retry::is_retryable()` which answers a different question:
 /// "could retrying this exact request succeed?"
 fn is_transient(err: &LlmError) -> bool {
-    matches!(
-        err,
+    match err {
         LlmError::RequestFailed { .. }
-            | LlmError::RateLimited { .. }
-            | LlmError::BadGateway { .. }
-            | LlmError::InvalidResponse { .. }
-            | LlmError::EmptyResponse { .. }
-            | LlmError::SessionExpired { .. }
-            | LlmError::SessionRenewalFailed { .. }
-            | LlmError::Http(_)
-            | LlmError::Io(_)
-    )
+        | LlmError::RateLimited { .. }
+        | LlmError::BadGateway { .. }
+        | LlmError::StreamInterrupted { .. }
+        | LlmError::SessionExpired { .. }
+        | LlmError::SessionRenewalFailed { .. } => true,
+        LlmError::Http(error) => crate::error::is_transient_http_error(error),
+        LlmError::Io(error) => crate::error::is_transient_io_error(error),
+        LlmError::InvalidRequest { .. }
+        | LlmError::InvalidResponse { .. }
+        | LlmError::EmptyResponse { .. }
+        | LlmError::ContextLengthExceeded { .. }
+        | LlmError::ModelNotAvailable { .. }
+        | LlmError::QuotaExceeded { .. }
+        | LlmError::AuthFailed { .. }
+        | LlmError::Json(_) => false,
+    }
 }
 
 #[async_trait]
@@ -596,9 +603,9 @@ mod tests {
             provider: "p".into(),
             retry_after: None,
         }));
-        assert!(is_transient(&LlmError::InvalidResponse {
+        assert!(is_transient(&LlmError::StreamInterrupted {
             provider: "p".into(),
-            reason: "bad".into(),
+            reason: "connection closed".into(),
         }));
         assert!(is_transient(&LlmError::SessionExpired {
             provider: "p".into(),
@@ -624,6 +631,17 @@ mod tests {
             provider: "p".into(),
             model: "m".into(),
         }));
+        assert!(!is_transient(&LlmError::InvalidResponse {
+            provider: "p".into(),
+            reason: "bad".into(),
+        }));
+        assert!(!is_transient(&LlmError::EmptyResponse {
+            provider: "p".into(),
+        }));
+        assert!(!is_transient(&LlmError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "session file denied"
+        ))));
         assert!(!is_transient(&LlmError::Json(
             serde_json::from_str::<String>("bad").unwrap_err()
         )));

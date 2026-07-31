@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::TenantId;
+use ironclaw_host_api::ids::TenantId;
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, LoopModelPort, LoopModelRequest, LoopModelResponse,
 };

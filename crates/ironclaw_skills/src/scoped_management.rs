@@ -2,8 +2,11 @@ use std::{path::PathBuf, sync::Arc};
 
 use ironclaw_filesystem::{DiskFilesystem, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    HostApiError, HostPath, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-    ResourceScope, UserId, VirtualPath,
+    error::HostApiError,
+    ids::{InvocationId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{HostPath, MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
 
 use crate::{

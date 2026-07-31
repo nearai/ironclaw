@@ -56,7 +56,7 @@ use mapping::{
     capability_host_error, capability_port_error_is_terminal, checkpoint_kind_to_host,
     honor_capability_retry_alteration, loop_gate_kind, model_error_class,
     model_error_failure_summary, model_preference_to_host, model_recovery_class,
-    sanitized_strategy_summary_or_fallback,
+    sanitized_strategy_summary_or_fallback, transcript_host_error,
 };
 use model::{ModelInput, ModelStage, ModelStep};
 use pipeline::{DefaultExecutorPipeline, ExecutorStage, StageContext};

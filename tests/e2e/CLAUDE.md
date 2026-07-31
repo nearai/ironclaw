@@ -115,6 +115,7 @@ from `tests/e2e/` for the full, current set.
 | File | What it tests |
 |------|--------------|
 | `test_reborn_webui_v2_smoke.py` | Canonical v2 smoke: serve boots, SPA renders authed shell, bearer auth + `?token=` shim scope, text turn persists/streams, thread list/delete, timeline pagination, composer-while-running, approval-gate send block, **new-chat-while-a-run-is-active (the #5256 `submitBusyRef` deadlock regression)** |
+| `test_reborn_webui_v2_sso.py` | Google-shaped SSO login through a local mock OIDC provider, one-time ticket exchange, two-user thread/timeline isolation, and logout revocation against the standalone `ironclaw serve` binary |
 | `test_reborn_webui_v2_tool_gates.py` | Served capability smoke: tool-result persistence and final reply, in-flight cancellation, approval approve/decline outcomes, and manual-token auth-gate resume with SSE/artifact redaction |
 | `test_reborn_gateway_smoke.py` | Legacy `ironclaw` web channel (`/api/chat/*`) under `ENGINE_V2` — NOT the reborn binary |
 | `test_reborn_v2_file_download.py` | Agent-produced workspace files are downloadable from the v2 UI |
@@ -129,6 +130,11 @@ scenarios that start the standalone `ironclaw serve` binary and exercise
 the Reborn WebChat v2 or OpenAI-compatible API surface. The manifest may use
 pytest node IDs to include only the Reborn binary/API checks from a broader
 scenario file.
+
+That lane builds the shipping binary under branch-aware LLVM instrumentation,
+fails if the run emits zero profile files, and uploads
+`reborn-shipping-binary-e2e-coverage`. A passing Pytest result without binary
+coverage is therefore not a passing coverage lane.
 
 Do not add legacy `ironclaw` gateway tests to that manifest, even if they run
 with `ENGINE_V2=true`. Those are compatibility/runtime E2E tests. Direct
@@ -171,6 +177,7 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 | `ironclaw_binary` | Legacy gateway binary. Checks `target/debug/ironclaw`; if absent, runs `cargo build -p ironclaw` (timeout 600s). |
 | `ironclaw_reborn_binary` | Reborn v2 binary. Builds `target/debug/ironclaw` with default features when stale/missing. Used by the v2 SPA and full-path fixture scenarios. |
 | `reborn_v2_server` | Starts `ironclaw serve` (v2 SPA at `/`, `local-dev` profile) against `mock_llm_server`; config written via `_write_config_toml` (selects the `openai` provider pointed at the mock). Waits for `/api/health`; SIGINT teardown. (Module-scoped, defined in `test_reborn_webui_v2_smoke.py`.) |
+| `reborn_v2_sso_server` | Starts the same standalone binary with the guarded debug-only Google endpoint seam pointed at `mock_oauth_idp`; queues Alice and Bob OIDC profiles for full SSO and scope-isolation coverage. (Module-scoped, defined in `reborn_webui_harness.py`.) |
 | `reborn_v2_browser` | Chromium instance for the v2 scenarios, independent of the legacy `browser` fixture (generous launch timeout + retry). |
 | `mock_llm_server` | Starts `mock_llm.py --port 0`, reads the assigned port from stdout, waits for `/v1/models` to return 200. Yields the base URL. Serves canned responses including delayed ones (e.g. `"editable composer slow response"` → ~5s) so tests can act while a run is in flight. |
 | `emulate_google_server` | Starts the Emulate CLI selected by `IRONCLAW_EMULATE_CLI`, or the `emulate@0.7.0` fallback, with `fixtures/emulate/google_gmail.yaml`; waits for the Gmail messages endpoint; and yields the base URL for HTTP rewrite maps. The pinned CI fork covers Gmail, Calendar, Drive, Docs, Sheets, and Slides. Local runs skip if neither the selected CLI nor `npx` is available; CI fails. |
@@ -274,11 +281,22 @@ provider world.
 `JourneyCase` is the small composition layer above those operation contracts.
 It declares the trace (when recorded), provider worlds, ingress, execution
 lane, delivery target, observable assertions, and exact executable evidence.
-The harvested provider runner consumes these declarations directly; provider
-setup, normalization, and readback remain in provider-owned helpers rather
-than moving into a generic DSL. The journey coverage gate derives channel
+The harvested provider runner consumes these declarations directly. Its small
+`ProviderJourneyReplayFacts` sidecar owns the few deterministic fixture choices
+that differ by journey; runners must not branch on case names. Recorded JSON is
+loaded as immutable input and compiled into an execution copy by
+`provider_journey_trace.py`. Provider setup and readback live in the
+`provider_journey_{google,github,slack}.py` helpers and the reusable
+`provider_journey_world.py` builder rather than moving into a generic DSL.
+`test_journey_coverage.py` blocks case-name branches and verifies compilation
+does not mutate the recording. The journey coverage gate derives channel
 ingress and delivery requirements from shipped manifests and adds the built-in
 WebUI and scheduled-trigger surfaces.
+
+Recorded-model parsing, request matching, exact result binding, and the
+`/__mock/llm_trace` routes live in `mock_llm_trace.py`; `mock_llm.py` owns the
+generic canned/scripted server and composes that trace module. Keep new replay
+semantics with the trace owner instead of growing the server file again.
 `ProviderFaultProfile` places a transparent proxy between that Reborn process
 and Emulate. Reusable profiles cover HTTP 400/401/403/404/409/429/5xx,
 timeout, connection reset, malformed/truncated/missing-field responses, and a
@@ -322,8 +340,8 @@ inventory now says so mechanically.** Coverage is counted per
   `slack__send_message` proves tool *choice*; it proves nothing about whether
   the provider committed the effect. Writes need a `ProviderOperationCase`
   with provider readback, an `integration_evidence` entry, or a
-  `journey_evidence` entry naming the exact test *and* the assertion helper
-  that performs the readback.
+  `journey_evidence` entry naming the exact test, provider-owned assertion
+  source, and assertion helper that performs the readback.
 - A read capability needs both a seeded `success` case and an `empty`-result
   case, so the runtime is proven to distinguish "no results" from "the call
   failed". Status and transport failures stay with the reusable fault

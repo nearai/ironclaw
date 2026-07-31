@@ -5,6 +5,7 @@
 //! - **API key auth**: When `NEARAI_API_KEY` is set, uses Bearer API key
 //! - **Session token auth**: Otherwise, uses `SessionManager` for Bearer session token
 //!   with automatic renewal on 401 errors
+// arch-exempt: large_file, provider-local streaming regression tests require private parser access pending provider adapter decomposition, plan #6175
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1593,7 +1594,7 @@ impl NearAiStreamingToolCallState {
 }
 
 fn incomplete_stream_error(reason: impl Into<String>) -> LlmError {
-    LlmError::InvalidResponse {
+    LlmError::StreamInterrupted {
         provider: "nearai_chat".to_string(),
         reason: reason.into(),
     }
@@ -1909,6 +1910,69 @@ mod tests {
             .await
     }
 
+    async fn complete_search_tool_streaming_from_sse(
+        sse_body: &'static str,
+    ) -> ToolCompletionResponse {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server_task = tokio::spawn(async move {
+            let (mut socket, _) = accept_chat_request(&listener).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write sse headers");
+            socket
+                .write_all(sse_body.as_bytes())
+                .await
+                .expect("write sse body");
+        });
+
+        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
+            .expect("provider");
+        let response = complete_search_tool_streaming(provider)
+            .await
+            .expect("streaming completion");
+        server_task.await.expect("server task");
+        response
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_streaming_infers_tool_use_without_finish_reason() {
+        let response = complete_search_tool_streaming_from_sse(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_search","type":"function","function":{"name":"search","arguments":"{\"query\":\"near ai\"}"}}]},"finish_reason":null}]}
+
+data: [DONE]
+
+"#,
+        )
+        .await;
+
+        assert_eq!(response.finish_reason, FinishReason::ToolUse);
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "search");
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_streaming_preserves_unknown_finish_reason() {
+        let response = complete_search_tool_streaming_from_sse(
+            r#"data: {"choices":[{"delta":{"content":"answer"},"finish_reason":"vendor_specific"}]}
+
+data: [DONE]
+
+"#,
+        )
+        .await;
+
+        assert_eq!(response.finish_reason, FinishReason::Unknown);
+        assert_eq!(response.content.as_deref(), Some("answer"));
+        assert!(response.tool_calls.is_empty());
+    }
+
     #[tokio::test]
     async fn complete_streaming_emits_delta_before_response_completes() {
         use tokio::io::AsyncWriteExt;
@@ -2085,7 +2149,7 @@ data: [DONE]
 
         server_task.await.expect("server task");
         match result {
-            Err(LlmError::InvalidResponse { provider, reason }) => {
+            Err(LlmError::StreamInterrupted { provider, reason }) => {
                 assert_eq!(provider, "nearai_chat");
                 assert!(reason.contains("terminal completion marker"), "{reason}");
             }
@@ -2137,7 +2201,7 @@ data: [DONE]
 
         server_task.await.expect("server task");
         match result {
-            Err(LlmError::InvalidResponse { provider, reason }) => {
+            Err(LlmError::StreamInterrupted { provider, reason }) => {
                 assert_eq!(provider, "nearai_chat");
                 assert!(
                     reason.contains("terminal completion marker"),
@@ -2185,7 +2249,7 @@ data: [DONE]
 
         server_task.await.expect("server task");
         match result {
-            Err(LlmError::InvalidResponse { provider, reason }) => {
+            Err(LlmError::StreamInterrupted { provider, reason }) => {
                 assert_eq!(provider, "nearai_chat");
                 assert!(
                     reason.contains("terminal completion marker"),
@@ -2233,7 +2297,7 @@ data: [DONE]
 
         server_task.await.expect("server task");
         match result {
-            Err(LlmError::InvalidResponse { provider, reason }) => {
+            Err(LlmError::StreamInterrupted { provider, reason }) => {
                 assert_eq!(provider, "nearai_chat");
                 assert!(
                     reason.contains("terminal completion marker"),

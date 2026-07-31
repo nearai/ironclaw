@@ -4,7 +4,12 @@
    final answer, including when a later user follow-up has already been
    appended. */
 export function groupMessages(messages) {
-  const orderedMessages = moveDelayedActivityBeforeAssistantBoundary(messages);
+  const renderableMessages = messages.filter(
+    (message) => !isEmptyIntermediateAssistantPhase(message),
+  );
+  const orderedMessages =
+    moveDelayedActivityBeforeAssistantBoundary(renderableMessages);
+  const runStartedAtById = new Map();
   const items = [];
 
   for (let index = 0; index < orderedMessages.length; index += 1) {
@@ -15,7 +20,7 @@ export function groupMessages(messages) {
       const boundary = orderedMessages[index + 1 + activity.length];
       if (activity.length > 0 && (!boundary || boundary.role === "user")) {
         appendActivityRun(items, activity);
-        appendMessage(items, msg);
+        appendMessage(items, msg, runStartedAtById);
         index += activity.length;
         continue;
       }
@@ -28,7 +33,7 @@ export function groupMessages(messages) {
       continue;
     }
 
-    appendMessage(items, msg);
+    appendMessage(items, msg, runStartedAtById);
   }
 
   return items;
@@ -99,8 +104,46 @@ function appendActivityRun(items, activity) {
   });
 }
 
-function appendMessage(items, message) {
-  items.push({ type: "message", id: message.id, message });
+function appendMessage(items, message, runStartedAtById) {
+  items.push({ type: "message", id: messageRenderKey(message), message });
+  const runId = turnRunIdForMessage(message);
+  const completedAt = timestampMs(message.timestamp);
+  if (message?.role === "user") {
+    if (runId && completedAt !== null) {
+      runStartedAtById.set(runId, completedAt);
+    }
+    return;
+  }
+  if (!isFinalAssistantReply(message)) return;
+
+  const startedAt = runStartedAtById.get(runId);
+  if (
+    !runId ||
+    startedAt === undefined ||
+    completedAt === null ||
+    completedAt < startedAt
+  ) {
+    return;
+  }
+
+  items.push({
+    type: "run-completion",
+    id: `run-completion-${runId}`,
+    durationSeconds: Math.max(1, Math.round((completedAt - startedAt) / 1000)),
+  });
+}
+
+function messageRenderKey(message) {
+  const runId =
+    typeof message?.turnRunId === "string" ? message.turnRunId : null;
+  const isActiveAssistantReply =
+    message?.role === "assistant" &&
+    message?.isFinalReply === false &&
+    message?.isStreaming === true;
+  if (runId && (isFinalAssistantReply(message) || isActiveAssistantReply)) {
+    return `assistant-reply-${runId}`;
+  }
+  return message.id;
 }
 
 function isFinalAssistantReply(msg) {
@@ -123,6 +166,27 @@ function isStreamingAssistantText(msg) {
     !hasToolCalls(msg) &&
     msg.isFinalReply === false &&
     Boolean(turnRunIdForMessage(msg))
+  );
+}
+
+function isEmptyIntermediateAssistantPhase(msg) {
+  // Intermediate phases are live run presentation, not transcript messages.
+  // A phase with no visible payload should not split adjacent activity into
+  // separate runs or reserve a blank row between tool groups.
+  const hasContent =
+    typeof msg?.content === "string" && msg.content.trim().length > 0;
+  const hasAttachments =
+    msg?.images?.length > 0 ||
+    msg?.attachments?.length > 0 ||
+    msg?.generatedImages?.length > 0;
+  return (
+    msg?.role === "assistant" &&
+    msg.isFinalReply === false &&
+    !hasToolCalls(msg) &&
+    !hasContent &&
+    !hasAttachments &&
+    !msg.error &&
+    msg.status !== "error"
   );
 }
 

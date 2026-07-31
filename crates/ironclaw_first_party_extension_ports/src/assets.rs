@@ -161,7 +161,7 @@ mod tests {
     use std::collections::HashMap;
 
     use async_trait::async_trait;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
     use ironclaw_loop_host::{SkillFilePath, SkillSourceKind};
     use ironclaw_turns::{
         TurnId, TurnRunId, TurnScope,

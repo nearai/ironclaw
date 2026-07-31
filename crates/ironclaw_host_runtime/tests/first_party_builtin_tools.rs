@@ -18,17 +18,39 @@ use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
-use ironclaw_host_api::FailureKind;
+use ironclaw_host_api::result_meta::FailureKind;
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    Timestamp,
+    action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    capability::{
+        CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
+        OriginGatePolicy, PermissionMode, UNGATED_LOOP_RUN_CAPABILITIES,
+    },
+    dispatch::{DispatchFailureDetail, DispatchInputIssueCode},
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse, RuntimeHttpSavedBody,
+    },
+    ids::{
+        AgentId, CapabilityGrantId, CapabilityId, ExtensionId, PackageId, ProjectId, RunId,
+        TenantId, ThreadId, UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{HostPath, MountAlias, ScopedPath, VirtualPath},
+    resource::{LOCAL_DEFAULT_TENANT_ID, ResourceEstimate},
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_host_runtime::{
-    APPLY_PATCH_CAPABILITY_ID, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
-    CommandExecutionOutput, CommandExecutionRequest, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
-    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
-    HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
+    APPLY_PATCH_CAPABILITY_ID, ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
+    CapabilitySurfacePolicy, CapabilitySurfaceVersion, CommandExecutionOutput,
+    CommandExecutionRequest, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID,
+    HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime, HostRuntimeServices,
+    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
     NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
     PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
@@ -799,11 +821,10 @@ async fn scheduled_loop_origin_denies_every_trigger_mutation_at_handler_boundary
         .expect("created trigger id")
         .to_string();
 
-    let run_id = ironclaw_host_api::RunId::new();
+    let run_id = ironclaw_host_api::ids::RunId::new();
     context.run_id = Some(run_id);
-    context.origin = Some(ironclaw_host_api::InvocationOrigin::ScheduledLoopRun(
-        run_id,
-    ));
+    context.origin =
+        Some(ironclaw_host_api::invocation::InvocationOrigin::ScheduledLoopRun(run_id));
     for (capability_id, input) in [
         (
             TRIGGER_CREATE_CAPABILITY_ID,
@@ -901,7 +922,7 @@ async fn builtin_trigger_create_can_inherit_delivery_target_from_trusted_run_con
     let hook = Arc::new(SourceResolvingTriggerCreateHook::new(inherited));
     let runtime = runtime_with_trigger_repository_and_create_hook(repository.clone(), hook.clone());
     let mut context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
-    let run_id = ironclaw_host_api::RunId::new();
+    let run_id = ironclaw_host_api::ids::RunId::new();
     context.run_id = Some(run_id);
 
     let output = invoke_with_context(
@@ -2436,8 +2457,10 @@ async fn builtin_trigger_list_includes_completed_fire_once_triggers() {
             trigger_id: record.trigger_id,
             fire_slot,
             run_id,
-            thread_id: ironclaw_host_api::ThreadId::new("01890f0f-fire-7000-8000-000000000001")
-                .unwrap(),
+            thread_id: ironclaw_host_api::ids::ThreadId::new(
+                "01890f0f-fire-7000-8000-000000000001",
+            )
+            .unwrap(),
             submitted_at: fire_slot,
         })
         .await
@@ -8456,7 +8479,7 @@ fn failure_input_issue<'a>(
     path: &str,
     code: DispatchInputIssueCode,
     case_name: &str,
-) -> &'a ironclaw_host_api::DispatchInputIssue {
+) -> &'a ironclaw_host_api::dispatch::DispatchInputIssue {
     let Some(DispatchFailureDetail::InvalidInput { issues }) = &failure.detail else {
         panic!(
             "{case_name}: expected invalid-input detail, got {:?}",
@@ -8642,7 +8665,7 @@ struct DeliveryTargetValidatingTriggerCreateHook {
 
 struct SourceResolvingTriggerCreateHook {
     target: String,
-    seen_run_ids: std::sync::Mutex<Vec<Option<ironclaw_host_api::RunId>>>,
+    seen_run_ids: std::sync::Mutex<Vec<Option<ironclaw_host_api::ids::RunId>>>,
 }
 
 impl SourceResolvingTriggerCreateHook {
@@ -8653,7 +8676,7 @@ impl SourceResolvingTriggerCreateHook {
         }
     }
 
-    fn seen_run_ids(&self) -> Vec<Option<ironclaw_host_api::RunId>> {
+    fn seen_run_ids(&self) -> Vec<Option<ironclaw_host_api::ids::RunId>> {
         self.seen_run_ids.lock().unwrap().clone()
     }
 }
@@ -8662,8 +8685,8 @@ impl SourceResolvingTriggerCreateHook {
 impl TriggerCreateHook for SourceResolvingTriggerCreateHook {
     async fn resolve_implicit_delivery_target(
         &self,
-        _scope: &ironclaw_host_api::ResourceScope,
-        run_id: Option<ironclaw_host_api::RunId>,
+        _scope: &ironclaw_host_api::resource::ResourceScope,
+        run_id: Option<ironclaw_host_api::ids::RunId>,
     ) -> Result<Option<ironclaw_triggers::TriggerDeliveryTargetId>, TriggerError> {
         self.seen_run_ids.lock().unwrap().push(run_id);
         Ok(Some(
@@ -8694,7 +8717,7 @@ impl DeliveryTargetValidatingTriggerCreateHook {
 impl TriggerCreateHook for DeliveryTargetValidatingTriggerCreateHook {
     async fn validate_delivery_target(
         &self,
-        _scope: &ironclaw_host_api::ResourceScope,
+        _scope: &ironclaw_host_api::resource::ResourceScope,
         target: &ironclaw_triggers::TriggerDeliveryTargetId,
     ) -> Result<(), TriggerError> {
         self.validated.lock().unwrap().push(target.to_string());
@@ -9543,6 +9566,7 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
         TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
         OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
+        ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,
         LIST_DIR_CAPABILITY_ID,

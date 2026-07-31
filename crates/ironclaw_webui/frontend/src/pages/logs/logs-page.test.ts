@@ -36,6 +36,12 @@ function createLogsPageHarness(overrides = {}) {
     isLoading: false,
     error: null,
     needsThreadScope: false,
+    nextCursor: null,
+    retentionLimitReached: false,
+    maxRetainedEntries: 2000,
+    isLoadingMore: false,
+    loadMoreError: null,
+    loadOlder: () => {},
     ...overrides,
   };
   const hookValues = [];
@@ -68,7 +74,15 @@ function createLogsPageHarness(overrides = {}) {
         ];
       },
     },
-    useT: () => (key) => key,
+    useT: () => (key, params) => {
+      if (key === "error.loadFailed") {
+        return `Failed to load ${params.what}: ${params.message}`;
+      }
+      if (key === "logs.retentionLimitReached") {
+        return `Showing ${params.count} entries`;
+      }
+      return key;
+    },
     useOutletContext: () => ({ isAdmin: true, threadsState: null }),
     useLogs: () => logs,
   };
@@ -306,6 +320,77 @@ test("LogsPage keeps the scrollable log output container", () => {
   const markup = flattenMarkup(renderLogsPage());
   // The inner output region is the actual scroll surface.
   assert.match(markup, /min-h-0 flex-1 overflow-y-auto/);
+});
+
+test("LogsPage renders the load-older action while a cursor is available", () => {
+  let loadCount = 0;
+  const rendered = renderLogsPage({
+    entries: [SAMPLE_ENTRY],
+    totalCount: 1,
+    nextCursor: "cursor-1",
+    loadOlder: () => {
+      loadCount += 1;
+    },
+  });
+
+  const button = nativeNodeByText(rendered, "button", "logs.loadOlder");
+  assert.ok(button, "expected a load-older button while another page is available");
+  assert.equal(button.props.disabled, false);
+  button.props.onClick();
+  assert.equal(loadCount, 1);
+});
+
+test("LogsPage disables pagination while loading and hides it after the final page", () => {
+  const loading = renderLogsPage({
+    entries: [SAMPLE_ENTRY],
+    totalCount: 1,
+    nextCursor: "cursor-1",
+    isLoadingMore: true,
+  });
+  const loadingButton = nativeNodeByText(loading, "button", "common.loading");
+  assert.ok(loadingButton);
+  assert.equal(loadingButton.props.disabled, true);
+
+  const complete = renderLogsPage({
+    entries: [SAMPLE_ENTRY],
+    totalCount: 1,
+    nextCursor: null,
+  });
+  assert.equal(nativeNodeByText(complete, "button", "logs.loadOlder"), undefined);
+});
+
+test("LogsPage shows a retry action when loading older logs fails", () => {
+  let retryCount = 0;
+  const rendered = renderLogsPage({
+    entries: [SAMPLE_ENTRY],
+    totalCount: 1,
+    nextCursor: "cursor-1",
+    loadMoreError: new Error("older logs unavailable"),
+    loadOlder: () => {
+      retryCount += 1;
+    },
+  });
+
+  const markup = flattenMarkup(rendered);
+  assert.match(markup, /Failed to load nav\.logs: older logs unavailable/);
+  assert.doesNotMatch(markup, /Failed to load logs\.loadOlder/);
+  const retry = nativeNodeByText(rendered, "button", "ext.catalog.retry");
+  assert.ok(retry, "expected a retry button after pagination fails");
+  retry.props.onClick();
+  assert.equal(retryCount, 1);
+});
+
+test("LogsPage explains the retention cap instead of offering another page", () => {
+  const rendered = renderLogsPage({
+    entries: [SAMPLE_ENTRY],
+    totalCount: 2000,
+    nextCursor: "cursor-beyond-cap",
+    retentionLimitReached: true,
+    maxRetainedEntries: 2000,
+  });
+
+  assert.match(flattenMarkup(rendered), /Showing 2000 entries/);
+  assert.equal(nativeNodeByText(rendered, "button", "logs.loadOlder"), undefined);
 });
 
 test("LogsPage clears entries only after confirming the shared dialog", () => {

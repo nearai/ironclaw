@@ -53,6 +53,23 @@ class ObservableAssertion(StrEnum):
     RESTART_IDEMPOTENCY = "restart_idempotency"
 
 
+class SlackChannelFixture(StrEnum):
+    """Provider-side Slack destination selected during trace compilation."""
+
+    SEEDED = "seeded"
+    MISSING = "missing"
+
+
+@dataclass(frozen=True)
+class ProviderJourneyReplayFacts:
+    """Small typed sidecar for deterministic provider replay compilation."""
+
+    google_spreadsheet_id: str = "sheet_reborn_abc"
+    slack_channel: SlackChannelFixture = SlackChannelFixture.SEEDED
+    expected_capability_failure: str | None = None
+    timeout_seconds: int = 120
+
+
 @dataclass(frozen=True)
 class PytestEvidence:
     """One exact Pytest declaration that CI can execute."""
@@ -116,6 +133,7 @@ class ProviderJourneyCase(JourneyCaseBase):
 
     trace: str
     live_evidence: LiveEvidence
+    replay: ProviderJourneyReplayFacts = ProviderJourneyReplayFacts()
     repeat_after_reset: bool = False
 
 

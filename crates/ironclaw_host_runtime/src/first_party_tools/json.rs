@@ -1,5 +1,5 @@
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
-use ironclaw_host_api::{EffectKind, PermissionMode};
+use ironclaw_host_api::capability::{EffectKind, PermissionMode};
 use serde_json::{Value, json};
 
 use crate::FirstPartyCapabilityError;

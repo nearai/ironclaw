@@ -22,7 +22,9 @@ use ironclaw_extension_host::{
     ExtensionBindings, ExtensionHost, ExtensionHostDeps, InstallationRecord,
     InstallationRecordStore, InstallationState, LifecycleError, RehydratedInstallationRecordStore,
 };
-use ironclaw_host_api::{InvocationOrigin, ProductKind, ToolAdapter};
+use ironclaw_host_api::{
+    ids::ProductKind, invocation::InvocationOrigin, tool_adapter::ToolAdapter,
+};
 use ironclaw_product::ChannelAdapter;
 
 struct Harness {
@@ -196,7 +198,7 @@ async fn activation_publishes_and_resolves() {
     assert!(snapshot.extension("acme").is_some());
     assert_eq!(channel.activate_calls.load(Ordering::SeqCst), 1);
     // Tool resolves (TOOL-1 groundwork: prebound adapter by capability id).
-    let capability = ironclaw_host_api::CapabilityId::new("acme.ping").unwrap();
+    let capability = ironclaw_host_api::ids::CapabilityId::new("acme.ping").unwrap();
     let binding = snapshot.resolve_tool(&capability).expect("tool resolves");
     assert_eq!(binding.declaration.id.as_str(), "acme");
     assert_eq!(
@@ -313,7 +315,7 @@ async fn snapshot_watch_subscription_observes_every_publish() {
 #[tokio::test]
 async fn snapshot_resolver_serves_activated_tools_and_stops_after_deactivate() {
     use ironclaw_capabilities::ToolResolver;
-    use ironclaw_host_api::CapabilityId;
+    use ironclaw_host_api::ids::CapabilityId;
 
     let channel = Arc::new(FakeChannelAdapter::default());
     let h = harness_with(
@@ -337,7 +339,10 @@ async fn snapshot_resolver_serves_activated_tools_and_stops_after_deactivate() {
 
     let resolved = resolver.resolve(&ping).expect("activated tool resolves");
     assert_eq!(resolved.provider.as_str(), "acme");
-    assert_eq!(resolved.runtime, ironclaw_host_api::RuntimeKind::Wasm);
+    assert_eq!(
+        resolved.runtime,
+        ironclaw_host_api::runtime::RuntimeKind::Wasm
+    );
 
     // An in-flight binding keeps working across the deactivation swap; new
     // resolution stops.
@@ -354,7 +359,7 @@ async fn snapshot_resolver_serves_activated_tools_and_stops_after_deactivate() {
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: ping.clone(),
             scope: sample_scope(),
-            estimate: ironclaw_host_api::ResourceEstimate::default(),
+            estimate: ironclaw_host_api::resource::ResourceEstimate::default(),
             mounts: None,
             resource_reservation: None,
             authenticated_actor_user_id: None,
@@ -370,8 +375,9 @@ async fn snapshot_resolver_serves_activated_tools_and_stops_after_deactivate() {
 async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
     use ironclaw_capabilities::ToolResolver;
     use ironclaw_host_api::{
-        CapabilityId, DispatchError, SecretHandle, ToolAdapter, ToolCall, ToolError, ToolPorts,
-        ToolResult,
+        dispatch::DispatchError,
+        ids::{CapabilityId, SecretHandle},
+        tool_adapter::{ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult},
     };
 
     struct AuthGatingAdapter;
@@ -416,7 +422,7 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("acme.ping").unwrap(),
             scope: sample_scope(),
-            estimate: ironclaw_host_api::ResourceEstimate::default(),
+            estimate: ironclaw_host_api::resource::ResourceEstimate::default(),
             mounts: None,
             resource_reservation: None,
             authenticated_actor_user_id: None,
@@ -442,7 +448,7 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
 
 #[tokio::test]
 async fn extension_capabilities_colliding_with_host_bridges_fail_activation() {
-    use ironclaw_host_api::CapabilityId;
+    use ironclaw_host_api::ids::CapabilityId;
 
     let channel = Arc::new(FakeChannelAdapter::default());
     let store = Arc::new(RehydratedInstallationRecordStore::default());
@@ -518,14 +524,14 @@ async fn extension_capabilities_colliding_with_host_bridges_fail_activation() {
     }
 }
 
-fn sample_scope() -> ironclaw_host_api::ResourceScope {
-    ironclaw_host_api::ResourceScope {
-        tenant_id: ironclaw_host_api::TenantId::new("tenant-a").unwrap(),
-        user_id: ironclaw_host_api::UserId::new("user-a").unwrap(),
+fn sample_scope() -> ironclaw_host_api::resource::ResourceScope {
+    ironclaw_host_api::resource::ResourceScope {
+        tenant_id: ironclaw_host_api::ids::TenantId::new("tenant-a").unwrap(),
+        user_id: ironclaw_host_api::ids::UserId::new("user-a").unwrap(),
         agent_id: None,
         project_id: None,
         mission_id: None,
         thread_id: None,
-        invocation_id: ironclaw_host_api::InvocationId::new(),
+        invocation_id: ironclaw_host_api::ids::InvocationId::new(),
     }
 }

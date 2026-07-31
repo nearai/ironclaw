@@ -1,7 +1,7 @@
 //! Projection read/subscription contracts.
 
-use crate::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use crate::{TurnActor, TurnScope};
+use crate::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use crate::turn::{TurnActor, TurnScope};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;

@@ -36,8 +36,8 @@ async fn filesystem_outbound_state_store_persists_across_reopen() {
     let storage_root = std::fs::canonicalize(dir.path().join("local-dev"))
         .expect("canonicalize local-dev storage root");
 
-    let tenant = ironclaw_host_api::TenantId::new("w6-outbound-tenant").unwrap();
-    let user = ironclaw_host_api::UserId::new("w6-outbound-user").unwrap();
+    let tenant = ironclaw_host_api::ids::TenantId::new("w6-outbound-tenant").unwrap();
+    let user = ironclaw_host_api::ids::UserId::new("w6-outbound-user").unwrap();
     let key = CommunicationPreferenceKey::personal(tenant.clone(), user.clone());
 
     // Non-vacuity guard (before-write): a fresh scope has no row at all yet.

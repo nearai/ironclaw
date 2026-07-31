@@ -27,7 +27,10 @@ use chrono::{Duration, Utc};
 use ironclaw_auth::{
     AuthProductScope, AuthSurface, CredentialAccountLookupRequest, CredentialAccountStatus,
 };
-use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
+use ironclaw_host_api::{
+    ids::{InvocationId, UserId},
+    resource::ResourceScope,
+};
 use ironclaw_reborn_composition::{
     KeepaliveSweepSettings, test_support::build_google_oauth_product_auth_for_test,
 };
@@ -218,8 +221,11 @@ async fn normal_sweep_does_not_mark_account_revoked() {
 #[tokio::test]
 async fn scripted_oauth_token_egress_consumes_queued_responses_fifo_then_default() {
     use ironclaw_host_api::{
-        CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeHttpEgress,
-        RuntimeHttpEgressRequest, RuntimeKind, UserId,
+        action::{NetworkMethod, NetworkPolicy},
+        http::{RuntimeHttpEgress, RuntimeHttpEgressRequest},
+        ids::{CapabilityId, InvocationId, UserId},
+        resource::ResourceScope,
+        runtime::RuntimeKind,
     };
     use ironclaw_reborn_composition::test_support::ScriptedOAuthTokenEgress;
 

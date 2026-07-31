@@ -1,7 +1,10 @@
 use std::{collections::HashMap, time::Duration};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{TenantId, ThreadId, Timestamp};
+use ironclaw_host_api::{
+    Timestamp,
+    ids::{TenantId, ThreadId},
+};
 use ironclaw_turns::{TurnRunId, TurnScope};
 
 use crate::{
@@ -370,7 +373,7 @@ pub async fn active_holds_for_records(
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 
     use super::*;
     use crate::{TriggerSchedule, TriggerSourceKind, TriggerState};

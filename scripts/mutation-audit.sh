@@ -103,6 +103,10 @@ for file in "${files[@]:-}"; do
 done
 [ "$MUT_ITERATE" = "1" ] && args+=(--iterate)
 
+# cargo-mutants creates --output with a single-level mkdir, which fails when
+# an intermediate parent (such as target/) does not exist on a fresh runner.
+mkdir -p -- "$MUT_OUT"
+
 echo "▶ mutation audit: package=$package files=${files[*]:-<all>}"
 set +e
 cargo mutants "${args[@]}"

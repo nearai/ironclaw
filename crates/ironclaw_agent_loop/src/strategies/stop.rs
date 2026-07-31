@@ -574,7 +574,7 @@ mod tests {
     }
 
     mod default_stop_condition_strategy {
-        use ironclaw_host_api::{CapabilityId, TenantId, ThreadId};
+        use ironclaw_host_api::ids::{CapabilityId, TenantId, ThreadId};
         use ironclaw_turns::{
             AgentLoopDriverDescriptor, LoopFailureKind, LoopMessageRef, RunProfileId,
             RunProfileVersion, TurnId, TurnRunId, TurnScope,

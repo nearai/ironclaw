@@ -3,7 +3,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{FailureKind, InvocationId, Resolution};
+use ironclaw_host_api::{ids::InvocationId, resolution::Resolution, result_meta::FailureKind};
 use ironclaw_loop_host::{
     CapabilityResultWrite, DurablePersistence, SkillBundleSource, SyntheticCapability,
     SyntheticCapabilityDescriptor, SyntheticCapabilityHandler, SyntheticCapabilityInvocation,
@@ -300,7 +300,10 @@ mod tests {
         .expect("budget-exceeded must be a model-visible failure, not a terminal host error");
 
         // A budget limit is a resource failure, not an input-encoding fault.
-        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::Resource);
+        assert_recoverable_failure(
+            &outcome,
+            ironclaw_host_api::result_meta::FailureKind::Resource,
+        );
     }
 
     #[test]
@@ -312,18 +315,21 @@ mod tests {
             })
             .expect("ambiguous skill must be a model-visible failure, not a terminal host error");
 
-        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::InputEncode);
+        assert_recoverable_failure(
+            &outcome,
+            ironclaw_host_api::result_meta::FailureKind::InputEncode,
+        );
     }
 
     /// A recoverable model-visible failure is `Resolution::Done` carrying a
     /// `RecoverableFailure` verdict with the per-case precise kind (the §5.3
     /// collapse of the old `CapabilityOutcome::Failed { .. }`).
     fn assert_recoverable_failure(
-        resolution: &ironclaw_host_api::Resolution,
-        expected_kind: ironclaw_host_api::FailureKind,
+        resolution: &ironclaw_host_api::resolution::Resolution,
+        expected_kind: ironclaw_host_api::result_meta::FailureKind,
     ) {
         match resolution {
-            ironclaw_host_api::Resolution::Done(outcome) => {
+            ironclaw_host_api::resolution::Resolution::Done(outcome) => {
                 assert_eq!(outcome.verdict.error_kind(), Some(&expected_kind));
                 assert!(
                     outcome.verdict.diagnostic().is_some(),

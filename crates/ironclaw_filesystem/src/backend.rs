@@ -16,7 +16,7 @@
 //! - [`EventRecord`] — one entry emitted by the append/tail plane.
 
 use async_trait::async_trait;
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 
 use crate::{
     CasExpectation, Entry, FilesystemError, FilesystemOperation, RecordVersion, SeqNo,

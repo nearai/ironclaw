@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_host_api::{
-    AgentId, Blocked, CapabilityId, ProjectId, Resolution, RuntimeKind, TenantId, ThreadId, UserId,
+    ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
+    resolution::{Blocked, Resolution},
+    runtime::RuntimeKind,
 };
 use ironclaw_processes::{ClaimProcessesRequest, ProcessKind, ProcessWorkerId};
 use ironclaw_turns::test_support::in_memory_agent_turn_process_system;
@@ -44,8 +46,8 @@ use ironclaw_turns::{
         LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRequest,
         LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopSafeSummary,
         LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput, PromptMode,
-        PromptSkillContextMetadata, SkillTrustLevel, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, resolution,
+        PromptSkillContextMetadata, SkillTrustLevel, SystemInferenceTaskId,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     },
 };
 
@@ -57,6 +59,7 @@ fn loop_compaction_outcome_serializes_and_deserializes_wire_shape() {
             .try_into()
             .expect("valid summary id"),
         compression_ratio_ppm: 250_000,
+        redacted_leak_count: 0,
     });
     let compacted_json = serde_json::to_value(&compacted).expect("compacted should serialize");
     assert_eq!(
@@ -71,6 +74,25 @@ fn loop_compaction_outcome_serializes_and_deserializes_wire_shape() {
     let restored_compacted: LoopCompactionOutcome =
         serde_json::from_value(compacted_json).expect("compacted should deserialize");
     assert_eq!(restored_compacted, compacted);
+
+    let redacted = LoopCompactionOutcome::Compacted(LoopCompactionResponse {
+        summary_artifact_id: "summary:redacted"
+            .to_string()
+            .try_into()
+            .expect("valid summary id"),
+        compression_ratio_ppm: 200_000,
+        redacted_leak_count: 2,
+    });
+    assert_eq!(
+        serde_json::to_value(redacted).expect("redacted compaction should serialize"),
+        serde_json::json!({
+            "compacted": {
+                "summary_artifact_id": "summary:redacted",
+                "compression_ratio_ppm": 200000,
+                "redacted_leak_count": 2
+            }
+        })
+    );
 
     let deferred = LoopCompactionOutcome::Deferred {
         safe_summary: LoopSafeSummary::new("compaction deferred until transcript stabilizes")
@@ -88,6 +110,70 @@ fn loop_compaction_outcome_serializes_and_deserializes_wire_shape() {
     let restored_deferred: LoopCompactionOutcome =
         serde_json::from_value(deferred_json).expect("deferred should deserialize");
     assert_eq!(restored_deferred, deferred);
+}
+
+#[test]
+fn compaction_leak_telemetry_preserves_legacy_wire_shapes() {
+    let task_id = SystemInferenceTaskId::new();
+    let reason_kind = LoopSafeSummary::new("redacted").expect("valid safe summary");
+
+    let zero_progress = LoopProgressEvent::CompactionLeakDetected {
+        task_id,
+        reason_kind: reason_kind.clone(),
+        redacted_leak_count: 0,
+    };
+    let zero_progress_json =
+        serde_json::to_value(&zero_progress).expect("zero progress should serialize");
+    assert!(
+        zero_progress_json
+            .pointer("/compaction_leak_detected/redacted_leak_count")
+            .is_none(),
+        "legacy progress shape must omit a zero count"
+    );
+    let restored_progress: LoopProgressEvent =
+        serde_json::from_value(zero_progress_json).expect("legacy progress should deserialize");
+    assert_eq!(restored_progress, zero_progress);
+
+    let counted_progress = LoopProgressEvent::CompactionLeakDetected {
+        task_id,
+        reason_kind: reason_kind.clone(),
+        redacted_leak_count: 2,
+    };
+    assert_eq!(
+        serde_json::to_value(&counted_progress)
+            .expect("counted progress should serialize")
+            .pointer("/compaction_leak_detected/redacted_leak_count"),
+        Some(&serde_json::json!(2))
+    );
+
+    let zero_milestone = LoopHostMilestoneKind::CompactionLeakDetected {
+        task_id,
+        reason_kind,
+        redacted_leak_count: 0,
+    };
+    let zero_milestone_json =
+        serde_json::to_value(&zero_milestone).expect("zero milestone should serialize");
+    assert!(
+        zero_milestone_json
+            .pointer("/compaction_leak_detected/redacted_leak_count")
+            .is_none(),
+        "legacy milestone shape must omit a zero count"
+    );
+    let restored_milestone: LoopHostMilestoneKind =
+        serde_json::from_value(zero_milestone_json).expect("legacy milestone should deserialize");
+    assert_eq!(restored_milestone, zero_milestone);
+
+    let counted_milestone = LoopHostMilestoneKind::CompactionLeakDetected {
+        task_id,
+        reason_kind: LoopSafeSummary::new("redacted").expect("valid safe summary"),
+        redacted_leak_count: 2,
+    };
+    assert_eq!(
+        serde_json::to_value(&counted_milestone)
+            .expect("counted milestone should serialize")
+            .pointer("/compaction_leak_detected/redacted_leak_count"),
+        Some(&serde_json::json!(2))
+    );
 }
 
 #[tokio::test]
@@ -3173,7 +3259,7 @@ struct RecordingAgentLoopHost {
     effects: Mutex<Vec<String>>,
     context_requests: Mutex<Vec<LoopContextRequest>>,
     model_responses: Mutex<Vec<LoopModelResponse>>,
-    capability_outcomes: Mutex<Vec<ironclaw_host_api::Resolution>>,
+    capability_outcomes: Mutex<Vec<ironclaw_host_api::resolution::Resolution>>,
     visible_surface: VisibleCapabilitySurface,
     milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
     context_message_safe_summary: String,
@@ -3290,7 +3376,7 @@ impl RecordingAgentLoopHost {
         self.model_responses.lock().unwrap().push(response);
     }
 
-    fn push_capability_outcome(&self, outcome: ironclaw_host_api::Resolution) {
+    fn push_capability_outcome(&self, outcome: ironclaw_host_api::resolution::Resolution) {
         self.capability_outcomes.lock().unwrap().push(outcome);
     }
 
@@ -3469,7 +3555,7 @@ impl LoopCapabilityPort for RecordingAgentLoopHost {
     async fn invoke_capability(
         &self,
         request: LoopRequest,
-    ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
+    ) -> Result<ironclaw_host_api::resolution::Resolution, AgentLoopHostError> {
         if request.surface_version != self.visible_surface.version
             || !self
                 .visible_surface
@@ -3498,8 +3584,8 @@ impl LoopCapabilityPort for RecordingAgentLoopHost {
     async fn invoke_capability_batch(
         &self,
         _request: LoopRequestBatch,
-    ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
-        Ok(ironclaw_host_api::ResolutionBatch {
+    ) -> Result<ironclaw_host_api::resolution::ResolutionBatch, AgentLoopHostError> {
+        Ok(ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: Vec::new(),
             stopped_on_suspension: false,
         })

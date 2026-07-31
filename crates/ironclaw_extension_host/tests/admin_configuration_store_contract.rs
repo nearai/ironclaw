@@ -9,8 +9,10 @@ use ironclaw_extension_host::{
 use ironclaw_extensions::AdminConfigurationGroupId;
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, SecretHandle,
-    TenantId, UserId, VirtualPath,
+    ids::{InvocationId, SecretHandle, TenantId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
 
 #[tokio::test]

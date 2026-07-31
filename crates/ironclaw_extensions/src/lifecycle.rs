@@ -2,7 +2,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{ExtensionId, ExtensionLifecycleOperation, RuntimeKind};
+use ironclaw_host_api::{
+    action::ExtensionLifecycleOperation, ids::ExtensionId, runtime::RuntimeKind,
+};
 
 use crate::{ExtensionError, ExtensionPackage, ExtensionRegistry};
 
@@ -164,7 +166,7 @@ impl ExtensionLifecycleService {
 mod tests {
     use tokio::sync::Mutex;
 
-    use ironclaw_host_api::{HostPortCatalog, VirtualPath};
+    use ironclaw_host_api::{host_port::HostPortCatalog, path::VirtualPath};
 
     use super::*;
     use crate::{ExtensionManifest, ManifestSource};

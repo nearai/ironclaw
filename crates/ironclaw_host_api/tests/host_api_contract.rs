@@ -1,6 +1,46 @@
 use std::path::PathBuf;
 
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    action::{
+        Action, ExtensionLifecycleOperation, NetworkMethod, NetworkPolicy, NetworkScheme,
+        NetworkTarget, NetworkTargetPattern, SecretUseMode,
+    },
+    approval::InvocationFingerprint,
+    audit::{ActionSummary, AuditEnvelope, AuditStage},
+    capability::{CapabilitySet, EffectKind, RuntimeCredentialAccountSetup},
+    capability_profile::CapabilityProfileSchemaRef,
+    decision::{
+        Decision, DenyReason, Obligation, ObligationKind, Obligations,
+        RuntimeCredentialAuthRequirement,
+    },
+    dispatch::{
+        DispatchError, DispatchFailureKind, DispatchInputIssueCode, RuntimeDispatchErrorKind,
+    },
+    error::HostApiError,
+    host_port::{
+        HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortGrant,
+        HostPortId, HostPortView,
+    },
+    http::{
+        RuntimeCredentialInjection, RuntimeCredentialTarget, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse, RuntimeHttpSaveTarget, RuntimeHttpSavedBody,
+    },
+    ids::{
+        AgentId, CapabilityId, CorrelationId, ExtensionId, InvocationId, PackageId, ProjectId,
+        ResourceReservationId, SecretHandle, SystemServiceId, TenantId, UserId, VendorId,
+    },
+    ingress::{IngressPolicy, IngressRouteDescriptor},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{HostPath, MountAlias, ScopedPath, VirtualPath},
+    product_surface::{ProductSurfaceEventSubscription, ProductSurfaceStreamResponse},
+    resource::{
+        LOCAL_DEFAULT_AGENT_ID, LOCAL_DEFAULT_PROJECT_ID, LOCAL_DEFAULT_TENANT_ID, ResourceCeiling,
+        ResourceEstimate, ResourceScope,
+    },
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
+    trust::{PackageIdentity, PackageSource, RequestedTrustClass},
+};
 use rust_decimal_macros::dec;
 use serde_json::json;
 
@@ -145,6 +185,36 @@ fn runtime_credential_target_serializes_path_placeholder() {
     assert_eq!(
         serde_json::from_value::<RuntimeCredentialTarget>(wire).unwrap(),
         target
+    );
+}
+
+#[test]
+fn runtime_body_credential_limit_defaults_compatibly_and_round_trips_when_derived() {
+    let legacy_wire = json!({
+        "type": "body_json_pointer",
+        "pointer": "/secret_token"
+    });
+    let legacy = serde_json::from_value::<RuntimeCredentialTarget>(legacy_wire.clone()).unwrap();
+    assert_eq!(
+        legacy,
+        RuntimeCredentialTarget::BodyJsonPointer {
+            pointer: "/secret_token".to_string(),
+            post_injection_body_limit_bytes: None,
+        }
+    );
+    assert_eq!(serde_json::to_value(legacy).unwrap(), legacy_wire);
+
+    let bounded = RuntimeCredentialTarget::BodyJsonPointer {
+        pointer: "/secret_token".to_string(),
+        post_injection_body_limit_bytes: Some(256),
+    };
+    assert_eq!(
+        serde_json::to_value(&bounded).unwrap(),
+        json!({
+            "type": "body_json_pointer",
+            "pointer": "/secret_token",
+            "post_injection_body_limit_bytes": 256
+        })
     );
 }
 
@@ -1687,5 +1757,43 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
     assert!(
         !debug_with_requirement.contains("google"),
         "provider id must not appear in Debug output; got: {debug_with_requirement}"
+    );
+}
+
+#[test]
+fn product_stream_continuation_is_process_local_not_wire_state() {
+    let (_sender, receiver) = tokio::sync::mpsc::channel(1);
+    let response = ProductSurfaceStreamResponse {
+        events: vec![json!({"kind": "projection_update"})],
+        next_cursor: Some("cursor-1".to_string()),
+        subscription: Some(ProductSurfaceEventSubscription::new(receiver)),
+    };
+
+    let encoded = serde_json::to_value(response).expect("stream response serializes");
+    assert_eq!(
+        encoded,
+        json!({
+            "events": [{"kind": "projection_update"}],
+            "next_cursor": "cursor-1"
+        }),
+        "the in-process continuation handle must never cross the wire"
+    );
+    let decoded: ProductSurfaceStreamResponse =
+        serde_json::from_value(encoded).expect("wire response deserializes");
+    assert!(decoded.subscription.is_none());
+}
+
+#[test]
+fn product_stream_continuation_debug_and_identity_are_stable() {
+    let (_sender, receiver) = tokio::sync::mpsc::channel(1);
+    let subscription = ProductSurfaceEventSubscription::new(receiver);
+    let (_other_sender, other_receiver) = tokio::sync::mpsc::channel(1);
+    let other_subscription = ProductSurfaceEventSubscription::new(other_receiver);
+
+    assert_eq!(subscription, subscription);
+    assert_ne!(subscription, other_subscription);
+    assert_eq!(
+        format!("{subscription:?}"),
+        "ProductSurfaceEventSubscription { .. }"
     );
 }

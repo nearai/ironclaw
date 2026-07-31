@@ -124,7 +124,7 @@ fn checkpoint(cursor: EventCursor, state: RuntimeProjectionState) -> RuntimeProj
 #[cfg(test)]
 mod tests {
     use ironclaw_events::{EventStreamKey, ReadScope};
-    use ironclaw_host_api::{AgentId, TenantId, UserId};
+    use ironclaw_host_api::ids::{AgentId, TenantId, UserId};
 
     use super::*;
 

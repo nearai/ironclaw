@@ -26,17 +26,17 @@
 //! - Execution mechanics (script/wasm/mcp runners) — those stay in their
 //!   respective runtime crates.
 //!
-//! ## Distinction from [`crate::RuntimeKind`]
+//! ## Distinction from [`crate::runtime::RuntimeKind`]
 //!
-//! [`crate::RuntimeKind`] answers *what kind of work is being performed*
+//! [`crate::runtime::RuntimeKind`] answers *what kind of work is being performed*
 //! (Wasm / Mcp / Script / FirstParty / System). [`RuntimeProfile`] answers
 //! *where and how that work is executed and with what authority*. Do not add a
-//! `Local` variant to [`crate::RuntimeKind`] — locality and authority belong
+//! `Local` variant to [`crate::runtime::RuntimeKind`] — locality and authority belong
 //! to runtime policy, not to the execution lane.
 //!
-//! ## Distinction from [`crate::TrustClass`]
+//! ## Distinction from [`crate::runtime::TrustClass`]
 //!
-//! [`crate::TrustClass`] is a per-invocation authority ceiling produced by the
+//! [`crate::runtime::TrustClass`] is a per-invocation authority ceiling produced by the
 //! trust policy engine for a specific package/extension. [`RuntimeProfile`] is
 //! a deployment-scoped policy preset chosen by the operator; the resolver
 //! turns it into [`EffectiveRuntimePolicy`] which then constrains the

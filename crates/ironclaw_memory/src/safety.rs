@@ -11,7 +11,7 @@
 use std::collections::BTreeSet;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{HostApiError, VirtualPath};
+use ironclaw_host_api::{error::HostApiError, path::VirtualPath};
 
 use crate::events::{MemoryAuditContext, MemoryEventSinkError};
 use crate::path::{MemoryDocumentPath, MemoryDocumentScope, validated_memory_relative_path};

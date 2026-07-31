@@ -4,7 +4,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
 use ironclaw_filesystem::SeqNo;
-use ironclaw_host_api::ResourceReservationId;
+use ironclaw_host_api::ids::ResourceReservationId;
 
 use crate::{
     ReservationRecord, ResourceAccount, ResourceError, ResourceLimits, ResourceState, ResourceTally,

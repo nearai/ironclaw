@@ -50,6 +50,10 @@ composition's facade). Enforced by `ironclaw_architecture`
 | `WebuiServeConfig` | Host-owned serve config (tenant, authenticator, default agent/project, public/protected mounts, Google OAuth). |
 | `WebuiAuthenticator` trait / `WebuiAuthentication` | Host-auth vocabulary the bearer middleware resolves each token through. |
 
+Run and full-thread regression artifact exports are QA-only. Host composition
+mounts their routes and exposes their browser affordances only when
+`IRONCLAW_REBORN_REGRESSION_ARTIFACT_EXPORT=true`; the default is disabled.
+
 Middleware modules (`src/webui_*.rs`) layer in a fixed order —
 **ws-origin → per-route body limit → bearer auth → rate limit → handler** —
 turning the `webui_v2_routes()` descriptors into tower layers.
@@ -76,7 +80,7 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 
 ## WebChat v2 route surface (folded from `ironclaw_webui_v2`)
 
-Handlers consume only `ironclaw_host_api::ProductSurface`. The bearer
+Handlers consume only `ironclaw_host_api::product_surface::ProductSurface`. The bearer
 middleware (in this crate's `webui_v2_app`) constructs the
 `ProductSurfaceCaller`, carries the matched token's `WebUiV2Capabilities`,
 and injects both as axum `Extension`s before the handler runs; handlers fail
@@ -92,6 +96,7 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.send_message` | POST | `/api/webchat/v2/threads/{thread_id}/messages` | — | `TurnCoordinator` |
 | `webui.v2.get_timeline` | GET | `/api/webchat/v2/threads/{thread_id}/timeline` (`?limit&cursor`) | — | `ProjectionOnly` |
 | `webui.v2.get_run_artifact` | GET | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/artifact` | — | `ProjectionOnly` |
+| `webui.v2.get_thread_artifact` | GET | `/api/webchat/v2/threads/{thread_id}/artifact` | — | `ProjectionOnly` |
 | `webui.v2.logs` | GET | `/api/webchat/v2/logs` | — | `ProjectionOnly` |
 | `webui.v2.stream_events` | GET | `/api/webchat/v2/threads/{thread_id}/events` | **SSE** | `ProjectionOnly` |
 | `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | **WebSocket** | `ProjectionOnly` |
@@ -118,6 +123,14 @@ bounded process-local diagnostic sidecar: `logs.complete` is always false and
 availability/truncation are explicit. Deployment-wide logs are not exposed
 through this caller route.
 
+`webui.v2.get_thread_artifact` applies the same caller ownership and redaction
+rules to every replayable message in the thread and queries logs at thread
+scope. Its `ironclaw.thread_artifact.v1` messages retain `run_id`, allowing the
+fixture importer to reconstruct multiple turns without mixing threads. Export
+is all-or-nothing and returns `413` when the thread exceeds 1,000 persisted
+messages, 16 MiB of stored message data, or 20 MiB after redaction and log
+assembly. The endpoint is limited to six requests per caller per minute.
+
 **Operator-gating.** LLM config, operator setup/config/service-control, and
 extension zip-import routes are operator-wide: `webui_v2_app` mounts them only
 when the authenticator advertises an operator config surface, and each handler
@@ -140,27 +153,52 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
   (default 3 concurrent; override via `WebUiV2State::with_sse_concurrency_limit`)
   — a caller cannot bypass the cap by mixing SSE and WS. Exhaustion returns
   `429` with `retryable: true`.
-- The SPA also sends a bounded, random `connection_id` that is stable for one
-  loaded browser tab plus a monotonically increasing `connection_generation`
-  for each EventSource it creates. A same-caller, same-id stream supersedes its
-  prior generation without consuming another slot; a delayed older generation
-  receives `204` and cannot cancel the current stream. This prevents
-  proxy-reordered closes/opens during thread navigation from stranding the
-  replacement stream behind the cap; distinct tabs still consume distinct
-  slots.
+- The SPA consumes SSE through `event-source-plus`, which owns event framing,
+  `Last-Event-ID`, abort, and retry/backoff over `fetch`/`ReadableStream`. The
+  bearer is sent in the `Authorization` header rather than the request URL. A
+  bounded, random `connection_id` remains stable for one loaded browser tab and
+  `connection_generation` increments for every package-managed request. A
+  same-caller, same-id stream supersedes its prior generation without consuming
+  another slot; a delayed older generation receives `204` and cannot cancel the
+  current stream. This prevents proxy-reordered closes/opens during thread
+  navigation from stranding the replacement stream behind the cap; distinct
+  tabs still consume distinct slots.
 - A successful facade subscription emits an application-level `keep_alive`
-  frame immediately after admission. Browser connection state uses that frame
-  as proof that the projection tail is ready instead of waiting for a model
-  delta or the periodic transport keep-alive.
-- `after_cursor` is retained only within one mounted Chat route (including
-  native EventSource retries and visibility recovery). A route/thread remount
+  frame immediately after admission and every 15 seconds while the projection
+  is idle. Browser connection state and its activity watchdog use those frames
+  as liveness proof; Axum's comment-only transport keep-alive still protects
+  proxies, but SSE parser packages do not expose comments to application code.
+- Subscription-capable product surfaces keep one projection subscription alive
+  for the entire SSE connection. Do not rebuild a one-event subscription after
+  each frame: model/tool milestones emitted between teardown and resubscribe
+  are not guaranteed to remain in the compacted live state. The product bridge
+  revalidates thread visibility on an independent bounded cadence so storage
+  I/O never gates individual text frames; drain/poll remains only for
+  compatibility surfaces without subscriptions.
+- Live assistant text is cumulative within one model call and keyed by both
+  turn run and model-call phase. A later model call therefore starts a new
+  assistant item instead of replacing an earlier utterance from the same run.
+  The SPA marks the prior phase as no longer streaming, retains it as
+  intermediate text, and upgrades only the latest phase when the durable final
+  reply arrives. These phase items remain live-projection/session state rather
+  than durable transcript records.
+- Active assistant phases render accumulated Markdown through Streamdown's
+  incomplete-Markdown-aware streaming mode. The product projection boundary
+  publishes cumulative text at most once per 16 ms browser-paint interval,
+  keeping only the latest replaceable snapshot inside that interval. Do not
+  raise the projection subscription buffer or restore the old 75 ms window:
+  the former only postpones lag under provider microbursts, while the latter
+  makes ordinary text visibly chunky. Completed phases continue through the
+  existing marked + DOMPurify renderer and code-block enhancement path.
+- The packaged SSE client retains `Last-Event-ID` only within one mounted Chat
+  route, including retries and visibility recovery. A route/thread remount
   starts at the projection origin so the server returns durable state plus the
   compacted current live state; it does not persist process-local live cursors
   across SPA navigation.
 - Every stream is closed after a max lifetime (5 min) and every `socket.send` /
-  drain await is `timeout`-bounded, so a back-pressuring client or a stalled
-  facade cannot pin a slot past the budget. Slots are RAII (`SseSlot`), released
-  on disconnect / expiry / error. Regressions locked by
+  subscription/drain await is `timeout`-bounded, so a back-pressuring client or
+  a stalled facade cannot pin a slot past the budget. Slots are RAII
+  (`SseSlot`), released on disconnect / expiry / error. Regressions locked by
   `stream_events_ws_shares_capacity_with_sse_streams` and
   `stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime`.
 - `capability_activity` / `capability_display_preview` frames carry only

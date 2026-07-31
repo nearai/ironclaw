@@ -40,10 +40,17 @@ use ironclaw_first_party_extension_ports::{
     SkillActivationSelectorConfig, SkillExecutionAdapter, SkillInjectionMode,
 };
 use ironclaw_host_api::{
-    ActionResultSummary, ActionSummary, AgentId, ApprovalRequestId, AuditEnvelope, AuditEventId,
-    AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, ExtensionId,
-    InvocationId, MountView, Principal, ProductSurface, ResourceScope, RuntimeHttpEgress, TenantId,
-    ThreadId, UserId,
+    audit::{ActionResultSummary, ActionSummary, AuditEnvelope, AuditStage, DecisionSummary},
+    capability::EffectKind,
+    http::RuntimeHttpEgress,
+    ids::{
+        AgentId, ApprovalRequestId, AuditEventId, CapabilityId, CorrelationId, ExtensionId,
+        InvocationId, TenantId, ThreadId, UserId,
+    },
+    mount::MountView,
+    product_surface::ProductSurface,
+    resource::ResourceScope,
+    scope::Principal,
 };
 use ironclaw_loop_host::{
     AwaitEdgeSettler, AwaitEdgeWriter, CapabilityAllowSet, CapabilityResolveError,
@@ -506,6 +513,12 @@ impl From<DefaultPlannedRuntimeBuildError> for RebornRuntimeError {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) struct OutboundTestStores {
+    state: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+    reply_attachment_intents: Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort>,
+}
+
 /// Started, running Reborn agent runtime.
 ///
 /// `RebornRuntime` is the single user-facing handle returned by
@@ -554,11 +567,10 @@ pub struct RebornRuntime {
     pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
     pub(crate) owner_user_id: UserId,
     pub(crate) extension_filesystem: Arc<CompositeRootFilesystem>,
-    pub(crate) workspace_mounts: MountView,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) outbound_state: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
+    pub(crate) outbound_state: OutboundTestStores,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) triggered_run_delivery: Arc<dyn ironclaw_outbound::TriggeredRunDeliveryStore>,
     #[cfg(any(test, feature = "test-support"))]
@@ -718,7 +730,7 @@ pub(crate) struct InteractionServiceTestParts {
 pub(crate) fn wrap_result_read_capability_for_test(
     inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
     thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
-    fallback_user_id: ironclaw_host_api::UserId,
+    fallback_user_id: ironclaw_host_api::ids::UserId,
     run_context: ironclaw_turns::run_profile::LoopRunContext,
     input_resolver: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
     result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
@@ -762,7 +774,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
 #[cfg(feature = "test-support")]
 pub(crate) fn staged_capability_io_for_test(
     thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
-    fallback_user_id: ironclaw_host_api::UserId,
+    fallback_user_id: ironclaw_host_api::ids::UserId,
 ) -> (
     std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
     std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
@@ -773,7 +785,7 @@ pub(crate) fn staged_capability_io_for_test(
 #[cfg(feature = "test-support")]
 pub(crate) fn staged_capability_io_with_observer_for_test(
     thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
-    fallback_user_id: ironclaw_host_api::UserId,
+    fallback_user_id: ironclaw_host_api::ids::UserId,
     observer: Option<std::sync::Arc<dyn crate::RebornTrajectoryObserver>>,
 ) -> (
     std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
@@ -964,11 +976,13 @@ impl RebornRuntime {
         Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
         Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
         Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository>,
+        Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort>,
     )> {
         Some((
-            Arc::clone(&self.outbound_state),
+            Arc::clone(&self.outbound_state.state),
             Arc::clone(&self.delivered_gate_routes),
             Arc::clone(&self.outbound_preferences),
+            Arc::clone(&self.outbound_state.reply_attachment_intents),
         ))
     }
 
@@ -1016,16 +1030,29 @@ impl RebornRuntime {
             identity,
             run_delivery_settings,
         } = wiring;
+        let attachment_filesystem = self.read_write_workspace_filesystem()?;
+        let inbound_attachments: Arc<dyn ironclaw_product::InboundAttachmentLander> =
+            Arc::new(ironclaw_product::ProjectScopedAttachmentLander::new(
+                Arc::clone(&attachment_filesystem),
+            ));
+        let project_filesystem: Arc<dyn ironclaw_product::ProjectFilesystemReader> = Arc::new(
+            ironclaw_product::ProjectScopedFilesystemReader::with_max_read_bytes(
+                attachment_filesystem,
+                ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64,
+            ),
+        );
         let source = crate::extension_host_assembly::ChannelHostAssemblySource {
             generic_host: self.extension_management.generic_host()?,
             ingress_registry: Arc::clone(&self.extension_ingress.as_ref()?.registry),
             workflow_filesystem: self.extension_filesystem.clone(),
+            inbound_attachments,
+            project_filesystem,
             delivery_coordinator: self.delivery_coordinator.clone(),
-            outbound_state: Arc::clone(&self.outbound_state),
+            outbound_state: Arc::clone(&self.outbound_state.state),
             delivered_gate_routes: Arc::clone(&self.delivered_gate_routes),
             outbound_preferences: Arc::clone(&self.outbound_preferences),
             identity_lookup: Arc::clone(&self.channel_identity_store)
-                as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>,
+                as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
             deployment_channels: Arc::clone(&self.deployment_channels),
             channel_config: Arc::clone(&self.channel_config_service),
             channel_pairing: self.channel_pairing.clone(),
@@ -1057,7 +1084,7 @@ impl RebornRuntime {
     pub async fn pairing_mint_for_test(
         &self,
         extension_id: &str,
-        user_id: &ironclaw_host_api::UserId,
+        user_id: &ironclaw_host_api::ids::UserId,
     ) -> Option<String> {
         let service = self.channel_pairing.as_ref()?.get(extension_id)?;
         service
@@ -1071,7 +1098,7 @@ impl RebornRuntime {
     pub async fn pairing_issue_for_test(
         &self,
         extension_id: &str,
-        user_id: &ironclaw_host_api::UserId,
+        user_id: &ironclaw_host_api::ids::UserId,
     ) -> Option<(String, Option<String>, chrono::DateTime<chrono::Utc>)> {
         let service = self.channel_pairing.as_ref()?.get(extension_id)?;
         service.issue_or_rotate(user_id).await.ok().map(|issue| {
@@ -1093,9 +1120,9 @@ impl RebornRuntime {
         turn_world: (
             Arc<dyn ironclaw_turns::TurnCoordinator>,
             Arc<dyn ProcessGateQuerySource<Error = TurnError>>,
-            ironclaw_host_api::TenantId,
+            ironclaw_host_api::ids::TenantId,
         ),
-    ) -> Result<Option<ironclaw_host_api::UserId>, String> {
+    ) -> Result<Option<ironclaw_host_api::ids::UserId>, String> {
         let (actor_kind, external_actor_id, conversation_space_id, conversation_id) = actor;
         let Some(service) = self
             .channel_pairing
@@ -1140,7 +1167,7 @@ impl RebornRuntime {
     pub async fn pairing_connected_for_test(
         &self,
         extension_id: &str,
-        user_id: &ironclaw_host_api::UserId,
+        user_id: &ironclaw_host_api::ids::UserId,
     ) -> Option<bool> {
         let service = self.channel_pairing.as_ref()?.get(extension_id)?;
         service
@@ -1234,10 +1261,9 @@ impl RebornRuntime {
     #[cfg(feature = "test-support")]
     fn standalone_workspace_attachment_reader_for_test(
         &self,
-    ) -> Option<Arc<crate::support::fs::ProjectScopedAttachmentReader<CompositeRootFilesystem>>>
-    {
+    ) -> Option<Arc<ironclaw_product::ProjectScopedAttachmentReader<CompositeRootFilesystem>>> {
         Some(Arc::new(
-            crate::support::fs::ProjectScopedAttachmentReader::new(
+            ironclaw_product::ProjectScopedAttachmentReader::new(
                 self.read_write_workspace_filesystem()?,
             ),
         ))
@@ -1260,7 +1286,7 @@ impl RebornRuntime {
         let read_write_workspace_filesystem = self.read_write_workspace_filesystem()?;
         Some(crate::factory::AttachmentTestSupport {
             read_port,
-            lander: Arc::new(crate::support::fs::ProjectScopedAttachmentLander::new(
+            lander: Arc::new(ironclaw_product::ProjectScopedAttachmentLander::new(
                 read_write_workspace_filesystem,
             )),
         })
@@ -1302,10 +1328,14 @@ impl RebornRuntime {
         &self,
     ) -> Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
         let extension_filesystem = &self.extension_filesystem;
-        let workspace_mounts = &self.workspace_mounts;
+        let attachment_mounts = crate::runtime_mounts::workspace_mount_view(
+            ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
+            &[],
+        )
+        .ok()?;
         Some(Arc::new(ScopedFilesystem::with_fixed_view(
             Arc::clone(extension_filesystem),
-            workspace_mounts.clone(),
+            attachment_mounts,
         )))
     }
 
@@ -1319,7 +1349,7 @@ impl RebornRuntime {
     pub async fn seed_standalone_secret(
         &self,
         owner: ResourceScope,
-        handle: ironclaw_host_api::SecretHandle,
+        handle: ironclaw_host_api::ids::SecretHandle,
         secret_value: String,
     ) -> Result<(), ironclaw_secrets::SecretStoreError> {
         self.secret_store
@@ -1596,7 +1626,7 @@ impl RebornRuntime {
                     snapshot_updates,
                 ),
             )
-                as Arc<dyn ironclaw_host_api::ChannelIdentityPostBindFactory>),
+                as Arc<dyn ironclaw_host_api::channel_identity::ChannelIdentityPostBindFactory>),
             _ => None,
         };
         Some(
@@ -1605,9 +1635,11 @@ impl RebornRuntime {
                 installation_store,
                 channel_config: Some(self.channel_config_service.clone()),
                 binding_store: Arc::clone(&identity_store)
-                    as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingStore>,
+                    as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingStore>,
                 rollback_store: identity_store
-                    as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingDeleteStore>,
+                    as Arc<
+                        dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingDeleteStore,
+                    >,
                 post_bind_factory,
                 overrides: Vec::new(),
             },
@@ -1634,8 +1666,12 @@ impl RebornRuntime {
                 self.thread_scope.tenant_id.clone(),
                 Vec::new(),
                 installation_store,
-                Arc::clone(&identity_store) as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>,
-                identity_store as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingDeleteStore>,
+                Arc::clone(&identity_store)
+                    as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
+                identity_store
+                    as Arc<
+                        dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingDeleteStore,
+                    >,
                 credential_cleanup,
                 account_status_reader,
                 Some(self.channel_dm_target_store.clone()),
@@ -1804,7 +1840,7 @@ impl RebornRuntime {
         let scope = self.turn_scope_for(&conversation.0).to_resource_scope();
         store
             .set(ironclaw_approvals::AutoApproveSettingInput {
-                updated_by: ironclaw_host_api::Principal::User(scope.user_id.clone()),
+                updated_by: ironclaw_host_api::scope::Principal::User(scope.user_id.clone()),
                 scope,
                 enabled: true,
             })
@@ -3492,10 +3528,11 @@ pub(crate) async fn build_runtime_with_resource_governor(
         // vision-capable models. Only available when a local runtime (and thus a
         // workspace filesystem) is composed.
         attachment_read_port: Some(
-            Arc::new(crate::support::fs::ProjectScopedAttachmentReader::new(
+            Arc::new(ironclaw_product::ProjectScopedAttachmentReader::new(
                 Arc::clone(&services.workspace_filesystem),
             )) as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>,
         ),
+        reply_attachment_intent_port: Some(Arc::clone(&services.reply_attachment_intents)),
         // §5.2.9 render-from-record: a `GateRecordStore` over the SAME
         // shared `extension_filesystem` + per-user mount view the standalone
         // capability port persists `GateRecord::Auth` into (see
@@ -4017,11 +4054,13 @@ pub(crate) async fn build_runtime_with_resource_governor(
         host_runtime_http_egress: services.host_runtime_http_egress.clone(),
         owner_user_id: services.owner_user_id.clone(),
         extension_filesystem: services.extension_filesystem.clone(),
-        workspace_mounts: services.workspace_mounts.clone(),
         system_extensions_lifecycle_mounts: services.system_extensions_lifecycle_mounts.clone(),
         outbound_preferences: services.outbound_preferences.clone(),
         #[cfg(any(test, feature = "test-support"))]
-        outbound_state: services.outbound_state.clone(),
+        outbound_state: OutboundTestStores {
+            state: services.outbound_state.clone(),
+            reply_attachment_intents: services.reply_attachment_intents.clone(),
+        },
         #[cfg(any(test, feature = "test-support"))]
         triggered_run_delivery: services.triggered_run_delivery.clone(),
         #[cfg(any(test, feature = "test-support"))]

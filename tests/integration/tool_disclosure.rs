@@ -22,7 +22,7 @@
 //!    `GithubIssueTools` backend surfaces all 48 `github.*` manifest
 //!    capabilities (`github_support::capability_ids()`), none of which is
 //!    Core-tier (`CORE_TOOL_NAMES` suffix-match misses every github id), so
-//!    the deferred active set is exactly the `tool_search` bridge. The
+//!    the deferred active set is exactly the complete discovery bridge set. The
 //!    13-capability `BuiltinHttpTools` backend stays UNDER the cap, so
 //!    bridged mode is wired-but-inert there — pinned below as the threshold
 //!    control.
@@ -47,10 +47,7 @@ use reborn_support::reply::RebornScriptedReply;
 /// Bridge meta-tool names (`tool_disclosure.rs`'s `TOOL_SEARCH_NAME`/
 /// `TOOL_DESCRIBE_NAME`/`TOOL_CALL_NAME`), hardcoded as literals: the
 /// constants are `pub(crate)` inside `ironclaw_runner` and not part of the
-/// crate's public surface for a test-tree import. Only `tool_search` is
-/// ADVERTISED (`advertised_bridge_tool_definitions`); `tool_describe`/
-/// `tool_call` are retained internally for describe-first routing and must
-/// NOT appear on the model surface.
+/// crate's public surface for a test-tree import.
 const TOOL_SEARCH_NAME: &str = "tool_search";
 const TOOL_DESCRIBE_NAME: &str = "tool_describe";
 const TOOL_CALL_NAME: &str = "tool_call";
@@ -62,6 +59,54 @@ const FLAT_GITHUB_TOOL_NAME: &str = "github__get_repo";
 
 /// Flat first-party tool (wire form) for the below-caps threshold control.
 const FLAT_HTTP_TOOL_NAME: &str = "builtin__http";
+
+fn deferred_bridge_script() -> [RebornScriptedReply; 4] {
+    [
+        RebornScriptedReply::tool_call(
+            TOOL_SEARCH_NAME,
+            serde_json::json!({"query": "get repository", "limit": 5}),
+        ),
+        RebornScriptedReply::tool_call(
+            TOOL_DESCRIBE_NAME,
+            serde_json::json!({"name": FLAT_GITHUB_TOOL_NAME}),
+        ),
+        RebornScriptedReply::tool_call(
+            TOOL_CALL_NAME,
+            serde_json::json!({
+                "name": FLAT_GITHUB_TOOL_NAME,
+                "arguments": r#"{"owner":"nearai","repo":"ironclaw"}"#
+            }),
+        ),
+        RebornScriptedReply::text("done"),
+    ]
+}
+
+async fn assert_deferred_bridge_flow(harness: &RebornIntegrationHarness) {
+    harness
+        .assert_model_message_content_contains("tool_search returned catalog matches")
+        .await
+        .expect("tool_search completion reaches the next production model request");
+    harness
+        .assert_model_message_content_contains("tool_describe returned schema")
+        .await
+        .expect("tool_describe completion reaches the next production model request");
+    harness
+        .assert_tool_invoked("github.get_repo")
+        .await
+        .expect("tool_call dispatches the selected target through the inner capability port");
+    harness
+        .assert_network_egress_header_contains(
+            "api.github.com/repos/nearai/ironclaw",
+            "authorization",
+            "Bearer ghp_fake_fixture_token",
+        )
+        .await
+        .expect("tool_call target reaches mediated GitHub egress with injected credentials");
+    harness
+        .assert_reply_contains("done")
+        .await
+        .expect("turn completes after the deferred capability result");
+}
 
 /// More than `DisclosureCaps::default().max_tools` GitHub capabilities while
 /// still excluding the tail of the catalog, so narrowed deferred-mode tests
@@ -76,9 +121,8 @@ fn wide_effective_github_allowlist() -> impl Iterator<Item = &'static str> {
 
 /// Bridged mode + a catalog over `DisclosureCaps::default().max_tools` (48
 /// github capabilities > 32): `select_active_set` defers, so the model sees
-/// the `tool_search` bridge (the only ADVERTISED bridge — discovery is
-/// tool_search → capability_info → direct call) and NOT the flat `github__*`
-/// list, nor the internal-only `tool_describe`/`tool_call` bridges.
+/// the complete advertised `tool_search` → `tool_describe` → `tool_call`
+/// bridge set and NOT the flat `github__*` list.
 #[tokio::test]
 async fn bridged_mode_defers_wide_catalog_to_bridge_meta_tools() {
     let harness = RebornIntegrationHarness::test_default()
@@ -91,22 +135,16 @@ async fn bridged_mode_defers_wide_catalog_to_bridge_meta_tools() {
 
     harness.submit_turn("hello").await.expect("turn completes");
 
-    harness
-        .assert_model_tools_contains(TOOL_SEARCH_NAME)
-        .await
-        .expect("deferral advertises the tool_search bridge");
+    for bridge in [TOOL_SEARCH_NAME, TOOL_DESCRIBE_NAME, TOOL_CALL_NAME] {
+        harness
+            .assert_model_tools_contains(bridge)
+            .await
+            .unwrap_or_else(|error| panic!("deferral must advertise bridge {bridge:?}: {error}"));
+    }
     harness
         .assert_model_tools_excludes(FLAT_GITHUB_TOOL_NAME)
         .await
         .expect("deferral replaces the flat tool list, not adds to it");
-    for internal_bridge in [TOOL_DESCRIBE_NAME, TOOL_CALL_NAME] {
-        harness
-            .assert_model_tools_excludes(internal_bridge)
-            .await
-            .unwrap_or_else(|error| {
-                panic!("bridge {internal_bridge:?} is internal-only, never advertised: {error}")
-            });
-    }
 }
 
 /// Negative control: the SAME wide catalog without
@@ -123,7 +161,7 @@ async fn bridged_mode_defers_wide_catalog_to_bridge_meta_tools() {
 /// is what makes this test's mode independent of the ambient env by
 /// construction, not just by today's harness hygiene.
 #[tokio::test]
-async fn default_mode_surfaces_the_flat_wide_tool_list() {
+async fn explicit_off_surfaces_the_flat_wide_tool_list() {
     let harness = RebornIntegrationHarness::test_default()
         .with_tool_disclosure_off()
         .with_github_issue_tools()
@@ -137,11 +175,43 @@ async fn default_mode_surfaces_the_flat_wide_tool_list() {
     harness
         .assert_model_tools_contains(FLAT_GITHUB_TOOL_NAME)
         .await
-        .expect("default mode keeps the flat tool list");
-    harness
-        .assert_model_tools_excludes(TOOL_SEARCH_NAME)
+        .expect("explicit Off keeps the flat tool list");
+    for bridge in [TOOL_SEARCH_NAME, TOOL_DESCRIBE_NAME, TOOL_CALL_NAME] {
+        harness
+            .assert_model_tools_excludes(bridge)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("explicit Off must exclude discovery bridge {bridge:?}: {error}")
+            });
+    }
+}
+
+/// General harnesses pin Off rather than inheriting the production environment,
+/// so unrelated integration tests remain stable when the production default can
+/// safely change after the authorization prerequisite lands.
+#[tokio::test]
+async fn hermetic_harness_defaults_to_off_for_wide_catalogs() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_github_issue_tools()
+        .script([RebornScriptedReply::text("done")])
+        .build()
         .await
-        .expect("default mode never surfaces the bridge meta tools");
+        .expect("hermetic default harness builds");
+
+    harness.submit_turn("hello").await.expect("turn completes");
+
+    harness
+        .assert_model_tools_contains(FLAT_GITHUB_TOOL_NAME)
+        .await
+        .expect("hermetic default keeps the flat tool list");
+    for bridge in [TOOL_SEARCH_NAME, TOOL_DESCRIBE_NAME, TOOL_CALL_NAME] {
+        harness
+            .assert_model_tools_excludes(bridge)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("hermetic default must pin Off and exclude {bridge:?}: {error}")
+            });
+    }
 }
 
 /// Threshold control: bridged mode with a catalog UNDER
@@ -165,10 +235,34 @@ async fn bridged_mode_below_caps_keeps_the_flat_list() {
         .assert_model_tools_contains(FLAT_HTTP_TOOL_NAME)
         .await
         .expect("below the disclosure caps the flat list is unchanged");
-    harness
-        .assert_model_tools_excludes(TOOL_SEARCH_NAME)
+    for bridge in [TOOL_SEARCH_NAME, TOOL_DESCRIBE_NAME, TOOL_CALL_NAME] {
+        harness
+            .assert_model_tools_excludes(bridge)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("below-threshold surfaces must not advertise bridge {bridge:?}: {error}")
+            });
+    }
+}
+
+/// Caller-path proof for the provider-facing protocol: every advertised bridge
+/// registers through the production capability-port factory, and the final
+/// `tool_call` dispatches the real bundled GitHub capability through mediated
+/// host egress.
+#[tokio::test]
+async fn deferred_search_describe_call_flow_uses_production_capability_chain() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_tool_disclosure_bridged()
+        .with_github_issue_tools()
+        .script(deferred_bridge_script())
+        .build()
         .await
-        .expect("no bridge meta tools below the disclosure caps");
+        .expect("bridged-disclosure harness builds");
+    harness
+        .submit_turn("find and inspect the ironclaw repository")
+        .await
+        .expect("search, describe, and call complete");
+    assert_deferred_bridge_flow(&harness).await;
 }
 
 /// Selector-budget regression: a physically wide catalog with only one

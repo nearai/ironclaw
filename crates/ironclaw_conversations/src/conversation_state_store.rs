@@ -4,9 +4,9 @@
 //! mount alias on a [`ScopedFilesystem`] over any [`RootFilesystem`]. The
 //! path returned by [`state_path`] is alias-relative — at every op the
 //! [`ScopedFilesystem`] resolves the alias against its caller-supplied
-//! [`MountView`](ironclaw_host_api::MountView) and enforces per-grant ACL
+//! [`MountView`](ironclaw_host_api::mount::MountView) and enforces per-grant ACL
 //! before backend dispatch. The composition layer wires the alias to a
-//! tenant/user-scoped [`VirtualPath`](ironclaw_host_api::VirtualPath), so
+//! tenant/user-scoped [`VirtualPath`](ironclaw_host_api::path::VirtualPath), so
 //! tenant isolation is structural — two services constructed over
 //! different `MountView`s against the same `RootFilesystem` cannot see
 //! each other's state. The store does not encode `tenant_id` / `user_id`
@@ -38,8 +38,8 @@ use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, FilesystemOperation, IndexKey, IndexValue,
     RootFilesystem, ScopedFilesystem,
 };
-use ironclaw_host_api::UserId;
-use ironclaw_host_api::{HostApiError, ResourceScope, ScopedPath};
+use ironclaw_host_api::ids::UserId;
+use ironclaw_host_api::{error::HostApiError, path::ScopedPath, resource::ResourceScope};
 use ironclaw_turns::{AcceptedMessageRef, IdempotencyKey, SubmitTurnResponse};
 use serde::{Deserialize, Serialize};
 
@@ -74,7 +74,7 @@ const FILESYSTEM_CAS_RETRIES: usize = 5;
 ///
 /// Construct with an [`Arc<ScopedFilesystem<F>>`] over any
 /// [`RootFilesystem`]. Tenant/user isolation lives in the caller's
-/// [`MountView`](ironclaw_host_api::MountView), not in this store.
+/// [`MountView`](ironclaw_host_api::mount::MountView), not in this store.
 pub struct ConversationStateStore<F: ?Sized>
 where
     F: RootFilesystem,
@@ -444,11 +444,11 @@ impl RebornFilesystemConversationServices {
 
     pub async fn pair_external_actor(
         &self,
-        tenant_id: ironclaw_host_api::TenantId,
+        tenant_id: ironclaw_host_api::ids::TenantId,
         adapter_kind: AdapterKind,
         adapter_installation_id: AdapterInstallationId,
         external_actor_ref: ExternalActorRef,
-        user_id: ironclaw_host_api::UserId,
+        user_id: ironclaw_host_api::ids::UserId,
     ) -> Result<(), InboundTurnError> {
         self.inner
             .try_pair_external_actor(
@@ -463,7 +463,7 @@ impl RebornFilesystemConversationServices {
 
     pub async fn unpair_external_actor(
         &self,
-        tenant_id: &ironclaw_host_api::TenantId,
+        tenant_id: &ironclaw_host_api::ids::TenantId,
         adapter_kind: &AdapterKind,
         adapter_installation_id: &AdapterInstallationId,
         external_actor_ref: &ExternalActorRef,
@@ -480,11 +480,11 @@ impl RebornFilesystemConversationServices {
 
     pub async fn pair_external_actor_with_epoch(
         &self,
-        tenant_id: ironclaw_host_api::TenantId,
+        tenant_id: ironclaw_host_api::ids::TenantId,
         adapter_kind: AdapterKind,
         adapter_installation_id: AdapterInstallationId,
         external_actor_ref: ExternalActorRef,
-        user_id: ironclaw_host_api::UserId,
+        user_id: ironclaw_host_api::ids::UserId,
         binding_epoch: ExternalActorBindingEpoch,
     ) -> Result<(), InboundTurnError> {
         self.inner
@@ -501,7 +501,7 @@ impl RebornFilesystemConversationServices {
 
     pub async fn unpair_external_actor_if_owned_by(
         &self,
-        tenant_id: &ironclaw_host_api::TenantId,
+        tenant_id: &ironclaw_host_api::ids::TenantId,
         adapter_kind: &AdapterKind,
         adapter_installation_id: &AdapterInstallationId,
         external_actor_ref: &ExternalActorRef,
@@ -522,7 +522,7 @@ impl RebornFilesystemConversationServices {
     /// for an adapter, optionally narrowed to one installation.
     pub async fn unpair_external_actors_owned_by(
         &self,
-        tenant_id: &ironclaw_host_api::TenantId,
+        tenant_id: &ironclaw_host_api::ids::TenantId,
         adapter_kind: &AdapterKind,
         adapter_installation_id: Option<&AdapterInstallationId>,
         user_id: &UserId,
@@ -542,7 +542,7 @@ impl RebornFilesystemConversationServices {
 impl ConversationActorPairingService for RebornFilesystemConversationServices {
     async fn pair_external_actor(
         &self,
-        tenant_id: ironclaw_host_api::TenantId,
+        tenant_id: ironclaw_host_api::ids::TenantId,
         adapter_kind: AdapterKind,
         adapter_installation_id: AdapterInstallationId,
         external_actor_ref: ExternalActorRef,
@@ -561,7 +561,7 @@ impl ConversationActorPairingService for RebornFilesystemConversationServices {
 
     async fn pair_external_actor_with_epoch(
         &self,
-        tenant_id: ironclaw_host_api::TenantId,
+        tenant_id: ironclaw_host_api::ids::TenantId,
         adapter_kind: AdapterKind,
         adapter_installation_id: AdapterInstallationId,
         external_actor_ref: ExternalActorRef,
@@ -582,7 +582,7 @@ impl ConversationActorPairingService for RebornFilesystemConversationServices {
 
     async fn unpair_external_actor(
         &self,
-        tenant_id: ironclaw_host_api::TenantId,
+        tenant_id: ironclaw_host_api::ids::TenantId,
         adapter_kind: AdapterKind,
         adapter_installation_id: AdapterInstallationId,
         external_actor_ref: ExternalActorRef,
@@ -599,7 +599,7 @@ impl ConversationActorPairingService for RebornFilesystemConversationServices {
 
     async fn unpair_external_actor_if_owned_by(
         &self,
-        tenant_id: &ironclaw_host_api::TenantId,
+        tenant_id: &ironclaw_host_api::ids::TenantId,
         adapter_kind: &AdapterKind,
         adapter_installation_id: &AdapterInstallationId,
         external_actor_ref: &ExternalActorRef,
@@ -629,9 +629,9 @@ impl ConversationBindingService for RebornFilesystemConversationServices {
     async fn resolve_or_create_binding_with_trusted_scope(
         &self,
         request: ResolveConversationRequest,
-        trusted_agent_id: Option<ironclaw_host_api::AgentId>,
-        trusted_project_id: Option<ironclaw_host_api::ProjectId>,
-        trusted_owner_user_id: Option<ironclaw_host_api::UserId>,
+        trusted_agent_id: Option<ironclaw_host_api::ids::AgentId>,
+        trusted_project_id: Option<ironclaw_host_api::ids::ProjectId>,
+        trusted_owner_user_id: Option<ironclaw_host_api::ids::UserId>,
     ) -> Result<ConversationBindingResolution, InboundTurnError> {
         self.inner
             .resolve_or_create_binding_with_trusted_scope(

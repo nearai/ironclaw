@@ -95,6 +95,29 @@ pub struct LeakPattern {
     pub action: LeakAction,
 }
 
+/// Controls how a detected value may be represented outside the scanner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeakPreviewPolicy {
+    /// Retain only a bounded prefix and suffix around a masked middle.
+    Masked,
+    /// Never retain any bytes from private-key material.
+    PrivateKey,
+}
+
+impl LeakPreviewPolicy {
+    fn render(self, matched_text: &str) -> String {
+        match self {
+            Self::Masked => mask_secret(matched_text),
+            Self::PrivateKey => "[PRIVATE_KEY]".to_string(),
+        }
+    }
+}
+
+struct RegisteredLeakPattern {
+    pattern: LeakPattern,
+    preview_policy: LeakPreviewPolicy,
+}
+
 /// A detected potential secret leak.
 #[derive(Debug, Clone)]
 pub struct LeakMatch {
@@ -128,11 +151,37 @@ impl LeakScanResult {
     pub fn max_severity(&self) -> Option<LeakSeverity> {
         self.matches.iter().map(|m| m.severity).max()
     }
+
+    /// Redact every matched range, regardless of its configured action.
+    ///
+    /// Consumers such as compaction use this when retaining surrounding
+    /// context is safe but no detected secret value may cross the boundary.
+    /// Match ranges are validated before slicing so a malformed scanner
+    /// implementation fails closed instead of panicking or returning partially
+    /// redacted content.
+    pub fn redact_all_matches(&self, content: &str) -> Result<Option<String>, LeakRedactionError> {
+        if self.matches.is_empty() {
+            return Ok(None);
+        }
+        let mut ranges = Vec::with_capacity(self.matches.len());
+        for leak_match in &self.matches {
+            let range = leak_match.location.clone();
+            if range.start >= range.end
+                || range.end > content.len()
+                || !content.is_char_boundary(range.start)
+                || !content.is_char_boundary(range.end)
+            {
+                return Err(LeakRedactionError::InvalidMatchRange);
+            }
+            ranges.push(range);
+        }
+        Ok(Some(apply_redactions(content, &ranges)))
+    }
 }
 
 /// Detector for secret leaks in output data.
 pub struct LeakDetector {
-    patterns: Vec<LeakPattern>,
+    patterns: Vec<RegisteredLeakPattern>,
     /// For fast prefix matching of known patterns
     prefix_matcher: Option<AhoCorasick>,
     known_prefixes: Vec<(String, usize)>, // (prefix, pattern_index)
@@ -141,15 +190,32 @@ pub struct LeakDetector {
 impl LeakDetector {
     /// Create a new detector with default patterns.
     pub fn new() -> Self {
-        Self::with_patterns(default_patterns())
+        Self::with_pattern_policies(default_patterns())
     }
 
-    /// Create a detector with custom patterns.
+    /// Create a detector with custom patterns using masked previews.
     pub fn with_patterns(patterns: Vec<LeakPattern>) -> Self {
+        Self::with_pattern_policies(
+            patterns
+                .into_iter()
+                .map(|pattern| (pattern, LeakPreviewPolicy::Masked))
+                .collect(),
+        )
+    }
+
+    /// Create a detector with custom patterns and explicit preview policies.
+    pub fn with_pattern_policies(patterns: Vec<(LeakPattern, LeakPreviewPolicy)>) -> Self {
+        let patterns: Vec<_> = patterns
+            .into_iter()
+            .map(|(pattern, preview_policy)| RegisteredLeakPattern {
+                pattern,
+                preview_policy,
+            })
+            .collect();
         // Build prefix matcher for patterns that start with a known prefix
         let mut prefixes = Vec::new();
-        for (idx, pattern) in patterns.iter().enumerate() {
-            if let Some(prefix) = extract_literal_prefix(pattern.regex.as_str())
+        for (idx, registered) in patterns.iter().enumerate() {
+            if let Some(prefix) = extract_literal_prefix(registered.pattern.regex.as_str())
                 && prefix.len() >= 3
             {
                 prefixes.push((prefix, idx));
@@ -210,20 +276,22 @@ impl LeakDetector {
 
         // Check candidate patterns
         for idx in candidate_indices {
-            let pattern = &self.patterns[idx];
+            let registered = &self.patterns[idx];
+            let pattern = &registered.pattern;
             for mat in pattern.regex.find_iter(content) {
                 let matched_text = mat.as_str();
                 if pattern.name == "bare_jwt" && !has_json_web_token_header(matched_text) {
                     continue;
                 }
                 let location = mat.start()..mat.end();
+                let masked_preview = registered.preview_policy.render(matched_text);
 
                 let leak_match = LeakMatch {
                     pattern_name: pattern.name.clone(),
                     severity: pattern.severity,
                     action: pattern.action,
                     location: location.clone(),
-                    masked_preview: mask_secret(matched_text),
+                    masked_preview,
                 };
 
                 if pattern.action == LeakAction::Block {
@@ -356,7 +424,19 @@ impl LeakDetector {
 
     /// Add a custom pattern at runtime.
     pub fn add_pattern(&mut self, pattern: LeakPattern) {
-        self.patterns.push(pattern);
+        self.add_pattern_with_preview_policy(pattern, LeakPreviewPolicy::Masked);
+    }
+
+    /// Add a custom pattern with an explicit preview policy at runtime.
+    pub fn add_pattern_with_preview_policy(
+        &mut self,
+        pattern: LeakPattern,
+        preview_policy: LeakPreviewPolicy,
+    ) {
+        self.patterns.push(RegisteredLeakPattern {
+            pattern,
+            preview_policy,
+        });
         // Note: prefix_matcher won't be updated; rebuild if needed
     }
 
@@ -377,6 +457,13 @@ impl Default for LeakDetector {
 pub enum LeakDetectionError {
     #[error("Secret leak blocked: pattern '{pattern}' matched '{preview}'")]
     SecretLeakBlocked { pattern: String, preview: String },
+}
+
+/// A scanner supplied a match range that cannot be safely redacted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum LeakRedactionError {
+    #[error("leak scanner returned an invalid match range")]
+    InvalidMatchRange,
 }
 
 /// Mask a secret for safe display.
@@ -524,8 +611,8 @@ fn decode_base64url_no_pad(input: &str) -> Option<Vec<u8>> {
 }
 
 /// Default leak detection patterns.
-fn default_patterns() -> Vec<LeakPattern> {
-    vec![
+fn default_patterns() -> Vec<(LeakPattern, LeakPreviewPolicy)> {
+    let mut patterns: Vec<_> = vec![
         // OpenAI API keys
         LeakPattern {
             name: "openai_api_key".to_string(),
@@ -575,20 +662,58 @@ fn default_patterns() -> Vec<LeakPattern> {
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
+    ]
+    .into_iter()
+    .map(|pattern| (pattern, LeakPreviewPolicy::Masked))
+    .collect();
+
+    patterns.extend([
         // PEM private keys
-        LeakPattern {
-            name: "pem_private_key".to_string(),
-            regex: Regex::new(r"-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----").unwrap(), // safety: hardcoded literal
-            severity: LeakSeverity::Critical,
-            action: LeakAction::Block,
-        },
+        (
+            LeakPattern {
+                name: "pem_private_key".to_string(),
+                // Match the complete block so value-redaction consumers cannot
+                // remove only the BEGIN sentinel while retaining key material.
+                // A missing END sentinel consumes the bounded remainder of the
+                // scanned content, which deliberately over-redacts fail-safe.
+                regex: Regex::new(
+                    r"-----BEGIN(?s:(?:\s+RSA\s+PRIVATE\s+KEY-----.*?(?:-----END\s+RSA\s+PRIVATE\s+KEY-----|$)|\s+PRIVATE\s+KEY-----.*?(?:-----END\s+PRIVATE\s+KEY-----|$)|\s+ENCRYPTED\s+PRIVATE\s+KEY-----.*?(?:-----END\s+ENCRYPTED\s+PRIVATE\s+KEY-----|$)))",
+                )
+                .unwrap(), // safety: hardcoded literal
+                severity: LeakSeverity::Critical,
+                action: LeakAction::Block,
+            },
+            LeakPreviewPolicy::PrivateKey,
+        ),
         // SSH private keys
-        LeakPattern {
-            name: "ssh_private_key".to_string(),
-            regex: Regex::new(r"-----BEGIN\s+(?:OPENSSH|EC|DSA)\s+PRIVATE\s+KEY-----").unwrap(), // safety: hardcoded literal
-            severity: LeakSeverity::Critical,
-            action: LeakAction::Block,
-        },
+        (
+            LeakPattern {
+                name: "ssh_private_key".to_string(),
+                regex: Regex::new(
+                    r"-----BEGIN(?s:(?:\s+OPENSSH\s+PRIVATE\s+KEY-----.*?(?:-----END\s+OPENSSH\s+PRIVATE\s+KEY-----|$)|\s+EC\s+PRIVATE\s+KEY-----.*?(?:-----END\s+EC\s+PRIVATE\s+KEY-----|$)|\s+DSA\s+PRIVATE\s+KEY-----.*?(?:-----END\s+DSA\s+PRIVATE\s+KEY-----|$)))",
+                )
+                .unwrap(), // safety: hardcoded literal
+                severity: LeakSeverity::Critical,
+                action: LeakAction::Block,
+            },
+            LeakPreviewPolicy::PrivateKey,
+        ),
+        // OpenPGP private-key armor
+        (
+            LeakPattern {
+                name: "pgp_private_key".to_string(),
+                regex: Regex::new(
+                    r"-----BEGIN(?s:\s+PGP\s+PRIVATE\s+KEY\s+BLOCK-----.*?(?:-----END\s+PGP\s+PRIVATE\s+KEY\s+BLOCK-----|$))",
+                )
+                .unwrap(), // safety: hardcoded literal
+                severity: LeakSeverity::Critical,
+                action: LeakAction::Block,
+            },
+            LeakPreviewPolicy::PrivateKey,
+        ),
+    ]);
+
+    let trailing_patterns = vec![
         // Google API keys
         LeakPattern {
             name: "google_api_key".to_string(),
@@ -631,14 +756,18 @@ fn default_patterns() -> Vec<LeakPattern> {
         // Bearer tokens (redact instead of block, might be intentional)
         LeakPattern {
             name: "bearer_token".to_string(),
-            regex: Regex::new(r"Bearer\s+[a-zA-Z0-9._-]{20,}").unwrap(), // safety: hardcoded literal
+            // RFC 6750 b64token is the HTTP token68 alphabet followed by
+            // optional padding. Matching the complete alphabet is required by
+            // range-redaction consumers so credential suffixes cannot survive.
+            regex: Regex::new(r"Bearer\s+[a-zA-Z0-9._~+/-]{20,}=*").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::High,
             action: LeakAction::Redact,
         },
         // Authorization header with key
         LeakPattern {
             name: "auth_header".to_string(),
-            regex: Regex::new(r"(?i)authorization:\s*[a-zA-Z]+\s+[a-zA-Z0-9_-]{20,}").unwrap(), // safety: hardcoded literal
+            regex: Regex::new(r"(?i)authorization:\s*[a-zA-Z]+\s+[a-zA-Z0-9._~+/-]{20,}=*")
+                .unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::High,
             action: LeakAction::Redact,
         },
@@ -711,12 +840,23 @@ fn default_patterns() -> Vec<LeakPattern> {
             severity: LeakSeverity::Medium,
             action: LeakAction::Warn,
         },
-    ]
+    ];
+    patterns.extend(
+        trailing_patterns
+            .into_iter()
+            .map(|pattern| (pattern, LeakPreviewPolicy::Masked)),
+    );
+
+    patterns
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::leak_detector::{LeakDetector, LeakSeverity, MAX_BARE_JWT_CANDIDATE_LEN};
+    use crate::leak_detector::{
+        LeakAction, LeakDetectionError, LeakDetector, LeakMatch, LeakPattern, LeakPreviewPolicy,
+        LeakRedactionError, LeakScanResult, LeakSeverity, MAX_BARE_JWT_CANDIDATE_LEN,
+    };
+    use regex::Regex;
 
     #[test]
     fn test_detect_openai_key() {
@@ -777,6 +917,192 @@ mod tests {
                 .iter()
                 .any(|m| m.pattern_name == "pem_private_key")
         );
+    }
+
+    #[test]
+    fn private_key_patterns_use_the_shared_begin_prefix_filter() {
+        let detector = LeakDetector::new();
+
+        for pattern_name in ["pem_private_key", "ssh_private_key", "pgp_private_key"] {
+            let pattern_index = detector
+                .patterns
+                .iter()
+                .position(|registered| registered.pattern.name == pattern_name)
+                .expect("default private-key pattern should exist");
+
+            assert!(
+                detector
+                    .known_prefixes
+                    .iter()
+                    .any(|(prefix, index)| prefix == "-----BEGIN" && *index == pattern_index),
+                "{pattern_name} should be eliminated before regex matching when the input has no private-key sentinel"
+            );
+        }
+    }
+
+    #[test]
+    fn private_key_redaction_removes_the_complete_bounded_block() {
+        let detector = LeakDetector::new();
+        let content = concat!(
+            "before\n",
+            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "TEST_PRIVATE_KEY_MATERIAL\n",
+            "-----END RSA PRIVATE KEY-----\n",
+            "after"
+        );
+
+        let scan = detector.scan(content);
+        let redacted = scan
+            .redact_all_matches(content)
+            .expect("valid detector ranges")
+            .expect("private key should be redacted");
+
+        assert_eq!(redacted, "before\n[REDACTED]\nafter");
+        assert!(!redacted.contains("TEST_PRIVATE_KEY_MATERIAL"));
+    }
+
+    #[test]
+    fn private_key_redaction_covers_every_supported_delimiter_pair() {
+        let detector = LeakDetector::new();
+
+        for label in [
+            "RSA PRIVATE KEY",
+            "PRIVATE KEY",
+            "ENCRYPTED PRIVATE KEY",
+            "PGP PRIVATE KEY BLOCK",
+            "OPENSSH PRIVATE KEY",
+            "EC PRIVATE KEY",
+            "DSA PRIVATE KEY",
+        ] {
+            let content = format!(
+                "before\n-----BEGIN {label}-----\nTEST_PRIVATE_KEY_MATERIAL\n-----END {label}-----\nafter"
+            );
+
+            let scan = detector.scan(&content);
+            let redacted = scan
+                .redact_all_matches(&content)
+                .expect("valid detector ranges")
+                .expect("private key should be redacted");
+
+            assert_eq!(redacted, "before\n[REDACTED]\nafter", "label: {label}");
+            assert!(
+                !redacted.contains("TEST_PRIVATE_KEY_MATERIAL"),
+                "label: {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn private_key_patterns_leave_public_key_near_misses_clean() {
+        let detector = LeakDetector::new();
+
+        for label in [
+            "RSA PUBLIC KEY",
+            "OPENSSH PUBLIC KEY",
+            "PGP PUBLIC KEY BLOCK",
+            "CERTIFICATE",
+        ] {
+            let content = format!(
+                "before\n-----BEGIN {label}-----\nPUBLIC_MATERIAL\n-----END {label}-----\nafter"
+            );
+
+            assert!(detector.scan(&content).is_clean(), "label: {label}");
+        }
+    }
+
+    #[test]
+    fn unterminated_private_key_redaction_consumes_the_bounded_remainder() {
+        let detector = LeakDetector::new();
+
+        for label in [
+            "RSA PRIVATE KEY",
+            "PRIVATE KEY",
+            "ENCRYPTED PRIVATE KEY",
+            "PGP PRIVATE KEY BLOCK",
+            "OPENSSH PRIVATE KEY",
+            "EC PRIVATE KEY",
+            "DSA PRIVATE KEY",
+        ] {
+            let content = format!("before\n-----BEGIN {label}-----\nTEST_PRIVATE_KEY_MATERIAL");
+            let scan = detector.scan(&content);
+            let redacted = scan
+                .redact_all_matches(&content)
+                .expect("valid detector ranges")
+                .expect("private key should be redacted");
+
+            assert_eq!(redacted, "before\n[REDACTED]", "label: {label}");
+        }
+    }
+
+    #[test]
+    fn mismatched_private_key_end_label_does_not_truncate_redaction() {
+        let detector = LeakDetector::new();
+
+        for (begin_label, mismatched_end_label) in [
+            ("RSA PRIVATE KEY", "PRIVATE KEY"),
+            ("PRIVATE KEY", "RSA PRIVATE KEY"),
+            ("ENCRYPTED PRIVATE KEY", "PRIVATE KEY"),
+            ("PGP PRIVATE KEY BLOCK", "PGP PUBLIC KEY BLOCK"),
+            ("OPENSSH PRIVATE KEY", "EC PRIVATE KEY"),
+            ("EC PRIVATE KEY", "DSA PRIVATE KEY"),
+            ("DSA PRIVATE KEY", "EC PRIVATE KEY"),
+        ] {
+            let content = format!(
+                "before\n-----BEGIN {begin_label}-----\nFIRST_PRIVATE_KEY_FRAGMENT\n-----END {mismatched_end_label}-----\nTRAILING_PRIVATE_KEY_FRAGMENT"
+            );
+            let scan = detector.scan(&content);
+            let redacted = scan
+                .redact_all_matches(&content)
+                .expect("valid detector ranges")
+                .expect("private key should be redacted");
+
+            assert_eq!(
+                redacted, "before\n[REDACTED]",
+                "begin: {begin_label}, end: {mismatched_end_label}"
+            );
+            assert!(!redacted.contains("TRAILING_PRIVATE_KEY_FRAGMENT"));
+        }
+    }
+
+    #[test]
+    fn unterminated_private_key_error_preview_is_constant() {
+        let detector = LeakDetector::new();
+        let private_material = "TEST_PRIVATE_KEY_SUFFIX";
+        let content = format!("-----BEGIN OPENSSH PRIVATE KEY-----\n{private_material}");
+
+        let error = detector
+            .scan_and_clean(&content)
+            .expect_err("private keys should remain blocked outside retention boundaries");
+        let LeakDetectionError::SecretLeakBlocked { preview, .. } = &error;
+
+        assert_eq!(preview, "[PRIVATE_KEY]");
+        assert!(!preview.contains(private_material));
+        assert!(!error.to_string().contains("FFIX"));
+    }
+
+    #[test]
+    fn custom_private_key_preview_policy_does_not_depend_on_pattern_name() {
+        let detector = LeakDetector::with_pattern_policies(vec![(
+            LeakPattern {
+                name: "renamed_private_key".to_string(),
+                regex: Regex::new(
+                    r"-----BEGIN CUSTOM PRIVATE KEY-----.*-----END CUSTOM PRIVATE KEY-----",
+                )
+                .unwrap(),
+                severity: LeakSeverity::Critical,
+                action: LeakAction::Block,
+            },
+            LeakPreviewPolicy::PrivateKey,
+        )]);
+        let content = "-----BEGIN CUSTOM PRIVATE KEY-----synthetic-----END CUSTOM PRIVATE KEY-----";
+
+        let error = detector
+            .scan_and_clean(content)
+            .expect_err("the custom private-key pattern should block");
+        let LeakDetectionError::SecretLeakBlocked { pattern, preview } = error;
+
+        assert_eq!(pattern, "renamed_private_key");
+        assert_eq!(preview, "[PRIVATE_KEY]");
     }
 
     #[test]
@@ -856,6 +1182,22 @@ mod tests {
     }
 
     #[test]
+    fn test_redact_token68_credentials_without_suffix_leak() {
+        let detector = LeakDetector::new();
+        let token = "AAAAAAAAAAAAAAAAAAAA~+/==";
+
+        for content in [
+            format!("token=Bearer {token}; retained"),
+            format!("Authorization: Basic {token}; retained"),
+        ] {
+            let redacted = detector.scan_and_clean(&content).unwrap();
+
+            assert!(redacted.ends_with("[REDACTED]; retained"));
+            assert!(!redacted.contains("~+/=="));
+        }
+    }
+
+    #[test]
     fn test_scan_and_clean_blocks() {
         let detector = LeakDetector::new();
         let content = "sk-proj-test1234567890abcdefghij";
@@ -911,6 +1253,108 @@ mod tests {
             "status code must survive: {redacted}"
         );
         assert!(redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_all_matches_masks_block_redact_and_warn_actions() {
+        let content = "prefix TEST_SECRET suffix";
+        let start = content.find("TEST_SECRET").unwrap();
+
+        for action in [LeakAction::Block, LeakAction::Redact, LeakAction::Warn] {
+            let scan = LeakScanResult {
+                matches: vec![LeakMatch {
+                    pattern_name: "synthetic".to_string(),
+                    severity: LeakSeverity::High,
+                    action,
+                    location: start..start + "TEST_SECRET".len(),
+                    masked_preview: "[masked]".to_string(),
+                }],
+                should_block: action == LeakAction::Block,
+                redacted_content: None,
+            };
+
+            assert_eq!(
+                scan.redact_all_matches(content).unwrap(),
+                Some("prefix [REDACTED] suffix".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn redact_all_matches_coalesces_overlaps_and_preserves_disjoint_matches() {
+        let content = "aa SECRET_ONE bb SECRET_TWO cc";
+        let first_start = content.find("SECRET_ONE").unwrap();
+        let second_start = content.find("SECRET_TWO").unwrap();
+        let synthetic_match = |location| LeakMatch {
+            pattern_name: "synthetic".to_string(),
+            severity: LeakSeverity::High,
+            action: LeakAction::Redact,
+            location,
+            masked_preview: "[masked]".to_string(),
+        };
+        let scan = LeakScanResult {
+            matches: vec![
+                synthetic_match(first_start..first_start + "SECRET_ONE".len()),
+                synthetic_match(first_start + 2..first_start + 6),
+                synthetic_match(second_start..second_start + "SECRET_TWO".len()),
+            ],
+            should_block: false,
+            redacted_content: None,
+        };
+
+        let redacted = scan
+            .redact_all_matches(content)
+            .expect("valid detector ranges")
+            .expect("matches should be redacted");
+
+        assert_eq!(redacted, "aa [REDACTED] bb [REDACTED] cc");
+        assert_eq!(redacted.matches("[REDACTED]").count(), 2);
+    }
+
+    #[test]
+    fn redact_all_matches_rejects_invalid_scanner_ranges() {
+        for (start, end) in [(0, usize::MAX), (2, 2), (3, 2)] {
+            let scan = LeakScanResult {
+                matches: vec![LeakMatch {
+                    pattern_name: "synthetic".to_string(),
+                    severity: LeakSeverity::High,
+                    action: LeakAction::Redact,
+                    location: start..end,
+                    masked_preview: "[masked]".to_string(),
+                }],
+                should_block: false,
+                redacted_content: None,
+            };
+
+            assert_eq!(
+                scan.redact_all_matches("safe"),
+                Err(LeakRedactionError::InvalidMatchRange)
+            );
+        }
+    }
+
+    #[test]
+    fn redact_all_matches_rejects_non_char_boundary_scanner_ranges() {
+        let content = "éx";
+
+        for location in [1..2, 0..1] {
+            let scan = LeakScanResult {
+                matches: vec![LeakMatch {
+                    pattern_name: "synthetic".to_string(),
+                    severity: LeakSeverity::High,
+                    action: LeakAction::Redact,
+                    location,
+                    masked_preview: "[masked]".to_string(),
+                }],
+                should_block: false,
+                redacted_content: None,
+            };
+
+            assert_eq!(
+                scan.redact_all_matches(content),
+                Err(LeakRedactionError::InvalidMatchRange)
+            );
+        }
     }
 
     #[test]
@@ -1772,6 +2216,24 @@ mod tests {
             assert!(
                 elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "ssh_private_key pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        #[test]
+        fn pgp_private_key_pattern_100kb_near_miss() {
+            let detector = LeakDetector::new();
+            let chunk = "-----BEGIN PGP PUBLIC KEY BLOCK-----\n";
+            let payload = chunk.repeat(3000);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let result = detector.scan(&payload);
+            let elapsed = start.elapsed();
+            assert!(result.is_clean());
+            assert!(
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
+                "pgp_private_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
         }

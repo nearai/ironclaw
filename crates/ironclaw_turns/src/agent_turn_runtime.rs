@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use ironclaw_host_api::RuntimeCredentialAuthRequirement;
+use ironclaw_host_api::decision::RuntimeCredentialAuthRequirement;
 
 use crate::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, CapabilityActivityId, GateRef,
@@ -209,7 +209,7 @@ mod tests {
         AcceptedMessageRef, EventCursor, GateResumeDisposition, ReplyTargetBindingRef,
         SourceBindingRef, TurnRunId, TurnRunRecord, TurnScope, TurnStatus,
     };
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
 
     fn minimal_turn_run_record() -> TurnRunRecord {
         // Build a TurnRunRecord by serializing a struct-literal then

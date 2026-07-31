@@ -3,7 +3,9 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPath, HostPortId, VirtualPath,
+    host_port::{HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortId},
+    ids::{CapabilityId, ExtensionId},
+    path::{HostPath, VirtualPath},
 };
 use ironclaw_host_runtime::discover_extensions_with_default_host_api_contracts;
 use tempfile::tempdir;

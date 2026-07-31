@@ -2,8 +2,11 @@ use std::sync::Arc;
 
 use ironclaw_extensions::InstallationOwner;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, NetworkTargetPattern,
-    PermissionMode, ResourceScope, RuntimeCredentialRequirement, RuntimeHttpEgress,
+    action::NetworkTargetPattern,
+    capability::{CapabilityDescriptor, EffectKind, PermissionMode, RuntimeCredentialRequirement},
+    http::RuntimeHttpEgress,
+    ids::{CapabilityId, ExtensionId},
+    resource::ResourceScope,
 };
 
 #[derive(Debug, Clone, PartialEq)]

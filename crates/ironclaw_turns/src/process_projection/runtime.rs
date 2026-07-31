@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use ironclaw_host_api::{ProcessId, SanitizedFailure};
+use ironclaw_host_api::{ids::ProcessId, turn::SanitizedFailure};
 use ironclaw_processes::{
     CancelProcessRequest, ClaimedProcess, GetProcessCheckpointRequest, GetProcessSnapshotRequest,
     JournaledProcessSnapshot, ProcessCheckpointId, ProcessCheckpointPort, ProcessCheckpointRef,

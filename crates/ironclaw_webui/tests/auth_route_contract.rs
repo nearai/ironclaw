@@ -35,7 +35,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::Duration as ChronoDuration;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_webui::{
     EnvBearerAuthenticator, OidcAuthenticator, OidcAuthenticatorConfig, SessionAuthenticator,
     SignedTokenSessionStore, signed_session_store,

@@ -33,10 +33,18 @@ use ironclaw_filesystem::{
     RootFilesystem, ScopedFilesystem, StorageClass,
 };
 use ironclaw_host_api::{
-    Action, AgentId, ApprovalRequestId, CapabilityGrant, CapabilityGrantId, CapabilityId,
-    EffectKind, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
-    MountPermissions, MountView, NetworkPolicy, Principal, ProjectId, ResourceScope,
-    RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, TenantId, UserId, VirtualPath,
+    action::{Action, NetworkPolicy},
+    capability::{CapabilityGrant, EffectKind, GrantConstraints},
+    http::RuntimeHttpEgressRequest,
+    ids::{
+        AgentId, ApprovalRequestId, CapabilityGrantId, CapabilityId, ExtensionId, InvocationId,
+        ProjectId, SecretHandle, TenantId, UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
+    runtime::RuntimeKind,
+    scope::Principal,
 };
 use ironclaw_host_runtime::HostRuntime;
 use ironclaw_loop_host::{
@@ -63,7 +71,7 @@ pub(crate) use super::doubles::{
     HostRuntimeHarnessCapabilityPortFactory, ParkingCapabilityGate, ParkingHostRuntime,
     RecordingCapabilityResultWriter, RecordingDelegatingCapabilityPort, RecordingHostRuntime,
     RecordingNetworkHttpEgress, RecordingNetworkHttpTransport, RecordingRuntimeHttpEgress,
-    RecordingTestCapabilityPort, StaticCapabilitySurfaceProfileResolver,
+    RecordingTestCapabilityPort, StaticCapabilitySurfaceProfileResolver, VendorResponseRouter,
 };
 pub(crate) use assembly::{
     StandaloneRootMounts, TriggerActiveRunLookupHostRuntime, bundled_extension_provider_trust,

@@ -9,7 +9,20 @@ use ironclaw_approvals::*;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    action::{Action, NetworkPolicy},
+    approval::{ApprovalRequest, InvocationFingerprint},
+    authorized::Authorized,
+    capability::{
+        CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
+    },
+    decision::{Decision, DenyReason},
+    dispatch::{CapabilityDispatchResult, CapabilityDispatcher, DispatchError},
+    ids::{ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId, UserId},
+    mount::MountView,
+    resource::{ResourceEstimate, ResourceScope},
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_processes::*;
 use serde_json::json;
 

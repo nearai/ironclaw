@@ -1,5 +1,8 @@
 use ironclaw_filesystem::{FileStat, FilesystemError, FilesystemOperation};
-use ironclaw_host_api::{RuntimeDispatchErrorKind, ScopedPath, VirtualPath};
+use ironclaw_host_api::{
+    dispatch::RuntimeDispatchErrorKind,
+    path::{ScopedPath, VirtualPath},
+};
 use ironclaw_safety::sensitive_paths::is_sensitive_path_str;
 use serde_json::Value;
 use tracing::debug;
@@ -111,7 +114,7 @@ fn summary_path_hint(path: &str) -> String {
     format!("path {hint}")
 }
 
-fn available_roots(mounts: &ironclaw_host_api::MountView) -> String {
+fn available_roots(mounts: &ironclaw_host_api::mount::MountView) -> String {
     let mut roots: Vec<String> = mounts
         .mounts
         .iter()
@@ -167,12 +170,14 @@ fn strip_leading_current_dir_segments(mut path: &str) -> &str {
 }
 
 pub(super) fn operation_allowed(
-    permissions: &ironclaw_host_api::MountPermissions,
+    permissions: &ironclaw_host_api::mount::MountPermissions,
     operation: FilesystemOperation,
 ) -> bool {
     match operation {
         FilesystemOperation::ReadFile => permissions.read,
-        FilesystemOperation::WriteFile | FilesystemOperation::AppendFile => permissions.write,
+        FilesystemOperation::WriteFile
+        | FilesystemOperation::AppendFile
+        | FilesystemOperation::CreateSubtreeAtomic => permissions.write,
         FilesystemOperation::ListDir => permissions.list,
         FilesystemOperation::Stat => permissions.read || permissions.list,
         FilesystemOperation::Delete => permissions.delete,

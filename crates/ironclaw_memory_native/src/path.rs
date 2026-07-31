@@ -8,7 +8,7 @@
 use std::sync::OnceLock;
 
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 
 pub use ironclaw_memory::{
     MemoryDocumentPath, MemoryDocumentScope, validated_memory_relative_path,

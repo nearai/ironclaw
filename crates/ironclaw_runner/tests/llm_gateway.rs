@@ -7,7 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{
+use ironclaw_host_api::ids::{
     AgentId, CapabilityId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
 };
 use ironclaw_llm::{
@@ -56,6 +56,60 @@ const STATIC_PROVIDER_ID: &str = "static-test-provider";
 
 fn provider_name(value: &str) -> ProviderToolName {
     ProviderToolName::new(value).expect("provider tool name")
+}
+
+fn reqwest_status_error(status: reqwest::StatusCode) -> reqwest::Error {
+    let response = reqwest::Response::from(
+        http::Response::builder()
+            .status(status)
+            .body(reqwest::Body::default())
+            .expect("status response fixture"),
+    );
+    response
+        .error_for_status()
+        .expect_err("error status fixture must produce reqwest::Error")
+}
+
+async fn reqwest_decode_error() -> reqwest::Error {
+    let response = reqwest::Response::from(
+        http::Response::builder()
+            .status(reqwest::StatusCode::OK)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(reqwest::Body::from("{"))
+            .expect("decode response fixture"),
+    );
+    response
+        .json::<serde_json::Value>()
+        .await
+        .expect_err("malformed JSON fixture must produce reqwest::Error")
+}
+
+fn reqwest_request_construction_error() -> reqwest::Error {
+    reqwest::Client::new()
+        .get("://invalid-url")
+        .build()
+        .expect_err("invalid URL fixture must produce reqwest::Error")
+}
+
+async fn reqwest_connection_error() -> reqwest::Error {
+    let listener =
+        std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve closed local test port");
+    let address = listener
+        .local_addr()
+        .expect("reserved local test port must have an address");
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("local connection client fixture");
+    let request = client
+        .get(format!("http://{address}/"))
+        .build()
+        .expect("local connection request fixture");
+    drop(listener);
+    client
+        .execute(request)
+        .await
+        .expect_err("closed local test port must produce reqwest::Error")
 }
 
 fn non_production_safety_context() -> InstructionSafetyContext {
@@ -3073,6 +3127,196 @@ async fn gateway_sanitizes_provider_errors() {
     assert!(!format!("{error:?}").contains("RAW_PROVIDER_SECRET"));
 }
 
+/// Regression for #6897: deterministic provider decode/response failures must
+/// enter the bounded invalid-output repair lane. Routing any of these through
+/// `Unavailable` gives them the 12-attempt provider-outage budget.
+#[tokio::test]
+async fn gateway_maps_deterministic_provider_response_errors_to_invalid_output() {
+    let json_error =
+        serde_json::from_str::<serde_json::Value>("{").expect_err("fixture JSON must be malformed");
+    let cases = [
+        ("json", LlmError::Json(json_error), "JSON error:"),
+        (
+            "invalid_response",
+            LlmError::InvalidResponse {
+                provider: "fixture-provider".to_string(),
+                reason: "malformed response envelope".to_string(),
+            },
+            "malformed response envelope",
+        ),
+        (
+            "empty_response",
+            LlmError::EmptyResponse {
+                provider: "fixture-provider".to_string(),
+            },
+            "Empty response",
+        ),
+    ];
+
+    for (label, provider_error, expected_detail) in cases {
+        let provider = Arc::new(RecordingLlmProvider::fail(provider_error));
+        let gateway = LlmProviderModelGateway::with_provider_identity(
+            STATIC_PROVIDER_ID,
+            provider,
+            LlmModelProfilePolicy::new()
+                .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+        );
+
+        let error = gateway
+            .stream_model(model_request(interactive_model()))
+            .await
+            .expect_err("scripted provider error must reach the gateway caller");
+
+        assert_eq!(
+            error.kind,
+            HostManagedModelErrorKind::InvalidOutput,
+            "{label} must not enter the long provider-unavailable retry lane"
+        );
+        assert!(
+            error
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains(expected_detail)),
+            "{label} must retain its scrubbed provider cause for durable failure reporting: {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn gateway_retries_only_evidence_backed_stream_and_io_failures() {
+    let cases = [
+        (
+            "interrupted_stream",
+            LlmError::StreamInterrupted {
+                provider: "fixture-provider".to_string(),
+                reason: "connection closed before terminal frame".to_string(),
+            },
+            HostManagedModelErrorKind::Unavailable,
+        ),
+        (
+            "connection_io",
+            LlmError::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "socket reset",
+            )),
+            HostManagedModelErrorKind::Unavailable,
+        ),
+        (
+            "local_io",
+            LlmError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "session file denied",
+            )),
+            HostManagedModelErrorKind::CredentialUnavailable,
+        ),
+    ];
+
+    for (label, provider_error, expected_kind) in cases {
+        let provider = Arc::new(RecordingLlmProvider::fail(provider_error));
+        let gateway = LlmProviderModelGateway::with_provider_identity(
+            STATIC_PROVIDER_ID,
+            provider,
+            LlmModelProfilePolicy::new()
+                .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+        );
+
+        let error = gateway
+            .stream_model(model_request(interactive_model()))
+            .await
+            .expect_err("scripted provider error must reach the gateway caller");
+
+        assert_eq!(
+            error.kind, expected_kind,
+            "{label} must follow its evidence-backed retry policy"
+        );
+    }
+}
+
+/// Caller-path coverage for every raw HTTP evidence branch in
+/// `map_provider_error`. These fixtures are real `reqwest::Error` values rather
+/// than message strings, so a regression in status/decode/connect inspection
+/// cannot silently fall back to the long unavailable lane.
+#[tokio::test]
+async fn gateway_maps_raw_http_errors_by_typed_evidence() {
+    let cases = vec![
+        (
+            "payment_required",
+            reqwest_status_error(reqwest::StatusCode::PAYMENT_REQUIRED),
+            HostManagedModelErrorKind::CredentialUnavailable,
+        ),
+        (
+            "unauthorized",
+            reqwest_status_error(reqwest::StatusCode::UNAUTHORIZED),
+            HostManagedModelErrorKind::CredentialUnavailable,
+        ),
+        (
+            "forbidden",
+            reqwest_status_error(reqwest::StatusCode::FORBIDDEN),
+            HostManagedModelErrorKind::CredentialUnavailable,
+        ),
+        (
+            "rate_limited",
+            reqwest_status_error(reqwest::StatusCode::TOO_MANY_REQUESTS),
+            HostManagedModelErrorKind::RateLimited,
+        ),
+        (
+            "server_error",
+            reqwest_status_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
+            HostManagedModelErrorKind::ProviderUnavailable,
+        ),
+        (
+            "non_retryable_status",
+            reqwest_status_error(reqwest::StatusCode::IM_A_TEAPOT),
+            HostManagedModelErrorKind::InvalidRequest,
+        ),
+        (
+            "decode",
+            reqwest_decode_error().await,
+            HostManagedModelErrorKind::InvalidOutput,
+        ),
+        (
+            "request_construction",
+            reqwest_request_construction_error(),
+            HostManagedModelErrorKind::InvalidRequest,
+        ),
+        (
+            "connection",
+            reqwest_connection_error().await,
+            HostManagedModelErrorKind::Unavailable,
+        ),
+    ];
+
+    for (label, provider_error, expected_kind) in cases {
+        let provider = Arc::new(RecordingLlmProvider::fail(LlmError::Http(provider_error)));
+        let gateway = LlmProviderModelGateway::with_provider_identity(
+            STATIC_PROVIDER_ID,
+            provider,
+            LlmModelProfilePolicy::new()
+                .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+        );
+
+        let error = gateway
+            .stream_model(model_request(interactive_model()))
+            .await
+            .expect_err("scripted HTTP provider error must reach the gateway caller");
+
+        assert_eq!(
+            error.kind, expected_kind,
+            "{label} must follow its typed HTTP evidence"
+        );
+        if label == "payment_required" {
+            assert_eq!(
+                error.safe_summary,
+                "model provider account is out of credits"
+            );
+            assert_eq!(
+                error.reason_kind,
+                Some(AgentLoopHostErrorReasonKind::ModelCreditsExhausted)
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn gateway_preserves_exhausted_fallback_as_unavailable_without_provider_call() {
     let provider = Arc::new(RecordingLlmProvider::reply("must not be called"));
@@ -4705,16 +4949,20 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
     async fn invoke_capability(
         &self,
         _request: ironclaw_turns::run_profile::LoopRequest,
-    ) -> Result<ironclaw_host_api::Resolution, ironclaw_turns::run_profile::AgentLoopHostError>
-    {
+    ) -> Result<
+        ironclaw_host_api::resolution::Resolution,
+        ironclaw_turns::run_profile::AgentLoopHostError,
+    > {
         panic!("gateway tests do not invoke capabilities")
     }
 
     async fn invoke_capability_batch(
         &self,
         _request: ironclaw_turns::run_profile::LoopRequestBatch,
-    ) -> Result<ironclaw_host_api::ResolutionBatch, ironclaw_turns::run_profile::AgentLoopHostError>
-    {
+    ) -> Result<
+        ironclaw_host_api::resolution::ResolutionBatch,
+        ironclaw_turns::run_profile::AgentLoopHostError,
+    > {
         panic!("gateway tests do not invoke capability batches")
     }
 }

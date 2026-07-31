@@ -9,8 +9,11 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, ExtensionId, ProviderToolName, RuntimeKind};
-use ironclaw_host_api::{Resolution, ResolutionBatch};
+use ironclaw_host_api::resolution::{Resolution, ResolutionBatch};
+use ironclaw_host_api::{
+    ids::{CapabilityId, ExtensionId, ProviderToolName},
+    runtime::RuntimeKind,
+};
 use ironclaw_host_runtime::READ_FILE_CAPABILITY_ID;
 use ironclaw_loop_host::{
     DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, build_spawn_subagent_parameters_schema,
@@ -324,7 +327,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
             && self.approval_calls.fetch_add(1, Ordering::SeqCst) == 0
         {
             return Ok(resolution::failed(
-                ironclaw_host_api::FailureKind::InputEncode,
+                ironclaw_host_api::result_meta::FailureKind::InputEncode,
                 "capability input failed validation".to_string(),
                 ironclaw_turns::run_profile::CapabilityFailureDetail::Diagnostic {
                     text: "capability input failed validation".to_string(),

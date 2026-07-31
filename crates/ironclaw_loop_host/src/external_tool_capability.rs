@@ -27,8 +27,9 @@ use crate::{
 };
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, ProviderToolName, Resolution, ResolutionBatch, RuntimeKind,
-    Suspension,
+    ids::{CapabilityId, InvocationId, ProviderToolName},
+    resolution::{Resolution, ResolutionBatch, Suspension},
+    runtime::RuntimeKind,
 };
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityProgress,
@@ -507,7 +508,7 @@ mod tests {
     use super::*;
 
     use crate::CapabilityWriteResult;
-    use ironclaw_host_api::{TenantId, ThreadId};
+    use ironclaw_host_api::ids::{TenantId, ThreadId};
     use ironclaw_turns::{
         ExternalToolCatalogError, ExternalToolSpec, InMemoryExternalToolCatalog,
         RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnScope,

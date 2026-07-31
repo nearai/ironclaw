@@ -24,15 +24,16 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 use tokio::sync::Mutex;
 
 use crate::backend::{EventRecord, StorageTxn};
 use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
-    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FileType, FilesystemError,
-    FilesystemOperation, Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page,
-    RecordVersion, RootFilesystem, SeqNo, VersionedEntry,
+    AtomicSubtreeEntry, BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FileType,
+    FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexName, IndexSpec,
+    IndexValue, Page, RecordVersion, RootFilesystem, SeqNo, VersionedEntry,
+    root::validate_atomic_subtree_entries,
 };
 
 mod transaction;
@@ -110,6 +111,43 @@ impl RootFilesystem for InMemoryBackend {
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
         let state = self.state.lock().await;
         Ok(state_get(&state, path))
+    }
+
+    async fn create_subtree_atomic(
+        &self,
+        prefix: &VirtualPath,
+        entries: Vec<AtomicSubtreeEntry>,
+    ) -> Result<Vec<RecordVersion>, FilesystemError> {
+        validate_atomic_subtree_entries(prefix, &entries)?;
+        let mut state = self.state.lock().await;
+        let prefix_with_separator = with_trailing_slash(prefix.as_str());
+        if state.entries.contains_key(prefix)
+            || state
+                .entries
+                .keys()
+                .any(|path| path.as_str().starts_with(&prefix_with_separator))
+        {
+            return Err(FilesystemError::VersionMismatch {
+                path: prefix.clone(),
+                expected: None,
+                found: Some(RecordVersion::from_backend(1)),
+            });
+        }
+        let modified = SystemTime::now();
+        let version = RecordVersion::from_backend(1);
+        let mut versions = Vec::with_capacity(entries.len());
+        for item in entries {
+            state.entries.insert(
+                item.path,
+                StoredEntry {
+                    entry: item.entry,
+                    version,
+                    modified,
+                },
+            );
+            versions.push(version);
+        }
+        Ok(versions)
     }
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {

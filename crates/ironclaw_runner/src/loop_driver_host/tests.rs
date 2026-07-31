@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use super::port_adapters::{HostManagedLoopCheckpointPort, HostManagedLoopProgressPort};
 
-use ironclaw_host_api::{AgentId, FailureKind, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+    result_meta::FailureKind,
+};
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::test_support::in_memory_loop_checkpoint_store;
 use ironclaw_turns::{
@@ -13,7 +16,8 @@ use ironclaw_turns::{
         LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopCheckpointPort,
         LoopCheckpointRequest, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopProgressEvent,
         LoopProgressPort, LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage,
-        LoopRunContext, RunProfileResolutionRequest, StageCheckpointPayloadRequest,
+        LoopRunContext, LoopSafeSummary, RunProfileResolutionRequest,
+        StageCheckpointPayloadRequest, SystemInferenceTaskId,
     },
 };
 
@@ -60,6 +64,38 @@ async fn recovery_progress_adapter_preserves_sequence_and_typed_labels() {
             class: LoopRecoveryClass::Capability(FailureKind::Backend),
             disposition: LoopRecoveryDisposition::Retried,
         }
+    ));
+}
+
+#[tokio::test]
+async fn compaction_redaction_progress_adapter_preserves_count_and_reason() {
+    let context = test_run_context().await;
+    let sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let milestone_sink: Arc<dyn LoopHostMilestoneSink> = sink.clone();
+    let port = HostManagedLoopProgressPort::new(context.clone(), milestone_sink);
+    let task_id = SystemInferenceTaskId::new();
+
+    port.emit_loop_progress(LoopProgressEvent::CompactionLeakDetected {
+        task_id,
+        reason_kind: LoopSafeSummary::new("redacted").expect("valid safe reason"),
+        redacted_leak_count: 2,
+    })
+    .await
+    .expect("compaction redaction progress must reach the durable milestone seam");
+
+    let milestones = sink.milestones();
+    assert_eq!(milestones.len(), 1);
+    let milestone = &milestones[0];
+    assert_eq!(milestone.scope, context.scope);
+    assert_eq!(milestone.turn_id, context.turn_id);
+    assert_eq!(milestone.run_id, context.run_id);
+    assert!(matches!(
+        &milestone.kind,
+        LoopHostMilestoneKind::CompactionLeakDetected {
+            task_id: emitted_task_id,
+            reason_kind,
+            redacted_leak_count: 2,
+        } if *emitted_task_id == task_id && reason_kind.as_str() == "redacted"
     ));
 }
 

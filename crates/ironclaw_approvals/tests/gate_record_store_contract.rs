@@ -13,7 +13,17 @@ use std::sync::Arc;
 
 use ironclaw_approvals::*;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    capability::RuntimeCredentialAccountSetup,
+    decision::RuntimeCredentialAuthRequirement,
+    gate_record::GateRecord,
+    ids::{ExtensionId, GateRef, InvocationId, ProjectId, ResultRef, TenantId, UserId, VendorId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
+    result_meta::LoopRef,
+    safe_summary::SafeSummary,
+};
 
 #[tokio::test]
 async fn gate_record_store_round_trips_every_variant() {

@@ -23,7 +23,7 @@ pub(super) const SECURITY_AUDIT_TARGET: &str = "security_audit";
 /// `info!`/`warn!`, which corrupt the interactive display); the dedicated
 /// `security_audit` target keeps the event filterable for operators.
 pub(super) fn emit_hook_quarantined(
-    tenant_id: &ironclaw_host_api::TenantId,
+    tenant_id: &ironclaw_host_api::ids::TenantId,
     extension_id: &str,
     reason: &str,
     hooks_dropped: usize,
@@ -70,7 +70,7 @@ pub(super) mod test_capture {
         (result, captured)
     }
 
-    pub(super) fn record(tenant_id: &ironclaw_host_api::TenantId, extension_id: &str) {
+    pub(super) fn record(tenant_id: &ironclaw_host_api::ids::TenantId, extension_id: &str) {
         CAPTURED.with(|cell| {
             if let Some(buffer) = cell.borrow_mut().as_mut() {
                 buffer.push((tenant_id.as_str().to_string(), extension_id.to_string()));

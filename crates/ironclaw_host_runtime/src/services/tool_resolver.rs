@@ -19,7 +19,11 @@ use ironclaw_capabilities::{
 };
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, DispatchError, ExtensionId, RuntimeKind, RuntimeLane,
+    capability::CapabilityDescriptor,
+    dispatch::DispatchError,
+    ids::{CapabilityId, ExtensionId},
+    lane::RuntimeLane,
+    runtime::RuntimeKind,
     runtime_policy::EffectiveRuntimePolicy,
 };
 use ironclaw_resources::ResourceGovernor;

@@ -3,7 +3,7 @@
 use std::{error::Error, fmt, sync::Arc};
 
 use ironclaw_events::SecurityAuditSink;
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_loop_host::{
     AgentTurnRunCancellationFactory, AwaitEdgeSettler, AwaitEdgeWriter,
     CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier, HostIdentityContextSource,
@@ -16,6 +16,7 @@ use ironclaw_loop_host::{
     SubagentSpawnLimits, verify_product_live_cancellation_probe,
 };
 use ironclaw_memory::MemoryService;
+use ironclaw_outbound::ReplyAttachmentIntentPort;
 use ironclaw_processes::ProcessTransitionPort;
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::{
@@ -111,16 +112,15 @@ impl ToolDisclosureMode {
             Ok(value) => Self::from_raw(Some(&value)),
             Err(std::env::VarError::NotPresent) => Self::from_raw(None),
             // Don't silently `.ok()`-drop a NotUnicode read: the var is set but
-            // unreadable (a misconfiguration). Surface it, then fall back to the
-            // unset default.
-            Err(error @ std::env::VarError::NotUnicode(_)) => {
+            // unreadable (a misconfiguration). Record it at the REPL-safe debug
+            // level and fail closed even if the unset default changes later.
+            Err(std::env::VarError::NotUnicode(_)) => {
                 tracing::debug!(
                     target: "ironclaw::reborn::runtime",
                     env = REBORN_TOOL_DISCLOSURE_ENV,
-                    error = %error,
-                    "REBORN_TOOL_DISCLOSURE is set but not valid UTF-8; using default"
+                    "REBORN_TOOL_DISCLOSURE is set but not valid UTF-8; falling back to Off"
                 );
-                Self::from_raw(None)
+                Self::Off
             }
         }
     }
@@ -136,7 +136,7 @@ impl ToolDisclosureMode {
             Some(value) if !value.is_empty() => {
                 tracing::debug!(
                     target: "ironclaw::reborn::runtime",
-                    value,
+                    env = REBORN_TOOL_DISCLOSURE_ENV,
                     "unrecognized REBORN_TOOL_DISCLOSURE value; falling back to default Off"
                 );
                 Self::Off
@@ -298,6 +298,10 @@ where
     /// textual `<attachments>` pointer (the same fallback a text-only model
     /// gets) rather than failing the turn.
     pub attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
+    /// Shared run-scoped intent store used by the explicit attachment
+    /// capability and transcript finalizer. Production must pass the exact
+    /// same handle to both sides so sealing cannot split from registration.
+    pub reply_attachment_intent_port: Option<Arc<dyn ReplyAttachmentIntentPort>>,
     /// Durable store the loop-host persisted `GateRecord::Auth` into (§5.2.9),
     /// threaded to the turn executor so an auth block re-sources its
     /// `credential_requirements` from the host record (render-from-record) after
@@ -776,6 +780,9 @@ where
     if let Some(port) = parts.attachment_read_port {
         host_factory = host_factory.with_attachment_read_port(port);
     }
+    if let Some(port) = parts.reply_attachment_intent_port {
+        host_factory = host_factory.with_reply_attachment_intent_port(port);
+    }
     if let Some(source) = parts.skill_context_source {
         host_factory = host_factory.with_skill_context_source(source);
     }
@@ -960,8 +967,9 @@ mod tests {
     };
     use async_trait::async_trait;
     use ironclaw_host_api::{
-        AgentId, CapabilityId, ProjectId, Resolution, ResolutionBatch, RuntimeKind, TenantId,
-        ThreadId,
+        ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId},
+        resolution::{Resolution, ResolutionBatch},
+        runtime::RuntimeKind,
     };
     use ironclaw_host_runtime::{
         TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
@@ -986,6 +994,7 @@ mod tests {
     #[test]
     fn tool_disclosure_mode_defaults_off_with_bridged_opt_in() {
         use super::ToolDisclosureMode;
+        assert_eq!(ToolDisclosureMode::default(), ToolDisclosureMode::Off);
         // Default off: unset / empty / unrecognized resolve to Off so the
         // request path stays byte-identical. Only explicit `bridged` opts in.
         // `is_bridged()` is what gates whether the gateway attaches the decorator.
@@ -1007,6 +1016,42 @@ mod tests {
         // Per-variant gating is unchanged.
         assert!(!ToolDisclosureMode::Off.is_bridged());
         assert!(ToolDisclosureMode::Bridged.is_bridged());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tool_disclosure_mode_non_unicode_env_fails_closed() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        use std::process::Command;
+
+        use super::{REBORN_TOOL_DISCLOSURE_ENV, ToolDisclosureMode};
+
+        const CHILD_MARKER: &str = "IRONCLAW_NON_UNICODE_DISCLOSURE_TEST_CHILD";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            assert_eq!(
+                ToolDisclosureMode::from_env(),
+                ToolDisclosureMode::Off,
+                "non-Unicode configuration must fail closed"
+            );
+            return;
+        }
+
+        let output = Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "runtime::tests::tool_disclosure_mode_non_unicode_env_fails_closed",
+                "--test-threads=1",
+            ])
+            .env(CHILD_MARKER, "1")
+            .env(REBORN_TOOL_DISCLOSURE_ENV, OsString::from_vec(vec![0xff]))
+            .output()
+            .expect("spawn isolated non-Unicode environment test");
+        assert!(
+            output.status.success(),
+            "isolated non-Unicode environment test failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

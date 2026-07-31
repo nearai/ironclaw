@@ -6,10 +6,14 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityDescriptionTrust, CapabilityDescriptor, CapabilityId, CapabilitySet,
-    ExecutionContext, ExtensionId, MountAlias, MountGrant, MountPermissions, MountView,
-    PermissionMode, ProviderToolName, Resolution, ResourceEstimate, ResourceUsage, RuntimeKind,
-    ThreadId, TrustClass, UserId, VirtualPath,
+    capability::{CapabilityDescriptionTrust, CapabilityDescriptor, CapabilitySet, PermissionMode},
+    ids::{CapabilityId, ExtensionId, ProviderToolName, ThreadId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resolution::Resolution,
+    resource::{ResourceEstimate, ResourceUsage},
+    runtime::{RuntimeKind, TrustClass},
+    scope::ExecutionContext,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime,
@@ -443,7 +447,7 @@ fn dispatch_trust_decision() -> TrustDecision {
     TrustDecision {
         effective_trust: EffectiveTrustClass::user_trusted(),
         authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![ironclaw_host_api::EffectKind::DispatchCapability],
+            allowed_effects: vec![ironclaw_host_api::capability::EffectKind::DispatchCapability],
             max_resource_ceiling: None,
         },
         provenance: TrustProvenance::Default,

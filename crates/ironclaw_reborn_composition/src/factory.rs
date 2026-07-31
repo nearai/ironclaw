@@ -138,11 +138,22 @@ use ironclaw_host_api::runtime_policy::{
     SecretMode,
 };
 use ironclaw_host_api::{
-    CapabilitySet, CorrelationId, CredentialStageError, ExtensionId, HostApiError, InvocationId,
-    MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy, Obligation, PackageId,
-    RecipeClientCredentials, ResourceEstimate, ResourceScope, RunId, RuntimeHttpEgress,
-    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
-    TrustClass, UserId, VendorId, VirtualPath, sha256_digest_token,
+    action::NetworkPolicy,
+    approval::sha256_digest_token,
+    capability::CapabilitySet,
+    decision::Obligation,
+    dispatch::CredentialStageError,
+    error::HostApiError,
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
+    ids::{CorrelationId, ExtensionId, InvocationId, PackageId, RunId, UserId, VendorId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    recipe::RecipeClientCredentials,
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::{RuntimeKind, TrustClass},
 };
 use ironclaw_host_runtime::memory_provider::MemoryServiceResolver;
 use ironclaw_host_runtime::{
@@ -155,7 +166,7 @@ use ironclaw_host_runtime::{
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
     builtin_first_party_package_for_process_backend,
 };
-use ironclaw_outbound::CommunicationPreferenceRepository;
+use ironclaw_outbound::{CommunicationPreferenceRepository, ReplyAttachmentIntentPort};
 use ironclaw_outbound::{
     DeliveredGateRouteStore, OutboundStateStorePort, TriggeredRunDeliveryStore,
 };
@@ -276,6 +287,7 @@ pub(crate) struct RebornRuntimeStores {
         Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>,
     pub(crate) skill_auto_activate_learned: Arc<AtomicBool>,
     pub(crate) outbound_state: Arc<dyn OutboundStateStorePort>,
+    pub(crate) reply_attachment_intents: Arc<dyn ReplyAttachmentIntentPort>,
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
     pub(crate) process_gate_query_source:
@@ -333,7 +345,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) memory_service_resolver: MemoryServiceResolver,
     /// Lifecycle hooks declared by the bound memory provider. Host-initiated
     /// retrieval, recording, and profile reads are wired only when declared.
-    pub(crate) memory_lifecycle: ironclaw_host_api::MemoryDescriptor,
+    pub(crate) memory_lifecycle: ironclaw_host_api::memory::MemoryDescriptor,
     pub(crate) workspace_mounts: MountView,
     pub(crate) standalone_storage_root: Option<PathBuf>,
     pub(crate) default_system_prompt_path: Option<PathBuf>,
@@ -482,10 +494,10 @@ impl std::fmt::Debug for RebornRuntimeStores {
 
 pub(crate) fn filesystem_reborn_identity_store<F>(
     scoped_filesystem: Arc<ScopedFilesystem<F>>,
-    tenant_id: ironclaw_host_api::TenantId,
+    tenant_id: ironclaw_host_api::ids::TenantId,
     actor_user_id: UserId,
-    agent_id: ironclaw_host_api::AgentId,
-    project_id: Option<ironclaw_host_api::ProjectId>,
+    agent_id: ironclaw_host_api::ids::AgentId,
+    project_id: Option<ironclaw_host_api::ids::ProjectId>,
 ) -> Arc<ironclaw_reborn_identity::RebornIdentityStore<F>>
 where
     F: RootFilesystem + 'static,
@@ -538,7 +550,7 @@ fn google_oauth_configured(
 }
 
 fn production_config(
-    required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
+    required_runtime_backends: Vec<ironclaw_host_api::runtime::RuntimeKind>,
     require_runtime_http_egress: bool,
     require_wasm_credentials: bool,
 ) -> ironclaw_host_runtime::ProductionWiringConfig {
@@ -561,17 +573,13 @@ fn extension_lifecycle_surface_context(
     local_runtime_identity: Option<&RebornLocalRuntimeIdentity>,
 ) -> Result<LifecycleProductSurfaceContext, RebornBuildError> {
     let default_identity = RebornRuntimeIdentity::reborn_cli();
-    let default_tenant_id =
-        ironclaw_host_api::TenantId::new(default_identity.tenant_id).map_err(|error| {
-            RebornBuildError::InvalidConfig {
-                reason: error.to_string(),
-            }
+    let default_tenant_id = ironclaw_host_api::ids::TenantId::new(default_identity.tenant_id)
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
         })?;
-    let default_agent_id =
-        ironclaw_host_api::AgentId::new(default_identity.agent_id).map_err(|error| {
-            RebornBuildError::InvalidConfig {
-                reason: error.to_string(),
-            }
+    let default_agent_id = ironclaw_host_api::ids::AgentId::new(default_identity.agent_id)
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
         })?;
     let tenant_id = local_runtime_identity
         .map(|identity| identity.tenant_id.clone())
@@ -589,8 +597,8 @@ fn extension_lifecycle_surface_context(
 
 fn owner_scope_from_runtime_identity(
     owner_user_id: UserId,
-    tenant_id: ironclaw_host_api::TenantId,
-    agent_id: ironclaw_host_api::AgentId,
+    tenant_id: ironclaw_host_api::ids::TenantId,
+    agent_id: ironclaw_host_api::ids::AgentId,
 ) -> ResourceScope {
     ResourceScope {
         tenant_id,
@@ -605,10 +613,10 @@ fn owner_scope_from_runtime_identity(
 
 fn default_runtime_owner_scope(
     owner_user_id: UserId,
-) -> Result<ResourceScope, ironclaw_host_api::HostApiError> {
+) -> Result<ResourceScope, ironclaw_host_api::error::HostApiError> {
     let identity = RebornRuntimeIdentity::reborn_cli();
-    let tenant_id = ironclaw_host_api::TenantId::new(identity.tenant_id)?;
-    let agent_id = ironclaw_host_api::AgentId::new(identity.agent_id)?;
+    let tenant_id = ironclaw_host_api::ids::TenantId::new(identity.tenant_id)?;
+    let agent_id = ironclaw_host_api::ids::AgentId::new(identity.agent_id)?;
     Ok(owner_scope_from_runtime_identity(
         owner_user_id,
         tenant_id,
@@ -1220,15 +1228,16 @@ fn manifest_channel_account_setup_descriptors(
         .filter_map(|manifest| {
             let channel = manifest.channel.as_ref()?;
             let connection = channel.connection.as_ref()?;
-            if connection.strategy != ironclaw_host_api::ChannelConnectionStrategy::WebGeneratedCode
+            if connection.strategy
+                != ironclaw_host_api::channel::ChannelConnectionStrategy::WebGeneratedCode
             {
                 return None;
             }
             Some(ExtensionAccountSetupDescriptor {
                 extension_id: manifest.id.clone(),
-                auth_requirement: ironclaw_host_api::RuntimeCredentialAuthRequirement {
+                auth_requirement: ironclaw_host_api::decision::RuntimeCredentialAuthRequirement {
                     provider: connection.provider.clone(),
-                    setup: ironclaw_host_api::RuntimeCredentialAccountSetup::Pairing,
+                    setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::Pairing,
                     requester_extension: manifest.id.clone(),
                     provider_scopes: Vec::new(),
                 },
@@ -1289,9 +1298,9 @@ pub fn production_first_party_trust_policy(
             None,
             HostTrustAssignment::first_party(),
             vec![
-                ironclaw_host_api::EffectKind::DispatchCapability,
-                ironclaw_host_api::EffectKind::ReadFilesystem,
-                ironclaw_host_api::EffectKind::WriteFilesystem,
+                ironclaw_host_api::capability::EffectKind::DispatchCapability,
+                ironclaw_host_api::capability::EffectKind::ReadFilesystem,
+                ironclaw_host_api::capability::EffectKind::WriteFilesystem,
             ],
             None,
         ));
@@ -1338,11 +1347,11 @@ pub(crate) fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, Rebo
 }
 
 #[cfg(test)]
-fn nearai_allowed_effects() -> Vec<ironclaw_host_api::EffectKind> {
+fn nearai_allowed_effects() -> Vec<ironclaw_host_api::capability::EffectKind> {
     vec![
-        ironclaw_host_api::EffectKind::DispatchCapability,
-        ironclaw_host_api::EffectKind::Network,
-        ironclaw_host_api::EffectKind::UseSecret,
+        ironclaw_host_api::capability::EffectKind::DispatchCapability,
+        ironclaw_host_api::capability::EffectKind::Network,
+        ironclaw_host_api::capability::EffectKind::UseSecret,
     ]
 }
 

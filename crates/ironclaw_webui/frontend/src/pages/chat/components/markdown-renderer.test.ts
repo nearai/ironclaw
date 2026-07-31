@@ -190,41 +190,51 @@ test("markdown and syntax highlighting stay out of the synchronous chat chunk", 
   );
 });
 
-test("streaming markdown renders sanitized snapshots at a bounded cadence", () => {
+test("streaming markdown delegates accumulated text without a fixed render interval", () => {
   assert.match(
     rendererSource,
-    /const STREAMING_RENDER_INTERVAL_MS = 150/,
-    "streaming rendering should have an explicit cadence budget",
+    /import\("streamdown"\)/,
+    "streaming replies should use the streaming-optimized Markdown renderer",
   );
   assert.match(
     rendererSource,
-    /const delay = Math\.max\(0, STREAMING_RENDER_INTERVAL_MS[\s\S]*setTimeout/,
-    "streaming updates should batch rendering instead of parsing every projection",
+    /<StreamingMarkdown[\s\S]*isAnimating=\{streaming\}[\s\S]*mode=\{streaming \? "streaming" : "static"\}/,
+    "the renderer should animate active streams and hold their final snapshot statically",
+  );
+  assert.doesNotMatch(
+    rendererSource,
+    /STREAMING_RENDER_INTERVAL_MS|scheduleStreamingRenderRef|renderTimerRef/,
+    "a fixed timer must not turn provider-rate text into visible bursts",
+  );
+  assert.match(
+    rendererSource,
+    /<React\.Suspense[\s\S]*\{normalizedContent\}[\s\S]*<\/React\.Suspense>/,
+    "the lazy streaming renderer should retain an escaped-text fallback",
+  );
+  assert.match(
+    rendererSource,
+    /if \(streaming \|\| keepStreamingRendererUntilFinalIsReady\) \{[\s\S]*<StreamingMarkdown[\s\S]*\{normalizedContent\}[\s\S]*if \(renderedHtml === null\)/,
+    "streaming content should bypass the completed-reply innerHTML path",
   );
   assert.match(
     rendererSource,
     /html: renderMarkdown\(currentContent\)/,
-    "every streamed snapshot must still pass through the markdown sanitizer",
+    "completed replies must still pass through the existing sanitizer",
+  );
+  assert.match(
+    appCssSource,
+    /@source "\.\.\/\.\.\/node_modules\/streamdown\/dist\/\*\.js";/,
+    "Tailwind should include the package's streaming renderer classes",
   );
   assert.match(
     rendererSource,
-    /if \(streaming \|\| renderedHtml === null\) return undefined/,
-    "syntax highlighting and code controls should wait for the completed reply",
+    /markdownLoadFailedRef\.current/,
+    "completed Markdown rendering should retain its failure guard",
   );
   assert.match(
     rendererSource,
-    /if \(renderedHtml === null\) \{[\s\S]*\{normalizedContent\}[\s\S]*dangerouslySetInnerHTML=\{\{ __html: renderedHtml \}\}/,
-    "only the completed sanitized result may be passed to innerHTML",
-  );
-  assert.match(
-    rendererSource,
-    /React\.useEffect\(\(\) => \{\s*latestContentRef\.current = normalizedContent;\s*latestStreamingRef\.current = streaming;/,
-    "async rendering should only observe committed stream snapshots",
-  );
-  assert.match(
-    rendererSource,
-    /markdownLoadFailedRef\.current = true[\s\S]*markdownLoadFailedRef\.current/,
-    "a failed Markdown chunk should stop repeated stream retries",
+    /markdownLoadFailedRef\.current = true/,
+    "a failed completed-reply render should trip the failure guard",
   );
 });
 

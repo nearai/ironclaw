@@ -2,6 +2,7 @@
 //! and host-runtime capability harnesses. One file per substituted port.
 
 mod empty_identity_context_source;
+mod failing_transcript_write_thread_service;
 mod fixed_runtime_credential_account_resolver;
 mod github_harness_authorizer;
 mod harness_capability_port_factory;
@@ -22,6 +23,10 @@ mod static_secret_store;
 mod unavailable_project_service;
 
 pub(crate) use empty_identity_context_source::EmptyIdentityContextSource;
+#[allow(unused_imports)]
+pub(crate) use failing_transcript_write_thread_service::{
+    FailingTranscriptWriteThreadService, TRANSCRIPT_FAILURE_SECRET,
+};
 pub(crate) use fixed_runtime_credential_account_resolver::FixedRuntimeCredentialAccountResolver;
 pub(crate) use github_harness_authorizer::GithubHarnessAuthorizer;
 pub(crate) use harness_capability_port_factory::HarnessCapabilityPortFactory;
@@ -33,7 +38,7 @@ pub(crate) use recording_approval_request_store::RecordingApprovalRequestStore;
 pub(crate) use recording_capability_result_writer::RecordingCapabilityResultWriter;
 pub(crate) use recording_delegating_capability_port::RecordingDelegatingCapabilityPort;
 pub(crate) use recording_host_runtime::RecordingHostRuntime;
-pub(crate) use recording_network_http_egress::RecordingNetworkHttpEgress;
+pub(crate) use recording_network_http_egress::{RecordingNetworkHttpEgress, VendorResponseRouter};
 pub(crate) use recording_network_http_transport::RecordingNetworkHttpTransport;
 pub(crate) use recording_runtime_http_egress::RecordingRuntimeHttpEgress;
 pub(crate) use recording_security_audit_sink::RecordingSecurityAuditSink;

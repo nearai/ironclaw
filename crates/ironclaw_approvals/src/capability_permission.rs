@@ -22,8 +22,8 @@ use ironclaw_filesystem::{
     VersionedEntry,
 };
 use ironclaw_host_api::{
-    CapabilityId, HostApiError, Principal, ResourceScope, ScopedPath, Timestamp,
-    sha256_digest_token,
+    Timestamp, approval::sha256_digest_token, error::HostApiError, ids::CapabilityId,
+    path::ScopedPath, resource::ResourceScope, scope::Principal,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -485,7 +485,7 @@ fn resource_scope_for_override_key(key: &CapabilityPermissionOverrideKey) -> Res
         project_id: key.scope.project_id.clone(),
         mission_id: None,
         thread_id: None,
-        invocation_id: ironclaw_host_api::InvocationId::new(),
+        invocation_id: ironclaw_host_api::ids::InvocationId::new(),
     }
 }
 
@@ -521,8 +521,9 @@ mod tests {
         IndexSpec, Page, ScopedFilesystem,
     };
     use ironclaw_host_api::{
-        AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId,
-        ThreadId, UserId, VirtualPath,
+        ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
     };
 
     use super::*;
@@ -535,7 +536,7 @@ mod tests {
             project_id: project_id.map(|id| ProjectId::new(id).unwrap()),
             mission_id: None,
             thread_id: thread_id.map(|id| ThreadId::new(id).unwrap()),
-            invocation_id: ironclaw_host_api::InvocationId::new(),
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         }
     }
 

@@ -6,3 +6,9 @@
 - HTTP ingress contracts are route/policy vocabulary only. Listener binding, Axum/router mounting, auth enforcement, scope extraction, body/rate limits, CORS/Origin checks, audit emission, and effect dispatch belong to host composition.
 - Serializable API types must not contain raw `HostPath`, secrets, or backend-specific error details. The narrow exception is bounded `ModelDiagnostic`: producers must scrub credential values and fence injection-shaped text before carrying a cause needed for model recovery.
 - Prefer strong enums/types over strings when the shape is known.
+- No wildcard re-exports. `lib.rs` exposes modules, never a flat prelude:
+  consumers import `ironclaw_host_api::<module>::<Type>` (for example
+  `scope::ExecutionContext`, `ids::ExtensionId`). Do not add a per-module glob
+  re-export — it hides which module a consumer actually depends on, which is
+  exactly what carving a vocabulary family out of this crate needs to see. The
+  only crate-root item is the `Timestamp` alias.

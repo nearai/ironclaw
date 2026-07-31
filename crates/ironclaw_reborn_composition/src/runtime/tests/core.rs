@@ -101,13 +101,14 @@ output_schema_ref = "schemas/write.output.json"
     let manifest = ironclaw_extensions::ExtensionManifest::parse(
         manifest,
         ironclaw_extensions::ManifestSource::HostBundled,
-        &ironclaw_host_api::HostPortCatalog::empty(),
+        &ironclaw_host_api::host_port::HostPortCatalog::empty(),
         &capability_provider_contracts(),
     )
     .expect("manifest parses");
     let package = ironclaw_extensions::ExtensionPackage::from_manifest(
         manifest,
-        ironclaw_host_api::VirtualPath::new("/system/extensions/approval-provider").expect("root"),
+        ironclaw_host_api::path::VirtualPath::new("/system/extensions/approval-provider")
+            .expect("root"),
     )
     .expect("package builds");
     let mut registry = ironclaw_extensions::ExtensionRegistry::new();
@@ -116,7 +117,7 @@ output_schema_ref = "schemas/write.output.json"
         .expect("resolver builds");
     let capability_id = CapabilityId::new("approval-provider.write").expect("capability id");
     let expected_provider =
-        ironclaw_host_api::ExtensionId::new("approval-provider").expect("extension id");
+        ironclaw_host_api::ids::ExtensionId::new("approval-provider").expect("extension id");
 
     assert_eq!(
         ironclaw_product::PersistentApprovalGranteeResolver::persistent_approval_grantee(
@@ -161,7 +162,7 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
         .await
         .expect("install Slack before OAuth callback");
 
-    let slack_id = ironclaw_host_api::ExtensionId::new("slack").expect("Slack extension id");
+    let slack_id = ironclaw_host_api::ids::ExtensionId::new("slack").expect("Slack extension id");
     runtime
         .channel_config_service
         .save(
@@ -511,17 +512,24 @@ fn production_scheduler_wake_guard_passes_standalone_with_absent_wiring() {
         .expect("standalone is exempt from the scheduler wake wiring requirement");
 }
 
-use ironclaw_host_api::ProjectId;
+use ironclaw_host_api::ids::ProjectId;
+use ironclaw_host_api::state::{InstallationState, LifecyclePublicState};
 use ironclaw_host_api::{
-    ActivityId, AgentId, ApprovalRequestId, CapabilityId, InvocationId, Principal,
-    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    Resolution, ResourceScope, TenantId, ThreadId, UserId,
+    ids::{
+        ActivityId, AgentId, ApprovalRequestId, CapabilityId, InvocationId, TenantId, ThreadId,
+        UserId,
+    },
+    product_surface::{
+        ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    },
+    resolution::Resolution,
+    resource::ResourceScope,
     runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
     },
+    scope::Principal,
 };
-use ironclaw_host_api::{InstallationState, LifecyclePublicState};
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
@@ -5069,13 +5077,14 @@ async fn standalone_runtime_webui_bundle_reuses_thread_and_turn_services() {
         panic!("webui submit should start a run");
     };
     let stream = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut after_cursor = None;
         loop {
             let stream = stream_product_events(
                 bundle.as_ref(),
                 caller.clone(),
                 RebornStreamEventsRequest {
                     thread_id: created.thread.thread_id.to_string(),
-                    after_cursor: None,
+                    after_cursor: after_cursor.clone(),
                 },
             )
             .await
@@ -5098,6 +5107,10 @@ async fn standalone_runtime_webui_bundle_reuses_thread_and_turn_services() {
             }) {
                 break stream;
             }
+            after_cursor = stream
+                .events
+                .last()
+                .map(|event| event.projection_cursor().clone());
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -5171,8 +5184,8 @@ async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
     // is byte-identical over the read-write view (the reader never writes), so
     // this test resolves the same authority a vision-capable model would.
     let read_port =
-        crate::support::fs::ProjectScopedAttachmentReader::new(Arc::clone(&read_write_filesystem));
-    let lander = crate::support::fs::ProjectScopedAttachmentLander::new(read_write_filesystem);
+        ironclaw_product::ProjectScopedAttachmentReader::new(Arc::clone(&read_write_filesystem));
+    let lander = ironclaw_product::ProjectScopedAttachmentLander::new(read_write_filesystem);
 
     let thread_scope = ThreadScope {
         tenant_id: TenantId::new("runtime-attachment-mount-tenant").unwrap(),
@@ -5185,7 +5198,7 @@ async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
         &lander,
         &thread_scope,
         "msg-attachment-mount",
-        vec![ironclaw_attachments::InboundAttachment {
+        vec![ironclaw_host_api::attachment::InboundAttachment {
             id: "att-0".to_string(),
             mime_type: "image/png".to_string(),
             filename: Some("mount-check.png".to_string()),
@@ -5212,8 +5225,67 @@ async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
+#[tokio::test]
+async fn production_channel_host_lands_attachment_with_read_write_mount() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let gateway = Arc::new(RecordingGateway {
+        reply: "channel attachment mount ok".to_string(),
+        requests: Arc::new(StdMutex::new(Vec::new())),
+    });
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_filesystem_build_input(
+            "runtime-channel-attachment-owner",
+            root.path().join("standalone"),
+        )
+        .with_runtime_policy(standalone_runtime_policy()),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "runtime-channel-attachment-tenant".to_string(),
+        agent_id: "runtime-channel-attachment-agent".to_string(),
+        source_binding_id: "runtime-channel-attachment-source".to_string(),
+        reply_target_binding_id: "runtime-channel-attachment-reply".to_string(),
+    })
+    .with_model_gateway_override(gateway);
+
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let assembly = runtime
+        ._channel_host_assembly
+        .as_ref()
+        .expect("local-dev runtime composes the production channel host");
+    let lander =
+        ironclaw_extension_host::channel_host::test_support::inbound_attachment_lander(assembly);
+    let thread_scope = ThreadScope {
+        tenant_id: TenantId::new("runtime-channel-attachment-tenant").unwrap(),
+        agent_id: AgentId::new("runtime-channel-attachment-agent").unwrap(),
+        project_id: None,
+        owner_user_id: Some(UserId::new("runtime-channel-attachment-owner").unwrap()),
+        mission_id: None,
+    };
+
+    let refs = lander
+        .land(
+            &thread_scope,
+            "msg-channel-attachment-mount",
+            vec![ironclaw_host_api::attachment::InboundAttachment {
+                id: "att-0".to_string(),
+                mime_type: "image/png".to_string(),
+                filename: Some("channel-mount-check.png".to_string()),
+                bytes: b"channel-attachment-mount-bytes".to_vec(),
+            }],
+        )
+        .await
+        .expect("production channel-host attachment lander has write authority");
+
+    assert_eq!(refs.len(), 1);
+    lander
+        .rollback(&thread_scope, &refs)
+        .await
+        .expect("production channel-host attachment lander has batch rollback authority");
+    runtime.shutdown().await.expect("runtime shutdown");
+}
+
 async fn query_webui_extension_setup(
-    api: &dyn ironclaw_host_api::ProductSurface,
+    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
     caller: ProductSurfaceCaller,
     package_id: &str,
 ) -> RebornSetupExtensionResponse {
@@ -5232,7 +5304,7 @@ async fn query_webui_extension_setup(
 }
 
 async fn invoke_product_command<T, O>(
-    api: &dyn ironclaw_host_api::ProductSurface,
+    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
     caller: ProductSurfaceCaller,
     command: ProductSurfaceCommandDescriptor<T, O>,
     input: T,
@@ -5242,10 +5314,10 @@ where
     O: serde::de::DeserializeOwned,
 {
     let input = serde_json::to_value(input).map_err(ProductSurfaceError::internal_from)?;
-    let response = ironclaw_host_api::ProductSurface::invoke(
+    let response = ironclaw_host_api::product_surface::ProductSurface::invoke(
         api,
         caller,
-        ironclaw_host_api::ProductSurfaceInvokeRequest {
+        ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
             operation_id: command.capability_id()?,
             input,
             activity_id: ActivityId::new(),
@@ -5256,7 +5328,7 @@ where
 }
 
 async fn invoke_product_capability<T>(
-    api: &dyn ironclaw_host_api::ProductSurface,
+    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
     caller: ProductSurfaceCaller,
     capability_id: &str,
     input: T,
@@ -5265,10 +5337,10 @@ where
     T: serde::Serialize,
 {
     let input = serde_json::to_value(input).map_err(ProductSurfaceError::internal_from)?;
-    let response = ironclaw_host_api::ProductSurface::invoke(
+    let response = ironclaw_host_api::product_surface::ProductSurface::invoke(
         api,
         caller,
-        ironclaw_host_api::ProductSurfaceInvokeRequest {
+        ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
             operation_id: CapabilityId::new(capability_id).expect("capability id"),
             input,
             activity_id: ActivityId::new(),
@@ -5279,14 +5351,14 @@ where
 }
 
 async fn query_product_surface_page(
-    api: &dyn ironclaw_host_api::ProductSurface,
+    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
     caller: ProductSurfaceCaller,
     query: RebornViewQuery,
 ) -> Result<RebornViewPage, ProductSurfaceError> {
-    let page = ironclaw_host_api::ProductSurface::query(
+    let page = ironclaw_host_api::product_surface::ProductSurface::query(
         api,
         caller,
-        ironclaw_host_api::ProductSurfaceQueryRequest {
+        ironclaw_host_api::product_surface::ProductSurfaceQueryRequest {
             view_id: query.view_id,
             input: query.params,
             cursor: query.cursor,
@@ -5306,14 +5378,14 @@ async fn query_product_surface_page(
 }
 
 async fn stream_product_events(
-    api: &dyn ironclaw_host_api::ProductSurface,
+    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
     caller: ProductSurfaceCaller,
     request: RebornStreamEventsRequest,
 ) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
-    let response = ironclaw_host_api::ProductSurface::stream_events(
+    let response = ironclaw_host_api::product_surface::ProductSurface::stream_events(
         api,
         caller,
-        ironclaw_host_api::ProductSurfaceStreamRequest {
+        ironclaw_host_api::product_surface::ProductSurfaceStreamRequest {
             stream_id: Some(request.thread_id),
             after_cursor: request
                 .after_cursor
@@ -5331,7 +5403,7 @@ async fn stream_product_events(
 }
 
 async fn submit_webui_extension_setup(
-    api: &dyn ironclaw_host_api::ProductSurface,
+    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
     caller: ProductSurfaceCaller,
     package_id: &str,
     request: ProductSetupExtensionRequest,
@@ -5360,7 +5432,7 @@ async fn submit_webui_extension_setup(
 }
 
 async fn install_webui_extension_for_setup(
-    api: &dyn ironclaw_host_api::ProductSurface,
+    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
     caller: ProductSurfaceCaller,
     package_id: &str,
 ) {
@@ -6286,7 +6358,8 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
                 .map_err(model_capability_error)?;
 
             // Find the builtin echo tool.
-            let echo_id = ironclaw_host_api::CapabilityId::new("builtin.echo").expect("echo id");
+            let echo_id =
+                ironclaw_host_api::ids::CapabilityId::new("builtin.echo").expect("echo id");
             let echo_tool = capabilities
                 .tool_definitions()
                 .map_err(model_capability_error)?
@@ -6679,9 +6752,9 @@ impl ironclaw_auth::RuntimeCredentialAccountSelectionService for MultiToolConfig
         Ok(ironclaw_auth::CredentialAccount {
             id: ironclaw_auth::CredentialAccountId::new(),
             scope: ironclaw_auth::AuthProductScope::new(
-                ironclaw_host_api::ResourceScope::local_default(
+                ironclaw_host_api::resource::ResourceScope::local_default(
                     UserId::new("multi-tool-credential-user").expect("user id"),
-                    ironclaw_host_api::InvocationId::new(),
+                    ironclaw_host_api::ids::InvocationId::new(),
                 )
                 .expect("resource scope"),
                 ironclaw_auth::AuthSurface::Api,
@@ -6694,7 +6767,7 @@ impl ironclaw_auth::RuntimeCredentialAccountSelectionService for MultiToolConfig
             owner_extension: None,
             granted_extensions: Vec::new(),
             access_secret: Some(
-                ironclaw_host_api::SecretHandle::new("test-secret").expect("secret handle"),
+                ironclaw_host_api::ids::SecretHandle::new("test-secret").expect("secret handle"),
             ),
             refresh_secret: None,
             scopes: Vec::new(),

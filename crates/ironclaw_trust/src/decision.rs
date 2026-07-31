@@ -1,13 +1,18 @@
 //! Effective trust + authority-ceiling output of a trust policy evaluation.
 //!
-//! [`EffectiveTrustClass`] wraps [`ironclaw_host_api::TrustClass`] so the
+//! [`EffectiveTrustClass`] wraps [`ironclaw_host_api::runtime::TrustClass`] so the
 //! privileged variants (`FirstParty`, `System`) are only constructible from
 //! inside this crate. Downstream authorization code that requires a
 //! policy-validated trust ceiling consumes `EffectiveTrustClass`, not
 //! `TrustClass` — host_api's `#[serde(skip_deserializing)]` guards the wire
 //! boundary, this newtype guards the in-process construction boundary.
 
-use ironclaw_host_api::{EffectKind, ResourceCeiling, SandboxQuota, Timestamp, TrustClass};
+use ironclaw_host_api::{
+    Timestamp,
+    capability::EffectKind,
+    resource::{ResourceCeiling, SandboxQuota},
+    runtime::TrustClass,
+};
 use serde::Serialize;
 
 /// Policy-validated trust ceiling.

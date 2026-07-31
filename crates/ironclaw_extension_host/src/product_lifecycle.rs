@@ -16,9 +16,14 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilitySurfaceKind, ExtensionId, InstallationState, ProductSurfaceCaller,
-    ProductSurfaceError, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
-    UserId, VendorId, VirtualPath,
+    decision::RuntimeCredentialAuthRequirement,
+    http::RuntimeHttpEgress,
+    ids::{ExtensionId, UserId, VendorId},
+    path::VirtualPath,
+    product_surface::{ProductSurfaceCaller, ProductSurfaceError},
+    resource::ResourceScope,
+    state::InstallationState,
+    surface::CapabilitySurfaceKind,
 };
 use ironclaw_product::{
     ChannelConnectionService, ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
@@ -1549,7 +1554,7 @@ impl ExtensionLifecycleManager {
         }
 
         let visible_capability_ids = package_visible_capability_ids(&active_package);
-        let account_setup = ironclaw_host_api::ExtensionId::new(package_ref.id.as_str())
+        let account_setup = ironclaw_host_api::ids::ExtensionId::new(package_ref.id.as_str())
             .ok()
             .and_then(|id| self.account_setups.descriptor(&id));
         let message = activation_success_message(
@@ -1608,7 +1613,7 @@ impl ExtensionLifecycleManager {
         &self,
         package_ref: LifecyclePackageRef,
         scope: &ResourceScope,
-        authenticated_actor_user_id: Option<&ironclaw_host_api::UserId>,
+        authenticated_actor_user_id: Option<&ironclaw_host_api::ids::UserId>,
     ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
         let (removed_extension_id, _) = extension_ids_from_package_ref(&package_ref)?;
         // Record only whether this invocation began while local removal state
@@ -2827,7 +2832,7 @@ fn activation_success_message(
 /// connection-template capability).
 fn hosted_mcp_discovery_network_policy(
     package: &ExtensionPackage,
-) -> Option<ironclaw_host_api::NetworkPolicy> {
+) -> Option<ironclaw_host_api::action::NetworkPolicy> {
     let ironclaw_extensions::ExtensionRuntime::Mcp { url: Some(url), .. } =
         &package.manifest.runtime
     else {
@@ -2835,9 +2840,9 @@ fn hosted_mcp_discovery_network_policy(
     };
     let parsed = url::Url::parse(url).ok()?;
     let host = parsed.host_str()?;
-    Some(ironclaw_host_api::NetworkPolicy {
-        allowed_targets: vec![ironclaw_host_api::NetworkTargetPattern {
-            scheme: Some(ironclaw_host_api::NetworkScheme::Https),
+    Some(ironclaw_host_api::action::NetworkPolicy {
+        allowed_targets: vec![ironclaw_host_api::action::NetworkTargetPattern {
+            scheme: Some(ironclaw_host_api::action::NetworkScheme::Https),
             host_pattern: host.to_string(),
             port: parsed.port(),
         }],
@@ -3157,7 +3162,12 @@ mod tests {
         ManifestSource, SharedExtensionRegistry,
     };
     use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{HostPortCatalog, InvocationId, ResourceScope, UserId, VirtualPath};
+    use ironclaw_host_api::{
+        host_port::HostPortCatalog,
+        ids::{InvocationId, UserId},
+        path::VirtualPath,
+        resource::ResourceScope,
+    };
     use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef};
     use ironclaw_trust::{HostTrustPolicy, InvalidationBus};
 

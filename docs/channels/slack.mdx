@@ -22,11 +22,11 @@ channels and DMs.
 
 Create an app at [api.slack.com/apps](https://api.slack.com/apps). The fastest route is
 **From an app manifest** — paste the [manifest below](#app-manifest), which sets the
-scopes, events, and redirect URL in one step. Replace `example.com` with your own host
-first.
+scopes, events, the `/ironclaw` slash command, and redirect URL in one step. Replace
+`example.com` with your own host first.
 
 If you build the app from scratch instead, configure **OAuth & Permissions**, **Event
-Subscriptions**, and the redirect URL to match that manifest.
+Subscriptions**, **Slash Commands**, and the redirect URL to match that manifest.
 
 Once created, install the app to your workspace and copy the bot token from **OAuth &
 Permissions**, and the signing secret from **Basic Information**. IronClaw uses the signing
@@ -68,11 +68,16 @@ in the web interface. The agent may reply that it can't help.
 Back in your Slack app, confirm **Event Subscriptions** points at your instance:
 
 ```
-https://your-host/webhooks/slack/events
+https://your-host/webhooks/extensions/slack/events
 ```
 
 Slack sends a verification challenge to that URL, so IronClaw must already be running and
 reachable when you save it. Reinstall the app if Slack asks you to.
+
+Also register the `/ironclaw` slash command under **Slash Commands**, pointed at the
+identical Request URL — Slack allows a slash command's endpoint to be any URL, so one
+signed address answers both surfaces. Registering a slash command adds the `commands` bot
+scope, which also needs a reinstall.
 
 </Step>
 
@@ -94,21 +99,28 @@ or self-signed endpoint.
 
 | Slack setting | URL |
 | --- | --- |
-| Event Subscriptions → Request URL | `https://your-host/webhooks/slack/events` |
-| OAuth & Permissions → Redirect URL | `https://your-host/api/reborn/product-auth/oauth/slack_personal/callback` |
+| Event Subscriptions → Request URL | `https://your-host/webhooks/extensions/slack/events` |
+| Slash Commands → Request URL | `https://your-host/webhooks/extensions/slack/events` |
+| OAuth & Permissions → Redirect URL | `https://your-host/api/reborn/product-auth/oauth/slack/callback` |
+
+<Note>
+Event Subscriptions and the `/ironclaw` slash command point at the identical Request
+URL — one signed endpoint answers both surfaces, so there is no second address to stand
+up.
+</Note>
 
 The redirect URL is used for per-user ("personal") Slack authorization. Tell IronClaw the
 same value so the two agree:
 
 ```bash
-export IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI=https://your-host/api/reborn/product-auth/oauth/slack_personal/callback
+export IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI=https://your-host/api/reborn/product-auth/oauth/slack/callback
 ```
 
 <Warning>
 The redirect URL must match **exactly** on both sides, including scheme, host, port, and
 path. Slack rejects the authorization with a redirect-URI mismatch if it differs by even a
-trailing slash. The path is `/api/reborn/product-auth/oauth/slack_personal/callback` — a
-shortened form like `/oauth/slack_personal/callback` is not served and will 404.
+trailing slash. The path is `/api/reborn/product-auth/oauth/slack/callback` — a shortened
+form like `/oauth/slack/callback` is not served and will 404.
 </Warning>
 
 For a local instance the values are `http://127.0.0.1:3000/...`, but Slack cannot reach
@@ -119,7 +131,8 @@ loopback, so events only work once the instance is reachable from the internet.
 ## App Manifest
 
 Create the app with **From an app manifest** and paste this, replacing `example.com` with
-your host. It sets the scopes, bot events, and redirect URL that the steps above describe.
+your host. It sets the scopes, bot events, the `/ironclaw` slash command, and redirect URL
+that the steps above describe.
 
 ```json
 {
@@ -135,11 +148,20 @@ your host. It sets the scopes, bot events, and redirect URL that the steps above
     "bot_user": {
       "display_name": "IronClaw",
       "always_online": true
-    }
+    },
+    "slash_commands": [
+      {
+        "command": "/ironclaw",
+        "url": "https://example.com/webhooks/extensions/slack/events",
+        "description": "Run IronClaw commands",
+        "usage_hint": "status | model <name> | help",
+        "should_escape": false
+      }
+    ]
   },
   "oauth_config": {
     "redirect_urls": [
-      "https://example.com/api/reborn/product-auth/oauth/slack_personal/callback"
+      "https://example.com/api/reborn/product-auth/oauth/slack/callback"
     ],
     "scopes": {
       "user": [
@@ -162,15 +184,17 @@ your host. It sets the scopes, bot events, and redirect URL that the steps above
         "im:history",
         "im:write",
         "files:read",
+        "files:write",
         "groups:history",
-        "mpim:history"
+        "mpim:history",
+        "commands"
       ]
     },
     "pkce_enabled": false
   },
   "settings": {
     "event_subscriptions": {
-      "request_url": "https://example.com/webhooks/slack/events",
+      "request_url": "https://example.com/webhooks/extensions/slack/events",
       "bot_events": [
         "app_mention",
         "message.channels",
@@ -193,6 +217,11 @@ authorization — searching and posting as the person rather than as the bot. If
 want the bot to participate in channels, you can drop the `user` block and the redirect
 URL with it.
 </Note>
+
+`files:read` lets the bot resolve and download inbound file shares.
+`files:write` lets it return explicitly attached workspace files through
+Slack's external upload flow. IronClaw never uses the retired `files.upload`
+method.
 
 Slack validates the request URL when you save the manifest, so start IronClaw before
 creating the app.
@@ -234,13 +263,13 @@ ironclaw config list | grep slack
 <Accordion title="Slack can't verify the request URL">
 IronClaw has to be running and publicly reachable over HTTPS before you save the URL.
 Confirm the instance answers from outside your network, and that you used the exact
-`/webhooks/slack/events` path.
+`/webhooks/extensions/slack/events` path.
 </Accordion>
 
 <Accordion title="Slack rejects authorization with a redirect-URI mismatch">
 The redirect URL in the Slack app and `IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI`
 must match character for character. Check the scheme, the port, and that the path is the
-full `/api/reborn/product-auth/oauth/slack_personal/callback`.
+full `/api/reborn/product-auth/oauth/slack/callback`.
 </Accordion>
 
 <Accordion title="The bot doesn't respond in a channel">

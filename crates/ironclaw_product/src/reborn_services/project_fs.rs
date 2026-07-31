@@ -16,14 +16,16 @@
 //! out are scoped paths (`/workspace/...`) — never host or virtual paths.
 
 use async_trait::async_trait;
+use ironclaw_host_api::attachment::WorkspaceFile;
 use serde::{Deserialize, Serialize};
 
 use ironclaw_threads::ThreadScope;
 
 /// Coarse filesystem entry kind exposed to product/WebUI consumers.
 ///
-/// Mirrors `ironclaw_filesystem::FileType` without depending on that crate so
-/// the product boundary stays free of substrate types.
+/// A wire projection of `ironclaw_filesystem::FileType`: this one is
+/// serialized into product/WebUI responses and must stay stable independently
+/// of the substrate enum, which is free to grow variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectFsEntryKind {
@@ -63,13 +65,28 @@ pub struct ProjectFsStat {
 ///
 /// Product-surface commands carry this through the host JSON envelope before
 /// WebUI streams the bytes as the HTTP body.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectFsFile {
     pub path: String,
     pub filename: Option<String>,
     pub mime_type: String,
     pub size_bytes: u64,
     pub bytes: Vec<u8>,
+}
+
+/// Renders the byte length, never the bytes. This is the wire type crossing
+/// the product-surface command envelope, so a derived `Debug` would put whole
+/// user files into any diagnostic that formats a command.
+impl std::fmt::Debug for ProjectFsFile {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProjectFsFile")
+            .field("path", &self.path)
+            .field("filename", &self.filename)
+            .field("mime_type", &self.mime_type)
+            .field("size_bytes", &self.size_bytes)
+            .finish()
+    }
 }
 
 /// Errors a project-filesystem read may produce.
@@ -150,7 +167,7 @@ pub trait ProjectFilesystemReader: Send + Sync {
         &self,
         thread_scope: &ThreadScope,
         path: &str,
-    ) -> Result<ProjectFsFile, ProjectFsError>;
+    ) -> Result<WorkspaceFile, ProjectFsError>;
 
     /// Return metadata for `path` without reading its bytes.
     async fn stat(

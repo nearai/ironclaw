@@ -24,12 +24,17 @@ pub use ironclaw_auth::{
 };
 pub use ironclaw_auth::{CredentialAccount, CredentialAccountSelectionRequest};
 pub use ironclaw_host_api::{
-    CapabilityId, HostApiError, NetworkScheme, NetworkTargetPattern, RuntimeCredentialRequirement,
-    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind,
-    SecretHandle,
+    action::{NetworkScheme, NetworkTargetPattern},
+    capability::{RuntimeCredentialRequirement, RuntimeCredentialRequirementSource},
+    dispatch::RuntimeDispatchErrorKind,
+    error::HostApiError,
+    http::RuntimeCredentialTarget,
+    ids::{CapabilityId, SecretHandle},
 };
 pub use ironclaw_host_api::{
-    ExtensionId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, VendorId,
+    capability::RuntimeCredentialAccountSetup,
+    decision::RuntimeCredentialAuthRequirement,
+    ids::{ExtensionId, VendorId},
 };
 pub use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -72,7 +77,7 @@ pub use deployment::{
 #[cfg(any(test, feature = "test-support"))]
 pub use deployment::{local_filesystem_build_input, local_filesystem_build_input_with_profile};
 pub use ironclaw_extension_host::provider_identity::ProviderIdentityActorResolver;
-pub use ironclaw_host_api::{
+pub use ironclaw_host_api::user_identity::{
     RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
     RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
     RebornUserIdentityBindingStore, RebornUserIdentityLookup, RebornUserIdentityLookupError,

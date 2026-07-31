@@ -1,6 +1,6 @@
 //! Memory search request/result types and rank-fusion helpers.
 
-use ironclaw_host_api::HostApiError;
+use ironclaw_host_api::error::HostApiError;
 
 use crate::path::MemoryDocumentPath;
 

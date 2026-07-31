@@ -282,7 +282,8 @@ fn map_outbound_repository_error(error: OutboundError) -> ProductSurfaceError {
         OutboundError::InvalidRequest { .. }
         | OutboundError::PreferenceTargetMissing { .. }
         | OutboundError::SubscriptionScopeMismatch
-        | OutboundError::DeliveryNotFound => ProductSurfaceError {
+        | OutboundError::DeliveryNotFound
+        | OutboundError::ReplyAttachmentIntentLimitExceeded => ProductSurfaceError {
             code: ProductSurfaceErrorCode::InvalidRequest,
             kind: ProductSurfaceErrorKind::Validation,
             status_code: 400,
@@ -298,7 +299,9 @@ fn map_outbound_repository_error(error: OutboundError) -> ProductSurfaceError {
             field: None,
             validation_code: None,
         },
-        OutboundError::CasConflict => ProductSurfaceError {
+        OutboundError::CasConflict
+        | OutboundError::ReplyAttachmentIntentsSealed
+        | OutboundError::ReplyAttachmentIntentConflict => ProductSurfaceError {
             code: ProductSurfaceErrorCode::Conflict,
             kind: ProductSurfaceErrorKind::Conflict,
             status_code: 409,
@@ -321,7 +324,7 @@ fn map_outbound_repository_error(error: OutboundError) -> ProductSurfaceError {
 mod tests {
     use std::{collections::HashMap, sync::Mutex};
 
-    use ironclaw_host_api::{TenantId, UserId};
+    use ironclaw_host_api::ids::{TenantId, UserId};
     use ironclaw_outbound::{
         CommunicationModality, CommunicationPreferenceRepository, CommunicationPreferenceVersion,
         DeliveryDefaultScope, DeliveryTargetCapabilities, MutableOutboundDeliveryTargetRegistry,

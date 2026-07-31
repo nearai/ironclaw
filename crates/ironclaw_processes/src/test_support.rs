@@ -29,8 +29,11 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
-    ApprovalRequest, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-    ResourceScope, VirtualPath,
+    approval::ApprovalRequest,
+    ids::InvocationId,
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
 
 use crate::types::same_scope_owner;

@@ -5,7 +5,9 @@
 
 use chrono::Utc;
 use ironclaw_host_api::{
-    MissingScopeBehavior, OAuth2CodeRecipe, PkceMode, SecretHandle, Timestamp, TokenExchangeAuth,
+    Timestamp,
+    ids::SecretHandle,
+    recipe::{MissingScopeBehavior, OAuth2CodeRecipe, PkceMode, TokenExchangeAuth},
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
@@ -236,7 +238,7 @@ impl AuthEngine {
 
     async fn read_refresh_token(
         &self,
-        scope: &ironclaw_host_api::ResourceScope,
+        scope: &ironclaw_host_api::resource::ResourceScope,
         handle: &SecretHandle,
     ) -> Result<SecretString, AuthProductError> {
         let lease = self
@@ -254,7 +256,7 @@ impl AuthEngine {
     /// declared identity endpoint called with the freshly-issued credential.
     async fn extract_identity(
         &self,
-        scope: &ironclaw_host_api::ResourceScope,
+        scope: &ironclaw_host_api::resource::ResourceScope,
         recipe: &OAuth2CodeRecipe,
         token_response: &ExtractedTokenResponse,
     ) -> Result<Option<OAuthProviderIdentity>, AuthProductError> {
@@ -310,7 +312,7 @@ impl AuthEngine {
     /// paired with a stale refresh token.
     async fn store_token_pair(
         &self,
-        scope: ironclaw_host_api::ResourceScope,
+        scope: ironclaw_host_api::resource::ResourceScope,
         access_secret: SecretHandle,
         refresh_secret: Option<SecretHandle>,
         tokens: &ExtractedTokenResponse,
@@ -569,7 +571,7 @@ fn pointer_string(value: &serde_json::Value, pointer: &str) -> Option<String> {
 fn exchange_token_handle(
     vendor: &str,
     flow_id: AuthFlowId,
-    invocation_id: ironclaw_host_api::InvocationId,
+    invocation_id: ironclaw_host_api::ids::InvocationId,
     token_kind: &'static str,
 ) -> Result<SecretHandle, AuthProductError> {
     SecretHandle::new(format!(

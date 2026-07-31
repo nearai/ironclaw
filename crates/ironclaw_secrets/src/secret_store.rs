@@ -9,7 +9,7 @@
 //!
 //! All paths are alias-relative [`ScopedPath`] strings under the `/secrets`
 //! mount alias. Tenant and user isolation are enforced structurally by the
-//! caller-supplied [`MountView`](ironclaw_host_api::MountView): composition
+//! caller-supplied [`MountView`](ironclaw_host_api::mount::MountView): composition
 //! wires `/secrets` → `/tenants/<tenant_id>/users/<user_id>/secrets`, so
 //! storage code never has to encode or remember tenant/user identity. The
 //! agent/project sub-scope remains in the path because secrets are partitioned
@@ -51,8 +51,12 @@ use ironclaw_filesystem::{
     RootFilesystem, ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{
-    HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-    SYSTEM_RESERVED_ID, ScopedPath, SecretHandle, Timestamp, VirtualPath,
+    Timestamp,
+    error::HostApiError,
+    ids::SecretHandle,
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, ScopedPath, VirtualPath},
+    resource::{ResourceScope, SYSTEM_RESERVED_ID},
 };
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -143,9 +147,9 @@ struct StoredSession {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SerializableCredentialSession {
     scope: ResourceScope,
-    invocation_id: ironclaw_host_api::InvocationId,
-    capability_id: ironclaw_host_api::CapabilityId,
-    extension_id: ironclaw_host_api::ExtensionId,
+    invocation_id: ironclaw_host_api::ids::InvocationId,
+    capability_id: ironclaw_host_api::ids::CapabilityId,
+    extension_id: ironclaw_host_api::ids::ExtensionId,
     account_id: CredentialAccountId,
     secret_handles: Vec<SecretHandle>,
     allowed_targets: Vec<crate::CredentialTargetPolicy>,
@@ -199,8 +203,8 @@ impl SerializableCredentialSession {
 /// Encryption is currently embedded (see the module docstring) and uses the
 /// same [`SecretsCrypto`] as the libSQL/Postgres backends. Tenant and user
 /// isolation are enforced by the caller's
-/// [`MountView`](ironclaw_host_api::MountView): the `/secrets` alias resolves
-/// to a per-tenant/per-user [`VirtualPath`](ironclaw_host_api::VirtualPath)
+/// [`MountView`](ironclaw_host_api::mount::MountView): the `/secrets` alias resolves
+/// to a per-tenant/per-user [`VirtualPath`](ironclaw_host_api::path::VirtualPath)
 /// before any backend dispatch, so two stores wrapping the same backend with
 /// different mounts cannot read each other's data.
 pub struct SecretStore<F>
@@ -1061,7 +1065,7 @@ where
 // All paths returned here are alias-relative [`ScopedPath`] strings under the
 // `/secrets` mount alias. Tenant and user identity are NOT encoded in the
 // path — the caller's [`MountView`] resolves `/secrets` to a
-// tenant/user-scoped [`VirtualPath`](ironclaw_host_api::VirtualPath) before
+// tenant/user-scoped [`VirtualPath`](ironclaw_host_api::path::VirtualPath) before
 // any backend dispatch, so two stores sharing one backend but constructed
 // with different MountViews cannot collide on identical (agent, project,
 // handle) tuples.
@@ -1157,7 +1161,7 @@ fn scoped_path_broker(raw: &str) -> Result<ScopedPath, CredentialBrokerError> {
 
 /// Join a leaf segment onto a `ScopedPath` prefix. Mirrors the engine's
 /// `join_scoped` helper: `list_dir` returns
-/// [`VirtualPath`](ironclaw_host_api::VirtualPath) results (post-resolution),
+/// [`VirtualPath`](ironclaw_host_api::path::VirtualPath) results (post-resolution),
 /// but the follow-up `get` must run through the `ScopedFilesystem` so the
 /// per-op ACL is enforced — so callers strip the leaf name and rejoin it
 /// onto the original `ScopedPath` prefix.
@@ -1502,9 +1506,14 @@ mod tests {
     use chrono::Utc;
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
-        AgentId, CapabilityId, ExtensionId, InvocationId, MissionId, MountAlias, MountGrant,
-        MountPermissions, MountView, NetworkMethod, ProjectId, ResourceScope, SecretHandle,
-        TenantId, ThreadId, UserId, VirtualPath,
+        action::NetworkMethod,
+        ids::{
+            AgentId, CapabilityId, ExtensionId, InvocationId, MissionId, ProjectId, SecretHandle,
+            TenantId, ThreadId, UserId,
+        },
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+        resource::ResourceScope,
     };
     use secrecy::ExposeSecret;
     use serde_json::json;

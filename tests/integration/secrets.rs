@@ -15,7 +15,7 @@ mod support;
 use std::sync::Arc;
 
 use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
-use ironclaw_host_api::SecretHandle;
+use ironclaw_host_api::ids::SecretHandle;
 use ironclaw_reborn_composition::test_support::{
     STANDALONE_DB_FILENAME, build_default_database_roots_for_test, build_secret_store_for_test,
     mount_database_roots_for_test,

@@ -27,9 +27,12 @@ use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    CapabilityDispatcher, CapabilityId, DispatchError, DispatchErrorLane, ResourceReservationId,
-    ResourceScope, ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeKind,
-    RuntimeLane, SecretHandle,
+    dispatch::{CapabilityDispatcher, DispatchError, RuntimeDispatchErrorKind},
+    http::RuntimeHttpEgress,
+    ids::{CapabilityId, ResourceReservationId, SecretHandle},
+    lane::RuntimeLane,
+    resource::{ResourceScope, ResourceUsage},
+    runtime::{DispatchErrorLane, RuntimeKind},
     runtime_policy::{
         DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode,
         ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -220,7 +223,7 @@ impl Drop for ProductAuthRuntimeHandoffGuard {
 }
 
 /// Alias for [`RuntimeSecretStageError`], which re-exports
-/// [`ironclaw_host_api::CredentialStageError`].
+/// [`ironclaw_host_api::dispatch::CredentialStageError`].
 pub type ProductAuthCredentialStageError = RuntimeSecretStageError;
 
 impl ProductAuthProviderRuntimePorts {
@@ -299,10 +302,10 @@ impl ProductAuthProviderRuntimePorts {
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
-        requirement: &ironclaw_host_api::RuntimeCredentialRequirement,
-        requester_extension: &ironclaw_host_api::ExtensionId,
+        requirement: &ironclaw_host_api::capability::RuntimeCredentialRequirement,
+        requester_extension: &ironclaw_host_api::ids::ExtensionId,
     ) -> Result<(), ProductAuthCredentialStageError> {
-        use ironclaw_host_api::RuntimeCredentialRequirementSource;
+        use ironclaw_host_api::capability::RuntimeCredentialRequirementSource;
         match &requirement.source {
             RuntimeCredentialRequirementSource::SecretHandle => {
                 self.stage_secret_once(scope, capability_id, &requirement.handle)
@@ -341,7 +344,7 @@ impl ProductAuthProviderRuntimePorts {
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
-        policy: ironclaw_host_api::NetworkPolicy,
+        policy: ironclaw_host_api::action::NetworkPolicy,
     ) {
         self.network_policy_store
             .insert(scope, capability_id, policy);
@@ -551,7 +554,7 @@ where
 
     /// The binder the extension host's loaders use to prebind WASM / hosted
     /// MCP / first-party-registry packages to their runtime lanes as
-    /// [`ironclaw_host_api::ToolAdapter`]s. The lanes stay host-private.
+    /// [`ironclaw_host_api::tool_adapter::ToolAdapter`]s. The lanes stay host-private.
     pub fn extension_lane_tool_binder(&self) -> ExtensionLaneToolBinder {
         ExtensionLaneToolBinder::new(Arc::new(ServiceLanePackageBinder {
             executor: self.runtime_lane_executor(),

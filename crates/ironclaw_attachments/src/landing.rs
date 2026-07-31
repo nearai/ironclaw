@@ -2,7 +2,7 @@
 //! the filesystem authority.
 
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{HostApiError, ResourceScope, ScopedPath};
+use ironclaw_host_api::{error::HostApiError, path::ScopedPath, resource::ResourceScope};
 
 /// Subdirectory, under the project mount, where landed attachments live.
 pub const ATTACHMENTS_DIR: &str = "attachments";
@@ -29,6 +29,12 @@ pub enum AttachmentLandingError {
     /// bound — the write-side counterpart to `read_bytes_bounded`.
     #[error("attachment is {size} bytes, over the {max} byte limit")]
     TooLarge { size: usize, max: usize },
+    /// The batch carries more attachments than the shared host policy permits.
+    #[error("attachment batch has {count} files, over the {max} file limit")]
+    TooMany { count: usize, max: usize },
+    /// The complete batch exceeds the shared aggregate byte budget.
+    #[error("attachment batch is {size} bytes, over the {max} byte limit")]
+    BatchTooLarge { size: usize, max: usize },
     /// Writing through the scoped filesystem failed. Notably
     /// [`FilesystemError::PermissionDenied`] when the project `MountView` lacks
     /// a write grant — landing fails closed rather than escaping the authority.
@@ -98,8 +104,24 @@ fn attachment_filename(landing: &AttachmentLanding<'_>) -> String {
     }
 }
 
+/// Build the batch directory for one inbound message:
+/// `{project_alias}/attachments/{date}/{message_id}`.
+pub fn attachment_batch_scoped_path(
+    project_alias: &str,
+    date: &str,
+    message_id: &str,
+) -> Result<ScopedPath, AttachmentLandingError> {
+    let date = sanitize_attachment_segment(date);
+    let message_id = sanitize_attachment_segment(message_id);
+    let full = format!(
+        "{}/{ATTACHMENTS_DIR}/{date}/{message_id}",
+        project_alias.trim_end_matches('/')
+    );
+    ScopedPath::new(full).map_err(AttachmentLandingError::InvalidPath)
+}
+
 /// Build the [`ScopedPath`] an attachment lands at:
-/// `{project_alias}/attachments/{date}/{message_id}-{index}-{filename}`, where
+/// `{project_alias}/attachments/{date}/{message_id}/{index}-{filename}`, where
 /// `index` is the 1-based attachment index so two attachments on one message
 /// never collide even when they share a filename.
 ///
@@ -111,14 +133,10 @@ pub fn attachment_scoped_path(
     date: &str,
     landing: &AttachmentLanding<'_>,
 ) -> Result<ScopedPath, AttachmentLandingError> {
-    let date = sanitize_attachment_segment(date);
-    let message_id = sanitize_attachment_segment(landing.message_id);
+    let batch = attachment_batch_scoped_path(project_alias, date, landing.message_id)?;
     let index = landing.index + 1;
     let filename = attachment_filename(landing);
-    let full = format!(
-        "{}/{ATTACHMENTS_DIR}/{date}/{message_id}-{index}-{filename}",
-        project_alias.trim_end_matches('/')
-    );
+    let full = format!("{}/{index}-{filename}", batch.as_str());
     ScopedPath::new(full).map_err(AttachmentLandingError::InvalidPath)
 }
 
@@ -139,7 +157,7 @@ pub fn attachment_scoped_path(
 /// enforce the same bound on a streaming reader *before* buffering the full
 /// `Vec<u8>`, so an oversized upload is rejected without full materialization.
 ///
-/// [`MountPermissions`]: ironclaw_host_api::MountPermissions
+/// [`MountPermissions`]: ironclaw_host_api::mount::MountPermissions
 pub async fn land_attachment<F>(
     filesystem: &ScopedFilesystem<F>,
     scope: &ResourceScope,
@@ -170,8 +188,10 @@ mod tests {
 
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, TenantId,
-        UserId, VirtualPath,
+        ids::{InvocationId, TenantId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+        resource::ResourceScope,
     };
 
     const PROJECT_TARGET: &str = "/projects/workspace";
@@ -258,7 +278,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             path.as_str(),
-            "/workspace/attachments/2026-06-09/msg1-1-report.pdf"
+            "/workspace/attachments/2026-06-09/msg1/1-report.pdf"
         );
     }
 
@@ -270,7 +290,7 @@ mod tests {
         let path = attachment_scoped_path("/workspace", "2026-06-09", &meta).unwrap();
         assert_eq!(
             path.as_str(),
-            "/workspace/attachments/2026-06-09/msg1-3-attachment.jpg"
+            "/workspace/attachments/2026-06-09/msg1/3-attachment.jpg"
         );
     }
 
@@ -284,11 +304,11 @@ mod tests {
         let second = attachment_scoped_path("/workspace", "2026-06-09", &second).unwrap();
         assert_eq!(
             first.as_str(),
-            "/workspace/attachments/2026-06-09/msg1-1-report.pdf"
+            "/workspace/attachments/2026-06-09/msg1/1-report.pdf"
         );
         assert_eq!(
             second.as_str(),
-            "/workspace/attachments/2026-06-09/msg1-2-report.pdf"
+            "/workspace/attachments/2026-06-09/msg1/2-report.pdf"
         );
         assert_ne!(
             first.as_str(),
@@ -341,7 +361,7 @@ mod tests {
         .expect("write succeeds through a read-write mount");
         assert_eq!(
             stored.as_str(),
-            "/workspace/attachments/2026-06-09/msg1-1-report.pdf"
+            "/workspace/attachments/2026-06-09/msg1/1-report.pdf"
         );
 
         // A separate scoped filesystem over the same backend — standing in for

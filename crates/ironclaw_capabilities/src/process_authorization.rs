@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    Authorized, CapabilityAuthorizer, CapabilityId, Invocation, ProcessId, Timestamp,
+    Timestamp,
+    authorized::{Authorized, CapabilityAuthorizer},
+    ids::{CapabilityId, ProcessId},
+    invocation::Invocation,
 };
 use ironclaw_processes::{
     GetProcessSnapshotRequest, ProcessExecutionRequest, ProcessJournalStoreError,
@@ -165,7 +168,7 @@ impl ProcessAuthorizationRemintPort for ProcessAuthorizationReminter {
         }
 
         let continuation = continuation.clone();
-        let ironclaw_host_api::ProcessAuthorizedContinuation {
+        let ironclaw_host_api::authorized::ProcessAuthorizedContinuation {
             invocation,
             lane,
             mounts,

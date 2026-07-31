@@ -352,6 +352,64 @@ async def test_admin_user_detail_refreshes_role_and_status_after_mutations(
     )
 
 
+async def test_admin_confirm_dialogs_restore_focus_after_escape_and_backdrop_cancel(
+    admin_client, reborn_v2_page, reborn_v2_server, test_user
+):
+    """Admin confirmations share browser keyboard, backdrop, and focus behavior."""
+    page = reborn_v2_page
+    await page.goto(
+        f"{reborn_v2_server}/admin/users?token={REBORN_V2_AUTH_TOKEN}"
+    )
+
+    user_link = page.get_by_role(
+        "button", name=test_user["display_name"], exact=True
+    )
+    user_row = user_link.locator(
+        "xpath=ancestor::div[contains(@class, 'justify-between')][1]"
+    )
+    suspend_trigger = user_row.get_by_role(
+        "button", name=SEL_V2["admin_suspend_button_name"], exact=True
+    )
+    await suspend_trigger.click()
+
+    suspend_dialog = page.get_by_role(
+        "dialog", name="Suspend user", exact=True
+    )
+    await expect(suspend_dialog).to_be_visible()
+    await expect(suspend_dialog).to_contain_text(test_user["display_name"])
+    await expect(
+        suspend_dialog.locator(SEL_V2["confirm_dialog_cancel"])
+    ).to_be_focused()
+    await page.keyboard.press("Escape")
+    await expect(suspend_dialog).to_have_count(0)
+    await expect(suspend_trigger).to_be_focused()
+
+    await user_link.click()
+    await expect(
+        page.get_by_role(
+            "heading", name=test_user["display_name"], exact=True
+        )
+    ).to_be_visible(timeout=15000)
+    delete_trigger = page.locator(SEL_V2["admin_user_detail_delete"])
+    await delete_trigger.click()
+
+    delete_dialog = page.get_by_role("dialog", name="Delete user", exact=True)
+    await expect(delete_dialog).to_contain_text(test_user["display_name"])
+    await expect(
+        delete_dialog.locator(SEL_V2["confirm_dialog_cancel"])
+    ).to_be_focused()
+    await delete_dialog.locator(
+        ":scope > div[aria-hidden='true']"
+    ).click(position={"x": 2, "y": 2})
+    await expect(delete_dialog).to_have_count(0)
+    await expect(delete_trigger).to_be_focused()
+
+    retained = await admin_client.get(
+        f"{ADMIN_BASE}/users/{test_user['id']}"
+    )
+    assert retained.status_code == 200, retained.text
+
+
 async def test_admin_token_visibility_matches_user_creation_lifecycle(
     admin_client, reborn_v2_page, reborn_v2_server, test_user
 ):

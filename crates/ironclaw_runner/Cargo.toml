@@ -39,6 +39,7 @@ ironclaw_llm = { path = "../ironclaw_llm", version = "0.1.0", default-features =
 ironclaw_loop_host = { path = "../ironclaw_loop_host", version = "0.1.0" }
 ironclaw_memory = { path = "../ironclaw_memory", version = "0.1.0" }
 ironclaw_observability = { path = "../ironclaw_observability" }
+ironclaw_outbound = { path = "../ironclaw_outbound", version = "0.1.0" }
 ironclaw_processes = { path = "../ironclaw_processes", version = "0.1.0" }
 ironclaw_approvals = { path = "../ironclaw_approvals", version = "0.1.0" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
@@ -59,6 +60,7 @@ tracing = "0.1"
 ironclaw_runner = { path = ".", features = ["test-support"] }
 ironclaw_loop_host = { path = "../ironclaw_loop_host", features = ["test-support"] }
 chrono = "0.4"
+http = "1"
 ironclaw_agent_loop = { path = "../ironclaw_agent_loop", version = "0.1.0", features = ["test-support"] }
 ironclaw_authorization = { path = "../ironclaw_authorization", version = "0.1.0" }
 ironclaw_event_projections = { path = "../ironclaw_event_projections", version = "0.1.0" }
@@ -72,6 +74,7 @@ ironclaw_skills = { path = "../ironclaw_skills", version = "0.3.0", default-feat
 ironclaw_trust = { path = "../ironclaw_trust", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0", features = ["test-support"] }
 rust_decimal = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
 serde = "1"
 serde_json = "1"
 tempfile = "3"
