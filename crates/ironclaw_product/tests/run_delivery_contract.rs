@@ -47,11 +47,11 @@ use ironclaw_threads::{
     InMemorySessionThreadService, MessageContent, SessionThreadService, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
-    GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
-    RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError, TurnId, TurnRunId,
-    TurnRunState, TurnScope, TurnStatus,
+    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GetRunStateRequest,
+    ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest,
+    RetryTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, TurnCoordinator, TurnError, TurnGateRef, TurnId, TurnRunId, TurnRunState,
+    TurnScope, TurnStatus,
 };
 
 // ── Scripted fakes ─────────────────────────────────────────────────────────
@@ -59,13 +59,13 @@ use ironclaw_turns::{
 #[derive(Clone)]
 struct ScriptedRunState {
     status: TurnStatus,
-    gate_ref: Option<GateRef>,
+    gate_ref: Option<TurnGateRef>,
 }
 
 fn scripted_state(status: TurnStatus, gate_ref: Option<&str>) -> ScriptedRunState {
     ScriptedRunState {
         status,
-        gate_ref: gate_ref.map(|s| GateRef::new(s).expect("gate ref")),
+        gate_ref: gate_ref.map(|s| TurnGateRef::new(s).expect("gate ref")),
     }
 }
 

@@ -56,9 +56,9 @@ use ironclaw_threads::{
     ToolResultReferenceEnvelope,
 };
 use ironclaw_turns::{
-    ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, GateRef, GetRunStateRequest,
+    ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, GetRunStateRequest,
     IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnError,
-    TurnErrorCategory, TurnRunId, TurnScope, TurnStatus, run_profile::LoopModelUsage,
+    TurnErrorCategory, TurnGateRef, TurnRunId, TurnScope, TurnStatus, run_profile::LoopModelUsage,
 };
 use sha2::{Digest, Sha256};
 
@@ -1343,7 +1343,7 @@ fn openai_compat_resume_turn_scope(
 }
 
 fn openai_compat_external_tool_resume_idempotency_key(
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
 ) -> Result<IdempotencyKey, OpenAiCompatHttpError> {
     const PREFIX: &str = "openai-compat-ext-resume-v1";
 

@@ -21,11 +21,11 @@ use ironclaw_host_api::{
 };
 use ironclaw_product::ProductAuthTurnGateResumeDispatcher;
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GateRef, GateResumeDisposition,
+    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateResumeDisposition,
     GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
     ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion,
     SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
-    TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus, events::EventCursor,
+    TurnGateRef, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 
 #[derive(Debug, Default)]
@@ -124,7 +124,7 @@ struct LifecycleTurnCoordinator {
     actor: TurnActor,
     scope: TurnScope,
     run_id: TurnRunId,
-    gate_ref: GateRef,
+    gate_ref: TurnGateRef,
     status: Mutex<TurnStatus>,
     resumes: Mutex<Vec<ResumeTurnRequest>>,
 }
@@ -134,7 +134,7 @@ impl LifecycleTurnCoordinator {
         actor: TurnActor,
         scope: TurnScope,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
     ) -> Self {
         Self {
             actor,
@@ -235,7 +235,7 @@ async fn assert_lifecycle_uninstall_denies_blocked_auth_gate(fail_flow_before_un
     let auth = Arc::new(InMemoryAuthProductServices::new());
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let run_id = TurnRunId::new();
-    let gate_ref = GateRef::new("gate:lifecycle").unwrap();
+    let gate_ref = TurnGateRef::new("gate:lifecycle").unwrap();
     let mut flow_scope = scope("alice");
     let thread_id = ThreadId::new("thread-lifecycle").unwrap();
     flow_scope.resource.thread_id = Some(thread_id.clone());

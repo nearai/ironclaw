@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use ironclaw_host_api::ids::{CapabilityId, ThreadId};
 use ironclaw_loop_host::{SpawnSubagentMode, SubagentKindId};
 use ironclaw_turns::{
-    GateRef, LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnRunId, TurnScope,
+    LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnGateRef, TurnRunId, TurnScope,
 };
 use serde::{Deserialize, Serialize};
 
@@ -74,7 +74,7 @@ impl EdgeTerminalKind {
 /// and `terminal_reason`), each named as a spec deviation in the PR:
 ///
 /// - `gate_ref` (D3): the pre-existing shared-batch-gate mechanism (one
-///   `GateRef` covering N children spawned in one call, parent resumes once
+///   `TurnGateRef` covering N children spawned in one call, parent resumes once
 ///   after the *last* sibling settles — live behavior, pinned by the
 ///   un-ignored e2e test `parallel_blocking_spawn_resumes_once_after_last_child`)
 ///   has no analog in the design doc's per-`(parent,child)` edge model. Sibling
@@ -111,7 +111,7 @@ pub struct AwaitEdge {
     /// zero live `agent_turn_runtime` lookup for the parent.
     pub parent_run_context: ironclaw_turns::run_profile::LoopRunContext,
     pub tree_root_run_id: TurnRunId,
-    pub gate_ref: GateRef,
+    pub gate_ref: TurnGateRef,
     pub source_binding_ref: SourceBindingRef,
     pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub subagent_kind: SubagentKindId,

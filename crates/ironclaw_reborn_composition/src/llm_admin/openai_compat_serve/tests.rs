@@ -535,11 +535,11 @@ fn openai_compat_resume_scope_preserves_actor_owner_boundary() {
 
 #[test]
 fn external_tool_resume_idempotency_key_is_stable_and_gate_scoped() {
-    let gate_ref = ironclaw_turns::GateRef::new("gate:external_tool-call-a").expect("gate ref");
+    let gate_ref = ironclaw_turns::TurnGateRef::new("gate:external_tool-call-a").expect("gate ref");
     let same_gate_ref =
-        ironclaw_turns::GateRef::new("gate:external_tool-call-a").expect("gate ref");
+        ironclaw_turns::TurnGateRef::new("gate:external_tool-call-a").expect("gate ref");
     let other_gate_ref =
-        ironclaw_turns::GateRef::new("gate:external_tool-call-b").expect("gate ref");
+        ironclaw_turns::TurnGateRef::new("gate:external_tool-call-b").expect("gate ref");
 
     let first =
         openai_compat_external_tool_resume_idempotency_key(&gate_ref).expect("idempotency key");

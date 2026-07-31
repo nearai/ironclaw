@@ -38,7 +38,8 @@ use ironclaw_outbound::{
     OutboundStateStorePort,
 };
 use ironclaw_turns::{
-    GateRef, GetRunStateRequest, TurnCoordinator, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    GetRunStateRequest, TurnCoordinator, TurnGateRef, TurnRunId, TurnRunState, TurnScope,
+    TurnStatus,
 };
 
 use crate::auth_prompt::{BlockedAuthFlowCanceller, BlockedAuthPromptRequest};
@@ -114,7 +115,7 @@ pub fn triggered_run_delivery_settings() -> RunDeliverySettings {
 pub trait ApprovalPromptContextSource: Send + Sync {
     async fn approval_prompt_context(
         &self,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
         owner_user_id: &UserId,
         scope: &TurnScope,
     ) -> Option<ApprovalPromptContextView>;

@@ -10,11 +10,11 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::test_support::{in_memory_agent_turn_runtime, in_memory_loop_checkpoint_store};
 use ironclaw_turns::{
-    AgentTurnRuntimePort, GateRef, LoopBlocked, LoopBlockedKind, LoopCheckpointKind,
-    LoopCheckpointStateRef, LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopExit,
-    LoopFailed, LoopFailureKind, LoopGateRef, LoopMessageRef, LoopResultRef,
-    PutLoopCheckpointRequest, RedactedCheckpointPayload, TurnActor, TurnCheckpointId, TurnError,
-    TurnId, TurnRunId, TurnScope, TurnStatus, run_profile::LoopModelUsage,
+    AgentTurnRuntimePort, LoopBlocked, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStateRef,
+    LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopExit, LoopFailed, LoopFailureKind,
+    LoopGateRef, LoopMessageRef, LoopResultRef, PutLoopCheckpointRequest,
+    RedactedCheckpointPayload, TurnActor, TurnCheckpointId, TurnError, TurnGateRef, TurnId,
+    TurnRunId, TurnScope, TurnStatus, run_profile::LoopModelUsage,
 };
 
 use super::{
@@ -1176,7 +1176,7 @@ async fn thread_checkpoint_evidence_verifies_awaited_child_blocked_checkpoint() 
         Arc::new(support::RecordingAwaitDependentRunEvidence::new(
             claimed.state.scope.clone(),
             claimed.state.run_id,
-            GateRef::new(gate_ref.as_str()).expect("gate ref"),
+            TurnGateRef::new(gate_ref.as_str()).expect("gate ref"),
             SpawnSubagentMode::Blocking,
         ));
     let evidence = ThreadCheckpointLoopExitEvidencePort::new(
@@ -1242,7 +1242,7 @@ async fn thread_checkpoint_evidence_rejects_background_child_gate_for_await_depe
         Arc::new(support::RecordingAwaitDependentRunEvidence::new(
             claimed.state.scope.clone(),
             claimed.state.run_id,
-            GateRef::new(gate_ref.as_str()).expect("gate ref"),
+            TurnGateRef::new(gate_ref.as_str()).expect("gate ref"),
             SpawnSubagentMode::Background,
         ));
     let evidence = ThreadCheckpointLoopExitEvidencePort::new(

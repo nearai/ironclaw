@@ -3824,7 +3824,7 @@ impl TurnCoordinator for BusyFirstUniqueKeyCoordinator {
             return Err(TurnError::ThreadBusy(ThreadBusy {
                 active_run_id: TurnRunId::new(),
                 status: TurnStatus::Running,
-                event_cursor: ironclaw_turns::events::EventCursor(1),
+                event_cursor: ironclaw_turns::EventCursor(1),
             }));
         }
         Ok(accepted_response(request))
@@ -3931,7 +3931,7 @@ fn accepted_response(request: SubmitTurnRequest) -> SubmitTurnResponse {
         status: TurnStatus::Queued,
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
-        event_cursor: ironclaw_turns::events::EventCursor(1),
+        event_cursor: ironclaw_turns::EventCursor(1),
         accepted_message_ref: request.accepted_message_ref,
         reply_target_binding_ref: request.reply_target_binding_ref,
     }

@@ -250,8 +250,8 @@ mod tests {
     };
     use ironclaw_processes::{ProcessGateRecord, ProcessSuspension};
     use ironclaw_turns::{
-        CancelRunRequest, CancelRunResponse, EventCursor, GateRef, GetRunStateRequest,
-        SubmitTurnRequest, SubmitTurnResponse, TurnError, TurnRunState, TurnScope, TurnStatus,
+        CancelRunRequest, CancelRunResponse, EventCursor, GetRunStateRequest, SubmitTurnRequest,
+        SubmitTurnResponse, TurnError, TurnGateRef, TurnRunState, TurnScope, TurnStatus,
     };
 
     struct RecordingInnerDispatcher {
@@ -413,7 +413,7 @@ mod tests {
             owner_user_id: Some(owner_user_id),
             suspension: ProcessSuspension {
                 kind: ProcessSuspensionKind::Authorization,
-                gate_ref: Some(GateRef::new(format!("gate-{run_id}")).expect("gate ref")),
+                gate_ref: Some(TurnGateRef::new(format!("gate-{run_id}")).expect("gate ref")),
                 activity_id: None,
                 credential_requirements: vec![requirement],
                 detail: None,

@@ -11,8 +11,8 @@ use ironclaw_host_api::{
     action::Action, ids::CapabilityId, resource::ResourceScope, scope::Principal,
 };
 use ironclaw_turns::{
-    GateRef, GateResumeDisposition, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator,
-    TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
+    GateResumeDisposition, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnError,
+    TurnErrorCategory, TurnGateRef, TurnRunId, TurnStatus,
 };
 
 use super::gate_ref::{approval_reply_binding_ref, approval_source_binding_ref};
@@ -148,7 +148,7 @@ impl DefaultApprovalInteractionService {
         &self,
         scope: &ApprovalInteractionScope,
         run_id_hint: Option<TurnRunId>,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> Result<ApprovalGateRecord, ProductSurfaceFailure> {
         self.read_model
             .approval_gate(scope, run_id_hint, gate_ref)

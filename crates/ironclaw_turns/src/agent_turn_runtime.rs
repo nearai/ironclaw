@@ -6,13 +6,13 @@ use serde::{Deserialize, Serialize};
 use ironclaw_host_api::decision::RuntimeCredentialAuthRequirement;
 
 use crate::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, CapabilityActivityId, GateRef,
+    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, CapabilityActivityId, EventCursor,
     GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
     RetryTurnRequest, RetryTurnResponse, RunProfileResolver, SourceBindingRef,
     SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActiveRunRefState,
-    TurnAdmissionPolicy, TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId,
-    TurnRunProfile, TurnRunState, TurnRunnerId, TurnScope, TurnStatus, TurnTimestamp,
-    events::EventCursor, run_profile::LoopModelRouteSnapshot,
+    TurnAdmissionPolicy, TurnCheckpointId, TurnError, TurnGateRef, TurnId, TurnLeaseToken,
+    TurnRunId, TurnRunProfile, TurnRunState, TurnRunnerId, TurnScope, TurnStatus, TurnTimestamp,
+    run_profile::LoopModelRouteSnapshot,
 };
 
 #[async_trait]
@@ -160,7 +160,7 @@ pub struct TurnRunRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_usage: Option<crate::run_profile::LoopModelUsage>,
     pub checkpoint_id: Option<TurnCheckpointId>,
-    pub gate_ref: Option<GateRef>,
+    pub gate_ref: Option<TurnGateRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_activity_id: Option<CapabilityActivityId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

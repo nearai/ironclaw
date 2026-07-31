@@ -3801,7 +3801,8 @@ async fn cancel_run_propagates_to_subagent_children() {
                     result_ref,
                     handoff: None,
                     parent_run_context: parent_run_context.clone(),
-                    gate_ref: ironclaw_turns::GateRef::new("gate:runtime-cancel-child").unwrap(),
+                    gate_ref: ironclaw_turns::TurnGateRef::new("gate:runtime-cancel-child")
+                        .unwrap(),
                 })
                 .unwrap(),
             ),

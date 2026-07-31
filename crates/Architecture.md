@@ -341,7 +341,7 @@ flowchart TD
 | `ironclaw_reborn_composition` | Product-facing runtime assembly, service handles, local/prod profiles, WebUI/runtime integration, projection services. | Low-level policy internals or direct product traffic bypassing Reborn adapters. |
 | `ironclaw_processes` | Neutral process journal, lifecycle transitions, leases, suspension, process trees, gates, and lifecycle queries. | Agent-loop policy, product bindings, or turn projections. |
 | `ironclaw_runner` | Agent-turn scheduling policy, per-process executor, concrete loop driver registry, loop host factory, and exit-applier wiring over process ports. | Generic process persistence, loop strategy internals, or product workflow. |
-| `ironclaw_turns` | Turn/run IDs, scopes, coordinator API, agent-turn process projections, loop-exit DTOs, run profiles, and loop checkpoint contracts. | Generic process lifecycle state, runtime dispatch, product adapters, or raw prompts/tool inputs/secrets. |
+| `ironclaw_turns` | Turn admission and the coordinator API, agent-turn process projections, loop-exit DTOs, run profiles, and loop checkpoint contracts. | The turn vocabulary itself (ids/scope/status/refs — those are `ironclaw_host_api::turn`'s), generic process lifecycle state, runtime dispatch, product adapters, or raw prompts/tool inputs/secrets. |
 | `ironclaw_agent_loop` | Canonical executor, loop families, sealed strategy composition, resumable loop state. | Host services, runtime lanes, product transport, provider auth. |
 | `ironclaw_loop_host` | Reusable adapters that implement loop host ports over threads, model gateways, capabilities, skills, checkpoints, cancellation, subagents. | Product-facing runtime service or durable turn state ownership. |
 | `ironclaw_host_runtime` | Kernel-facing host runtime services: capability host, dispatcher composition, approvals, resources, processes, secrets/network mediation. | Agent-loop planning or product conversation UX. |
@@ -399,12 +399,12 @@ refs that cross crate boundaries:
 
 | Data | Purpose | Owner |
 | --- | --- | --- |
-| `TurnScope` | Canonical tenant/agent/project/thread scope. It is the active-lock and isolation key. | `ironclaw_turns` |
-| `TurnActor` | Actor metadata for the accepted turn. It does not change the active-lock key. | `ironclaw_turns` |
-| `AcceptedMessageRef` | Durable ref to the accepted inbound message in thread/transcript storage. | `ironclaw_turns` + thread service |
-| `SourceBindingRef` / `ReplyTargetBindingRef` | Canonical product binding refs for source and reply target. | Product workflow / turns |
-| `TurnId` | Accepted inbound turn identity. | `ironclaw_turns` |
-| `TurnRunId` | Executable run identity. A turn may have resumed/child run behavior around this run record. | `ironclaw_turns` |
+| `TurnScope` | Canonical tenant/agent/project/thread scope. It is the active-lock and isolation key. | `ironclaw_host_api::turn` |
+| `TurnActor` | Actor metadata for the accepted turn. It does not change the active-lock key. | `ironclaw_host_api::turn` |
+| `AcceptedMessageRef` | Durable ref to the accepted inbound message in thread/transcript storage. | `ironclaw_host_api::turn` (minted by the thread service) |
+| `SourceBindingRef` / `ReplyTargetBindingRef` | Canonical product binding refs for source and reply target. | `ironclaw_host_api::turn` (minted by product workflow) |
+| `TurnId` | Accepted inbound turn identity. | `ironclaw_host_api::turn` |
+| `TurnRunId` | Executable run identity. A turn may have resumed/child run behavior around this run record. | `ironclaw_host_api::turn` |
 | `JournaledProcessSnapshot` | Authoritative lifecycle status, lease, suspension, checkpoint, tree, and journal cursor. | `ironclaw_processes` |
 | `TurnRunState` | Agent-turn view of a process snapshot plus typed profile and binding metadata. | `ironclaw_turns::AgentTurnRuntimePort` |
 | `LoopExecutionState` | Loop-owned resumable strategy state, serialized only as bounded checkpoint payload bytes. | `ironclaw_agent_loop` |
@@ -412,7 +412,7 @@ refs that cross crate boundaries:
 | `LoopExit` | Driver claim containing durable refs only; never trusted by itself. | loop driver / turns |
 | `LoopMessageRef` / `LoopResultRef` / `LoopGateRef` | Host-minted evidence refs used to validate exits and blocked gates. | host ports / turns |
 | `LoopRequest` / `CapabilityOutcome` | Scoped tool/capability request and sanitized result refs/summaries. | loop host ports + host runtime |
-| `EventCursor` | Replay/projection cursor for redacted lifecycle and progress events. | events / turns |
+| `EventCursor` | Replay/projection cursor for redacted lifecycle and progress events. Two distinct types: `ironclaw_events::EventCursor` for the durable event log, `ironclaw_host_api::turn::EventCursor` for a turn's lifecycle stream. | `ironclaw_events` / `ironclaw_host_api::turn` |
 
 Persistence placement follows this split:
 

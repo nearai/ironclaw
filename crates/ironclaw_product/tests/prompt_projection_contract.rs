@@ -12,7 +12,7 @@ use ironclaw_product::{
     AuthChallengeProvider, AuthChallengeView, BlockedAuthPromptRequest, approval_prompt_lookup,
     auth_prompt_view_for_blocked_auth,
 };
-use ironclaw_turns::{GateRef, TurnRunId, TurnScope};
+use ironclaw_turns::{TurnGateRef, TurnRunId, TurnScope};
 
 #[derive(Debug)]
 struct OAuthChallenge {
@@ -125,7 +125,7 @@ async fn auth_prompt_enrichment_accepts_the_owned_view_without_a_crossing_reques
 async fn approval_prompt_lookup_without_a_store_is_empty() {
     let lookup = approval_prompt_lookup(
         None,
-        &GateRef::new("approval:missing").expect("gate ref"),
+        &TurnGateRef::new("approval:missing").expect("gate ref"),
         &UserId::new("owner-prompt").expect("owner"),
         &turn_scope(),
     )

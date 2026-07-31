@@ -1,11 +1,11 @@
 //! Contract tests for [`MemoryPromptContextService`] and [`EmptyMemoryPromptContextService`].
 
 use ironclaw_host_api::ids::{TenantId, ThreadId, UserId};
+use ironclaw_host_api::turn::{TurnActor, TurnScope};
 use ironclaw_turns::run_profile::{
     ContextProfileId, EmptyMemoryPromptContextService, MemoryPromptContextRequest,
     MemoryPromptContextService,
 };
-use ironclaw_turns::scope::{TurnActor, TurnScope};
 
 fn test_scope(tenant: &str) -> TurnScope {
     TurnScope::new(

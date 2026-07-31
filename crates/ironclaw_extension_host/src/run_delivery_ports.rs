@@ -15,7 +15,7 @@ use ironclaw_product::{
     PairingAuthChallengeView,
 };
 use ironclaw_product::{ApprovalPromptContextView, AuthPromptView, ProductAdapterError};
-use ironclaw_turns::{GateRef, TurnScope};
+use ironclaw_turns::{TurnGateRef, TurnScope};
 
 use ironclaw_product::auth_prompt_view_for_blocked_auth;
 
@@ -138,7 +138,7 @@ impl ProjectionApprovalPromptContextSource {
 impl ApprovalPromptContextSource for ProjectionApprovalPromptContextSource {
     async fn approval_prompt_context(
         &self,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
         owner_user_id: &UserId,
         scope: &TurnScope,
     ) -> Option<ApprovalPromptContextView> {

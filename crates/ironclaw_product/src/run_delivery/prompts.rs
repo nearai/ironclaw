@@ -7,7 +7,7 @@
 
 use crate::{ApprovalPromptContextView, AuthPromptChallengeKind, AuthPromptView, GatePromptView};
 use ironclaw_outbound::RunNotificationEventKind;
-use ironclaw_turns::{GateRef, TurnRunId};
+use ironclaw_turns::{TurnGateRef, TurnRunId};
 
 use crate::is_approval_gate_ref;
 
@@ -58,7 +58,7 @@ pub(crate) fn run_notification_projection_id(
 /// once by [`gate_prompt_text`].
 pub(crate) fn approval_gate_prompt_view(
     run_id: TurnRunId,
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
     context: Option<&ApprovalPromptContextView>,
 ) -> GatePromptView {
     let gate_ref_str = gate_ref.as_str();

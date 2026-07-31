@@ -3,7 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
-use crate::ReplyTargetBindingRef;
+use crate::turn::ReplyTargetBindingRef;
 use async_trait::async_trait;
 
 use crate::product_adapter::{

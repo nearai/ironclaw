@@ -7,7 +7,7 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_turns::{
-    GateRef, IdempotencyKey, ResumeTurnResponse, TurnActor, TurnRunId, TurnScope,
+    IdempotencyKey, ResumeTurnResponse, TurnActor, TurnGateRef, TurnRunId, TurnScope,
 };
 use serde::{Deserialize, Serialize};
 
@@ -153,7 +153,7 @@ impl ApprovalInteractionActionView {
 pub struct PendingApprovalInteractionView {
     pub scope: ApprovalInteractionScope,
     pub run_id: TurnRunId,
-    pub gate_ref: GateRef,
+    pub gate_ref: TurnGateRef,
     pub approval_request_id: ApprovalRequestId,
     pub summary: String,
     pub action: ApprovalInteractionActionView,
@@ -164,7 +164,7 @@ pub struct ApprovalGateRecord {
     scope: ApprovalInteractionScope,
     resource_scope: ResourceScope,
     run_id: TurnRunId,
-    gate_ref: GateRef,
+    gate_ref: TurnGateRef,
     request: ApprovalRequest,
     status: ApprovalStatus,
 }
@@ -173,7 +173,7 @@ impl ApprovalGateRecord {
     pub fn new(
         resource_scope: ResourceScope,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         request: ApprovalRequest,
     ) -> Result<Self, ProductSurfaceFailure> {
         Self::with_status(
@@ -188,7 +188,7 @@ impl ApprovalGateRecord {
     pub fn with_status(
         resource_scope: ResourceScope,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         request: ApprovalRequest,
         status: ApprovalStatus,
     ) -> Result<Self, ProductSurfaceFailure> {
@@ -229,7 +229,7 @@ impl ApprovalGateRecord {
         self.run_id
     }
 
-    pub fn gate_ref(&self) -> &GateRef {
+    pub fn gate_ref(&self) -> &TurnGateRef {
         &self.gate_ref
     }
 
@@ -277,7 +277,7 @@ pub struct ResolveApprovalInteractionRequest {
     pub scope: TurnScope,
     pub actor: TurnActor,
     pub run_id_hint: Option<TurnRunId>,
-    pub gate_ref: GateRef,
+    pub gate_ref: TurnGateRef,
     pub decision: ApprovalInteractionDecision,
     pub idempotency_key: IdempotencyKey,
 }
@@ -366,7 +366,7 @@ mod tests {
             ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
                 .unwrap();
         resource_scope.thread_id = Some(ThreadId::new("thread-a").unwrap());
-        let wrong_gate_ref = GateRef::new("gate:approval-wrong").unwrap();
+        let wrong_gate_ref = TurnGateRef::new("gate:approval-wrong").unwrap();
 
         let error = ApprovalGateRecord::with_status(
             resource_scope,

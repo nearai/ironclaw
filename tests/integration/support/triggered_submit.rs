@@ -35,7 +35,7 @@ use ironclaw_triggers::{
 };
 use ironclaw_turns::run_profile::ModelProfileId;
 use ironclaw_turns::{
-    GateRef, GateResumeDisposition, ResumeTurnPrecondition, TurnRunId, TurnRunState, TurnScope,
+    GateResumeDisposition, ResumeTurnPrecondition, TurnGateRef, TurnRunId, TurnRunState, TurnScope,
     TurnStatus,
 };
 
@@ -281,7 +281,7 @@ impl RebornIntegrationHarness {
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> HarnessResult<()> {
         self.capability_recorder
             .approve_standalone_gate(gate_ref)
@@ -304,7 +304,7 @@ impl RebornIntegrationHarness {
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> HarnessResult<()> {
         self.capability_recorder
             .deny_standalone_gate(gate_ref)
@@ -330,7 +330,7 @@ impl RebornIntegrationHarness {
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         resume_disposition: Option<GateResumeDisposition>,
         precondition: ResumeTurnPrecondition,
     ) -> HarnessResult<()> {

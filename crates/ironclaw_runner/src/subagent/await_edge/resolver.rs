@@ -29,7 +29,7 @@ use ironclaw_turns::{
     run_profile::{AgentLoopHostError, LoopRunContext},
 };
 #[cfg(test)]
-use ironclaw_turns::{GateRef, TurnActor};
+use ironclaw_turns::{TurnActor, TurnGateRef};
 
 use super::{AwaitEdge, AwaitEdgeState, EdgeTerminalKind, store::AwaitEdgeStore};
 use crate::subagent::spawn_result::{
@@ -335,7 +335,7 @@ where
             agent_id: child_record.scope.agent_id.clone(),
             project_id: child_record.scope.project_id.clone(),
             thread_id: metadata.parent_thread_id.clone(),
-            thread_owner: ironclaw_turns::scope::TurnThreadOwner::explicit(Some(
+            thread_owner: ironclaw_host_api::turn::TurnThreadOwner::explicit(Some(
                 owner_user_id.clone(),
             )),
         };
@@ -1042,7 +1042,7 @@ mod tests {
         );
         // Distinct from the derived `gate:subagent-<child_run_id>` token so
         // the test can tell "sourced from metadata" apart from "recomputed".
-        let metadata_gate_ref = GateRef::new("gate:subagent-shared-batch").unwrap();
+        let metadata_gate_ref = TurnGateRef::new("gate:subagent-shared-batch").unwrap();
         let metadata = ironclaw_loop_host::SubagentThreadMetadata {
             kind: ironclaw_loop_host::SubagentThreadKind::Subagent,
             parent_run_id,
@@ -1133,7 +1133,7 @@ mod tests {
             result_ref: ironclaw_turns::LoopResultRef::new("result:subagent.recon-t2").unwrap(),
             handoff: None,
             parent_run_context: parent_context,
-            gate_ref: GateRef::new("gate:subagent-t2").unwrap(),
+            gate_ref: TurnGateRef::new("gate:subagent-t2").unwrap(),
         };
 
         let thread_service = Arc::new(ironclaw_threads::InMemorySessionThreadService::default());
@@ -1278,7 +1278,7 @@ mod tests {
             result_ref: ironclaw_turns::LoopResultRef::new("result:subagent.recon-t4").unwrap(),
             handoff: None,
             parent_run_context: tampered_context,
-            gate_ref: GateRef::new("gate:subagent-t4").unwrap(),
+            gate_ref: TurnGateRef::new("gate:subagent-t4").unwrap(),
         };
 
         let thread_service = Arc::new(ironclaw_threads::InMemorySessionThreadService::default());
@@ -1527,7 +1527,7 @@ mod tests {
         parent_context.thread_id = parent_thread_id.clone();
         parent_context.run_id = parent_run_id;
         parent_context.actor = Some(TurnActor::new(user_id.clone()));
-        let gate_ref = GateRef::new("gate:mixed-status-group").expect("gate");
+        let gate_ref = TurnGateRef::new("gate:mixed-status-group").expect("gate");
         let child_cases = [
             (
                 "completed",
@@ -2016,12 +2016,12 @@ fn event_kind_from_terminal_status(
 fn recovered_gate_ref(
     metadata: &ironclaw_loop_host::SubagentThreadMetadata,
     child_record: &TurnRunRecord,
-) -> Result<GateRef, TurnError> {
+) -> Result<TurnGateRef, TurnError> {
     match metadata.mode {
         ironclaw_loop_host::SpawnSubagentMode::Blocking => Ok(metadata.gate_ref.clone()),
         ironclaw_loop_host::SpawnSubagentMode::Background => {
             // Mirrors the spawn path's `LoopGateRef`-compatible gate token format.
-            GateRef::new(format!("gate:subagent-bg-{}", child_record.run_id))
+            TurnGateRef::new(format!("gate:subagent-bg-{}", child_record.run_id))
                 .map_err(|reason| TurnError::InvalidRequest { reason })
         }
     }

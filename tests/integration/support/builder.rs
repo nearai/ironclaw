@@ -49,10 +49,10 @@ use ironclaw_turns::run_profile::{
     CommunicationContextProvider, InstructionSafetyContext, LoopHostMilestone,
 };
 use ironclaw_turns::{
-    AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, GateRef, GateResumeDisposition,
+    AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, GateResumeDisposition,
     IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
-    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnCoordinator, TurnRunId, TurnRunState,
-    TurnScope, TurnStatus,
+    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnCoordinator, TurnGateRef, TurnRunId,
+    TurnRunState, TurnScope, TurnStatus,
 };
 
 use super::capability_backend::{
@@ -1117,14 +1117,14 @@ impl RebornIntegrationHarness {
     }
 
     /// Submit a user turn and wait until it blocks on an approval gate, returning
-    /// the run id and the raised `GateRef`. The named C1 fixture: a scripted
+    /// the run id and the raised `TurnGateRef`. The named C1 fixture: a scripted
     /// destructive tool call in a `RebornIntegrationGroup::live_approvals` thread
     /// blocks here; the test then calls `approve_gate`/`deny_gate` and
     /// `wait_for_status(Completed)`.
     pub async fn submit_turn_until_blocked(
         &self,
         text: &str,
-    ) -> HarnessResult<(TurnRunId, GateRef)> {
+    ) -> HarnessResult<(TurnRunId, TurnGateRef)> {
         let run_id = self.submit_turn_async(text).await?;
         let state = self
             .wait_for_status(run_id, TurnStatus::BlockedApproval)
@@ -1139,14 +1139,14 @@ impl RebornIntegrationHarness {
     }
 
     /// Submit a user turn and wait until it blocks on an **auth** gate, returning
-    /// the run id and the raised `GateRef`. Mirror of `submit_turn_until_blocked`
+    /// the run id and the raised `TurnGateRef`. Mirror of `submit_turn_until_blocked`
     /// for the `RebornIntegrationGroup::live_auth_gate` fixture: a scripted
     /// capability whose credential account resolves to `AuthRequired` blocks here
     /// at `TurnStatus::BlockedAuth` (E-AUTHGATE seam).
     pub async fn submit_turn_until_auth_blocked(
         &self,
         text: &str,
-    ) -> HarnessResult<(TurnRunId, GateRef)> {
+    ) -> HarnessResult<(TurnRunId, TurnGateRef)> {
         let run_id = self.submit_turn_async(text).await?;
         let state = self
             .wait_for_status(run_id, TurnStatus::BlockedAuth)
@@ -1168,7 +1168,7 @@ impl RebornIntegrationHarness {
     /// payload outright.
     pub async fn submit_approval_resolution(
         &self,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
         decision: ironclaw_product::ApprovalDecision,
     ) -> HarnessResult<ProductInboundAck> {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
@@ -1188,7 +1188,7 @@ impl RebornIntegrationHarness {
     /// `deny_auth_gate`'s direct coordinator resume.
     pub async fn submit_auth_resolution(
         &self,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
         result: ironclaw_product::AuthResolutionResult,
     ) -> HarnessResult<ProductInboundAck> {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
@@ -1280,7 +1280,7 @@ impl RebornIntegrationHarness {
     pub async fn assert_gate_survives_reopen(
         &self,
         run_id: TurnRunId,
-        expected_gate_ref: &GateRef,
+        expected_gate_ref: &TurnGateRef,
     ) -> HarnessResult<()> {
         let StorageReopen::LibSql { db_path } = &self._shared.storage_reopen else {
             return Err("assert_gate_survives_reopen requires StorageMode::LibSql".into());
@@ -1303,7 +1303,7 @@ impl RebornIntegrationHarness {
                 .get_run_state(&self.turn_scope, run_id)
                 .await?;
             if state.status == TurnStatus::BlockedApproval {
-                return match state.gate_ref.as_ref().map(GateRef::as_str) {
+                return match state.gate_ref.as_ref().map(TurnGateRef::as_str) {
                     Some(seen) if seen == expected_gate_ref.as_str() => Ok(()),
                     other => Err(format!(
                         "gate ref after reopen was {other:?}, expected {:?}",
@@ -1820,7 +1820,11 @@ impl RebornIntegrationHarness {
     /// stale or wrong (non-approval) gate ref fails the resume with
     /// `TurnError::InvalidTransition` instead of silently resuming whatever
     /// gate class happens to be blocked.
-    pub async fn approve_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub async fn approve_gate(
+        &self,
+        run_id: TurnRunId,
+        gate_ref: &TurnGateRef,
+    ) -> HarnessResult<()> {
         self.capability_recorder
             .approve_standalone_gate(gate_ref)
             .await?;
@@ -1842,8 +1846,8 @@ impl RebornIntegrationHarness {
     pub async fn approve_gate_with_stale_resume_ref(
         &self,
         run_id: TurnRunId,
-        real_gate_ref: &GateRef,
-        stale_gate_ref: &GateRef,
+        real_gate_ref: &TurnGateRef,
+        stale_gate_ref: &TurnGateRef,
     ) -> HarnessResult<()> {
         self.capability_recorder
             .approve_standalone_gate(real_gate_ref)
@@ -1864,7 +1868,11 @@ impl RebornIntegrationHarness {
     /// stale-ref resume: the record is already `Approved`, so re-calling
     /// `approve_gate` would hit a double-resolve `NotPending` error instead of
     /// completing the still-blocked run.
-    pub async fn resume_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub async fn resume_gate(
+        &self,
+        run_id: TurnRunId,
+        gate_ref: &TurnGateRef,
+    ) -> HarnessResult<()> {
         self.resume_run(
             run_id,
             gate_ref.clone(),
@@ -1881,7 +1889,7 @@ impl RebornIntegrationHarness {
     ///
     /// See [`approve_gate`](Self::approve_gate) for why this resumes with
     /// `ResumeTurnPrecondition::BlockedApprovalGate`.
-    pub async fn deny_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub async fn deny_gate(&self, run_id: TurnRunId, gate_ref: &TurnGateRef) -> HarnessResult<()> {
         self.capability_recorder
             .deny_standalone_gate(gate_ref)
             .await?;
@@ -1905,7 +1913,11 @@ impl RebornIntegrationHarness {
     /// (server-enforced: `resume_turn_once` requires `status == BlockedAuth`),
     /// same shape as `deny_gate`'s `BlockedApprovalGate`. A client-side
     /// `gate:auth-` prefix check adds cheap defense-in-depth on top.
-    pub async fn deny_auth_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub async fn deny_auth_gate(
+        &self,
+        run_id: TurnRunId,
+        gate_ref: &TurnGateRef,
+    ) -> HarnessResult<()> {
         if !gate_ref.as_str().starts_with("gate:auth-") {
             return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
         }
@@ -1933,7 +1945,7 @@ impl RebornIntegrationHarness {
     pub async fn resolve_auth_gate(
         &self,
         run_id: TurnRunId,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> HarnessResult<()> {
         if !gate_ref.as_str().starts_with("gate:auth-") {
             return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
@@ -2121,7 +2133,7 @@ impl RebornIntegrationHarness {
     async fn resume_run(
         &self,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         resume_disposition: Option<GateResumeDisposition>,
         precondition: ResumeTurnPrecondition,
     ) -> HarnessResult<()> {
@@ -2143,7 +2155,7 @@ impl RebornIntegrationHarness {
         &self,
         scope: TurnScope,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         resume_disposition: Option<GateResumeDisposition>,
         precondition: ResumeTurnPrecondition,
     ) -> HarnessResult<()> {

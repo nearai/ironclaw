@@ -1,5 +1,5 @@
 use crate::ids::{TriggerFireSlot, TriggerOriginRef};
-use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnScope};
+use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnActor, TurnScope};
 use serde::{Deserialize, Serialize};
 
 /// Delivery resolution target categories used by the outbound resolver.

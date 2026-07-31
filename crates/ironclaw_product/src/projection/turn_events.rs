@@ -19,10 +19,10 @@ use ironclaw_host_api::{
     ids::{InvocationId, UserId},
 };
 use ironclaw_turns::{
-    GateRef, GetRunStateRequest, ModelInvalidOutputDetailReason, SanitizedFailure, TurnActor,
+    GetRunStateRequest, ModelInvalidOutputDetailReason, SanitizedFailure, TurnActor,
     TurnBlockedGateKind, TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionCursor,
     TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionSource,
-    TurnEventReducerService, TurnLifecycleEvent, TurnRunId, TurnScope, TurnStatus,
+    TurnEventReducerService, TurnGateRef, TurnLifecycleEvent, TurnRunId, TurnScope, TurnStatus,
     run_profile::{
         SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,
         SystemInferenceTaskId, SystemPromptId, SystemPromptSource, SystemTaskKind,
@@ -468,7 +468,7 @@ async fn approval_gate_prompt(
     caller_user_id: &UserId,
     approval_requests: Option<&dyn ApprovalRequestStorePort>,
     event: &TurnLifecycleEvent,
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
     gate_ref_string: String,
 ) -> Result<ProductOutboundPayload, ProductAdapterError> {
     let owner_user_id = event.owner_user_id.as_ref().unwrap_or(caller_user_id);
@@ -504,7 +504,7 @@ async fn approval_gate_prompt(
 /// the request is missing, or the lookup fails.
 pub async fn approval_prompt_context_view(
     approval_requests: Option<&dyn ApprovalRequestStorePort>,
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
 ) -> Option<ApprovalPromptContextView> {
@@ -522,7 +522,7 @@ struct ApprovalPromptLookup {
 
 async fn approval_prompt_lookup(
     approval_requests: Option<&dyn ApprovalRequestStorePort>,
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
 ) -> Result<ApprovalPromptLookup, ironclaw_approvals::ApprovalStoreError> {

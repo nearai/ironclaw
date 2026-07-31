@@ -14,12 +14,12 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, EventCursor,
-    GateRef, GetLoopCheckpointRequest, GetRunStateRequest, LoopBlocked, LoopBlockedKind,
-    LoopCheckpointKind, LoopCheckpointRecord, LoopCheckpointStateRef, LoopCheckpointStore,
-    LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef,
-    LoopResultRef, PutLoopCheckpointRequest, RedactedCheckpointPayload, ReplyTargetBindingRef,
-    ResumeTurnRequest, ResumeTurnResponse, RunProfileVersion, SanitizedFailure, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnError, TurnId,
+    GetLoopCheckpointRequest, GetRunStateRequest, LoopBlocked, LoopBlockedKind, LoopCheckpointKind,
+    LoopCheckpointRecord, LoopCheckpointStateRef, LoopCheckpointStore, LoopCompleted,
+    LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef,
+    PutLoopCheckpointRequest, RedactedCheckpointPayload, ReplyTargetBindingRef, ResumeTurnRequest,
+    ResumeTurnResponse, RunProfileVersion, SanitizedFailure, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnError, TurnGateRef, TurnId,
     TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope, TurnStatus,
     run_profile::{CheckpointSchemaId, LoopDriverId},
     runner::ClaimedTurnRun,
@@ -57,7 +57,7 @@ pub(super) fn empty_await_dependent_run_evidence() -> Arc<dyn AwaitDependentRunE
 pub(super) struct RecordingAwaitDependentRunEvidence {
     scope: TurnScope,
     run_id: TurnRunId,
-    gate_ref: GateRef,
+    gate_ref: TurnGateRef,
     mode: ironclaw_loop_host::SpawnSubagentMode,
 }
 
@@ -65,7 +65,7 @@ impl RecordingAwaitDependentRunEvidence {
     pub(super) fn new(
         scope: TurnScope,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         mode: ironclaw_loop_host::SpawnSubagentMode,
     ) -> Self {
         Self {

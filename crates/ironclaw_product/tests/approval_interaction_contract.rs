@@ -41,10 +41,10 @@ use ironclaw_product::{
     RunStateApprovalInteractionReadModel, approval_gate_ref,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
-    GateResumeDisposition, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
-    ResumeTurnPrecondition, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
+    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateResumeDisposition,
+    GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition,
+    ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnGateRef,
     TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 
@@ -74,14 +74,14 @@ struct FakeTurnRunLocator {
 }
 
 impl FakeTurnRunLocator {
-    fn with_run(run_id: TurnRunId, gate_ref: GateRef) -> Self {
+    fn with_run(run_id: TurnRunId, gate_ref: TurnGateRef) -> Self {
         Self {
             runs: Mutex::new(vec![ApprovalBlockedTurnRun { run_id, gate_ref }]),
             historical_runs: Mutex::new(Vec::new()),
         }
     }
 
-    fn with_historical_run(run_id: TurnRunId, gate_ref: GateRef) -> Self {
+    fn with_historical_run(run_id: TurnRunId, gate_ref: TurnGateRef) -> Self {
         Self {
             runs: Mutex::new(Vec::new()),
             historical_runs: Mutex::new(vec![ApprovalBlockedTurnRun { run_id, gate_ref }]),
@@ -101,7 +101,7 @@ impl ApprovalTurnRunLocator for FakeTurnRunLocator {
     async fn approval_run_for_gate(
         &self,
         _scope: &ApprovalInteractionScope,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> Result<Option<TurnRunId>, ironclaw_product::ProductSurfaceFailure> {
         Ok(self
             .runs
@@ -134,7 +134,7 @@ impl ApprovalInteractionReadModel for FakeReadModel {
         &self,
         scope: &ApprovalInteractionScope,
         run_id_hint: Option<TurnRunId>,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> Result<Option<ApprovalGateRecord>, ironclaw_product::ProductSurfaceFailure> {
         Ok(self
             .gates
@@ -437,7 +437,7 @@ fn resolver_failure() -> ironclaw_product::ProductSurfaceFailure {
 struct FakeTurnCoordinator {
     actor: TurnActor,
     status: Mutex<TurnStatus>,
-    gate_ref: Mutex<Option<GateRef>>,
+    gate_ref: Mutex<Option<TurnGateRef>>,
     resumptions: Mutex<Vec<ResumeTurnRequest>>,
     cancellations: Mutex<Vec<CancelRunRequest>>,
     resume_error: Mutex<Option<TurnError>>,
@@ -450,7 +450,7 @@ struct FakeTurnCoordinator {
 }
 
 impl FakeTurnCoordinator {
-    fn blocked(actor: TurnActor, gate_ref: GateRef) -> Self {
+    fn blocked(actor: TurnActor, gate_ref: TurnGateRef) -> Self {
         Self {
             actor,
             status: Mutex::new(TurnStatus::BlockedApproval),
@@ -714,7 +714,7 @@ fn service_fixture_with_scope(
     Arc<RecordingApprovalResolver>,
     Arc<FakeTurnCoordinator>,
     TurnRunId,
-    GateRef,
+    TurnGateRef,
 ) {
     let actor = actor(gate_scope.user_id.as_str());
     let gate_ref = approval_gate_ref(request.id).expect("gate ref");
@@ -816,7 +816,7 @@ fn service_fixture(
     Arc<RecordingApprovalResolver>,
     Arc<FakeTurnCoordinator>,
     TurnRunId,
-    GateRef,
+    TurnGateRef,
 ) {
     service_fixture_for_request(approval_request(reason))
 }
@@ -828,7 +828,7 @@ fn service_fixture_for_request(
     Arc<RecordingApprovalResolver>,
     Arc<FakeTurnCoordinator>,
     TurnRunId,
-    GateRef,
+    TurnGateRef,
 ) {
     service_fixture_for_request_status(request, ApprovalStatus::Pending)
 }
@@ -841,7 +841,7 @@ fn service_fixture_for_request_status(
     Arc<RecordingApprovalResolver>,
     Arc<FakeTurnCoordinator>,
     TurnRunId,
-    GateRef,
+    TurnGateRef,
 ) {
     let actor = actor("user-alpha");
     let gate_ref = approval_gate_ref(request.id).expect("gate ref");
@@ -2367,7 +2367,7 @@ async fn missing_gate_returns_deterministic_not_found_without_resolution() {
 #[tokio::test]
 async fn resolve_rejects_malformed_approval_gate_ref_without_side_effects() {
     let resolver = Arc::new(RecordingApprovalResolver::default());
-    let bad_gate_ref = GateRef::new("gate:approval-not-a-request-id").expect("gate ref");
+    let bad_gate_ref = TurnGateRef::new("gate:approval-not-a-request-id").expect("gate ref");
     let coordinator = Arc::new(FakeTurnCoordinator::blocked(
         actor("user-alpha"),
         bad_gate_ref.clone(),

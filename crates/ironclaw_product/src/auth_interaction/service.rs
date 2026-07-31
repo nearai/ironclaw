@@ -6,8 +6,8 @@ use ironclaw_auth::{
     CredentialAccountId, CredentialSelectionInput,
 };
 use ironclaw_turns::{
-    GateRef, GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
-    TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
+    GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
+    TurnCoordinator, TurnError, TurnErrorCategory, TurnGateRef, TurnRunId, TurnStatus,
 };
 
 use super::types::is_pending_auth_status;
@@ -30,7 +30,7 @@ pub trait AuthInteractionReadModel: Send + Sync {
         &self,
         scope: &AuthInteractionScope,
         run_id_hint: Option<TurnRunId>,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> Result<Option<AuthGateRecord>, ProductSurfaceFailure>;
 }
 
@@ -90,7 +90,7 @@ impl DefaultAuthInteractionService {
         &self,
         scope: &AuthInteractionScope,
         run_id_hint: Option<TurnRunId>,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> Result<AuthGateRecord, ProductSurfaceFailure> {
         let gate = self
             .read_model

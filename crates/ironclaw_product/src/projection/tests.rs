@@ -28,9 +28,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor as TurnEventCursor,
-    GateRef, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
-    TurnBlockedGateKind, TurnBlockedGateMetadata, TurnError, TurnEventKind, TurnEventPage,
+    GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnBlockedGateKind,
+    TurnBlockedGateMetadata, TurnError, TurnEventKind, TurnEventPage, TurnGateRef,
     TurnLifecycleEvent, TurnRunId, TurnRunState, TurnStatus,
     run_profile::{
         LoopSafeSummary, SystemInferenceError, SystemInferencePort, SystemInferenceRequest,
@@ -459,7 +459,7 @@ fn turn_run_state(
         model_usage: None,
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
-        gate_ref: Some(GateRef::new("gate:auth-required").unwrap()),
+        gate_ref: Some(TurnGateRef::new("gate:auth-required").unwrap()),
         blocked_activity_id: None,
         credential_requirements: Vec::new(),
         failure: None,

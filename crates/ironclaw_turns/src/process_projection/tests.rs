@@ -9,9 +9,9 @@ use std::sync::Arc;
 use super::*;
 use crate::TurnEventProjectionFromProcessJournal;
 use crate::{
-    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, CapabilityActivityId, EventCursor, GateRef,
+    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, CapabilityActivityId, EventCursor,
     IdempotencyKey, InMemoryRunProfileResolver, ReplyTargetBindingRef, RunProfileId,
-    RunProfileVersion, SourceBindingRef, TurnActor, TurnId, TurnRunProfile, TurnScope,
+    RunProfileVersion, SourceBindingRef, TurnActor, TurnGateRef, TurnId, TurnRunProfile, TurnScope,
     events::TurnEventProjectionSource,
 };
 
@@ -50,7 +50,7 @@ fn record_with_status(status: TurnStatus) -> TurnRunRecord {
         model_usage: None,
         checkpoint_id: None,
         gate_ref: GateKind::from_status(status)
-            .map(|_| GateRef::new("gate:process-journal").expect("gate")),
+            .map(|_| TurnGateRef::new("gate:process-journal").expect("gate")),
         blocked_activity_id: None,
         credential_requirements: Vec::new(),
         failure: None,
@@ -256,7 +256,7 @@ async fn resume_rejects_a_running_claim_without_clearing_its_lease() {
             scope: turn_scope.clone(),
             actor,
             run_id,
-            gate_resolution_ref: GateRef::new("gate:stale-resume").expect("gate"),
+            gate_resolution_ref: TurnGateRef::new("gate:stale-resume").expect("gate"),
             source_binding_ref: SourceBindingRef::new("source:stale-resume").expect("source"),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply:stale-resume")
                 .expect("reply"),
@@ -324,7 +324,7 @@ async fn foreign_actor_cannot_resume_or_cancel_and_leaves_process_unchanged() {
         .expect("claim")
         .pop()
         .expect("claimed");
-    let gate_ref = GateRef::new("gate:foreign-test").expect("gate");
+    let gate_ref = TurnGateRef::new("gate:foreign-test").expect("gate");
     store
         .suspend_process(SuspendProcessRequest {
             process_id: claim.state.process_id,
@@ -1099,7 +1099,7 @@ fn lifecycle_event_projects_to_process_journal_entry() {
         model_usage: None,
         received_at: Utc::now(),
         checkpoint_id: None,
-        gate_ref: Some(GateRef::new("gate:process-journal").expect("gate")),
+        gate_ref: Some(TurnGateRef::new("gate:process-journal").expect("gate")),
         blocked_activity_id: Some(CapabilityActivityId::new()),
         credential_requirements: Vec::new(),
         failure: None,
@@ -1318,7 +1318,7 @@ fn runner_outcomes_map_to_process_outcomes() {
         )
         .expect("state ref"),
         reason: BlockedReason::ExternalTool {
-            gate_ref: GateRef::new("gate:process-journal").expect("gate"),
+            gate_ref: TurnGateRef::new("gate:process-journal").expect("gate"),
         },
         blocked_activity_id: Some(CapabilityActivityId::new()),
     };

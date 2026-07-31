@@ -8,13 +8,13 @@ use crate::{
     PrepareOAuthFlowRequest, ProviderScope, TurnGateAuthFlowQuery, TurnRunRef,
 };
 use chrono::{Duration as ChronoDuration, Utc};
+use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
     ids::{InvocationId, SecretHandle},
     resource::ResourceScope,
 };
 use ironclaw_secrets::{SecretMaterial, SecretStorePort};
-use ironclaw_turns::{TurnRunId, TurnScope};
 use secrecy::SecretString;
 use tokio::sync::Mutex as AsyncMutex;
 

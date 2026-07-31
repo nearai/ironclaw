@@ -4097,7 +4097,7 @@ mod tests {
         let missing_invocation_id = InvocationId::parse(missing_resume_token.as_str())
             .expect("missing-target resume token carries invocation id");
         let missing_approval_request_id = {
-            let routing_ref = ironclaw_turns::GateRef::new(missing_gate_origin.as_str())
+            let routing_ref = ironclaw_turns::TurnGateRef::new(missing_gate_origin.as_str())
                 .expect("routing gate ref is valid");
             ironclaw_product::approval_request_id_from_gate_ref(&routing_ref)
                 .expect("read model recovers the approval request id from the routing ref")
@@ -4243,7 +4243,7 @@ mod tests {
         // durable approval record (correlation id) — see the missing-target
         // reconstruction above; confirm against the post-flip resume contract.
         let approval_request_id = {
-            let routing_ref = ironclaw_turns::GateRef::new(set_gate_origin.as_str())
+            let routing_ref = ironclaw_turns::TurnGateRef::new(set_gate_origin.as_str())
                 .expect("routing gate ref is valid");
             ironclaw_product::approval_request_id_from_gate_ref(&routing_ref)
                 .expect("read model recovers the approval request id from the routing ref")
@@ -4281,7 +4281,7 @@ mod tests {
             // The routing ref the loop carries is `gate:approval-{id}`; the product
             // read model recovers the approval id from it, agreeing with the id the
             // gate was raised under.
-            let routing_ref = ironclaw_turns::GateRef::new(set_gate_origin.as_str())
+            let routing_ref = ironclaw_turns::TurnGateRef::new(set_gate_origin.as_str())
                 .expect("routing gate ref is valid");
             let recovered_id = approval_request_id_from_gate_ref(&routing_ref)
                 .expect("read model recovers the approval request id from the routing ref");

@@ -303,7 +303,7 @@ mod tests {
         AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService,
         MessageContent,
     };
-    use ironclaw_turns::{GateRef, LoopResultRef, TurnRunId};
+    use ironclaw_turns::{LoopResultRef, TurnGateRef, TurnRunId};
 
     use crate::subagent::flavors::SubagentFlavorId;
 
@@ -496,7 +496,7 @@ mod tests {
                 result_ref: LoopResultRef::new("result:subagent.prompt").unwrap(),
                 handoff: None,
                 parent_run_context: context.clone(),
-                gate_ref: GateRef::new("gate:subagent-prompt-test").unwrap(),
+                gate_ref: TurnGateRef::new("gate:subagent-prompt-test").unwrap(),
             })
             .unwrap()
         });

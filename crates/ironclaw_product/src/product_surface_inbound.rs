@@ -11,7 +11,9 @@ use ironclaw_host_api::{
     product_surface::{ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode},
     turn::{TurnActor, TurnScope},
 };
-use ironclaw_turns::{CancelRunRequest, GateRef, IdempotencyKey, SanitizedCancelReason, TurnRunId};
+use ironclaw_turns::{
+    CancelRunRequest, IdempotencyKey, SanitizedCancelReason, TurnGateRef, TurnRunId,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -382,7 +384,7 @@ pub enum ProductInboundCommand {
         scope: TurnScope,
         actor: TurnActor,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         client_action_id: IdempotencyKey,
         resolution: ProductGateResolution,
     },
@@ -540,9 +542,9 @@ fn parse_run_id(value: Option<String>) -> Result<TurnRunId, ProductSurfaceError>
         .map_err(|_| validation_error("run_id", ProductSurfaceValidationCode::InvalidId))
 }
 
-fn parse_gate_ref(value: Option<String>) -> Result<GateRef, ProductSurfaceError> {
+fn parse_gate_ref(value: Option<String>) -> Result<TurnGateRef, ProductSurfaceError> {
     let value = required_text("gate_ref", value, GATE_REF_MAX_BYTES, TextMode::Token)?;
-    GateRef::new(value)
+    TurnGateRef::new(value)
         .map_err(|_| validation_error("gate_ref", ProductSurfaceValidationCode::InvalidId))
 }
 

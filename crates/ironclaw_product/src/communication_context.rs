@@ -5,16 +5,13 @@ use crate::{
     LifecycleProductService, LifecycleProductSurfaceContext, OutboundPreferencesProductService,
     RebornOutboundDeliveryTargetStatus,
 };
+use ironclaw_host_api::turn::{TurnActor, TurnScope};
 use ironclaw_host_api::{
     product_surface::ProductSurfaceCaller, state::InstallationState, surface::CapabilitySurfaceKind,
 };
-use ironclaw_turns::{
-    run_profile::{
-        CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
-        ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState,
-        DeliveryTargetSummary,
-    },
-    scope::{TurnActor, TurnScope},
+use ironclaw_turns::run_profile::{
+    CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
+    ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
 };
 use tokio::join;
 use tokio::time::timeout;
@@ -239,6 +236,7 @@ mod tests {
         RebornOutboundPreferencesResponse, RebornSetOutboundPreferencesRequest,
     };
     use async_trait::async_trait;
+    use ironclaw_host_api::turn::{TurnActor, TurnScope};
     use ironclaw_host_api::{
         ids::{AgentId, ProjectId, TenantId, UserId},
         product_surface::{
@@ -248,9 +246,8 @@ mod tests {
         state::InstallationState,
         surface::CapabilitySurfaceKind,
     };
-    use ironclaw_turns::{
-        run_profile::{CommunicationContextProvider, ConnectedChannelsState, DeliveryTargetState},
-        scope::{TurnActor, TurnScope},
+    use ironclaw_turns::run_profile::{
+        CommunicationContextProvider, ConnectedChannelsState, DeliveryTargetState,
     };
 
     use super::RuntimeCommunicationContextProvider;

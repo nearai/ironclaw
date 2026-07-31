@@ -59,7 +59,7 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_trust::EffectiveTrustClass;
 use ironclaw_turns::{
-    GateRef,
+    TurnGateRef,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, LoopCapabilityPort, LoopHostMilestoneSink,
         LoopRequest, LoopRunContext,
@@ -1259,7 +1259,10 @@ impl HostRuntimeCapabilityHarness {
         self.workspace_root.join(relative.trim_start_matches('/'))
     }
 
-    pub(crate) async fn approve_standalone_gate(&self, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub(crate) async fn approve_standalone_gate(
+        &self,
+        gate_ref: &TurnGateRef,
+    ) -> HarnessResult<()> {
         let approval_parts = self
             .approval_parts
             .as_ref()
@@ -1307,7 +1310,7 @@ impl HostRuntimeCapabilityHarness {
     /// persisted request to `Denied` (no lease issued) via `ApprovalResolver::deny`.
     /// The caller then resumes the run with `GateResumeDisposition::Denied` so the
     /// executor surfaces a non-retryable authorization failure to the model.
-    pub(crate) async fn deny_standalone_gate(&self, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub(crate) async fn deny_standalone_gate(&self, gate_ref: &TurnGateRef) -> HarnessResult<()> {
         let approval_parts = self
             .approval_parts
             .as_ref()
@@ -1514,7 +1517,7 @@ impl HostRuntimeCapabilityHarness {
     /// never drift from the live approve/deny path. Tests only.
     pub(crate) fn approval_request_scope_for_test(
         &self,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> HarnessResult<(ApprovalRequestId, ResourceScope)> {
         let request_id = approval_request_id_from_gate_ref(gate_ref)?;
         let scope = self
@@ -2160,7 +2163,7 @@ fn host_runtime_harness_error(error: impl std::fmt::Display) -> AgentLoopHostErr
     AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, error.to_string())
 }
 
-fn approval_request_id_from_gate_ref(gate_ref: &GateRef) -> HarnessResult<ApprovalRequestId> {
+fn approval_request_id_from_gate_ref(gate_ref: &TurnGateRef) -> HarnessResult<ApprovalRequestId> {
     const APPROVAL_GATE_PREFIX: &str = "gate:approval-";
     let value = gate_ref
         .as_str()

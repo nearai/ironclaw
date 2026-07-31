@@ -51,9 +51,10 @@ use ironclaw_threads::{
     ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
+    AcceptedMessageRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
     ResumeTurnRequest, RetryTurnRequest, SanitizedCancelReason, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
+    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnGateRef, TurnRunId, TurnScope,
+    TurnStatus,
 };
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -1243,8 +1244,8 @@ enum GateResolutionRoute {
 impl GateResolutionRoute {
     fn from_run_state(
         status: TurnStatus,
-        parked_gate_ref: Option<&GateRef>,
-        requested_gate_ref: &GateRef,
+        parked_gate_ref: Option<&TurnGateRef>,
+        requested_gate_ref: &TurnGateRef,
         resolution: &ProductGateResolution,
     ) -> Result<Self, ProductSurfaceError> {
         match status {
@@ -1274,7 +1275,7 @@ impl GateResolutionRoute {
         }
     }
 
-    fn from_gate_shape(gate_ref: &GateRef, resolution: &ProductGateResolution) -> Self {
+    fn from_gate_shape(gate_ref: &TurnGateRef, resolution: &ProductGateResolution) -> Self {
         match (
             is_approval_gate_ref(gate_ref.as_str()),
             is_auth_gate_ref(gate_ref.as_str()),
@@ -6094,7 +6095,7 @@ where
         scope: TurnScope,
         actor: TurnActor,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         client_action_id: IdempotencyKey,
         resolution: ProductGateResolution,
     ) -> Result<RebornResolveGateResponse, ProductSurfaceError> {
@@ -6136,7 +6137,7 @@ where
         scope: &TurnScope,
         actor: &TurnActor,
         run_id: TurnRunId,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
         resolution: &ProductGateResolution,
     ) -> Result<GateResolutionRoute, ProductSurfaceError> {
         let state = match self
@@ -6173,7 +6174,7 @@ where
         scope: TurnScope,
         actor: TurnActor,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         client_action_id: IdempotencyKey,
         resolution: ProductGateResolution,
     ) -> Result<RebornResolveGateResponse, ProductSurfaceError> {
@@ -6216,7 +6217,7 @@ where
         scope: TurnScope,
         actor: TurnActor,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         client_action_id: IdempotencyKey,
         resolution: ProductGateResolution,
     ) -> Result<RebornResolveGateResponse, ProductSurfaceError> {
@@ -6391,8 +6392,8 @@ fn map_project_service_error(error: ProjectServiceError) -> ProductSurfaceError 
 }
 
 fn validate_current_gate_ref(
-    parked_gate_ref: Option<&GateRef>,
-    requested_gate_ref: &GateRef,
+    parked_gate_ref: Option<&TurnGateRef>,
+    requested_gate_ref: &TurnGateRef,
     kind: ProductSurfaceErrorKind,
 ) -> Result<(), ProductSurfaceError> {
     match parked_gate_ref {
@@ -6423,7 +6424,7 @@ async fn assert_generic_run_parked_on_gate(
     turn_coordinator: &dyn TurnCoordinator,
     scope: &TurnScope,
     run_id: TurnRunId,
-    expected_gate_ref: &GateRef,
+    expected_gate_ref: &TurnGateRef,
 ) -> Result<(), ProductSurfaceError> {
     let state = turn_coordinator
         .get_run_state(GetRunStateRequest {
@@ -6838,7 +6839,7 @@ fn webui_retry_binding_id(
     )
 }
 
-fn gate_ref_string(gate_ref: &ironclaw_turns::GateRef) -> String {
+fn gate_ref_string(gate_ref: &ironclaw_turns::TurnGateRef) -> String {
     gate_ref.as_str().to_string()
 }
 

@@ -11,7 +11,7 @@ use crate::{
     OAuthProviderRefreshRequest, SecretCleanupReport, SecretCleanupRequest, SecretSubmitRequest,
     SecretSubmitResult,
 };
-use ironclaw_turns::TurnRunId;
+use ironclaw_host_api::turn::TurnRunId;
 
 struct SharedAuthTestDouble;
 
@@ -762,7 +762,7 @@ async fn create_test_flow(
 #[tokio::test]
 async fn cancel_blocked_auth_flow_cancels_non_terminal_flow() {
     use ironclaw_host_api::ids::UserId;
-    use ironclaw_turns::TurnScope;
+    use ironclaw_host_api::turn::TurnScope;
 
     let auth_svc = Arc::new(InMemoryAuthProductServices::new());
     let services = Arc::new(make_auth_services_with_flow_source(Arc::clone(&auth_svc)));
@@ -812,7 +812,7 @@ async fn cancel_blocked_auth_flow_cancels_non_terminal_flow() {
 #[tokio::test]
 async fn cancel_blocked_auth_flow_is_noop_when_flow_absent() {
     use ironclaw_host_api::ids::UserId;
-    use ironclaw_turns::{TurnRunId, TurnScope};
+    use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 
     let auth_svc = Arc::new(InMemoryAuthProductServices::new());
     let services = Arc::new(make_auth_services_with_flow_source(Arc::clone(&auth_svc)));
@@ -857,7 +857,7 @@ async fn cancel_blocked_auth_flow_treats_terminal_race_as_ok() {
         OAuthCallbackFailureInput, OAuthCallbackInput, Timestamp,
     };
     use ironclaw_host_api::ids::UserId;
-    use ironclaw_turns::TurnScope;
+    use ironclaw_host_api::turn::TurnScope;
 
     /// A `AuthFlowManager` whose `cancel_flow` returns a caller-supplied error
     /// while all other methods forward to the real in-memory store.  Used to
@@ -1068,7 +1068,7 @@ async fn cancel_blocked_auth_flow_treats_terminal_race_as_ok() {
 #[tokio::test]
 async fn cancel_blocked_auth_flow_fails_closed_without_flow_record_source() {
     use ironclaw_host_api::ids::UserId;
-    use ironclaw_turns::{TurnRunId, TurnScope};
+    use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 
     let double = Arc::new(SharedAuthTestDouble);
     // Build WITHOUT `.with_flow_record_source` — `flow_record_source` is None.
@@ -1114,7 +1114,7 @@ async fn cancel_blocked_auth_flow_fails_closed_without_flow_record_source() {
 #[tokio::test]
 async fn cancel_blocked_auth_flow_rejects_invalid_gate_ref() {
     use ironclaw_host_api::ids::UserId;
-    use ironclaw_turns::{TurnRunId, TurnScope};
+    use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 
     let auth_svc = Arc::new(InMemoryAuthProductServices::new());
     let services = Arc::new(make_auth_services_with_flow_source(Arc::clone(&auth_svc)));
@@ -1159,7 +1159,7 @@ async fn cancel_blocked_auth_flow_rejects_invalid_gate_ref() {
 #[tokio::test]
 async fn cancel_blocked_auth_flow_propagates_flow_source_error() {
     use ironclaw_host_api::ids::UserId;
-    use ironclaw_turns::{TurnRunId, TurnScope};
+    use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 
     /// A flow record source that always errors out.
     struct AlwaysFailingFlowSource;

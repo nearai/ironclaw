@@ -16,12 +16,12 @@
 - Adapter-facing coordinator: `TurnCoordinator`/`DefaultTurnCoordinator`, `TurnAdmissionPolicy`, run-wake notifier ports (`coordinator`); request/response surface `SubmitTurnRequest`/`ResumeTurnRequest`/`CancelRunRequest`/`GetRunStateRequest` (`request`) and `SubmitTurnResponse`/`ResumeTurnResponse`/`CancelRunResponse`/`ThreadBusy` (`response`).
 - Runner-facing claim and outcome projection types (`runner`); lifecycle
   mutation ports are owned by `ironclaw_processes`.
-- Canonical typed IDs and references: `TurnId`, `TurnRunId`, `TurnRunnerId`, `RunProfileId`/`RunProfileVersion`, `IdempotencyKey`, `TurnLeaseToken`, gate/message/result/binding refs (`ids`); turn scope/actor (`scope`).
+- **Not** the turn vocabulary. `TurnId`/`TurnRunId`/`TurnRunnerId`/`RunProfileId`/`RunProfileVersion`/`IdempotencyKey`/`TurnLeaseToken`, the gate/message/result/binding refs, `TurnScope`/`TurnActor`, `TurnStatus`+`GateKind`+`BlockedReason`, `EventCursor`, and `RunOriginAdapter` are all owned by `ironclaw_host_api::turn`. This crate re-exports them from its prelude for its own consumers' convenience — adding a *new* turn type means adding it there, not here.
 - Admission control: limits, buckets, capacity denials, providers (`admission`).
 - Run-profile contracts: `AgentLoopDriver` + descriptors/run/resume requests, run-profile resolution/registry/resolver, prompt/context/model/capability profile ids, resource-budget tiers, scheduling/concurrency classes, redacted provenance (`run_profile`, which has its own `CLAUDE.md`).
 - Loop-exit protocol: `LoopExit`/`LoopCompleted`/`LoopFailed`/`LoopBlocked`/`LoopCancelled`, evidence ports, applier, mapping, validation (`loop_exit`).
 - Lifecycle events + projection: `TurnLifecycleEvent`, `TurnEventKind`, `TurnEventSink`, projection service/cursor/source (`events`).
-- Status/error vocabulary: `TurnStatus`/`TurnRunState`/`TurnError`/`TurnErrorCategory`, admission rejections, sanitized failure/cancel reasons (`status`).
+- Kernel state and error surface: `TurnRunState`, `TurnError`/`TurnErrorCategory`/`TurnCapacityResource`, `TurnRunProfile`, admission rejections, and the `is_recoverability_critical` write-behind durability boundary (`status`). The `TurnStatus` values those types carry come from `ironclaw_host_api::turn`.
 - Agent-turn projection over process submission, journal, control, and tree
   ports (`process_projection`); `AgentTurnRuntimePort` is a coordination/query
   projection implemented by `AgentTurnProcessRuntime`, not a persistence

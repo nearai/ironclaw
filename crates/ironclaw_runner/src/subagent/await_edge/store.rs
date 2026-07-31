@@ -155,7 +155,7 @@ impl AwaitEdgeStore {
         &self,
         scope: &TurnScope,
         parent_run_id: TurnRunId,
-        gate_ref: &ironclaw_turns::GateRef,
+        gate_ref: &ironclaw_turns::TurnGateRef,
     ) -> Result<Vec<(TurnRunId, AwaitEdge)>, AwaitEdgeStoreError> {
         self.dependencies
             .query_process_dependencies(Self::query(
@@ -264,7 +264,7 @@ impl crate::loop_exit_applier::AwaitDependentRunEvidenceStore for AwaitEdgeStore
         run_id: TurnRunId,
         gate_ref: &ironclaw_turns::LoopGateRef,
     ) -> Result<bool, ironclaw_turns::TurnError> {
-        let gate_ref = ironclaw_turns::GateRef::new(gate_ref.as_str()).map_err(|reason| {
+        let gate_ref = ironclaw_turns::TurnGateRef::new(gate_ref.as_str()).map_err(|reason| {
             ironclaw_turns::TurnError::InvalidRequest {
                 reason: format!("awaited child gate evidence has invalid gate ref: {reason}"),
             }
@@ -315,7 +315,7 @@ mod tests {
     use ironclaw_loop_host::{AwaitedChildSetRecord, SpawnSubagentMode, SubagentKindId};
     use ironclaw_processes::{ProcessDependencyRecord, ProcessDependencyState};
     use ironclaw_turns::{
-        GateRef, LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnActor, TurnRunId,
+        LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnActor, TurnGateRef, TurnRunId,
         TurnScope,
     };
 
@@ -359,7 +359,7 @@ mod tests {
                 parent_thread_id,
                 parent_run_context,
                 tree_root_run_id: parent_run_id,
-                gate_ref: GateRef::new("gate:store-transition").expect("gate"),
+                gate_ref: TurnGateRef::new("gate:store-transition").expect("gate"),
                 source_binding_ref: SourceBindingRef::new("source:store-transition")
                     .expect("source"),
                 reply_target_binding_ref: ReplyTargetBindingRef::new("reply:store-transition")

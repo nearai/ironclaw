@@ -65,11 +65,12 @@ use ironclaw_threads::{
     ThreadMessageRecord, ThreadScope,
 };
 use ironclaw_turns::{
-    AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort, CancelRunRequest, GateRef,
+    AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort, CancelRunRequest,
     GetLoopCheckpointRequest, IdempotencyKey, LoopBlockedKind, LoopCheckpointKind,
     LoopCheckpointStore, ProcessLoopCheckpointStore, ReplyTargetBindingRef, ResumeTurnRequest,
     RetryTurnRequest, RetryTurnResponse, SanitizedCancelReason, SourceBindingRef, TurnActor,
-    TurnCoordinator, TurnError, TurnRunId, TurnRunRecord, TurnRunState, TurnScope, TurnStatus,
+    TurnCoordinator, TurnError, TurnGateRef, TurnRunId, TurnRunRecord, TurnRunState, TurnScope,
+    TurnStatus,
     run_profile::{
         AgentLoopHostError, CapabilityCallCandidate, CapabilityInputRef, CapabilitySurfaceVersion,
         LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopRequest,
@@ -1079,7 +1080,7 @@ impl RebornBinaryE2EHarness {
     pub async fn approve_and_resume_standalone_gate(
         &self,
         run_id: TurnRunId,
-    ) -> HarnessResult<GateRef> {
+    ) -> HarnessResult<TurnGateRef> {
         let blocked = self
             .run_state(run_id)
             .await?
@@ -1110,7 +1111,7 @@ impl RebornBinaryE2EHarness {
     pub async fn resume_with_gate(
         &self,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
     ) -> HarnessResult<()> {
         self.resume_with_gate_as(
             self.turn_scope.clone(),
@@ -1127,7 +1128,7 @@ impl RebornBinaryE2EHarness {
         scope: TurnScope,
         actor: TurnActor,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         idempotency_key: impl Into<String>,
     ) -> HarnessResult<()> {
         let response = self
@@ -1478,7 +1479,7 @@ impl LoopExitEvidencePort for HarnessLoopExitEvidencePort {
         if !matches!(
             request.blocked.kind,
             LoopBlockedKind::Approval | LoopBlockedKind::AwaitDependentRun
-        ) || GateRef::new(request.blocked.gate_ref.as_str()).is_err()
+        ) || TurnGateRef::new(request.blocked.gate_ref.as_str()).is_err()
         {
             return Ok(false);
         }

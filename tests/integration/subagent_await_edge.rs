@@ -17,7 +17,7 @@ use ironclaw_processes::{
 };
 use ironclaw_runner::subagent::await_edge::{EdgeTerminalKind, store::AwaitEdgeStore};
 use ironclaw_turns::{
-    GateRef, LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnRunId, TurnScope,
+    LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnGateRef, TurnRunId, TurnScope,
 };
 
 #[tokio::test]
@@ -43,7 +43,7 @@ async fn runner_await_edge_is_a_projection_over_process_dependencies() {
         as Arc<dyn ProcessDependencyPort<Error = ironclaw_processes::ProcessJournalStoreError>>;
     let store = AwaitEdgeStore::new(dependencies);
     let dependency_metadata = serde_json::to_value(AwaitedChildSetRecord {
-        gate_ref: GateRef::new("gate:child").expect("gate"),
+        gate_ref: TurnGateRef::new("gate:child").expect("gate"),
         parent_run_context: parent_context,
         tree_root_run_id: parent_run_id,
         child_scope: child_scope.clone(),

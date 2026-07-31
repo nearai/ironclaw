@@ -38,7 +38,7 @@ use ironclaw_threads::{
     UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, BlockedReason, DefaultTurnCoordinator, GateRef, IdempotencyKey,
+    AcceptedMessageRef, BlockedReason, DefaultTurnCoordinator, IdempotencyKey,
     LoopCheckpointStateRef, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
     SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
     TurnErrorCategory, claimed_turn_run_from_process_claim, runner::ClaimedTurnRun,
@@ -1674,7 +1674,7 @@ where
     ) -> Result<ClaimedTurnRun, OperationFailure> {
         let run_id = claimed.state.run_id;
         let is_auth = use_auth_gate;
-        let gate_ref = GateRef::new(format!("stress-gate:{run_id}"))
+        let gate_ref = TurnGateRef::new(format!("stress-gate:{run_id}"))
             .map_err(|error| OperationFailure::invalid_request("block_run", error))?;
         let state_ref = LoopCheckpointStateRef::new(format!("checkpoint:stress-block-{run_id}"))
             .map_err(|error| OperationFailure::invalid_request("block_run", error))?;

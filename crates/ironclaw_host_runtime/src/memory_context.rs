@@ -12,8 +12,8 @@
 //! shape model-visible content — the host is the sole constructor of admitted
 //! loop-context snippets.
 //!
-//! [`TurnScope`]: ironclaw_turns::scope::TurnScope
-//! [`TurnActor`]: ironclaw_turns::scope::TurnActor
+//! [`TurnScope`]: ironclaw_host_api::turn::TurnScope
+//! [`TurnActor`]: ironclaw_host_api::turn::TurnActor
 
 use std::sync::Arc;
 

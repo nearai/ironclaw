@@ -1,5 +1,5 @@
 use ironclaw_turns::{
-    GateRef, GetRunStateRequest, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope,
+    GetRunStateRequest, TurnActor, TurnCoordinator, TurnError, TurnGateRef, TurnRunId, TurnScope,
     TurnStatus,
 };
 
@@ -27,7 +27,7 @@ pub(crate) async fn blocked_gate_state(
     scope: &TurnScope,
     actor: &TurnActor,
     run_id: TurnRunId,
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
     blocked_status: TurnStatus,
 ) -> Result<BlockedGateState, BlockedGateStateError> {
     let state = turn_coordinator

@@ -49,7 +49,7 @@ async fn build_restarted_harness(
 ) -> (
     reborn_support::builder::RebornIntegrationHarness,
     TurnRunId,
-    ironclaw_turns::GateRef,
+    ironclaw_turns::TurnGateRef,
 ) {
     let group = RebornIntegrationGroup::builder()
         .storage(StorageMode::LibSql)

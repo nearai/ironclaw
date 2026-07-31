@@ -47,7 +47,7 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::BudgetGateId;
-use ironclaw_turns::GateRef;
+use ironclaw_turns::TurnGateRef;
 
 fn standalone_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
@@ -91,7 +91,7 @@ fn assert_budget_blocked_outcome(outcome: RebornTurnDriveOutcome) -> BudgetGateI
 /// Parse the `gate:budget-<uuid>` ref a paused budget run surfaces back into
 /// the typed [`BudgetGateId`], so the id can be compared against the
 /// `GateOpened` broadcast event without reading the gate store.
-fn budget_gate_id_from_ref(gate_ref: &GateRef) -> BudgetGateId {
+fn budget_gate_id_from_ref(gate_ref: &TurnGateRef) -> BudgetGateId {
     let raw_id = gate_ref
         .as_str()
         .strip_prefix("gate:budget-")
