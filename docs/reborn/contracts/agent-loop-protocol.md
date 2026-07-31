@@ -169,7 +169,11 @@ Those blocked states are host-managed transitions driven by approval or auth ser
   active loop contract surface as `invalid_output`, not `unavailable`. The
   agent loop owns recovery: it retries the model call with a model-visible
   repair hint in the prompt bundle, and exhausted retries fail the run as
-  `invalid_model_output`.
+  `invalid_model_output`. Provider `Json`, `InvalidResponse`, and
+  `EmptyResponse` failures normalize at this boundary. A stream that ended
+  before its provider terminal frame is instead `StreamInterrupted` and may
+  use availability recovery; opaque `Http` or `Io` errors may do so only when
+  their concrete status or error kind carries transient connection evidence.
 - Recoverable `context_overflow`, `content_filtered`, and `invalid_output`
   failures may receive one additional observation-assisted model attempt after
   their ordinary retry budget. The observation is loop-owned, typed, and
@@ -226,7 +230,29 @@ one-shot budget or grant extra no-progress turns. Legacy checkpoints deserialize
 an empty warning state, and unsupported warning schema versions fail before the
 model boundary.
 
-This keeps projections, debugging, and compaction grounded in typed state rather than inferences from transcript prose alone.
+Host-managed compaction is a typed retention boundary. It validates the caller
+scope, cut point, stable message kinds, byte/token limits, cancellation, and
+summary-replacement range before inference or persistence. Raw content remains
+subject to fail-closed prompt-injection scanning. Every leak match action
+(`Block`, `Redact`, or `Warn`) is deterministically replaced in place so safe
+surrounding context can continue through compaction; transformed input and
+output are rescanned before inference or persistence. Invalid match ranges,
+matches that cross message-body or serialized structural boundaries, injection
+introduced by transformation, or any residual leak match fail closed.
+Private-key patterns cover the complete bounded block (or, within one message,
+the bounded remainder when the matching end sentinel is missing or mislabeled),
+never only the begin sentinel.
+
+Successful persistence returns an additive `redacted_leak_count`. The field is
+defaulted and omitted at zero so legacy checkpoint and wire shapes remain
+compatible. A nonzero count emits one typed, safe
+`CompactionLeakDetected` progress/milestone per successful compaction response;
+the payload contains only the task id, fixed safe reason, and aggregate count,
+never match names, ranges, previews, or values. Progress publication remains a
+best-effort operator surface rather than a durable exactly-once event log.
+
+This keeps projections, debugging, and compaction grounded in typed state
+rather than inferences from transcript prose alone.
 
 ---
 

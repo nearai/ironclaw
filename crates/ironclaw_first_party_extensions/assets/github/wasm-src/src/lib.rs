@@ -13,6 +13,7 @@ wit_bindgen::generate!({
 mod api;
 mod dispatch;
 mod request;
+mod response;
 mod schema;
 mod types;
 mod validation;
@@ -562,6 +563,115 @@ mod tests {
         assert_eq!(
             requests[0].path,
             "/repos/nearai/ironclaw/pulls?state=all&per_page=12&head=henry%3Afix&base=main&sort=updated&direction=asc&page=101"
+        );
+    }
+
+    #[test]
+    fn list_pull_requests_compacts_realistic_large_provider_response() {
+        let large_body = "x".repeat(32 * 1024);
+        let provider_items = (0..100)
+            .map(|index| {
+                json!({
+                    "id": 10_000 + index,
+                    "node_id": format!("PR_{index}"),
+                    "number": 5_000 + index,
+                    "state": "open",
+                    "locked": false,
+                    "title": format!("Prioritize pull request {index}"),
+                    "body": large_body,
+                    "html_url": format!("https://github.com/nearai/ironclaw/pull/{}", 5_000 + index),
+                    "user": {
+                        "login": format!("author-{index}"),
+                        "id": index,
+                        "avatar_url": "https://avatars.githubusercontent.com/u/1",
+                        "site_admin": false
+                    },
+                    "labels": [{
+                        "id": index,
+                        "name": "priority/high",
+                        "color": "ff0000",
+                        "description": large_body
+                    }],
+                    "assignees": [{
+                        "login": "review-owner",
+                        "avatar_url": "https://avatars.githubusercontent.com/u/2"
+                    }],
+                    "requested_reviewers": [{
+                        "login": "requested-reviewer",
+                        "avatar_url": "https://avatars.githubusercontent.com/u/3"
+                    }],
+                    "requested_teams": [{"slug": "maintainers", "description": large_body}],
+                    "milestone": {"title": "v1.0", "description": large_body},
+                    "draft": index % 2 == 0,
+                    "created_at": "2026-07-01T00:00:00Z",
+                    "updated_at": "2026-07-31T00:00:00Z",
+                    "closed_at": null,
+                    "merged_at": null,
+                    "head": {
+                        "ref": format!("feature/{index}"),
+                        "sha": format!("{index:040x}"),
+                        "repo": {"full_name": "nearai/ironclaw", "description": large_body}
+                    },
+                    "base": {
+                        "ref": "main",
+                        "sha": "1111111111111111111111111111111111111111",
+                        "repo": {"full_name": "nearai/ironclaw", "description": large_body}
+                    },
+                    "_links": {"self": {"href": "https://api.github.com/large"}},
+                    "author_association": "CONTRIBUTOR"
+                })
+            })
+            .collect::<Vec<_>>();
+        let provider_output =
+            serde_json::to_string(&provider_items).expect("provider fixture JSON");
+        assert!(
+            provider_output.len() > 10 * 1024 * 1024,
+            "fixture should reproduce a multi-megabyte provider response"
+        );
+        test_support::set_response(Ok(provider_output));
+
+        let output = execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","page":2,"limit":100}"#,
+            Some(r#"{"capability_id":"github.list_pull_requests"}"#),
+        )
+        .expect("github.list_pull_requests should compact the provider response");
+
+        assert!(
+            output.len() < 100 * 1024,
+            "100 compact pull requests should stay model-useful, got {} bytes",
+            output.len()
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("compact list output should be JSON");
+        let items = parsed.as_array().expect("list shape remains an array");
+        assert_eq!(items.len(), 100, "pagination item count must be preserved");
+        assert_eq!(items[0]["number"], 5_000);
+        assert_eq!(items[0]["title"], "Prioritize pull request 0");
+        assert_eq!(items[0]["user"], json!({"login": "author-0"}));
+        assert_eq!(items[0]["labels"], json!([{"name": "priority/high"}]));
+        assert_eq!(items[0]["assignees"], json!([{"login": "review-owner"}]));
+        assert_eq!(
+            items[0]["requested_reviewers"],
+            json!([{"login": "requested-reviewer"}])
+        );
+        assert_eq!(
+            items[0]["requested_teams"],
+            json!([{"slug": "maintainers"}])
+        );
+        assert_eq!(items[0]["milestone"], json!({"title": "v1.0"}));
+        assert_eq!(
+            items[0]["head"],
+            json!({"ref": "feature/0", "sha": "0000000000000000000000000000000000000000"})
+        );
+        assert!(
+            items[0].get("body").is_none()
+                && items[0]["head"].get("repo").is_none()
+                && items[0].get("_links").is_none(),
+            "large detail must remain available only through github.get_pull_request"
+        );
+        assert_eq!(
+            test_support::requests()[0].path,
+            "/repos/nearai/ironclaw/pulls?state=open&per_page=100&page=2"
         );
     }
 
@@ -1539,6 +1649,101 @@ mod tests {
         assert_eq!(
             requests[0].path,
             "/search/issues?q=repo%3Anearai%2Fironclaw%20is%3Apr&per_page=5&sort=reactions-heart&order=desc"
+        );
+    }
+
+    #[test]
+    fn search_issues_pull_requests_compacts_items_and_preserves_envelope_and_errors() {
+        let large_body = "x".repeat(32 * 1024);
+        let provider_items = (0..100)
+            .map(|index| {
+                json!({
+                    "id": 20_000 + index,
+                    "node_id": format!("I_{index}"),
+                    "number": 6_000 + index,
+                    "title": format!("Search result {index}"),
+                    "body": large_body,
+                    "state": "open",
+                    "state_reason": null,
+                    "locked": false,
+                    "draft": index % 2 == 0,
+                    "html_url": format!("https://github.com/nearai/ironclaw/pull/{}", 6_000 + index),
+                    "repository_url": "https://api.github.com/repos/nearai/ironclaw",
+                    "user": {"login": format!("author-{index}"), "avatar_url": "https://example.test/avatar"},
+                    "labels": [{"name": "bug", "description": large_body}],
+                    "assignees": [{"login": "owner", "avatar_url": "https://example.test/avatar"}],
+                    "milestone": {"title": "next", "description": large_body},
+                    "comments": 17,
+                    "created_at": "2026-07-01T00:00:00Z",
+                    "updated_at": "2026-07-31T00:00:00Z",
+                    "closed_at": null,
+                    "author_association": "MEMBER",
+                    "pull_request": {
+                        "url": format!("https://api.github.com/repos/nearai/ironclaw/pulls/{}", 6_000 + index),
+                        "html_url": format!("https://github.com/nearai/ironclaw/pull/{}", 6_000 + index),
+                        "diff_url": "https://example.test/large.diff",
+                        "patch_url": "https://example.test/large.patch"
+                    },
+                    "reactions": {"total_count": 999, "url": "https://api.github.com/large"},
+                    "performed_via_github_app": {"description": large_body},
+                    "score": 1.0
+                })
+            })
+            .collect::<Vec<_>>();
+        let provider_output = json!({
+            "total_count": 12_345,
+            "incomplete_results": true,
+            "items": provider_items
+        })
+        .to_string();
+        assert!(provider_output.len() > 6 * 1024 * 1024);
+        test_support::set_response(Ok(provider_output));
+
+        let output = execute_inner(
+            r#"{"repo":"nearai/ironclaw","type":"pr","page":4,"limit":100}"#,
+            Some(r#"{"capability_id":"github.search_issues_pull_requests"}"#),
+        )
+        .expect("github.search_issues_pull_requests should compact the provider response");
+
+        assert!(
+            output.len() < 100 * 1024,
+            "100 compact search results should stay model-useful, got {} bytes",
+            output.len()
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("compact search output should be JSON");
+        assert_eq!(parsed["total_count"], 12_345);
+        assert_eq!(parsed["incomplete_results"], true);
+        assert_eq!(parsed["items"].as_array().map(Vec::len), Some(100));
+        assert_eq!(parsed["items"][0]["user"], json!({"login": "author-0"}));
+        assert_eq!(parsed["items"][0]["labels"], json!([{"name": "bug"}]));
+        assert_eq!(
+            parsed["items"][0]["pull_request"],
+            json!({
+                "url": "https://api.github.com/repos/nearai/ironclaw/pulls/6000",
+                "html_url": "https://github.com/nearai/ironclaw/pull/6000"
+            })
+        );
+        assert!(
+            parsed["items"][0].get("body").is_none()
+                && parsed["items"][0].get("reactions").is_none()
+                && parsed["items"][0].get("performed_via_github_app").is_none(),
+            "large detail must remain available through github.get_issue or github.get_pull_request"
+        );
+        assert_eq!(
+            test_support::requests()[0].path,
+            "/search/issues?q=repo%3Anearai%2Fironclaw%20is%3Apr&per_page=100&page=4"
+        );
+
+        test_support::set_response(Err("github_api_error_status_503".to_string()));
+        assert_eq!(
+            execute_inner(
+                r#"{"repo":"nearai/ironclaw","type":"pr"}"#,
+                Some(r#"{"capability_id":"github.search_issues_pull_requests"}"#),
+            )
+            .unwrap_err(),
+            "github_api_error_status_503",
+            "provider errors must pass through the compacting response path"
         );
     }
 

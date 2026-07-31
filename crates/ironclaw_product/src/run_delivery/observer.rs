@@ -1477,3 +1477,21 @@ pub(crate) fn envelope_is_direct_chat(envelope: &ProductInboundEnvelope) -> bool
 fn auth_setup_link_is_private(envelope: &ProductInboundEnvelope) -> bool {
     envelope_is_direct_chat(envelope)
 }
+
+#[cfg(test)]
+mod delivery_claim_tests {
+    use super::{DeliveryClaim, DeliveryRunLedger};
+    use ironclaw_turns::TurnRunId;
+
+    #[test]
+    fn delivery_run_ledger_distinguishes_active_and_delivered_claims() {
+        let mut ledger = DeliveryRunLedger::default();
+        let run_id = TurnRunId::new();
+
+        assert_eq!(ledger.try_claim(run_id), DeliveryClaim::Claimed);
+        assert_eq!(ledger.try_claim(run_id), DeliveryClaim::AlreadyActive);
+
+        ledger.record_delivered(run_id);
+        assert_eq!(ledger.try_claim(run_id), DeliveryClaim::AlreadyDelivered);
+    }
+}

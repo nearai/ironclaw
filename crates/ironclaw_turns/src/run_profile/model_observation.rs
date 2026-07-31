@@ -134,7 +134,8 @@ pub enum ToolObservationDetail {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         next_offset: Option<u64>,
         /// Element count when the full result is a top-level JSON array.
-        /// Attached only to truncated previews, so the model cannot misread
+        /// Attached only when a continuation offset exists, including when an
+        /// unsafe truncated preview is suppressed, so the model cannot misread
         /// a byte-sliced array as the complete result.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         item_count: Option<u64>,
@@ -163,7 +164,6 @@ impl ToolObservationDetail {
             }
             Self::ResultReference {
                 result_ref,
-                preview,
                 next_offset,
                 item_count,
                 ..
@@ -181,10 +181,8 @@ impl ToolObservationDetail {
                     "model observation result ref",
                     MODEL_OBSERVATION_TEXT_MAX_BYTES,
                 )?;
-                if item_count.is_some() && (preview.is_none() || next_offset.is_none()) {
-                    return Err(
-                        "model observation item_count requires preview and next_offset".to_string(),
-                    );
+                if item_count.is_some() && next_offset.is_none() {
+                    return Err("model observation item_count requires next_offset".to_string());
                 }
                 Ok(())
             }
@@ -485,12 +483,11 @@ mod tests {
         assert_eq!(value["trust"], "untrusted_tool_output");
     }
 
-    /// `item_count` is only meaningful alongside a truncated preview; a
-    /// `ResultReference` carrying `item_count` without both `preview` and
-    /// `next_offset` must fail validation.
+    /// `item_count` is meaningful for a truncated result even when its unsafe
+    /// preview is suppressed, but it must still carry a continuation offset.
     #[test]
-    fn result_reference_rejects_item_count_without_preview_and_next_offset() {
-        let observation = ModelVisibleToolObservation {
+    fn result_reference_allows_item_count_without_preview() {
+        let metadata_only = ModelVisibleToolObservation {
             schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
             status: ToolObservationStatus::Success,
             summary: "Tool completed.".to_string(),
@@ -498,8 +495,8 @@ mod tests {
                 result_ref: "result:item-count-without-preview".to_string(),
                 byte_len: 4096,
                 preview: None,
-                total_bytes: None,
-                next_offset: None,
+                total_bytes: Some(4096),
+                next_offset: Some(2048),
                 item_count: Some(600),
             },
             artifacts: Vec::new(),
@@ -507,9 +504,24 @@ mod tests {
             trust: ObservationTrust::UntrustedToolOutput,
         };
 
-        observation
+        metadata_only
             .validate()
-            .expect_err("item_count without preview/next_offset must be rejected");
+            .expect("suppressed preview may retain item_count with next_offset");
+
+        let missing_offset = ModelVisibleToolObservation {
+            detail: ToolObservationDetail::ResultReference {
+                result_ref: "result:item-count-without-offset".to_string(),
+                byte_len: 4096,
+                preview: None,
+                total_bytes: Some(4096),
+                next_offset: None,
+                item_count: Some(600),
+            },
+            ..metadata_only
+        };
+        missing_offset
+            .validate()
+            .expect_err("item_count without next_offset must be rejected");
     }
 
     #[test]

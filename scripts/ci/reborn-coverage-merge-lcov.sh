@@ -10,10 +10,10 @@
 # appear in more than one lane's tracefile with different per-line hit counts
 # (each lane only exercised its own subset of test binaries against that
 # shared file). A naive concatenation would leave duplicate `SF:` blocks for
-# that file instead of one true picture of "how many of the 5 lanes hit this
-# line" — so this script sums DA: hit counts per (file, line) across all
-# inputs and recomputes LF/LH from the merged counts, rather than trusting any
-# single lane's LF/LH.
+# that file instead of one true picture of "how many lanes hit this line or
+# branch" — so this script sums DA: hit counts per (file, line) and BRDA:
+# counts per (file, line, block, branch) across all inputs. LF/LH and BRF/BRH
+# are recomputed from the merged counts rather than trusting any one lane.
 #
 # Deliberately a small Python merger, not the `lcov` CLI (`lcov -a ... -o`):
 # avoids an extra apt-get dependency in the coverage-report job (see
@@ -47,8 +47,9 @@ import sys
 output_path = sys.argv[1]
 input_paths = sys.argv[2:]
 
-# filename -> { line_number: hit_count }
-files: dict[str, dict[int, int]] = {}
+# filename -> {"lines": {line_number: hit_count},
+#              "branches": {(line, block, branch): hit_count}}
+files: dict[str, dict[str, dict]] = {}
 
 # Only source files under a crates/ironclaw_* directory are kept — this is
 # the "all 71 crates" scope for the Reborn integration-tier coverage report,
@@ -67,21 +68,25 @@ for input_path in input_paths:
                 current_file = line[len("SF:"):]
                 keep_current = bool(crate_re.search(current_file))
                 if keep_current:
-                    files.setdefault(current_file, {})
+                    files.setdefault(current_file, {"lines": {}, "branches": {}})
             elif line.startswith("DA:") and keep_current and current_file is not None:
                 rest = line[len("DA:"):]
                 parts = rest.split(",")
                 line_no = int(parts[0])
                 hit_count = int(parts[1])
-                bucket = files[current_file]
+                bucket = files[current_file]["lines"]
                 bucket[line_no] = bucket.get(line_no, 0) + hit_count
+            elif line.startswith("BRDA:") and keep_current and current_file is not None:
+                line_no, block, branch, taken = line[len("BRDA:"):].split(",", 3)
+                key = (int(line_no), block, branch)
+                hit_count = 0 if taken == "-" else int(taken)
+                bucket = files[current_file]["branches"]
+                bucket[key] = bucket.get(key, 0) + hit_count
             elif line == "end_of_record":
                 current_file = None
                 keep_current = False
-            # LF:/LH:/other record kinds (FN, BRDA, ...) are ignored on input —
-            # this report only needs line coverage, and LF/LH are recomputed
-            # from the merged DA: counts below so a single lane's summary
-            # never gets trusted as the merged truth.
+            # LF:/LH:/BRF:/BRH:/function records are ignored on input because
+            # their summaries are recomputed below.
 
 if not files:
     # A run with zero matching files is a legitimate (if unlikely) outcome —
@@ -93,7 +98,8 @@ if not files:
 
 with open(output_path, "w", encoding="utf-8") as out:
     for filename in sorted(files):
-        lines = files[filename]
+        lines = files[filename]["lines"]
+        branches = files[filename]["branches"]
         out.write(f"SF:{filename}\n")
         for line_no in sorted(lines):
             out.write(f"DA:{line_no},{lines[line_no]}\n")
@@ -101,5 +107,9 @@ with open(output_path, "w", encoding="utf-8") as out:
         lines_hit = sum(1 for count in lines.values() if count > 0)
         out.write(f"LF:{lines_found}\n")
         out.write(f"LH:{lines_hit}\n")
+        for (line_no, block, branch), count in sorted(branches.items()):
+            out.write(f"BRDA:{line_no},{block},{branch},{count}\n")
+        out.write(f"BRF:{len(branches)}\n")
+        out.write(f"BRH:{sum(1 for count in branches.values() if count > 0)}\n")
         out.write("end_of_record\n")
 PY

@@ -1231,9 +1231,9 @@ mod tests {
             provider: "p".into(),
             retry_after: None,
         }));
-        assert!(is_retryable(&LlmError::InvalidResponse {
+        assert!(is_retryable(&LlmError::StreamInterrupted {
             provider: "p".into(),
-            reason: "bad json".into(),
+            reason: "connection closed".into(),
         }));
         assert!(is_retryable(&LlmError::SessionRenewalFailed {
             provider: "p".into(),
@@ -1259,6 +1259,17 @@ mod tests {
             provider: "p".into(),
             model: "m".into(),
         }));
+        assert!(!is_retryable(&LlmError::InvalidResponse {
+            provider: "p".into(),
+            reason: "bad json".into(),
+        }));
+        assert!(!is_retryable(&LlmError::EmptyResponse {
+            provider: "p".into(),
+        }));
+        assert!(!is_retryable(&LlmError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "session file denied"
+        ))));
     }
 
     // Test: empty providers list returns error (not panic).

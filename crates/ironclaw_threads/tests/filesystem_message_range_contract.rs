@@ -1,9 +1,15 @@
 //! Focused filesystem range and summary-index contract tests.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
+use async_trait::async_trait;
 use ironclaw_filesystem::{
-    CasExpectation, Entry, InMemoryBackend, IndexKey, RootFilesystem, ScopedFilesystem,
+    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError, Filter,
+    InMemoryBackend, IndexKey, IndexSpec, OrderedPage, Page, RecordVersion, RootFilesystem,
+    ScopedFilesystem, SeqNo, StorageTxn, VersionedEntry,
 };
 use ironclaw_host_api::{
     ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
@@ -11,11 +17,312 @@ use ironclaw_host_api::{
     path::{MountAlias, ScopedPath, VirtualPath},
 };
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AppendFinalizedAssistantMessageRequest,
-    CreateSummaryArtifactRequest, EnsureThreadRequest, FilesystemSessionThreadService,
-    MessageContent, SessionThreadError, SessionThreadService, SummaryKind,
-    SummaryModelContextPolicy, ThreadMessageId, ThreadMessageRangeRequest, ThreadScope,
+    AcceptInboundMessageRequest, AppendFinalizedAssistantMessageRequest, BoundedThreadMessages,
+    BoundedThreadMessagesRequest, CreateSummaryArtifactRequest, EnsureThreadRequest,
+    FilesystemSessionThreadService, InMemorySessionThreadService, MessageContent, MessageStatus,
+    RedactMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
+    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRangeRequest,
+    ThreadScope,
 };
+
+#[tokio::test]
+async fn filesystem_store_bounded_read_uses_capped_query_page() {
+    let backend = Arc::new(QueryTrackingBackend::new());
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-tail-bound", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("tail-bound");
+    let thread_id = ThreadId::new("thread-tail-bound").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    for index in 0..3 {
+        service
+            .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+                scope: scope.clone(),
+                thread_id: thread_id.clone(),
+                turn_run_id: format!("run-{index}"),
+                content: MessageContent::text(format!("reply {index}")),
+            })
+            .await
+            .unwrap();
+    }
+    backend.reset_query_observations();
+
+    let result = service
+        .list_thread_messages_bounded(BoundedThreadMessagesRequest {
+            scope,
+            thread_id,
+            max_messages: 2,
+            max_bytes: 1024 * 1024,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result, BoundedThreadMessages::LimitExceeded);
+    assert_eq!(
+        backend.ordered_query_limits(),
+        vec![3],
+        "bounded reads must request only max_messages + 1 ordered rows",
+    );
+}
+
+#[tokio::test]
+async fn filesystem_store_bounded_read_returns_newest_redacted_row_within_cap() {
+    let fixture = RangeFixture::new("fs-bounded-shadow", "tenant-bounded-shadow").await;
+    let finalized = fixture
+        .service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            turn_run_id: "run-shadow".into(),
+            content: MessageContent::text("secret answer"),
+        })
+        .await
+        .unwrap();
+    fixture
+        .service
+        .redact_message(RedactMessageRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            message_id: finalized.message_id,
+            redaction_ref: "redaction/shadow".into(),
+        })
+        .await
+        .unwrap();
+
+    let result = fixture
+        .service
+        .list_thread_messages_bounded(BoundedThreadMessagesRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            max_messages: 1,
+            max_bytes: 1024 * 1024,
+        })
+        .await
+        .unwrap();
+
+    let BoundedThreadMessages::Complete(messages) = result else {
+        panic!("the one redacted message must fit within the logical row cap");
+    };
+    assert_eq!(messages.history.messages.len(), 1);
+    assert_eq!(
+        messages.history.messages[0].message_id,
+        finalized.message_id
+    );
+    assert_eq!(messages.history.messages[0].status, MessageStatus::Redacted);
+}
+
+#[tokio::test]
+async fn filesystem_store_bounded_read_classifies_message_and_byte_budgets() {
+    let fixture = RangeFixture::new("fs-bounded", "tenant-bounded").await;
+    fixture.seed_messages("event", 3).await;
+
+    let result = fixture
+        .service
+        .list_thread_messages_bounded(BoundedThreadMessagesRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            max_messages: 2,
+            max_bytes: 1024 * 1024,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result, BoundedThreadMessages::LimitExceeded);
+
+    let byte_limited = fixture
+        .service
+        .list_thread_messages_bounded(BoundedThreadMessagesRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            max_messages: 4,
+            max_bytes: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(byte_limited, BoundedThreadMessages::LimitExceeded);
+
+    let complete = fixture
+        .service
+        .list_thread_messages_bounded(BoundedThreadMessagesRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            max_messages: 4,
+            max_bytes: 1024 * 1024,
+        })
+        .await
+        .unwrap();
+    let BoundedThreadMessages::Complete(messages) = complete else {
+        panic!("messages should fit within the export budget");
+    };
+    assert_eq!(messages.history.messages.len(), 3);
+}
+
+#[tokio::test]
+async fn bounded_read_byte_budget_matches_between_filesystem_and_in_memory() {
+    let filesystem = RangeFixture::new("fs-byte-parity", "tenant-byte-parity").await;
+    let filesystem_message = filesystem.seed_messages("byte-parity", 1).await[0];
+
+    let memory = InMemorySessionThreadService::default();
+    let memory_scope = scope("memory-byte-parity");
+    let memory_thread_id = ThreadId::new("thread-memory-byte-parity").unwrap();
+    memory
+        .ensure_thread(EnsureThreadRequest {
+            scope: memory_scope.clone(),
+            thread_id: Some(memory_thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    memory
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: memory_scope.clone(),
+            thread_id: memory_thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("byte-parity-1".into()),
+            content: MessageContent::text("message 1"),
+        })
+        .await
+        .unwrap();
+
+    let memory_history = memory
+        .list_thread_history(ThreadHistoryRequest {
+            scope: memory_scope.clone(),
+            thread_id: memory_thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    let compact_memory_bytes = serde_json::to_vec(&memory_history.messages[0])
+        .expect("message serializes")
+        .len();
+    assert!(
+        compact_memory_bytes < filesystem.stored_message_len(&filesystem_message).await,
+        "fixture must distinguish compact transcript JSON from the stored filesystem row"
+    );
+
+    let filesystem_result = filesystem
+        .service
+        .list_thread_messages_bounded(BoundedThreadMessagesRequest {
+            scope: filesystem.scope.clone(),
+            thread_id: filesystem.thread_id.clone(),
+            max_messages: 1,
+            max_bytes: compact_memory_bytes,
+        })
+        .await
+        .unwrap();
+    let memory_result = memory
+        .list_thread_messages_bounded(BoundedThreadMessagesRequest {
+            scope: memory_scope.clone(),
+            thread_id: memory_thread_id.clone(),
+            max_messages: 1,
+            max_bytes: compact_memory_bytes,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(filesystem_result, BoundedThreadMessages::LimitExceeded);
+    assert_eq!(memory_result, BoundedThreadMessages::LimitExceeded);
+
+    let filesystem_complete = filesystem
+        .service
+        .list_thread_messages_bounded(BoundedThreadMessagesRequest {
+            scope: filesystem.scope.clone(),
+            thread_id: filesystem.thread_id.clone(),
+            max_messages: 1,
+            max_bytes: 1024 * 1024,
+        })
+        .await
+        .unwrap();
+    let memory_complete = memory
+        .list_thread_messages_bounded(BoundedThreadMessagesRequest {
+            scope: memory_scope,
+            thread_id: memory_thread_id,
+            max_messages: 1,
+            max_bytes: 1024 * 1024,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        filesystem_complete,
+        BoundedThreadMessages::Complete(_)
+    ));
+    assert!(matches!(
+        memory_complete,
+        BoundedThreadMessages::Complete(_)
+    ));
+}
+
+#[tokio::test]
+async fn filesystem_store_bounded_read_fails_closed_without_paginated_query() {
+    let backend = Arc::new(QueryTrackingBackend::new());
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-no-query", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("no-query");
+    let thread_id = ThreadId::new("thread-no-query").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("event-no-query".into()),
+            content: MessageContent::text("message"),
+        })
+        .await
+        .unwrap();
+    service
+        .list_thread_messages_bounded(BoundedThreadMessagesRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            max_messages: 10,
+            max_bytes: 1024 * 1024,
+        })
+        .await
+        .expect("the ordered-query baseline must be available");
+    backend.reject_ordered_queries();
+
+    let error = service
+        .list_thread_messages_bounded(BoundedThreadMessagesRequest {
+            scope,
+            thread_id,
+            max_messages: 10,
+            max_bytes: 1024 * 1024,
+        })
+        .await
+        .expect_err("unsupported bounded query must remain a backend error");
+
+    assert!(
+        matches!(error, SessionThreadError::Backend(ref message) if message.contains("query")),
+        "unexpected bounded query error: {error:?}",
+    );
+    assert_eq!(
+        backend.list_dir_calls(),
+        0,
+        "bounded reads must not materialize an unpaged directory fallback",
+    );
+}
 
 #[tokio::test]
 async fn filesystem_store_range_read_returns_only_requested_sequences() {
@@ -189,6 +496,115 @@ async fn filesystem_store_summary_creation_requires_complete_sequence_projection
     ));
 }
 
+struct QueryTrackingBackend {
+    inner: InMemoryBackend,
+    ordered_query_limits: Mutex<Vec<u32>>,
+    reject_ordered_queries: AtomicBool,
+    list_dir_calls: AtomicUsize,
+}
+
+impl QueryTrackingBackend {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+            ordered_query_limits: Mutex::new(Vec::new()),
+            reject_ordered_queries: AtomicBool::new(false),
+            list_dir_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn reset_query_observations(&self) {
+        self.ordered_query_limits.lock().unwrap().clear();
+    }
+
+    fn ordered_query_limits(&self) -> Vec<u32> {
+        self.ordered_query_limits.lock().unwrap().clone()
+    }
+
+    fn reject_ordered_queries(&self) {
+        self.reject_ordered_queries.store(true, Ordering::SeqCst);
+        self.list_dir_calls.store(0, Ordering::SeqCst);
+    }
+
+    fn list_dir_calls(&self) -> usize {
+        self.list_dir_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for QueryTrackingBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.list_dir_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn query_ordered(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: &OrderedPage,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.ordered_query_limits.lock().unwrap().push(page.limit);
+        if self.reject_ordered_queries.load(Ordering::SeqCst) {
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: ironclaw_filesystem::FilesystemOperation::Query,
+            });
+        }
+        self.inner.query_ordered(path, filter, page).await
+    }
+
+    async fn ensure_index(
+        &self,
+        path: &VirtualPath,
+        spec: &IndexSpec,
+    ) -> Result<(), FilesystemError> {
+        self.inner.ensure_index(path, spec).await
+    }
+
+    async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
+        self.inner.begin(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        self.inner.reserve_sequence(path).await
+    }
+}
+
 struct RangeFixture {
     scoped: Arc<ScopedFilesystem<InMemoryBackend>>,
     service: FilesystemSessionThreadService<InMemoryBackend>,
@@ -293,6 +709,20 @@ impl RangeFixture {
             .await
             .unwrap()
             .is_some()
+    }
+
+    async fn stored_message_len(&self, message_id: &ThreadMessageId) -> usize {
+        self.scoped
+            .get(
+                &self.scope.to_resource_scope(),
+                &self.message_path(&message_id.to_string()),
+            )
+            .await
+            .unwrap()
+            .expect("stored message row")
+            .entry
+            .body
+            .len()
     }
 
     async fn delete_message(&self, message_id: ThreadMessageId) {

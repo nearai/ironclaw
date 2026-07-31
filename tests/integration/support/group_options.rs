@@ -88,10 +88,9 @@ impl RebornIntegrationGroupBuilder {
     /// Force `ToolDisclosureMode::Bridged` into the group's ONE planned
     /// runtime config (enabler (b)), regardless of `REBORN_TOOL_DISCLOSURE` —
     /// avoids the shared-process env-var race `apply_hermetic_env()` already
-    /// guards against (see `ToolDisclosureMode::from_env`). Defaults `None`
-    /// (resolves via `from_env()`, matching today's behavior).
+    /// guards against (see `ToolDisclosureMode::from_env`). Defaults to `Off`.
     pub fn with_tool_disclosure_bridged(mut self) -> Self {
-        self.tool_disclosure = Some(ToolDisclosureMode::Bridged);
+        self.tool_disclosure = ToolDisclosureMode::Bridged;
         self
     }
 
@@ -106,7 +105,7 @@ impl RebornIntegrationGroupBuilder {
     /// actually makes the control's assertion mode-specific rather than
     /// env-dependent.
     pub fn with_tool_disclosure_off(mut self) -> Self {
-        self.tool_disclosure = Some(ToolDisclosureMode::Off);
+        self.tool_disclosure = ToolDisclosureMode::Off;
         self
     }
 

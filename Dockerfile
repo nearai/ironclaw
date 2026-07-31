@@ -19,6 +19,9 @@ FROM rust:1.96-bookworm@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8
 COPY --from=node_toolchain /usr/local/bin/node /usr/local/bin/node
 COPY --from=node_toolchain /usr/local/lib/node_modules/ /usr/local/lib/node_modules/
 
+WORKDIR /app
+COPY .cargo/config.toml .cargo/config.toml
+
 RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
     && ln -sf ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack \
@@ -27,8 +30,6 @@ RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && corepack --version \
     && corepack enable pnpm \
     && cargo install --locked cargo-chef@0.1.77
-
-WORKDIR /app
 
 FROM chef AS planner
 
