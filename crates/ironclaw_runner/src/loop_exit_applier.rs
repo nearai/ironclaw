@@ -17,9 +17,13 @@ use ironclaw_turns::{
     LoopMessageRef, LoopResultRef, TurnError, TurnId, TurnRunId, TurnScope, TurnStatus,
 };
 
-pub use ironclaw_turns::loop_exit::{
+// Not re-exported: a `Loop*Port` has exactly one import path, and
+// `LoopExitEvidencePort` belongs to the turn kernel that validates against it
+// (PROPOSAL §11.2.4, pinned by `reborn_loop_port_location_scan`). The evidence
+// requests and the applier travel with it for the same reason — one home each.
+use ironclaw_turns::loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
-    FinalCheckpointEvidenceRequest, LoopExitApplier, LoopExitEvidencePort,
+    FinalCheckpointEvidenceRequest, LoopExitEvidencePort,
 };
 
 /// Strict test/local evidence port. Defaults to distrust everything.

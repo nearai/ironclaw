@@ -1,3 +1,4 @@
+use ironclaw_turns::loop_exit::LoopExitApplier;
 // arch-exempt: large_file, checkpoint evidence integration coverage, plan #6168
 use std::sync::Arc;
 
@@ -25,8 +26,7 @@ use ironclaw_turns::{
 use super::{
     ApprovalGateEvidenceStore, AwaitDependentRunEvidenceStore, BlockedEvidenceRequest,
     CompletionEvidenceRequest, FailureEvidenceRequest, InMemoryLoopExitEvidencePort,
-    LoopExitApplier, LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort,
-    verify_tool_result_ref,
+    LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort, verify_tool_result_ref,
 };
 
 mod support;

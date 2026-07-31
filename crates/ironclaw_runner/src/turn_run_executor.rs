@@ -28,11 +28,12 @@ use tracing::{debug, error, warn};
 /// prefix to recover the same key the loop-host persisted under.
 const AUTH_GATE_LOOP_REF_PREFIX: &str = "gate:auth-";
 
+use ironclaw_turns::loop_exit::LoopExitApplier;
+
 use crate::{
     after_turn_memory::AfterTurnMemoryRecorder,
     driver_registry::{DriverRegistry, LoopDriverRegistryKey},
     failure_categories::host_stage_unavailable_category,
-    loop_exit_applier::LoopExitApplier,
     turn_runner::{HostFactory, sanitized_driver_failure, sanitized_failure},
     turn_scheduler::{TurnRunExecutor, TurnRunExecutorError},
 };

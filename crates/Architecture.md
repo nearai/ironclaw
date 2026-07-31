@@ -1004,8 +1004,8 @@ Partial or evolving:
 - `crates/AGENTS.md`
 - `crates/ironclaw_turns/src/lib.rs`
 - `crates/ironclaw_turns/src/runner.rs`
-- `crates/ironclaw_turns/src/run_profile/driver.rs`
-- `crates/ironclaw_turns/src/run_profile/host/`
+- `crates/ironclaw_loop_contracts/src/driver.rs`
+- `crates/ironclaw_loop_contracts/src/host/`
 - `crates/ironclaw_agent_loop/src/executor.rs`
 - `crates/ironclaw_agent_loop/src/family.rs`
 - `crates/ironclaw_agent_loop/src/state.rs`

@@ -1,3 +1,4 @@
+use ironclaw_turns::loop_exit::LoopExitApplier;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -30,7 +31,7 @@ use ironclaw_turns::{
 };
 
 use crate::loop_exit_applier::{
-    AwaitDependentRunEvidenceStore, InMemoryLoopExitEvidencePort, LoopExitApplier,
+    AwaitDependentRunEvidenceStore, InMemoryLoopExitEvidencePort,
     ThreadCheckpointLoopExitEvidencePort,
 };
 

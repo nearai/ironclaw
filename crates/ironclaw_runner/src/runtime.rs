@@ -27,7 +27,8 @@ use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::{
     AgentTurnProcessCommitObserver, AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort,
     DefaultTurnCoordinator, LoopCheckpointStore, TurnCommittedEventObserver, TurnEventSink,
-    TurnRunWakeNotifier, TurnSpawnTreePort, loop_exit::LoopExitEvidencePort,
+    TurnRunWakeNotifier, TurnSpawnTreePort,
+    loop_exit::{LoopExitApplier, LoopExitEvidencePort},
 };
 
 use crate::{
@@ -37,9 +38,7 @@ use crate::{
         HookDispatcherBuilderFactory, RebornLoopDriverHostFactory, TextOnlyLoopHostConfig,
         apply_capability_surface_profile, capability_resolve_error_to_agent_host_error,
     },
-    loop_exit_applier::{
-        AwaitDependentRunEvidenceStore, LoopExitApplier, ThreadCheckpointLoopExitEvidencePort,
-    },
+    loop_exit_applier::{AwaitDependentRunEvidenceStore, ThreadCheckpointLoopExitEvidencePort},
     model_routes::ModelRouteResolver,
     planned_driver_factory::{
         DefaultPlannedDriverRegistrationError, default_planned_run_profile_resolver,
