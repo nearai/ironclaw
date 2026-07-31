@@ -3,8 +3,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_filesystem::{CasExpectation, Entry, FilesystemError, RootFilesystem};
-#[cfg(test)]
-use ironclaw_host_api::http::RuntimeHttpEgress;
 use ironclaw_host_api::{
     ids::{CapabilityId, InvocationId},
     path::VirtualPath,
@@ -108,31 +106,6 @@ impl RebornIronhubLinkService {
         service
             .with_manifest_url(self.manifest_url.as_str().to_string())
             .with_link_state(Arc::clone(&self.state))
-    }
-}
-
-#[cfg(test)]
-pub(super) mod test_support {
-    use super::*;
-
-    pub(crate) fn new_with_runtime_egress(
-        skill_management: Arc<ScopedSkillManagementPort>,
-        extension_management: Arc<ExtensionLifecycleManager>,
-        runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
-        state: Arc<IronhubLinkStateStore>,
-        shared_key: IronhubSharedKey,
-    ) -> Result<RebornIronhubLinkService, IronhubLinkBuildError> {
-        let install_capability = CapabilityId::new(INSTALL_CAPABILITY_ID)
-            .map_err(|_| IronhubLinkBuildError::InvalidConfig)?;
-        Ok(RebornIronhubLinkService {
-            skill_management,
-            extension_management,
-            egress: runtime_http_egress,
-            state,
-            shared_key,
-            install_capability,
-            manifest_url: crate::IronhubManifestUrl::default(),
-        })
     }
 }
 
@@ -523,7 +496,10 @@ fn map_install_error(error: IronHubCommandError) -> IronhubLinkError {
 #[cfg(test)]
 mod tests {
     use hmac::{Hmac, KeyInit, Mac};
-    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_filesystem::{
+        Fault, FaultInjecting, FileStat, FileType, FilesystemOperation, InMemoryBackend,
+        RecordVersion,
+    };
     use sha2::Sha256;
 
     use super::*;
@@ -547,6 +523,48 @@ mod tests {
         )
     }
 
+    struct AlwaysCasConflictFilesystem;
+
+    #[async_trait]
+    impl RootFilesystem for AlwaysCasConflictFilesystem {
+        async fn put(
+            &self,
+            path: &VirtualPath,
+            _entry: Entry,
+            _cas: CasExpectation,
+        ) -> Result<RecordVersion, FilesystemError> {
+            Err(FilesystemError::VersionMismatch {
+                path: path.clone(),
+                expected: None,
+                found: Some(RecordVersion::from_backend(1)),
+            })
+        }
+
+        async fn get(
+            &self,
+            _path: &VirtualPath,
+        ) -> Result<Option<ironclaw_filesystem::VersionedEntry>, FilesystemError> {
+            Ok(None)
+        }
+
+        async fn list_dir(
+            &self,
+            _path: &VirtualPath,
+        ) -> Result<Vec<ironclaw_filesystem::DirEntry>, FilesystemError> {
+            Ok(Vec::new())
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            Ok(FileStat {
+                path: path.clone(),
+                file_type: FileType::File,
+                len: 0,
+                modified: None,
+                sensitive: false,
+            })
+        }
+    }
+
     fn sign(payload: &str) -> String {
         let mut mac = Hmac::<Sha256>::new_from_slice(SHARED_KEY.as_bytes()).expect("HMAC key");
         mac.update(payload.as_bytes());
@@ -568,6 +586,34 @@ mod tests {
             nonce: &request.nonce,
         };
         request.sig = sign(&challenge.payload());
+        request
+    }
+
+    fn install_request(ts: u64) -> IronhubInstallDeliveryRequest {
+        let mut request = IronhubInstallDeliveryRequest {
+            slug: "fixture".to_string(),
+            version: "1.0.0".to_string(),
+            uid: "user-1".to_string(),
+            aid: "agent-1".to_string(),
+            ts,
+            nonce: "install-nonce".to_string(),
+            artifact_digest: format!("sha256:{}", "a".repeat(64)),
+            sig: String::new(),
+            private_manifest_url: Some("https://hub.ironclaw.com/private/manifest".to_string()),
+        };
+        request.sig = sign(
+            &InstallDelivery {
+                slug: &request.slug,
+                version: &request.version,
+                uid: &request.uid,
+                aid: &request.aid,
+                ts: request.ts,
+                nonce: &request.nonce,
+                artifact_digest: &request.artifact_digest,
+                private_manifest_url: request.private_manifest_url.as_deref(),
+            }
+            .payload(),
+        );
         request
     }
 
@@ -605,6 +651,97 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn authentication_validates_all_bounded_fields_and_install_signatures() {
+        let now = u64::try_from(Utc::now().timestamp()).expect("positive timestamp");
+        assert!(authenticate_register(&shared_key(), &register_request(now)).is_ok());
+
+        for (field, value) in [
+            ("uid", "".to_string()),
+            ("aid", "x".repeat(MAX_LINK_ID_BYTES + 1)),
+            ("nonce", "x".repeat(MAX_NONCE_BYTES + 1)),
+            ("nonce", "line\nbreak".to_string()),
+        ] {
+            let mut request = register_request(now);
+            match field {
+                "uid" => request.uid = value,
+                "aid" => request.aid = value,
+                "nonce" => request.nonce = value,
+                _ => unreachable!("fixed test field"),
+            }
+            assert!(matches!(
+                authenticate_register(&shared_key(), &request),
+                Err(IronhubLinkError::InvalidInput { .. })
+            ));
+        }
+
+        let valid = install_request(now);
+        assert!(authenticate_install(&shared_key(), &valid).is_ok());
+        let mut bad_signature = valid.clone();
+        bad_signature.sig = "00".to_string();
+        assert!(matches!(
+            authenticate_install(&shared_key(), &bad_signature),
+            Err(IronhubLinkError::InvalidSignature)
+        ));
+        let stale = install_request(1);
+        assert!(matches!(
+            authenticate_install(&shared_key(), &stale),
+            Err(IronhubLinkError::StaleTimestamp)
+        ));
+        assert!(!timestamp_fresh(u64::MAX));
+    }
+
+    #[test]
+    fn link_errors_map_to_stable_product_errors() {
+        assert!(matches!(
+            map_state_error(IronhubLinkStateError::NonceReplay),
+            IronhubLinkError::Replay
+        ));
+        assert!(matches!(
+            map_state_error(IronhubLinkStateError::ManifestReplay),
+            IronhubLinkError::Replay
+        ));
+        assert!(matches!(
+            map_state_error(IronhubLinkStateError::InvalidInput),
+            IronhubLinkError::InvalidInput { .. }
+        ));
+        assert!(matches!(
+            map_state_error(IronhubLinkStateError::Unavailable),
+            IronhubLinkError::Unavailable
+        ));
+        for error in [
+            IronHubCommandError::InvalidInput {
+                reason: "bad input".to_string(),
+            },
+            IronHubCommandError::Catalog {
+                reason: "bad catalog".to_string(),
+            },
+        ] {
+            assert!(matches!(
+                map_install_error(error),
+                IronhubLinkError::InvalidInput { .. }
+            ));
+        }
+        assert!(matches!(
+            map_install_error(IronHubCommandError::RuntimeHttpEgressUnavailable),
+            IronhubLinkError::Install { .. }
+        ));
+        assert!(matches!(
+            map_install_error(IronHubCommandError::Install {
+                reason: "failed".to_string(),
+            }),
+            IronhubLinkError::Install { .. }
+        ));
+        assert!(matches!(
+            map_install_error(IronHubCommandError::Product(
+                ironclaw_product::ProductSurfaceFailure::InvalidBindingRequest {
+                    reason: "failed".to_string(),
+                },
+            )),
+            IronhubLinkError::Install { .. }
+        ));
+    }
+
     #[tokio::test]
     async fn nonce_is_single_use_across_store_reconstruction() {
         let filesystem = shared_filesystem();
@@ -635,6 +772,205 @@ mod tests {
             .consume_install_nonce(&caller("user-b"), "shared-nonce", Utc::now())
             .await
             .expect("another caller has an independent nonce namespace");
+        let project_caller = ProductSurfaceCaller::new(
+            ironclaw_host_api::ids::TenantId::new("tenant").expect("tenant"),
+            ironclaw_host_api::ids::UserId::new("user-c").expect("user"),
+            None,
+            Some(ironclaw_host_api::ids::ProjectId::new("project").expect("project")),
+        );
+        store
+            .consume_install_nonce(&project_caller, "shared-nonce", Utc::now())
+            .await
+            .expect("project-only caller has a stable nonce namespace");
+    }
+
+    #[tokio::test]
+    async fn durable_state_rejects_invalid_inputs_and_maps_backend_failures() {
+        let store = IronhubLinkStateStore::new(shared_filesystem());
+        for nonce in ["", "line\nbreak"] {
+            assert_eq!(
+                store
+                    .consume_install_nonce(&caller("user"), nonce, Utc::now())
+                    .await,
+                Err(IronhubLinkStateError::InvalidInput)
+            );
+        }
+        let oversized_nonce = "x".repeat(MAX_NONCE_BYTES + 1);
+        assert_eq!(
+            store
+                .consume_install_nonce(&caller("user"), &oversized_nonce, Utc::now())
+                .await,
+            Err(IronhubLinkStateError::InvalidInput)
+        );
+        assert_eq!(
+            store
+                .record_private_manifest("", "repo", Utc::now(), "digest")
+                .await,
+            Err(IronhubLinkStateError::InvalidInput)
+        );
+        assert_eq!(
+            store
+                .record_private_manifest("host", "", Utc::now(), "digest")
+                .await,
+            Err(IronhubLinkStateError::InvalidInput)
+        );
+        assert_eq!(
+            store.record_public_manifest("", Utc::now(), "digest").await,
+            Err(IronhubLinkStateError::InvalidInput)
+        );
+        let oversized_url = "x".repeat(4097);
+        assert_eq!(
+            store
+                .record_public_manifest(&oversized_url, Utc::now(), "digest")
+                .await,
+            Err(IronhubLinkStateError::InvalidInput)
+        );
+        assert_eq!(
+            store
+                .record_private_manifest("bad\nhost", "repo", Utc::now(), "digest")
+                .await,
+            Err(IronhubLinkStateError::InvalidInput)
+        );
+
+        for operation in [
+            FilesystemOperation::ReadFile,
+            FilesystemOperation::WriteFile,
+        ] {
+            let filesystem: Arc<dyn RootFilesystem> = Arc::new(
+                FaultInjecting::new(InMemoryBackend::new())
+                    .with_fault(Fault::on(operation).backend("state unavailable")),
+            );
+            let unavailable = IronhubLinkStateStore::new(filesystem);
+            let result = unavailable
+                .record_private_manifest("catalog.example", "org/repo", Utc::now(), "digest")
+                .await;
+            assert_eq!(result, Err(IronhubLinkStateError::Unavailable));
+            assert_eq!(
+                unavailable
+                    .record_public_manifest(
+                        "https://catalog.example/manifest",
+                        Utc::now(),
+                        "digest",
+                    )
+                    .await,
+                Err(IronhubLinkStateError::Unavailable)
+            );
+        }
+
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(
+            FaultInjecting::new(InMemoryBackend::new())
+                .with_fault(Fault::on(FilesystemOperation::WriteFile).backend("nonce unavailable")),
+        );
+        let unavailable = IronhubLinkStateStore::new(filesystem);
+        assert_eq!(
+            unavailable
+                .consume_install_nonce(&caller("user"), "nonce", Utc::now())
+                .await,
+            Err(IronhubLinkStateError::Unavailable)
+        );
+
+        let conflict_store = IronhubLinkStateStore::new(Arc::new(AlwaysCasConflictFilesystem));
+        assert_eq!(
+            conflict_store
+                .record_private_manifest("catalog.example", "org/repo", Utc::now(), "digest")
+                .await,
+            Err(IronhubLinkStateError::Unavailable)
+        );
+        assert_eq!(
+            conflict_store
+                .record_public_manifest("https://catalog.example/manifest", Utc::now(), "digest")
+                .await,
+            Err(IronhubLinkStateError::Unavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_manifest_state_rejects_corruption_and_accepts_monotonic_updates() {
+        let filesystem = Arc::new(InMemoryBackend::new());
+        let store = IronhubLinkStateStore::new(filesystem.clone());
+        let generated_at = Utc::now();
+        store
+            .record_private_manifest("catalog.example", "org/repo", generated_at, "digest-a")
+            .await
+            .expect("initial private state");
+        store
+            .record_private_manifest(
+                "catalog.example",
+                "org/repo",
+                generated_at + chrono::Duration::seconds(1),
+                "digest-b",
+            )
+            .await
+            .expect("newer private state");
+
+        let private_path = manifest_path("catalog.example", "corrupt/repo").expect("state path");
+        filesystem
+            .put(
+                &private_path,
+                Entry::bytes(b"{}".to_vec()),
+                CasExpectation::Absent,
+            )
+            .await
+            .expect("seed corrupt private state");
+        assert_eq!(
+            store
+                .record_private_manifest("catalog.example", "corrupt/repo", Utc::now(), "digest")
+                .await,
+            Err(IronhubLinkStateError::Unavailable)
+        );
+
+        let mismatch_path = manifest_path("catalog.example", "mismatch/repo").expect("state path");
+        let mismatched = PrivateManifestState {
+            catalog_host: "other.example".to_string(),
+            signed_repo: "other/repo".to_string(),
+            generated_at,
+            signed_manifest_digest: "digest".to_string(),
+        };
+        filesystem
+            .put(
+                &mismatch_path,
+                Entry::bytes(serde_json::to_vec(&mismatched).expect("state JSON")),
+                CasExpectation::Absent,
+            )
+            .await
+            .expect("seed mismatched private state");
+        assert_eq!(
+            store
+                .record_private_manifest("catalog.example", "mismatch/repo", Utc::now(), "digest")
+                .await,
+            Err(IronhubLinkStateError::Unavailable)
+        );
+
+        let public_url = "https://catalog.example/public-manifest";
+        store
+            .record_public_manifest(public_url, generated_at, "digest-a")
+            .await
+            .expect("initial public state");
+        store
+            .record_public_manifest(
+                public_url,
+                generated_at + chrono::Duration::seconds(1),
+                "digest-b",
+            )
+            .await
+            .expect("newer public state");
+
+        let corrupt_public_url = "https://catalog.example/corrupt-manifest";
+        let public_path = public_manifest_path(corrupt_public_url).expect("state path");
+        filesystem
+            .put(
+                &public_path,
+                Entry::bytes(b"{}".to_vec()),
+                CasExpectation::Absent,
+            )
+            .await
+            .expect("seed corrupt public state");
+        assert_eq!(
+            store
+                .record_public_manifest(corrupt_public_url, Utc::now(), "digest")
+                .await,
+            Err(IronhubLinkStateError::Unavailable)
+        );
     }
 
     #[tokio::test]

@@ -248,3 +248,51 @@ fn capability_error(error: IronHubCommandError) -> FirstPartyCapabilityError {
     tracing::debug!(?kind, "IronHub capability dispatch failed");
     FirstPartyCapabilityError::new(kind)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_errors_map_to_redacted_dispatch_categories() {
+        let cases = [
+            (
+                IronHubCommandError::InvalidInput {
+                    reason: "private".to_string(),
+                },
+                RuntimeDispatchErrorKind::InputEncode,
+            ),
+            (
+                IronHubCommandError::RuntimeHttpEgressUnavailable,
+                RuntimeDispatchErrorKind::Executor,
+            ),
+            (
+                IronHubCommandError::Catalog {
+                    reason: "private".to_string(),
+                },
+                RuntimeDispatchErrorKind::OperationFailed,
+            ),
+            (
+                IronHubCommandError::Install {
+                    reason: "private".to_string(),
+                },
+                RuntimeDispatchErrorKind::OperationFailed,
+            ),
+            (
+                IronHubCommandError::Product(
+                    ironclaw_product::ProductSurfaceFailure::InvalidBindingRequest {
+                        reason: "private".to_string(),
+                    },
+                ),
+                RuntimeDispatchErrorKind::OperationFailed,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            let FirstPartyCapabilityError::Dispatch { kind, .. } = capability_error(error) else {
+                panic!("IronHub failures must remain redacted dispatch failures");
+            };
+            assert_eq!(kind, expected);
+        }
+    }
+}

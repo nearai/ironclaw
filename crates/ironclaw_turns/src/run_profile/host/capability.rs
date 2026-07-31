@@ -687,6 +687,22 @@ mod tests {
     }
 
     #[test]
+    fn provider_tool_constructor_defaults_description_provenance_to_untrusted() {
+        let definition = ProviderToolDefinition::from_parts(
+            CapabilityId::new("demo.constructed").expect("valid capability id"),
+            "demo__constructed",
+            "constructed through the provider boundary",
+            serde_json::json!({"type": "object"}),
+        )
+        .expect("valid provider tool definition");
+
+        assert_eq!(
+            definition.description_trust,
+            CapabilityDescriptionTrust::Untrusted
+        );
+    }
+
+    #[test]
     fn provider_tool_wire_cannot_forge_host_description_provenance() {
         let definition: ProviderToolDefinition = serde_json::from_value(serde_json::json!({
             "capability_id": "demo.catalog",

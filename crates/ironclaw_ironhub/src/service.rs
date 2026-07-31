@@ -661,6 +661,17 @@ pub(crate) fn configure_test_catalog(
 }
 
 #[cfg(test)]
+pub(crate) fn configure_test_catalog_without_link_state(
+    mut service: IronHubService,
+    manifest_url: impl Into<String>,
+    verify_keys: &'static [(&'static str, &'static str)],
+) -> IronHubService {
+    service.manifest_url = manifest_url.into();
+    service.verify_keys = verify_keys;
+    service
+}
+
+#[cfg(test)]
 pub(crate) fn configure_test_link_state(
     mut service: IronHubService,
     link_state: Arc<IronhubLinkStateStore>,
@@ -737,6 +748,31 @@ fn map_link_state_error(error: IronhubLinkStateError) -> IronHubCommandError {
         IronhubLinkStateError::Unavailable => {
             catalog("IronHub durable replay state is unavailable")
         }
+    }
+}
+
+#[cfg(test)]
+mod link_state_error_tests {
+    use super::*;
+
+    #[test]
+    fn every_link_state_error_maps_to_a_stable_command_category() {
+        assert!(matches!(
+            map_link_state_error(IronhubLinkStateError::ManifestReplay),
+            IronHubCommandError::Catalog { .. }
+        ));
+        assert!(matches!(
+            map_link_state_error(IronhubLinkStateError::NonceReplay),
+            IronHubCommandError::InvalidInput { .. }
+        ));
+        assert!(matches!(
+            map_link_state_error(IronhubLinkStateError::InvalidInput),
+            IronHubCommandError::InvalidInput { .. }
+        ));
+        assert!(matches!(
+            map_link_state_error(IronhubLinkStateError::Unavailable),
+            IronHubCommandError::Catalog { .. }
+        ));
     }
 }
 

@@ -1629,6 +1629,14 @@ mod tests {
         let vocab_refs = outcome_refs(
             "{\"name\": \"attio\", \"description\": \"Authenticated with a workspace API key presented as a Bearer header.\"}",
         );
+        assert_eq!(
+            vocab_refs
+                .preview_meta
+                .referenced_result_ref
+                .as_ref()
+                .map(|reference| reference.as_str()),
+            Some("result:staged")
+        );
         let vocab = vocab_refs
             .preview
             .as_ref()

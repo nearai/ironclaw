@@ -3260,6 +3260,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn registry_package_install_runs_through_production_coordination_and_catalog_lookup() {
+        let services = crate::lifecycle_test_support::build_lifecycle_test_services(
+            "registry-install-owner",
+            None,
+            false,
+        )
+        .await;
+        let scope = crate::lifecycle_test_support::webui_gate_resource_scope_for_owner(
+            "registry-install-owner",
+        );
+        let manifest = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "registry-fixture"
+name = "Registry Fixture"
+version = "0.1.0"
+description = "Registry install fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/fixture.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "registry-fixture.run"
+description = "Run fixture"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/input.json"
+output_schema_ref = "schemas/output.json"
+"#;
+        let component = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm"),
+        )
+        .expect("component fixture");
+        let package = crate::registry_extension_package(
+            vec![
+                ("manifest.toml".to_string(), manifest.as_bytes().to_vec()),
+                ("wasm/fixture.wasm".to_string(), component),
+                ("schemas/input.json".to_string(), b"{}".to_vec()),
+                ("schemas/output.json".to_string(), b"{}".to_vec()),
+            ],
+            &[],
+        )
+        .expect("registry package validates");
+
+        let response = services
+            .extension_management
+            .install_registry_package(package, false, &scope.user_id, &scope)
+            .await
+            .expect("registry package installs through lifecycle manager");
+
+        assert_eq!(response.phase, InstallationState::Active);
+    }
+
+    #[tokio::test]
     async fn lifecycle_manager_installs_activates_and_removes_catalog_package() {
         let package = fixture_extension_package();
         let extension_id = package.package.id.clone();

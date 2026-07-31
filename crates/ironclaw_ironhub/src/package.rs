@@ -6,8 +6,8 @@ use ironclaw_extension_host::{
     AvailableExtensionPackage, parse_imported_manifest, registry_extension_package,
 };
 
-use super::catalog::validate_hub_name;
-use super::model::{IronHubCommandError, IronHubToolEntry};
+use crate::catalog::validate_hub_name;
+use crate::model::{IronHubCommandError, IronHubToolEntry};
 
 /// Assemble a registry tool package around the manifest the registry published.
 ///
@@ -329,6 +329,47 @@ access_token = "/access_token""#
                 && error.to_string().contains("raw_output.v1.json"),
             "got {error}"
         );
+    }
+
+    #[test]
+    fn package_rejects_invalid_utf8_and_duplicate_or_unreferenced_schemas() {
+        let entry = entry_named("attio");
+        let invalid_utf8 = ironhub_tool_package(
+            &entry,
+            vec![0xff],
+            component(),
+            b"{}".to_vec(),
+            published_schemas("attio"),
+            &[],
+        )
+        .expect_err("manifest must be UTF-8");
+        assert!(invalid_utf8.to_string().contains("not UTF-8"));
+
+        let mut duplicate = published_schemas("attio");
+        duplicate.push(duplicate[0].clone());
+        let duplicate_error = ironhub_tool_package(
+            &entry,
+            published_manifest("attio", &api_key_auth("attio", "")),
+            component(),
+            b"{}".to_vec(),
+            duplicate,
+            &[],
+        )
+        .expect_err("duplicate schema paths must be rejected");
+        assert!(duplicate_error.to_string().contains("more than once"));
+
+        let mut unreferenced = published_schemas("attio");
+        unreferenced.push(("schemas/attio/unused.json".to_string(), b"{}".to_vec()));
+        let unreferenced_error = ironhub_tool_package(
+            &entry,
+            published_manifest("attio", &api_key_auth("attio", "")),
+            component(),
+            b"{}".to_vec(),
+            unreferenced,
+            &[],
+        )
+        .expect_err("unreferenced schema paths must be rejected");
+        assert!(unreferenced_error.to_string().contains("unreferenced"));
     }
 
     #[test]

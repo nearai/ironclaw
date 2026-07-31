@@ -350,6 +350,24 @@ mod tests {
     }
 
     #[test]
+    fn marker_boundaries_and_redaction_skip_embedded_vocabulary() {
+        assert!(marker_match_at("secret", "secret", 0, 6));
+        assert!(!marker_match_at("xsecret", "secret", 1, 7));
+        assert!(!marker_match_at("secretary", "secret", 0, 6));
+        assert!(marker_match_at("bearer token", "bearer ", 0, 7));
+        assert!(marker_match_at(
+            "authorization: token",
+            "authorization:",
+            0,
+            14
+        ));
+        assert_eq!(
+            redact_credential_text("secretary then secret value"),
+            "secretary then [redacted] value"
+        );
+    }
+
+    #[test]
     fn diagnostic_credential_guard_distinguishes_vocabulary_from_values() {
         for safe in [
             "password field is required",

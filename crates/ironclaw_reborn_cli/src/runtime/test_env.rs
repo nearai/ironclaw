@@ -54,6 +54,17 @@ impl EnvGuard {
         }
     }
 
+    #[cfg(unix)]
+    pub(crate) fn set_os(key: &'static str, value: &std::ffi::OsStr) -> Self {
+        let prior = std::env::var_os(key);
+        // SAFETY: env mutation is process-global; callers hold `lock_runtime_env`
+        // and this guard restores the previous value on drop.
+        unsafe { std::env::set_var(key, value) };
+        Self {
+            prior: vec![(key, prior)],
+        }
+    }
+
     pub(crate) fn clear(key: &'static str) -> Self {
         let prior = std::env::var_os(key);
         // SAFETY: see EnvGuard::set.

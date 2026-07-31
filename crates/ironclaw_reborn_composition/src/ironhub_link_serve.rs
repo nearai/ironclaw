@@ -115,3 +115,101 @@ fn ironhub_link_status(error: IronhubLinkError) -> StatusCode {
         IronhubLinkError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct StubLink {
+        unavailable: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl IronhubLinkService for StubLink {
+        async fn register(&self, _request: IronhubRegisterRequest) -> Result<(), IronhubLinkError> {
+            if self.unavailable {
+                Err(IronhubLinkError::Unavailable)
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn deliver_install(
+            &self,
+            _caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
+            _request: ironclaw_product::IronhubInstallDeliveryRequest,
+        ) -> Result<ironclaw_product::IronhubInstallDeliveryResult, IronhubLinkError> {
+            unreachable!("register route never delivers installs")
+        }
+    }
+
+    fn state() -> IronhubRegisterRouteState {
+        IronhubRegisterRouteState::new(Arc::new(StubLink { unavailable: false }))
+    }
+
+    #[tokio::test]
+    async fn register_route_builds_strict_policy_and_handles_valid_and_invalid_json() {
+        let state = state();
+        assert_eq!(format!("{state:?}"), "IronhubRegisterRouteState");
+        let mount = ironhub_register_route_mount(state.clone()).expect("route mount");
+        assert_eq!(mount.descriptors.len(), 1);
+        assert_eq!(
+            mount.descriptors[0].route_pattern().as_str(),
+            IRONHUB_REGISTER_PATH
+        );
+
+        let invalid =
+            ironhub_register_handler(State(state.clone()), Bytes::from_static(b"{")).await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let valid = serde_json::to_vec(&IronhubRegisterRequest {
+            uid: "user".to_string(),
+            aid: "agent".to_string(),
+            ts: 1,
+            nonce: "nonce".to_string(),
+            sig: "signature".to_string(),
+        })
+        .expect("request JSON");
+        let response = ironhub_register_handler(State(state), Bytes::from(valid)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let unavailable = IronhubRegisterRouteState::new(Arc::new(StubLink { unavailable: true }));
+        let valid = serde_json::to_vec(&IronhubRegisterRequest {
+            uid: "user".to_string(),
+            aid: "agent".to_string(),
+            ts: 1,
+            nonce: "nonce".to_string(),
+            sig: "signature".to_string(),
+        })
+        .expect("request JSON");
+        let response = ironhub_register_handler(State(unavailable), Bytes::from(valid)).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn link_errors_map_to_public_statuses_without_details() {
+        for error in [
+            IronhubLinkError::InvalidSignature,
+            IronhubLinkError::StaleTimestamp,
+            IronhubLinkError::Replay,
+        ] {
+            assert_eq!(ironhub_link_status(error), StatusCode::FORBIDDEN);
+        }
+        assert_eq!(
+            ironhub_link_status(IronhubLinkError::InvalidInput {
+                reason: "private".to_string(),
+            }),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            ironhub_link_status(IronhubLinkError::Install {
+                reason: "private".to_string(),
+            }),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            ironhub_link_status(IronhubLinkError::Unavailable),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+}

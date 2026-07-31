@@ -178,6 +178,20 @@ mod tests {
     }
 
     #[test]
+    fn register_request_debug_output_redacts_signature() {
+        let request = IronhubRegisterRequest {
+            uid: "user".to_string(),
+            aid: "agent".to_string(),
+            ts: 1_700_000_000,
+            nonce: "nonce".to_string(),
+            sig: "register-secret".to_string(),
+        };
+        let rendered = format!("{request:?}");
+        assert!(!rendered.contains("register-secret"));
+        assert!(rendered.contains("<redacted>"));
+    }
+
+    #[test]
     fn install_delivery_rejects_unsigned_unknown_fields() {
         let result = serde_json::from_value::<IronhubInstallDeliveryRequest>(serde_json::json!({
             "slug": "skill",

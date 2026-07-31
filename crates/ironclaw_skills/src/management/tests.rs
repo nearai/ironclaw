@@ -995,6 +995,166 @@ async fn replacement_snapshot_restores_complete_bundle_and_raw_metadata() {
 }
 
 #[tokio::test]
+async fn replacement_snapshot_rejects_invalid_names_and_bounded_resource_overflow() {
+    let context = skill_management_context(Arc::new(InMemoryBackend::default()), skill_mounts());
+    let invalid = capture_skill_bundle(&context, "../invalid")
+        .await
+        .err()
+        .expect("snapshot names must be validated before filesystem access");
+    assert_eq!(invalid.kind(), SkillManagementErrorKind::InvalidInput);
+
+    for mode in [
+        SnapshotListingMode::ExhaustEntryBudget,
+        SnapshotListingMode::ExceedEntryBudget,
+        SnapshotListingMode::UnsupportedEntry,
+    ] {
+        let context = skill_management_context_with_root(
+            Arc::new(SnapshotListingFilesystem { mode }),
+            skill_mounts(),
+        );
+        let error = capture_skill_bundle(&context, "snapshot-limits")
+            .await
+            .err()
+            .expect("bounded or unsupported directory shapes must fail closed");
+        let expected = if mode == SnapshotListingMode::UnsupportedEntry {
+            SkillManagementErrorKind::InvalidSkill
+        } else {
+            SkillManagementErrorKind::Resource
+        };
+        assert_eq!(error.kind(), expected);
+    }
+}
+
+#[tokio::test]
+async fn replacement_snapshot_enforces_file_count_file_size_and_total_size_caps() {
+    let too_many_files = Arc::new(InMemoryBackend::default());
+    write_file(
+        too_many_files.as_ref(),
+        "/projects/skills/too-many/SKILL.md",
+        skill_md("too-many", "description", "PROMPT"),
+    )
+    .await;
+    for index in 0..=(super::install_bundle::MAX_INSTALL_BUNDLE_FILES + 2) {
+        write_file(
+            too_many_files.as_ref(),
+            &format!("/projects/skills/too-many/references/{index}.txt"),
+            "x".to_string(),
+        )
+        .await;
+    }
+    let context = skill_management_context(too_many_files, skill_mounts());
+    assert_eq!(
+        capture_skill_bundle(&context, "too-many")
+            .await
+            .err()
+            .expect("snapshot file count must be capped")
+            .kind(),
+        SkillManagementErrorKind::Resource
+    );
+
+    let oversized_file = Arc::new(InMemoryBackend::default());
+    write_file(
+        oversized_file.as_ref(),
+        "/projects/skills/oversized/SKILL.md",
+        skill_md("oversized", "description", "PROMPT"),
+    )
+    .await;
+    oversized_file
+        .write_file(
+            &VirtualPath::new("/projects/skills/oversized/references/large.bin").unwrap(),
+            &vec![b'x'; MAX_INSTALL_BUNDLE_FILE_BYTES + 1],
+        )
+        .await
+        .expect("seed oversized snapshot file");
+    let context = skill_management_context(oversized_file, skill_mounts());
+    assert_eq!(
+        capture_skill_bundle(&context, "oversized")
+            .await
+            .err()
+            .expect("snapshot file byte cap must be enforced")
+            .kind(),
+        SkillManagementErrorKind::Resource
+    );
+
+    let oversized_total = Arc::new(InMemoryBackend::default());
+    write_file(
+        oversized_total.as_ref(),
+        "/projects/skills/oversized-total/SKILL.md",
+        skill_md("oversized-total", "description", "PROMPT"),
+    )
+    .await;
+    let chunk = vec![b'x'; MAX_INSTALL_BUNDLE_FILE_BYTES];
+    for index in 0..12 {
+        oversized_total
+            .write_file(
+                &VirtualPath::new(format!(
+                    "/projects/skills/oversized-total/references/{index}.bin"
+                ))
+                .unwrap(),
+                &chunk,
+            )
+            .await
+            .expect("seed total-size snapshot file");
+    }
+    let context = skill_management_context(oversized_total, skill_mounts());
+    assert_eq!(
+        capture_skill_bundle(&context, "oversized-total")
+            .await
+            .err()
+            .expect("snapshot total byte cap must be enforced")
+            .kind(),
+        SkillManagementErrorKind::Resource
+    );
+}
+
+#[tokio::test]
+async fn replacement_restore_write_failure_cleans_up_partial_bundle() {
+    let inner = Arc::new(InMemoryBackend::default());
+    write_file(
+        inner.as_ref(),
+        "/projects/skills/restore-cleanup/SKILL.md",
+        skill_md("restore-cleanup", "description", "PROMPT"),
+    )
+    .await;
+    write_file(
+        inner.as_ref(),
+        "/projects/skills/restore-cleanup/scripts/run.py",
+        "print('fixture')\n".to_string(),
+    )
+    .await;
+    let capture_context = skill_management_context(inner.clone(), skill_mounts());
+    let snapshot = capture_skill_bundle(&capture_context, "restore-cleanup")
+        .await
+        .expect("capture restore cleanup fixture");
+    inner
+        .delete(&VirtualPath::new("/projects/skills/restore-cleanup").expect("skill path"))
+        .await
+        .expect("remove original fixture");
+    drop(capture_context);
+    let Ok(inner) = Arc::try_unwrap(inner) else {
+        panic!("capture context releases backend");
+    };
+
+    let backend = Arc::new(
+        FaultInjecting::new(inner).with_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .path("scripts/run.py")
+                .backend("injected restore write failure"),
+        ),
+    );
+    let restore_context = skill_management_context_with_root(backend.clone(), skill_mounts());
+    let error = restore_skill_bundle(&restore_context, "restore-cleanup", snapshot)
+        .await
+        .expect_err("restore write failure must propagate after cleanup");
+    assert_eq!(error.kind(), SkillManagementErrorKind::InvalidSkill);
+    assert_missing(
+        backend.as_ref(),
+        "/projects/skills/restore-cleanup/SKILL.md",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn replacement_restore_reports_original_and_cleanup_failures() {
     let inner = Arc::new(InMemoryBackend::default());
     write_file(
@@ -1189,6 +1349,58 @@ async fn assert_file_contents<R: RootFilesystem + ?Sized>(root: &R, path: &str, 
 #[derive(Clone)]
 struct CleanupDeleteDenyingFilesystem {
     inner: Arc<InMemoryBackend>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SnapshotListingMode {
+    ExhaustEntryBudget,
+    ExceedEntryBudget,
+    UnsupportedEntry,
+}
+
+struct SnapshotListingFilesystem {
+    mode: SnapshotListingMode,
+}
+
+#[async_trait]
+impl RootFilesystem for SnapshotListingFilesystem {
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.list_dir_bounded(path, 1).await
+    }
+
+    async fn list_dir_bounded(
+        &self,
+        path: &VirtualPath,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        let count = match self.mode {
+            SnapshotListingMode::ExhaustEntryBudget => max_entries.saturating_sub(1),
+            SnapshotListingMode::ExceedEntryBudget => max_entries,
+            SnapshotListingMode::UnsupportedEntry => 1,
+        };
+        let file_type = if self.mode == SnapshotListingMode::UnsupportedEntry {
+            ironclaw_filesystem::FileType::Symlink
+        } else {
+            ironclaw_filesystem::FileType::Directory
+        };
+        Ok((0..count)
+            .map(|index| {
+                let name = format!("entry-{index}");
+                DirEntry {
+                    path: VirtualPath::new(format!("{}/{name}", path.as_str())).unwrap(),
+                    name,
+                    file_type,
+                }
+            })
+            .collect())
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        Err(FilesystemError::NotFound {
+            path: path.clone(),
+            operation: FilesystemOperation::Stat,
+        })
+    }
 }
 
 #[async_trait]

@@ -193,6 +193,15 @@ rationale = "Recaptures the extension-host baseline after PR #6780 extracted Iro
 issue = "https://github.com/nearai/ironclaw/pull/6780"
 
 [[crate]]
+name = "ironclaw_ironhub"
+floor_percent = 86.79
+floor_covered_lines = 1892
+captured_total_lines = 2180
+captured_date = "2026-07-31"
+rationale = "IronHub catalog verification, replay protection, mediated artifact delivery, and install orchestration are security-sensitive shipping paths extracted from extension host."
+issue = "https://github.com/nearai/ironclaw/pull/6780"
+
+[[crate]]
 name = "ironclaw_events"
 floor_percent = 81.04
 floor_covered_lines = 1252

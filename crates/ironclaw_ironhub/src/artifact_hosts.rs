@@ -38,3 +38,37 @@ pub fn artifact_network_policy() -> NetworkPolicy {
         max_egress_bytes: None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn artifact_hosts_accept_explicit_and_githubusercontent_hosts_only() {
+        assert!(is_allowed_artifact_host("HUB.IRONCLAW.COM"));
+        assert!(is_allowed_artifact_host(
+            "release-assets.githubusercontent.com"
+        ));
+        assert!(!is_allowed_artifact_host(
+            "githubusercontent.com.evil.example"
+        ));
+
+        let policy = artifact_network_policy();
+        assert!(policy.deny_private_ip_ranges);
+        assert_eq!(
+            policy.allowed_targets.len(),
+            IRONHUB_ARTIFACT_HOSTS.len() + 1
+        );
+        assert!(policy.allowed_targets.iter().all(|target| {
+            target.scheme == Some(NetworkScheme::Https) && target.port.is_none()
+        }));
+        assert_eq!(
+            policy
+                .allowed_targets
+                .last()
+                .expect("suffix target")
+                .host_pattern,
+            format!("*{IRONHUB_ARTIFACT_HOST_SUFFIX}")
+        );
+    }
+}

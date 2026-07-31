@@ -745,4 +745,22 @@ mod tests {
 
         assert_eq!(input.ironhub_manifest_url, manifest_url);
     }
+
+    #[test]
+    fn ironhub_builder_methods_preserve_validated_inputs() {
+        let shared_key = ironclaw_ironhub::IronhubSharedKey::new(
+            "ihub_sk_RuntimeInputTestKey00000000000000000000000000",
+        )
+        .expect("valid shared key");
+        let manifest_url =
+            ironclaw_ironhub::validated_manifest_url("https://hub.ironclaw.com/test/other.json")
+                .expect("valid manifest URL");
+
+        let input = RebornRuntimeInput::default()
+            .with_ironhub_agent_shared_key(shared_key)
+            .with_ironhub_manifest_url(manifest_url.clone());
+
+        assert!(input.ironhub_agent_shared_key.is_some());
+        assert_eq!(input.ironhub_manifest_url, manifest_url);
+    }
 }

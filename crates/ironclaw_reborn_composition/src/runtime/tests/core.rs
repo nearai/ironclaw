@@ -247,6 +247,62 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
     tokio::task::yield_now().await;
     assert_eq!(network_egress.calls.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn runtime_with_ironhub_shared_key_builds_link_service_and_public_register_mount() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let gateway = Arc::new(RecordingGateway {
+        reply: "unused IronHub runtime test reply".to_string(),
+        requests: Arc::new(StdMutex::new(Vec::new())),
+    });
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_filesystem_build_input(
+            "runtime-ironhub-link-owner",
+            root.path().join("standalone"),
+        )
+        .with_runtime_policy(standalone_runtime_policy()),
+    )
+    .with_ironhub_agent_shared_key(
+        ironclaw_ironhub::IronhubSharedKey::new(
+            "ihub_sk_RuntimeLinkTestKey000000000000000000000000000",
+        )
+        .expect("shared key"),
+    )
+    .with_model_gateway_override(gateway)
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "runtime-ironhub-link-tenant".to_string(),
+        agent_id: "runtime-ironhub-link-agent".to_string(),
+        source_binding_id: "runtime-ironhub-link-source".to_string(),
+        reply_target_binding_id: "runtime-ironhub-link-reply".to_string(),
+    });
+
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    use ironclaw_ironhub::RebornIronHubRuntime;
+    assert!(runtime.ironhub_runtime_http_egress().is_some());
+    drop(runtime.ironhub_skill_management());
+    drop(runtime.ironhub_extension_management());
+    drop(runtime.ironhub_link_state());
+    assert_eq!(
+        runtime.ironhub_manifest_url().as_str(),
+        ironclaw_ironhub::IronhubManifestUrl::default().as_str()
+    );
+    let product_surface = runtime
+        .product_surface(None)
+        .expect("IronHub link reaches product surface");
+    let mount = runtime
+        .ironhub_register_route_mount()
+        .expect("register route composes")
+        .expect("shared key enables register route");
+    assert_eq!(mount.descriptors.len(), 1);
+    assert_eq!(
+        mount.descriptors[0].route_pattern().as_str(),
+        crate::IRONHUB_REGISTER_PATH
+    );
+    drop(product_surface);
+    drop(mount);
+
+    drop(runtime);
+}
 /// Wiring guard: the `regex_skill_activation_enabled` flag from
 /// [`RebornRuntimeInput`] must reach
 /// [`SkillActivationSelectorConfig::regex_activation_enabled`]

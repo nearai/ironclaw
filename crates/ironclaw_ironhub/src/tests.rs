@@ -25,19 +25,19 @@ use std::sync::{Arc, Mutex};
 
 use super::agent_link::{InstallDelivery, IronhubSharedKey};
 use super::catalog::{
-    IronHubManifestSource, classify_gate_and_digest, sha256_hex, validate_private_manifest,
-    validate_private_manifest_origin, verify_signed_manifest_with_keys,
+    IronHubManifestSource, classify_gate_and_digest, sha256_hex, validate_manifest,
+    validate_private_manifest, validate_private_manifest_origin, verify_signed_manifest_with_keys,
 };
-use super::link_service::IronhubLinkStateStore;
+use super::link_service::{IronhubLinkStateStore, RebornIronhubLinkService};
 use super::model::{
     IronHubArtifact, IronHubCommand, IronHubCommandError, IronHubEntryKind, IronHubInstallOptions,
     IronHubManifest, IronHubPhase, IronHubProvenance, IronHubSkillEntry,
 };
 use super::service::{
     IronHubService, RebornIronHubRuntime, clear_test_manifest_cache, configure_test_catalog,
-    configure_test_link_state, execute_reborn_ironhub_command,
-    execute_reborn_ironhub_service_command, test_manifest_fetch_lock_exists,
-    validated_manifest_url,
+    configure_test_catalog_without_link_state, configure_test_link_state,
+    execute_reborn_ironhub_command, execute_reborn_ironhub_service_command,
+    test_manifest_fetch_lock_exists, validated_manifest_url,
 };
 
 const TOOL_RESULT_PREVIEW_BUDGET_BYTES: usize = 24 * 1024;
@@ -69,6 +69,43 @@ impl RebornIronHubRuntime for MissingEgressRuntime {
 
     fn ironhub_manifest_url(&self) -> super::IronhubManifestUrl {
         unreachable!("missing egress must fail before manifest URL is requested")
+    }
+}
+
+struct WiredRuntime {
+    skill_management: Arc<ironclaw_skills::ScopedSkillManagementPort>,
+    extension_management: Arc<ironclaw_extension_host::ExtensionLifecycleManager>,
+    egress: Arc<dyn RuntimeHttpEgress>,
+    context: ironclaw_product::LifecycleProductSurfaceContext,
+    state: Arc<IronhubLinkStateStore>,
+    manifest_url: super::IronhubManifestUrl,
+}
+
+impl RebornIronHubRuntime for WiredRuntime {
+    fn ironhub_skill_management(&self) -> Arc<ironclaw_skills::ScopedSkillManagementPort> {
+        Arc::clone(&self.skill_management)
+    }
+
+    fn ironhub_extension_management(
+        &self,
+    ) -> Arc<ironclaw_extension_host::ExtensionLifecycleManager> {
+        Arc::clone(&self.extension_management)
+    }
+
+    fn ironhub_runtime_http_egress(&self) -> Option<Arc<dyn RuntimeHttpEgress>> {
+        Some(Arc::clone(&self.egress))
+    }
+
+    fn ironhub_surface_context(&self) -> ironclaw_product::LifecycleProductSurfaceContext {
+        self.context.clone()
+    }
+
+    fn ironhub_link_state(&self) -> Arc<IronhubLinkStateStore> {
+        Arc::clone(&self.state)
+    }
+
+    fn ironhub_manifest_url(&self) -> super::IronhubManifestUrl {
+        self.manifest_url.clone()
     }
 }
 
@@ -119,6 +156,287 @@ async fn service_wrapper_routes_catalog_requests_through_the_mediated_egress() {
     assert_eq!(
         requests[0].capability_id.as_str(),
         super::IRONHUB_SEARCH_CAPABILITY_ID
+    );
+}
+
+#[tokio::test]
+async fn reborn_runtime_wrapper_wires_authenticated_scope_and_mediated_egress() {
+    let owner = "runtime-wrapper-owner";
+    let services = ironclaw_extension_host::lifecycle_test_support::build_lifecycle_test_services(
+        owner, None, false,
+    )
+    .await;
+    let scope =
+        ironclaw_extension_host::lifecycle_test_support::webui_gate_resource_scope_for_owner(owner);
+    let manifest_url =
+        validated_manifest_url("https://hub.ironclaw.com/tests/runtime-wrapper/manifest.json")
+            .expect("manifest URL");
+    clear_test_manifest_cache(manifest_url.as_str());
+    let egress = Arc::new(RecordingEgress::new([]));
+    let runtime = WiredRuntime {
+        skill_management: services.skill_management,
+        extension_management: services.extension_management,
+        egress: egress.clone(),
+        context: ironclaw_product::LifecycleProductSurfaceContext {
+            tenant_id: scope.tenant_id.clone(),
+            user_id: scope.user_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+        },
+        state: Arc::new(IronhubLinkStateStore::new(Arc::new(InMemoryBackend::new()))),
+        manifest_url,
+    };
+
+    for command in [
+        IronHubCommand::List { kind: None },
+        IronHubCommand::Info {
+            name: "fixture".to_string(),
+            kind: None,
+        },
+        IronHubCommand::Install {
+            name: "fixture".to_string(),
+            options: IronHubInstallOptions::default(),
+        },
+    ] {
+        let error = execute_reborn_ironhub_command(&runtime, command)
+            .await
+            .expect_err("empty egress rejects catalog fetch");
+        assert!(matches!(error, IronHubCommandError::Catalog { .. }));
+    }
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[0].capability_id.as_str(),
+        super::IRONHUB_SEARCH_CAPABILITY_ID
+    );
+    assert_eq!(
+        requests[1].capability_id.as_str(),
+        super::IRONHUB_INFO_CAPABILITY_ID
+    );
+    assert_eq!(
+        requests[2].capability_id.as_str(),
+        super::IRONHUB_INSTALL_CAPABILITY_ID
+    );
+    for request in requests {
+        assert_eq!(request.scope.tenant_id, scope.tenant_id);
+        assert_eq!(request.scope.user_id, scope.user_id);
+        assert_eq!(request.scope.agent_id, scope.agent_id);
+        assert_eq!(request.scope.project_id, scope.project_id);
+    }
+}
+
+#[tokio::test]
+async fn install_rejects_catalog_tools_that_predate_published_extension_manifests() {
+    let owner = "stale-tool-owner";
+    let services = ironclaw_extension_host::lifecycle_test_support::build_lifecycle_test_services(
+        owner, None, false,
+    )
+    .await;
+    let scope =
+        ironclaw_extension_host::lifecycle_test_support::webui_gate_resource_scope_for_owner(owner);
+    let manifest_url = "https://hub.ironclaw.com/tests/stale-tool/manifest.json";
+    clear_test_manifest_cache(manifest_url);
+    let artifact = IronHubArtifact {
+        url: "https://hub.ironclaw.com/tests/stale-tool/artifact".to_string(),
+        size_bytes: 1,
+        sha256: "a".repeat(64),
+    };
+    let manifest = IronHubManifest {
+        version: "1".to_string(),
+        generated_at: "2026-01-01T00:00:00Z".to_string(),
+        release_tag: "v1".to_string(),
+        repo: "nearai/stale-tool".to_string(),
+        tools: vec![super::model::IronHubToolEntry {
+            name: "stale-tool".to_string(),
+            version: "1.0.0".to_string(),
+            description: "stale catalog entry".to_string(),
+            provenance: IronHubProvenance::Official,
+            wasm: artifact.clone(),
+            capabilities: artifact,
+            manifest: None,
+            schemas: std::collections::BTreeMap::new(),
+        }],
+        skills: Vec::new(),
+    };
+    let envelope = signed_manifest(
+        serde_json::to_string(&manifest).expect("manifest JSON"),
+        &test_signing_key(),
+    );
+    let service = configure_test_catalog(
+        IronHubService::new_with_runtime_egress(
+            services.skill_management,
+            services.extension_management,
+            Arc::new(RecordingEgress::new([(manifest_url, envelope)])),
+            scope,
+            CapabilityId::new(super::IRONHUB_INSTALL_CAPABILITY_ID).expect("capability id"),
+        ),
+        manifest_url,
+        test_manifest_verify_keys(),
+    );
+
+    let error = service
+        .execute(IronHubCommand::Install {
+            name: "stale-tool".to_string(),
+            options: IronHubInstallOptions {
+                kind: Some(IronHubEntryKind::Tool),
+                ..IronHubInstallOptions::default()
+            },
+        })
+        .await
+        .expect_err("tool without a published extension manifest must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("publishes no extension manifest")
+    );
+}
+
+#[tokio::test]
+async fn default_manifest_verifier_rejects_unsigned_catalog_bytes() {
+    let owner = "production-key-owner";
+    let services = ironclaw_extension_host::lifecycle_test_support::build_lifecycle_test_services(
+        owner, None, false,
+    )
+    .await;
+    let scope =
+        ironclaw_extension_host::lifecycle_test_support::webui_gate_resource_scope_for_owner(owner);
+    let manifest_url = "https://hub.ironclaw.com/tests/production-key/manifest.json";
+    clear_test_manifest_cache(manifest_url);
+    let service = IronHubService::new_with_runtime_egress(
+        services.skill_management,
+        services.extension_management,
+        Arc::new(RecordingEgress::new([(manifest_url, b"unsigned".to_vec())])),
+        scope,
+        CapabilityId::new(super::IRONHUB_SEARCH_CAPABILITY_ID).expect("capability id"),
+    )
+    .with_manifest_url(manifest_url.to_string())
+    .with_link_state(Arc::new(IronhubLinkStateStore::new(Arc::new(
+        InMemoryBackend::new(),
+    ))));
+
+    let error = service
+        .execute(IronHubCommand::List { kind: None })
+        .await
+        .expect_err("unsigned catalog must fail production-key verification");
+    assert!(
+        error
+            .to_string()
+            .contains("signed manifest verification failed")
+    );
+}
+
+#[tokio::test]
+async fn private_manifest_fetch_rejects_oversize_malformed_and_invalid_timestamp_payloads() {
+    let owner = "private-validation-owner";
+    let services = ironclaw_extension_host::lifecycle_test_support::build_lifecycle_test_services(
+        owner, None, false,
+    )
+    .await;
+    let scope =
+        ironclaw_extension_host::lifecycle_test_support::webui_gate_resource_scope_for_owner(owner);
+    let configured_url = super::model::DEFAULT_IRONHUB_MANIFEST_URL;
+    let private_url = "https://hub.ironclaw.com/api/private/validation-manifest";
+    let artifact_url = "https://hub.ironclaw.com/api/private/fixture/SKILL.md";
+    let artifact = b"---\nname: fixture\ndescription: fixture\n---\n# Fixture\n";
+    let invalid_timestamp = skill_manifest("fixture", artifact_url, artifact, "not-rfc3339");
+    let cases = [
+        (
+            signed_manifest("not JSON".to_string(), &test_signing_key()),
+            "private manifest parse failed",
+        ),
+        (
+            signed_manifest(
+                serde_json::to_string(&invalid_timestamp).expect("manifest JSON"),
+                &test_signing_key(),
+            ),
+            "generated_at is not RFC3339",
+        ),
+        (
+            signed_manifest(
+                format!(r#"{{"padding":"{}"}}"#, "x".repeat(1024 * 1024)),
+                &test_signing_key(),
+            ),
+            "private manifest exceeds size cap",
+        ),
+    ];
+
+    for (envelope, expected) in cases {
+        let service = configure_test_catalog(
+            IronHubService::new_with_runtime_egress(
+                Arc::clone(&services.skill_management),
+                Arc::clone(&services.extension_management),
+                Arc::new(RecordingEgress::new([(private_url, envelope)])),
+                scope.clone(),
+                CapabilityId::new(super::IRONHUB_INSTALL_CAPABILITY_ID).expect("capability id"),
+            ),
+            configured_url,
+            test_manifest_verify_keys(),
+        );
+        let error = service
+            .execute(IronHubCommand::Install {
+                name: "fixture".to_string(),
+                options: IronHubInstallOptions {
+                    kind: Some(IronHubEntryKind::Skill),
+                    private_manifest_url: Some(private_url.to_string()),
+                    ..IronHubInstallOptions::default()
+                },
+            })
+            .await
+            .expect_err("invalid private manifest must fail closed");
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected}, got {error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn private_manifest_fetch_requires_durable_replay_state() {
+    let owner = "private-replay-state-owner";
+    let services = ironclaw_extension_host::lifecycle_test_support::build_lifecycle_test_services(
+        owner, None, false,
+    )
+    .await;
+    let scope =
+        ironclaw_extension_host::lifecycle_test_support::webui_gate_resource_scope_for_owner(owner);
+    let private_url = "https://hub.ironclaw.com/api/private/replay-state-manifest";
+    let artifact_url = "https://hub.ironclaw.com/api/private/fixture/SKILL.md";
+    let artifact = b"---\nname: fixture\ndescription: fixture\n---\n# Fixture\n";
+    let manifest = skill_manifest("fixture", artifact_url, artifact, "2026-01-02T00:00:00Z");
+    let service = configure_test_catalog_without_link_state(
+        IronHubService::new_with_runtime_egress(
+            services.skill_management,
+            services.extension_management,
+            Arc::new(RecordingEgress::new([(
+                private_url,
+                signed_manifest(
+                    serde_json::to_string(&manifest).expect("manifest JSON"),
+                    &test_signing_key(),
+                ),
+            )])),
+            scope,
+            CapabilityId::new(super::IRONHUB_INSTALL_CAPABILITY_ID).expect("capability id"),
+        ),
+        super::model::DEFAULT_IRONHUB_MANIFEST_URL,
+        test_manifest_verify_keys(),
+    );
+
+    let error = service
+        .execute(IronHubCommand::Install {
+            name: "fixture".to_string(),
+            options: IronHubInstallOptions {
+                kind: Some(IronHubEntryKind::Skill),
+                private_manifest_url: Some(private_url.to_string()),
+                ..IronHubInstallOptions::default()
+            },
+        })
+        .await
+        .expect_err("private manifests require durable replay state");
+    assert!(
+        error
+            .to_string()
+            .contains("requires durable replay protection"),
+        "unexpected error: {error}"
     );
 }
 
@@ -280,6 +598,7 @@ fn private_manifest_origin_is_pinned_to_configured_catalog() {
     for url in [
         "https://user@catalog.example/api/private/manifest",
         "https://user:password@catalog.example/api/private/manifest",
+        "https://:password@catalog.example/api/private/manifest",
     ] {
         assert!(
             validate_private_manifest_origin(configured, url).is_err(),
@@ -297,6 +616,78 @@ fn private_manifest_origin_is_pinned_to_configured_catalog() {
         validate_private_manifest(&cross_origin_artifact, &origin).is_err(),
         "a private manifest cannot redirect artifact download off the pinned origin"
     );
+}
+
+#[test]
+fn catalog_validation_covers_published_tool_assets_and_origin_boundaries() {
+    let artifact = |url: &str| IronHubArtifact {
+        url: url.to_string(),
+        size_bytes: 2,
+        sha256: "a".repeat(64),
+    };
+    let tool = super::model::IronHubToolEntry {
+        name: "fixture".to_string(),
+        version: "1.0.0".to_string(),
+        description: "fixture".to_string(),
+        provenance: IronHubProvenance::Official,
+        wasm: artifact("https://hub.ironclaw.com/fixture.wasm"),
+        capabilities: artifact("https://hub.ironclaw.com/capabilities.json"),
+        manifest: Some(artifact("https://hub.ironclaw.com/manifest.toml")),
+        schemas: std::collections::BTreeMap::from([(
+            "schemas/input.json".to_string(),
+            artifact("https://hub.ironclaw.com/input.json"),
+        )]),
+    };
+    let manifest = IronHubManifest {
+        version: "1".to_string(),
+        generated_at: "2026-01-01T00:00:00Z".to_string(),
+        release_tag: "v1".to_string(),
+        repo: "nearai/fixture".to_string(),
+        tools: vec![tool.clone()],
+        skills: Vec::new(),
+    };
+    validate_manifest(&manifest).expect("complete published tool manifest");
+
+    let mut too_many = manifest.clone();
+    too_many.tools[0].schemas = (0..=super::model::MAX_TOOL_SCHEMA_ARTIFACTS)
+        .map(|index| {
+            (
+                format!("schemas/{index}.json"),
+                artifact("https://hub.ironclaw.com/schema.json"),
+            )
+        })
+        .collect();
+    assert!(validate_manifest(&too_many).is_err());
+
+    let mut invalid_path = manifest;
+    invalid_path.tools[0].schemas = std::collections::BTreeMap::from([(
+        "../outside.json".to_string(),
+        artifact("https://hub.ironclaw.com/schema.json"),
+    )]);
+    assert!(validate_manifest(&invalid_path).is_err());
+
+    let port_origin = validate_private_manifest_origin(
+        "https://catalog.example:8443/catalog",
+        "https://catalog.example:8443/private",
+    )
+    .expect("same non-default port");
+    assert_eq!(
+        port_origin.redacted_source_url(),
+        "https://catalog.example:8443/"
+    );
+
+    for configured in [
+        "not a URL",
+        "http://catalog.example/catalog",
+        "https://user@catalog.example/catalog",
+        "https://localhost/catalog",
+    ] {
+        assert!(
+            validate_private_manifest_origin(configured, "https://catalog.example/private")
+                .is_err(),
+            "configured catalog origin must reject {configured}"
+        );
+    }
 }
 
 #[test]
@@ -803,14 +1194,15 @@ async fn deep_link_install_accepts_hub_digest_and_uses_authenticated_caller_scop
         (artifact_url, artifact),
     ]));
     let state = Arc::new(IronhubLinkStateStore::new(Arc::clone(&services.filesystem)));
-    let service = super::link_service::test_support::new_with_runtime_egress(
+    let service = RebornIronhubLinkService::new(
         Arc::clone(&services.skill_management),
         Arc::clone(&services.extension_management),
         egress.clone(),
         state,
         IronhubSharedKey::new(LINK_KEY).expect("link key"),
     )
-    .expect("link service");
+    .expect("link service")
+    .with_manifest_url(super::IronhubManifestUrl::default());
     let artifact_digest = format!(
         "sha256:{}",
         sha256_hex(manifest.skills[0].skill_md.sha256.as_bytes())

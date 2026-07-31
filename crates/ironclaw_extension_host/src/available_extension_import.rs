@@ -693,6 +693,89 @@ prompt_doc_ref = "prompts/run.md"
     }
 
     #[test]
+    fn registry_extension_package_rejects_non_utf8_manifest() {
+        let error =
+            registry_extension_package(vec![("manifest.toml".to_string(), vec![0xff])], &[])
+                .expect_err("registry manifests must be UTF-8");
+        assert!(format!("{error}").contains("not UTF-8"));
+    }
+
+    #[test]
+    fn imported_auth_recipe_onboarding_preserves_api_key_and_oauth_copy() {
+        for (method, recipe, expected_name, expected_url) in [
+            (
+                "api_key",
+                r#"fields = [ { handle = "fixture_api_key", label = "API key", secret = true } ]"#,
+                "Fixture API",
+                "https://example.com/api-keys",
+            ),
+            (
+                "oauth2_code",
+                r#"authorization_endpoint = "https://example.com/oauth/authorize"
+token_endpoint = "https://example.com/oauth/token"
+scopes = ["read"]
+client_credentials = { client_id_handle = "fixture_client_id", client_secret_handle = "fixture_client_secret" }
+
+[auth.fixture.token_response]
+access_token = "/access_token""#,
+                "Fixture OAuth",
+                "https://example.com/oauth/apps",
+            ),
+        ] {
+            let manifest = format!(
+                r#"schema_version = "reborn.extension_manifest.v3"
+id = "fixture"
+name = "Fixture"
+version = "0.1.0"
+description = "fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/fixture.wasm"
+
+[[tools]]
+origin_gate_matrix = {{ loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }}
+id = "fixture.run"
+description = "run"
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/input.json"
+
+[[tools.credentials]]
+handle = "fixture_api_key"
+vendor = "fixture"
+audience = {{ scheme = "https", host = "example.com" }}
+injection = {{ type = "header", name = "authorization", prefix = "Bearer " }}
+
+[auth.fixture]
+method = "{method}"
+display_name = "{expected_name}"
+instructions = "Create the vendor credential."
+setup_url = "{expected_url}"
+{recipe}"#
+            );
+            let record = parse_imported_manifest(&manifest, ManifestSource::RegistryInstalled)
+                .expect("auth fixture manifest");
+            let onboarding =
+                onboarding_from_auth_recipes(record.resolved()).expect("published setup copy");
+            assert_eq!(onboarding.instructions, "Create the vendor credential.");
+            assert_eq!(
+                onboarding.credential_instructions,
+                Some(onboarding.instructions.clone())
+            );
+            assert_eq!(onboarding.setup_url.as_deref(), Some(expected_url));
+            assert!(
+                onboarding
+                    .credential_next_step
+                    .as_deref()
+                    .is_some_and(|step| step.contains(expected_name))
+            );
+        }
+    }
+
+    #[test]
     fn test_tool_fixture_manifests_stay_importable() {
         for (label, manifest) in [
             (

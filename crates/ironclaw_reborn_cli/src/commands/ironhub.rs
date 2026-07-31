@@ -213,24 +213,31 @@ fn execute_ironhub_command(
             .shutdown()
             .await
             .context("failed to shut down Reborn runtime after IronHub command");
-        match (command_result, shutdown_result) {
-            (Ok(response), Ok(())) => Ok(response),
-            (Err(command_error), Ok(())) => Err(command_error),
-            (Ok(_), Err(shutdown_error)) => Err(shutdown_error),
-            (Err(command_error), Err(shutdown_error)) => {
-                tracing::debug!(
-                    %shutdown_error,
-                    "Reborn runtime shutdown also failed after IronHub command failure"
-                );
-                Err(command_error)
-            }
-        }
+        reconcile_command_and_shutdown(command_result, shutdown_result)
     })
+}
+
+fn reconcile_command_and_shutdown(
+    command_result: anyhow::Result<IronHubResponse>,
+    shutdown_result: anyhow::Result<()>,
+) -> anyhow::Result<IronHubResponse> {
+    match (command_result, shutdown_result) {
+        (Ok(response), Ok(())) => Ok(response),
+        (Err(command_error), Ok(())) => Err(command_error),
+        (Ok(_), Err(shutdown_error)) => Err(shutdown_error),
+        (Err(command_error), Err(shutdown_error)) => {
+            tracing::debug!(
+                %shutdown_error,
+                "Reborn runtime shutdown also failed after IronHub command failure"
+            );
+            Err(command_error)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::read_private_manifest_url;
+    use super::*;
 
     #[test]
     fn private_manifest_url_is_trimmed_when_read_from_file() {
@@ -246,6 +253,11 @@ mod tests {
     }
 
     #[test]
+    fn absent_private_manifest_url_file_stays_absent() {
+        assert_eq!(read_private_manifest_url(None).expect("optional URL"), None);
+    }
+
+    #[test]
     fn empty_private_manifest_url_file_is_rejected() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("private-manifest-url");
@@ -254,5 +266,76 @@ mod tests {
         let error = read_private_manifest_url(Some(&path))
             .expect_err("an empty private-manifest URL must fail closed");
         assert!(error.to_string().contains("is empty"));
+    }
+
+    #[test]
+    fn command_and_shutdown_results_preserve_the_authoritative_error() {
+        let response = || {
+            serde_json::from_value(serde_json::json!({
+                "phase": "discovered",
+                "total_entries": 0,
+                "returned_entries": 0,
+                "truncated": false,
+                "catalog_total": 0,
+                "entries": []
+            }))
+            .expect("fixture response")
+        };
+        assert!(reconcile_command_and_shutdown(Ok(response()), Ok(())).is_ok());
+
+        let command_error =
+            reconcile_command_and_shutdown(Err(anyhow::anyhow!("command failed")), Ok(()))
+                .expect_err("command failure must propagate");
+        assert_eq!(command_error.to_string(), "command failed");
+
+        let shutdown_error =
+            reconcile_command_and_shutdown(Ok(response()), Err(anyhow::anyhow!("shutdown failed")))
+                .expect_err("shutdown failure must propagate after command success");
+        assert_eq!(shutdown_error.to_string(), "shutdown failed");
+
+        let command_error = reconcile_command_and_shutdown(
+            Err(anyhow::anyhow!("command failed first")),
+            Err(anyhow::anyhow!("shutdown failed second")),
+        )
+        .expect_err("command failure remains authoritative when shutdown also fails");
+        assert_eq!(command_error.to_string(), "command failed first");
+    }
+
+    #[test]
+    fn install_command_assembles_runtime_and_rejects_invalid_name_without_network() {
+        let _env_lock = crate::runtime::test_env::lock_runtime_env();
+        let _manifest_url = crate::runtime::test_env::EnvGuard::set(
+            "IRONHUB_MANIFEST_URL",
+            "https://hub.ironclaw.com/manifest.json",
+        );
+        let directory = tempfile::tempdir().expect("tempdir");
+        let private_url_path = directory.path().join("private-manifest-url");
+        std::fs::write(
+            &private_url_path,
+            "https://hub.ironclaw.com/private/manifest\n",
+        )
+        .expect("write private URL file");
+        let (_context_dir, context) = crate::context::RebornCliContext::test_context();
+        let command = IronHubCommand {
+            confirm_host_access: false,
+            command: IronHubSubcommand::Install(IronHubInstallCommand {
+                name: "../invalid".to_string(),
+                kind: Some(IronHubKindArg::Skill),
+                force: false,
+                acknowledge_unverified: false,
+                expected_version: None,
+                expected_artifact_digest: None,
+                private_manifest_url_file: Some(private_url_path),
+                json: true,
+            }),
+        };
+
+        let error = command
+            .execute(context)
+            .expect_err("invalid package name must fail before network access");
+        assert!(
+            format!("{error:#}").contains("name must be 1-128 bytes"),
+            "unexpected error: {error:#}"
+        );
     }
 }

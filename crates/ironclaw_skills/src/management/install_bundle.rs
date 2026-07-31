@@ -113,9 +113,7 @@ pub(crate) async fn capture_skill_bundle(
                         .ok_or_else(|| {
                             SkillManagementError::new(SkillManagementErrorKind::Resource)
                         })?;
-                    total_bytes = total_bytes.checked_add(contents.len()).ok_or_else(|| {
-                        SkillManagementError::new(SkillManagementErrorKind::Resource)
-                    })?;
+                    total_bytes = total_bytes.saturating_add(contents.len());
                     if total_bytes > MAX_SKILL_SNAPSHOT_TOTAL_BYTES {
                         return Err(SkillManagementError::new(
                             SkillManagementErrorKind::Resource,
