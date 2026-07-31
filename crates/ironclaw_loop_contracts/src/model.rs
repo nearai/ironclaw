@@ -30,7 +30,7 @@ pub enum ModelCallOutcome<'a> {
 }
 
 /// Budget/resource accounting boundary invoked around every model call flowing
-/// through [`HostManagedLoopModelPort`].
+/// through `ironclaw_turns`'s `HostManagedLoopModelPort`.
 ///
 /// Implementations may enforce token budgets, call-count limits, cost caps, or
 /// any other resource policy. A `pre_model_call` rejection short-circuits the

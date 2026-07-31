@@ -56,7 +56,7 @@
 //! loop's own ref identity. Each constructor mints a fresh kernel handle **and**
 //! preserves the originating loop ref on the channel's `origin` (a [`LoopRef`]),
 //! so loop/evidence state keyed under the loop ref stays reachable. The only
-//! identity that crosses directly is [`TurnRunId`](ironclaw_host_api::turn::TurnRunId) → [`RunId`]
+//! identity that crosses directly is [`TurnRunId`] → [`RunId`]
 //! (both wrap a `Uuid`, preserved via `RunId::from_uuid`). Auth gate records are
 //! keyed DETERMINISTICALLY from the `gate:auth-{gate_id}` ref via
 //! [`GateRef::for_auth_gate`] so the persist seam and the runner's blocked-exit

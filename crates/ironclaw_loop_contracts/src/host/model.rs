@@ -53,7 +53,7 @@ pub struct LoopModelMessage {
 /// Prompt construction mode requested by an agent-loop driver.
 ///
 /// `TextOnly` builds a prompt from transcript/context message refs and is the
-/// only mode supported by [`crate::HostManagedLoopPromptPort`]
+/// only mode supported by `ironclaw_turns`'s `HostManagedLoopPromptPort`
 /// today. `CodeAct` is reserved for a future checkpoint/tool-aware prompt
 /// bundle flow and is rejected by the text-only host port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
