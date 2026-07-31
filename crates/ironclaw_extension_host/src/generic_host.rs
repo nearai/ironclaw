@@ -330,7 +330,7 @@ impl ExtensionLoader for CompositionExtensionLoader {
         // Mirrors `check_binding`'s own declared-tools test (entrypoint.rs):
         // a resolved contract with no `[[tools]]` and no `[mcp]` declares no
         // tool surface at all. A package in that shape (e.g. a channel-only
-        // first-party extension like Telegram) has nothing to bind, so the
+        // first-party extension) has nothing to bind, so the
         // lane binder must not be asked to produce an adapter for it — the
         // lane binder always succeeds with a (possibly empty-routed) tool
         // adapter, which would then fail the binding-rule check with

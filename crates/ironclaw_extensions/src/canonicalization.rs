@@ -61,7 +61,7 @@ pub fn canonicalize_installation_rows(
             }
             let incarnation_id = rows
                 .iter()
-                .max_by_key(|row| row.updated_at())
+                .max_by_key(|row| (row.updated_at(), row.incarnation_id().cloned()))
                 .and_then(|row| row.incarnation_id().cloned());
             let owner = if rows.iter().any(|row| row.owner().is_tenant()) {
                 InstallationOwner::Tenant

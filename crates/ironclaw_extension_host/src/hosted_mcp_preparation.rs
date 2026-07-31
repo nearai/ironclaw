@@ -198,10 +198,11 @@ impl HostedMcpPreparationService {
         Ok(None)
     }
 
-    #[allow(clippy::too_many_arguments)]
     // arch-exempt: too_many_args, mirrors the parameter set `prepare_if_pending`
-    // already gathered under its operation-lock guard; no aggregation owns
-    // these together yet, tracked with the hosted-MCP preparation service.
+    // already gathered under its operation-lock guard; missing a
+    // HostedMcpPreparationAttempt context struct to own
+    // (package_ref, extension_id, scope, installation, manifest), plan TBD
+    #[allow(clippy::too_many_arguments)]
     async fn attempt_hosted_mcp_preparation(
         &self,
         package_ref: &LifecyclePackageRef,
@@ -374,6 +375,12 @@ impl HostedMcpPreparationService {
             // `Required`). A best-effort refresh runs on a package that is
             // already `Ready`, so there is no pending lease to finalize —
             // persist the refreshed catalog as a plain upsert instead.
+            //
+            // `installation` predates the unlocked discovery call, and this
+            // upsert writes with `CasExpectation::Any`, so a concurrent
+            // installation-row mutation can be lost. Closing that needs a
+            // manifest-only CAS upsert across every storage backend; tracked
+            // as follow-up rather than widened here.
             self.installation_store
                 .upsert_manifest_and_installation(finalized.clone(), installation.clone())
                 .await

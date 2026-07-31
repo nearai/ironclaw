@@ -169,6 +169,7 @@ async def _open_custom_mcp_page(
 async def _register(page) -> None:
     await page.get_by_role("button", name="Add MCP server").click()
     await page.get_by_label("Server name").fill("Custom weather MCP")
+    await page.get_by_text("Advanced options").click()
     await page.get_by_label("Server ID").fill("custom-weather-mcp")
     await page.get_by_label("Server address").fill("https://weather.example.test/mcp")
     await page.get_by_role("button", name="Continue").click()
@@ -194,7 +195,7 @@ async def test_custom_mcp_registration_creates_uninstalled_registry_entry(
         await expect(page.get_by_role("button", name="Install")).to_be_visible()
 
         await _register(page)
-        await expect(page.get_by_text("Registration complete", exact=True)).to_be_visible()
+        await expect(page.get_by_text("Server added", exact=True)).to_be_visible()
         assert registrations == [
             {
                 "desired_id": "custom-weather-mcp",
@@ -225,7 +226,7 @@ async def test_custom_mcp_bearer_install_hands_off_to_existing_setup_states(
     )
     try:
         await _register(page)
-        await expect(page.get_by_text("Registration complete", exact=True)).to_be_visible()
+        await expect(page.get_by_text("Server added", exact=True)).to_be_visible()
         await page.get_by_role("button", name="Done").click()
         await _install_registered_mcp(page)
         await expect(page.get_by_role("dialog")).to_contain_text("Configure Custom weather MCP")
@@ -257,7 +258,7 @@ async def test_custom_mcp_oauth_uses_existing_authorize_setup_control(
     )
     try:
         await _register(page)
-        await expect(page.get_by_text("Registration complete", exact=True)).to_be_visible()
+        await expect(page.get_by_text("Server added", exact=True)).to_be_visible()
         await page.get_by_role("button", name="Done").click()
         await _install_registered_mcp(page)
         await expect(page.get_by_role("button", name="Authorize")).to_be_visible()

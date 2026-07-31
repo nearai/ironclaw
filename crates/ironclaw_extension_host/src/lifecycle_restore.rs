@@ -131,8 +131,19 @@ async fn restore_registered_only_definitions(
         if already_contributed.contains(manifest.extension_id().as_str()) {
             continue;
         }
-        let available = crate::hosted_mcp_manifest::available_package(manifest)?;
-        catalog.extend(AvailableExtensionCatalog::from_packages(vec![available]));
+        match crate::hosted_mcp_manifest::available_package(manifest) {
+            Ok(available) => {
+                catalog.extend(AvailableExtensionCatalog::from_packages(vec![available]));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    extension_id = manifest.extension_id().as_str(),
+                    %error,
+                    "skipping registered hosted MCP definition restore: definition is not \
+                     convertible into an available package"
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -240,10 +251,10 @@ pub fn prepare_install(
         &contracts,
         Some(manifest_hash.clone()),
     )?
-    // "Required" means nothing model-visible until discovery succeeds
-    // (Notion: only a host-internal mcp_server template). `mcp.is_some()`
-    // alone is the wrong test — NEAR AI ships a static model-visible
-    // `nearai.web_search` tool and must activate without discovery. The
+    // "Required" means nothing model-visible until discovery succeeds — a
+    // package carrying only a host-internal `mcp_server` template.
+    // `mcp.is_some()` alone is the wrong test: a bundled provider may ship a
+    // static model-visible tool and must activate without discovery. The
     // visible-capability exemption only applies to a genuine hosted-MCP
     // package (manifest runtime `Mcp`, per the v3 `[mcp]`/`[runtime]`
     // exclusivity in `ironclaw_extensions::v3`): a package whose tools come

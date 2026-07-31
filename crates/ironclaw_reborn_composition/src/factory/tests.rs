@@ -1531,7 +1531,7 @@ fn nearai_bootstrap_input_with_base(
 }
 
 fn nearai_bootstrap_input(owner: &str, root: PathBuf, api_key: &str) -> RebornHostBindings {
-    nearai_bootstrap_input_with_base(owner, root, "https://private.near.ai", api_key)
+    nearai_bootstrap_input_with_base(owner, root, "https://private.nearai.example", api_key)
 }
 
 #[test]
@@ -2034,7 +2034,7 @@ async fn standalone_nearai_mcp_rebootstrap_reuses_existing_account() {
     let outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         Some(
             ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
-                "https://private.near.ai",
+                "https://private.nearai.example",
                 secrecy::SecretString::from("nearai-second-key"),
             )
             .expect("valid NEAR AI MCP bootstrap config"),
@@ -2107,7 +2107,7 @@ async fn standalone_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential
     let outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         Some(
             ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
-                "https://private.near.ai",
+                "https://private.nearai.example",
                 secrecy::SecretString::from("nearai-test-key"),
             )
             .expect("valid NEAR AI MCP bootstrap config"),
@@ -2166,7 +2166,7 @@ async fn standalone_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential
 async fn standalone_nearai_mcp_invalid_base_url_fails_build() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = ironclaw_operator::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
-        "http://private.near.ai",
+        "http://private.nearai.example",
         secrecy::SecretString::from("nearai-test-key"),
     )
     .expect("config shape");

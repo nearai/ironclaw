@@ -1810,13 +1810,13 @@ async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
     let config = ironclaw_llm::LlmConfig {
         backend: "nearai".to_string(),
         session: ironclaw_llm::SessionConfig {
-            auth_base_url: "https://private.near.ai".to_string(),
+            auth_base_url: "https://private.nearai.example".to_string(),
             session_path: session_dir.path().join("session.json"),
         },
         nearai: ironclaw_llm::NearAiConfig {
             model: "test-model".to_string(),
             cheap_model: None,
-            base_url: "https://private.near.ai".to_string(),
+            base_url: "https://private.nearai.example".to_string(),
             api_key: None,
             fallback_model: None,
             max_retries: 0,
@@ -1919,13 +1919,13 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     let config = ironclaw_llm::LlmConfig {
         backend: "nearai".to_string(),
         session: ironclaw_llm::SessionConfig {
-            auth_base_url: "https://private.near.ai".to_string(),
+            auth_base_url: "https://private.nearai.example".to_string(),
             session_path: session_dir.path().join("session.json"),
         },
         nearai: ironclaw_llm::NearAiConfig {
             model: "test-model".to_string(),
             cheap_model: None,
-            base_url: "https://cloud-api.near.ai".to_string(),
+            base_url: "https://cloud-api.nearai.example".to_string(),
             api_key: None,
             fallback_model: None,
             max_retries: 0,
@@ -2068,13 +2068,13 @@ async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
     let config = ironclaw_llm::LlmConfig {
         backend: "nearai".to_string(),
         session: ironclaw_llm::SessionConfig {
-            auth_base_url: "https://private.near.ai".to_string(),
+            auth_base_url: "https://private.nearai.example".to_string(),
             session_path: session_dir.path().join("session.json"),
         },
         nearai: ironclaw_llm::NearAiConfig {
             model: "test-model".to_string(),
             cheap_model: None,
-            base_url: "https://cloud-api.near.ai".to_string(),
+            base_url: "https://cloud-api.nearai.example".to_string(),
             api_key: Some(secrecy::SecretString::from("sk-prebuild-nearai-mcp-key")),
             fallback_model: None,
             max_retries: 0,
