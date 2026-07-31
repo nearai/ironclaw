@@ -244,7 +244,11 @@ def build_plan(
     root_partitions: set[int] = set()
     integration_lanes: set[str | int] = set()
     run_frontend = False
-    run_qa_replay = False
+    # Recorded replay is a repository-wide ordering and integration sentinel,
+    # not affected-area coverage. Keep it on for every pull request even when
+    # no changed path maps to another Reborn lane.
+    run_qa_replay = True
+    qa_evidence_changed = False
     reasons: list[str] = []
     root_inventory = _root_test_partitions()
     integration_inventory = _integration_test_lanes()
@@ -284,7 +288,7 @@ def build_plan(
             "scripts/ci/test-check-reborn-qa-fixtures.sh",
             "scripts/ci/test-check-regression-promotions.py",
         }:
-            run_qa_replay = True
+            qa_evidence_changed = True
             reasons.append("recorded QA evidence changed")
             continue
         if path.startswith("crates/"):
@@ -341,7 +345,7 @@ def build_plan(
         or root_partitions
         or integration_lanes
         or run_frontend
-        or run_qa_replay
+        or qa_evidence_changed
     )
     return {
         "mode": "selected" if active else "none",

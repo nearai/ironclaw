@@ -33,12 +33,14 @@ WASM build to ordinary PR feedback. Push and deep-CI runs remain exhaustive.
 
 `reborn-tests.yml` follows the same PR-versus-queue contract. Pull requests use
 `reborn_pr_test_plan.py` to run affected crate buckets and exact changed root,
-integration, frontend, or recorded-fixture suites without LLVM
-instrumentation. The full transitive reverse workspace dependency closure is
-included in PR crate selection. Foundational-crate changes that span more than
-three canonical buckets coalesce every changed and dependent package into at
-most three PR jobs instead of omitting consumer tests. The merge queue and
-pushes to `main` still run every crate bucket, root
+integration, and frontend suites without LLVM instrumentation. Recorded QA
+replay remains a baseline on every pull request because it detects ordering
+and cross-surface regressions that cannot be inferred from changed paths. The
+full transitive reverse workspace dependency closure is included in PR crate
+selection. Foundational-crate changes that span more than three canonical
+buckets coalesce every changed and dependent package into at most three PR
+jobs instead of omitting consumer tests. The merge queue and pushes to `main`
+still run every crate bucket, root
 partition, group suite, integration lane, frontend test, recorded replay, and
 coverage gate. Unknown paths, empty diffs, and recognized test-topology or
 workspace-topology changes fail closed to that same full plan on the pull

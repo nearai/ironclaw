@@ -1123,5 +1123,5 @@ jobs:
             "${mutation_expected}"
 
           if [[ "${plan_mode}" == "none" ]]; then
-            echo "No affected Reborn test surface — all lanes skipped as planned"
+            echo "No affected Reborn test surface — baseline recorded replay ran as planned"
           fi

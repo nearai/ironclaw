@@ -76,6 +76,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
             plan["crate_buckets"],
             [{"name": "selected", "packages": ["alpha", "beta", "gamma"]}],
         )
+        self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["coverage_mode"], "none")
 
     def test_high_fanout_package_keeps_consumers_in_bounded_jobs(self) -> None:
@@ -136,12 +137,13 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 any(package_set <= set(candidate["packages"]) for candidate in bounded)
             )
 
-    def test_frontend_only_change_runs_only_frontend(self) -> None:
+    def test_frontend_change_runs_frontend_and_baseline_qa_replay(self) -> None:
         plan = self.plan(
             "pull_request", ["crates/ironclaw_webui/frontend/src/app.tsx"]
         )
         self.assertEqual(plan["mode"], "selected")
         self.assertTrue(plan["run_frontend"])
+        self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["crate_buckets"], [])
         self.assertEqual(plan["integration_lanes"], [])
 
@@ -159,9 +161,10 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["crate_buckets"], [])
 
-    def test_unrelated_workflow_change_runs_no_reborn_lane(self) -> None:
+    def test_unrelated_workflow_change_runs_only_baseline_qa_replay(self) -> None:
         plan = self.plan("pull_request", [".github/workflows/code_style.yml"])
         self.assertEqual(plan["mode"], "none")
+        self.assertTrue(plan["run_qa_replay"])
 
     def test_reborn_workflow_change_fails_closed_to_full_pr_plan(self) -> None:
         plan = self.plan("pull_request", [".github/workflows/reborn-tests.yml"])
