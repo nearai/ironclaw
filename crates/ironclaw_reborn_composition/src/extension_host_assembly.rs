@@ -2,13 +2,18 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use ironclaw_extensions::ExtensionInstallationStorePort;
-use ironclaw_filesystem::{CompositeRootFilesystem, RootFilesystem};
-use ironclaw_host_api::{CapabilityId, ExtensionHostAssemblyConfig, ResourceScope, UserId};
+use ironclaw_filesystem::{CompositeRootFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_host_api::{
+    extension::ExtensionHostAssemblyConfig,
+    ids::{CapabilityId, UserId},
+    resource::ResourceScope,
+};
 use ironclaw_host_runtime::{ExtensionLaneToolBinder, HostRuntimeHttpEgressPort};
 use ironclaw_product::{
     ApprovalInteractionService, ApprovalPromptContextSource, AuthChallengeProvider,
     AuthInteractionService, BlockedAuthFlowCanceller, BlockedAuthPromptSource,
-    ExtensionAccountSetupDescriptor, ExtensionAccountSetupRegistry, RunDeliverySettings,
+    ExtensionAccountSetupDescriptor, ExtensionAccountSetupRegistry, InboundAttachmentLander,
+    ProjectFilesystemReader, RunDeliverySettings,
 };
 use ironclaw_resources::ResourceGovernor;
 use ironclaw_threads::{SessionThreadService, ThreadScope};
@@ -116,14 +121,26 @@ pub(crate) async fn build_backend_extension_host(
         },
     )
     .await;
+    let ingress_filesystem: Arc<dyn RootFilesystem> = filesystem;
     let ingress = ironclaw_extension_host::extension_ingress::build_extension_ingress(
         generic.host.snapshot_watch(),
         Arc::clone(&deployment_channels),
         Arc::new(ironclaw_extension_host::FilesystemReplyContextStore::new(
-            filesystem,
+            Arc::clone(&ingress_filesystem),
             channel_egress_scope.tenant_id.clone(),
             channel_egress_scope.user_id.clone(),
         )),
+        Arc::new(
+            ironclaw_extension_host::FilesystemInboundBatchStore::new(
+                ingress_filesystem,
+                channel_egress_scope.tenant_id.clone(),
+                channel_egress_scope.user_id.clone(),
+            )
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("inbound batch store could not be configured: {error}"),
+            })?,
+        ),
+        channel_egress_transport.clone(),
     );
     let (delivery_coordinator, channel_delivery_resolver) = match channel_egress_transport {
         Some(transport) => {
@@ -254,7 +271,7 @@ pub(crate) async fn build_backend_channel_pairing(
             })?;
         let agent_id = match scope.agent_id.clone() {
             Some(agent_id) => agent_id,
-            None => ironclaw_host_api::AgentId::new("reborn").map_err(|error| {
+            None => ironclaw_host_api::ids::AgentId::new("reborn").map_err(|error| {
                 RebornBuildError::InvalidConfig {
                     reason: format!("fallback channel pairing agent id is invalid: {error}"),
                 }
@@ -273,11 +290,11 @@ pub(crate) async fn build_backend_channel_pairing(
             installation,
             template_values,
             identity_bind: Arc::clone(&identity_store)
-                as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingStore>,
+                as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingStore>,
             identity_lookup: Arc::clone(&identity_store)
-                as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>,
+                as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
             identity_delete: Arc::clone(&identity_store)
-                as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingDeleteStore>,
+                as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingDeleteStore>,
             continuation: Arc::clone(&continuation),
             conversation_actor_pairings: Arc::clone(&workflow_state.conversations)
                 as Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
@@ -302,8 +319,10 @@ pub(crate) async fn build_backend_channel_pairing(
             scope.tenant_id,
             Vec::new(),
             Some(installation_store),
-            Arc::clone(&identity_store) as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>,
-            identity_store as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingDeleteStore>,
+            Arc::clone(&identity_store)
+                as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
+            identity_store
+                as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingDeleteStore>,
             Some(credential_cleanup),
             Some(account_status_reader),
             Some(dm_targets),
@@ -344,11 +363,13 @@ pub(crate) struct ChannelHostAssemblySource {
     pub(crate) ingress_registry:
         Arc<ironclaw_extension_host::extension_ingress::ExtensionIngressRegistry>,
     pub(crate) workflow_filesystem: Arc<dyn RootFilesystem>,
+    pub(crate) inbound_attachments: Arc<dyn InboundAttachmentLander>,
+    pub(crate) project_filesystem: Arc<dyn ProjectFilesystemReader>,
     pub(crate) delivery_coordinator: Option<Arc<ironclaw_product::DeliveryCoordinator>>,
     pub(crate) outbound_state: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
     pub(crate) delivered_gate_routes: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
     pub(crate) outbound_preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository>,
-    pub(crate) identity_lookup: Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>,
+    pub(crate) identity_lookup: Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
     pub(crate) channel_config: Arc<ironclaw_extension_host::ChannelConfigService>,
     pub(crate) channel_pairing:
@@ -356,16 +377,36 @@ pub(crate) struct ChannelHostAssemblySource {
 }
 
 fn channel_host_source(services: &RebornRuntimeStores) -> Option<ChannelHostAssemblySource> {
+    let inbound_mounts = crate::runtime_mounts::workspace_mount_view(
+        ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
+        &[],
+    )
+    .ok()?;
+    let inbound_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&services.extension_filesystem),
+        inbound_mounts,
+    ));
+    let inbound_attachments: Arc<dyn InboundAttachmentLander> = Arc::new(
+        ironclaw_product::ProjectScopedAttachmentLander::new(inbound_filesystem),
+    );
+    let project_filesystem: Arc<dyn ProjectFilesystemReader> = Arc::new(
+        ironclaw_product::ProjectScopedFilesystemReader::with_max_read_bytes(
+            Arc::clone(&services.workspace_filesystem),
+            ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64,
+        ),
+    );
     Some(ChannelHostAssemblySource {
         generic_host: services.extension_management.generic_host()?,
         ingress_registry: Arc::clone(&services.extension_ingress.as_ref()?.registry),
         workflow_filesystem: services.extension_filesystem.clone(),
+        inbound_attachments,
+        project_filesystem,
         delivery_coordinator: services.delivery_coordinator.clone(),
         outbound_state: Arc::clone(&services.outbound_state),
         delivered_gate_routes: Arc::clone(&services.delivered_gate_routes),
         outbound_preferences: Arc::clone(&services.outbound_preferences),
         identity_lookup: Arc::clone(&services.channel_identity_store)
-            as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>,
+            as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
         deployment_channels: Arc::clone(&services.deployment_channels),
         channel_config: Arc::clone(&services.channel_config_service),
         channel_pairing: services.channel_pairing.clone(),
@@ -416,6 +457,8 @@ pub(crate) fn start_channel_host(
         generic_host,
         ingress_registry: registry,
         workflow_filesystem,
+        inbound_attachments,
+        project_filesystem,
         delivery_coordinator,
         outbound_state,
         delivered_gate_routes,
@@ -435,6 +478,7 @@ pub(crate) fn start_channel_host(
             outbound_store: Arc::clone(outbound_state),
             route_store: Arc::clone(delivered_gate_routes),
             communication_preferences: Arc::clone(outbound_preferences),
+            project_filesystem: Arc::clone(project_filesystem),
             approval_context,
             blocked_auth_prompts,
             auth_flow_cancel,
@@ -450,6 +494,7 @@ pub(crate) fn start_channel_host(
         workflow_state,
         thread_service,
         turn_coordinator,
+        inbound_attachments: Arc::clone(inbound_attachments),
         approval_interaction,
         auth_interaction,
         identity,

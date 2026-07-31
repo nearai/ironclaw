@@ -23,8 +23,13 @@ pub use test_support::{
 use ironclaw_authorization::{CapabilityLease, CapabilityLeaseError, CapabilityLeaseStorePort};
 use ironclaw_events::AuditSink;
 use ironclaw_host_api::{
-    Action, ApprovalDecisionKind, ApprovalRequestId, CapabilityGrant, CapabilityGrantId,
-    CapabilityId, GrantConstraints, InvocationFingerprint, Principal, ResourceScope,
+    action::Action,
+    approval::InvocationFingerprint,
+    audit::ApprovalDecisionKind,
+    capability::{CapabilityGrant, GrantConstraints},
+    ids::{ApprovalRequestId, CapabilityGrantId, CapabilityId},
+    resource::ResourceScope,
+    scope::Principal,
 };
 use thiserror::Error;
 
@@ -282,7 +287,7 @@ where
     pub async fn deny(
         &self,
         scope: &ResourceScope,
-        request_id: ironclaw_host_api::ApprovalRequestId,
+        request_id: ironclaw_host_api::ids::ApprovalRequestId,
         denial: DenyApproval,
     ) -> Result<ApprovalRecord, ApprovalResolutionError> {
         let record = self
@@ -320,11 +325,11 @@ where
     async fn emit_approval_resolved(
         &self,
         scope: &ResourceScope,
-        request: &ironclaw_host_api::ApprovalRequest,
+        request: &ironclaw_host_api::approval::ApprovalRequest,
         resolved_by: Principal,
         decision: ApprovalDecisionKind,
     ) {
-        self.emit_audit_best_effort(ironclaw_host_api::AuditEnvelope::approval_resolved(
+        self.emit_audit_best_effort(ironclaw_host_api::audit::AuditEnvelope::approval_resolved(
             scope,
             request,
             resolved_by,
@@ -333,7 +338,7 @@ where
         .await;
     }
 
-    async fn emit_audit_best_effort(&self, record: ironclaw_host_api::AuditEnvelope) {
+    async fn emit_audit_best_effort(&self, record: ironclaw_host_api::audit::AuditEnvelope) {
         if let Some(sink) = self.audit_sink {
             let _ = sink.emit_audit(record).await;
         }

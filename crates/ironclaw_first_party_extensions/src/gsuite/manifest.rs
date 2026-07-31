@@ -1,6 +1,7 @@
 use ironclaw_host_api::{
-    EffectKind, ExtensionId, PermissionMode, ResourceCeiling, ResourceEstimate, ResourceProfile,
-    SandboxQuota,
+    capability::{EffectKind, PermissionMode},
+    ids::ExtensionId,
+    resource::{ResourceCeiling, ResourceEstimate, ResourceProfile, SandboxQuota},
 };
 
 pub const CALENDAR_EXTENSION_ID: &str = "google-calendar";

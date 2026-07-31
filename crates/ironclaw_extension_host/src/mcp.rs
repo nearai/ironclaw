@@ -4,8 +4,9 @@ use ironclaw_extensions::{
     ExtensionPackage, ExtensionRuntime, ManifestSource, SharedExtensionRegistry,
 };
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
-    RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeHttpEgress,
+    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    http::{RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeHttpEgress},
+    ids::{CapabilityId, ExtensionId},
 };
 use ironclaw_mcp::{
     McpHostHttpClient, McpHostHttpEgressPlan, McpHostHttpEgressPlanRequest,
@@ -191,10 +192,17 @@ fn hosted_mcp_network_policy(endpoint: &HostedMcpEndpoint) -> NetworkPolicy {
 mod tests {
     use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ManifestSource};
     use ironclaw_host_api::{
-        CapabilityId, CapabilityProfileSchemaRef, ExtensionId, InvocationId, NetworkMethod,
-        NetworkScheme, NetworkTargetPattern, PermissionMode, ProjectId, ResourceScope,
-        RuntimeCredentialRequirementSource, RuntimeCredentialTarget, SecretHandle, TenantId,
-        TrustClass, UserId, VendorId, VirtualPath,
+        action::{NetworkMethod, NetworkScheme, NetworkTargetPattern},
+        capability::{PermissionMode, RuntimeCredentialRequirementSource},
+        capability_profile::CapabilityProfileSchemaRef,
+        http::RuntimeCredentialTarget,
+        ids::{
+            CapabilityId, ExtensionId, InvocationId, ProjectId, SecretHandle, TenantId, UserId,
+            VendorId,
+        },
+        path::VirtualPath,
+        resource::ResourceScope,
+        runtime::TrustClass,
     };
 
     use super::*;
@@ -489,7 +497,7 @@ mod tests {
                         version: "0.1.0".to_string(),
                         description: "Hosted MCP".to_string(),
                         source: ManifestSource::HostBundled,
-                        requested_trust: ironclaw_host_api::RequestedTrustClass::ThirdParty,
+                        requested_trust: ironclaw_host_api::trust::RequestedTrustClass::ThirdParty,
                         descriptor_trust_default: TrustClass::Sandbox,
                         runtime: ironclaw_extensions::ExtensionRuntime::Mcp {
                             transport: "http".to_string(),
@@ -504,9 +512,9 @@ mod tests {
                             id: CapabilityId::new(capability_id).unwrap(),
                             description: "Search".to_string(),
                             effects: vec![
-                                ironclaw_host_api::EffectKind::DispatchCapability,
-                                ironclaw_host_api::EffectKind::Network,
-                                ironclaw_host_api::EffectKind::UseSecret,
+                                ironclaw_host_api::capability::EffectKind::DispatchCapability,
+                                ironclaw_host_api::capability::EffectKind::Network,
+                                ironclaw_host_api::capability::EffectKind::UseSecret,
                             ],
                             default_permission: PermissionMode::Allow,
                             visibility: ironclaw_extensions::CapabilityVisibility::Model,
@@ -523,7 +531,7 @@ mod tests {
                             prompt_doc_ref: None,
                             required_host_ports: Vec::new(),
                             runtime_credentials: vec![
-                                ironclaw_host_api::RuntimeCredentialRequirement {
+                                ironclaw_host_api::capability::RuntimeCredentialRequirement {
                                     handle: SecretHandle::new(credential_handle).unwrap(),
                                     source:
                                         RuntimeCredentialRequirementSource::ProductAuthAccount {

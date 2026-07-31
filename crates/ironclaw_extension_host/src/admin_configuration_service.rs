@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use ironclaw_extensions::{AdminConfigurationGroupId, ExtensionAdminConfigurationDescriptor};
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{ResourceScope, SecretHandle};
+use ironclaw_host_api::{ids::SecretHandle, resource::ResourceScope};
 use ironclaw_secrets::{SecretMaterial, SecretStorePort};
 use secrecy::ExposeSecret;
 use sha2::{Digest, Sha256};

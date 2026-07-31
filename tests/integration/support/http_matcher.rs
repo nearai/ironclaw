@@ -12,7 +12,7 @@
 // under `-D warnings`. Module-level allow matches the sibling support modules.
 #![allow(dead_code)]
 
-use ironclaw_host_api::{RuntimeHttpEgressError, RuntimeHttpEgressRequest};
+use ironclaw_host_api::http::{RuntimeHttpEgressError, RuntimeHttpEgressRequest};
 
 /// What a matched [`ScriptedHttpResponse`] yields: a successful response
 /// (status + body), or a scripted egress error letting tests exercise runtime

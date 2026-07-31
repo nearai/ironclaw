@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use crate::state::{
     CompactionEffectivenessBaseline, IndexedMessageKind, LoopExecutionState, MessageIndexEntry,
 };
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_turns::run_profile::{CompactionInitiator, LoopRunContext, PromptContextTokenBudget};
 
 /// Decides whether to replace older transcript context with a host-managed summary.
@@ -279,7 +279,7 @@ mod tests {
         CompactionEffectivenessBaseline, CompactionPromptSnapshot, CompactionStrategyState,
         DeferredCompactionWatermark, LoopExecutionState, MessageIndexEntry,
     };
-    use ironclaw_host_api::CapabilityId;
+    use ironclaw_host_api::ids::CapabilityId;
     use ironclaw_turns::run_profile::PromptContextTokenBudget;
 
     #[test]

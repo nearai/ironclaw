@@ -13,6 +13,9 @@ pub const MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY: &str = "model_spend_budget_exha
 /// This must not be presented as a provider balance or configured-budget outcome.
 pub const BUDGET_ACCOUNTING_FAILED_CATEGORY: &str = "budget_accounting_failed";
 
+/// Failure category for assistant output that could not be durably committed.
+pub const TRANSCRIPT_WRITE_FAILED_CATEGORY: &str = "transcript_write_failed";
+
 /// A deterministic checkpoint validation rejection.
 ///
 /// The rejected state is never used to run a model or capability. The

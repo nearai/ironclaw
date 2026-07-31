@@ -17,10 +17,16 @@ use ironclaw_auth::{
     CredentialRecoveryProjection, ProviderScope,
 };
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, NetworkMethod, ResourceScope, ResourceUsage,
-    RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
-    RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest, RuntimeKind,
+    action::NetworkMethod,
+    dispatch::RuntimeDispatchErrorKind,
+    http::{
+        RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressReasonCode,
+        RuntimeHttpEgressRequest,
+    },
+    ids::{CapabilityId, ExtensionId},
+    resource::{ResourceScope, ResourceUsage},
+    runtime::RuntimeKind,
 };
 use serde_json::{Value, json};
 
@@ -555,7 +561,7 @@ pub enum GsuiteCredentialDispatchReason {
     },
     MissingAccessSecret,
     AuthRequired {
-        required_secrets: Vec<ironclaw_host_api::SecretHandle>,
+        required_secrets: Vec<ironclaw_host_api::ids::SecretHandle>,
     },
     BackendAuth,
     HostApi,
@@ -608,7 +614,7 @@ impl GsuiteDispatchError {
     /// return an empty `Vec` (the caller reads [`Self::reason`] for richer context).
     /// `Recovery(Configured)` returns `None` because it signals a backend infrastructure
     /// failure — prompting the user to re-authenticate would be incorrect.
-    pub fn auth_requirement(&self) -> Option<Vec<ironclaw_host_api::SecretHandle>> {
+    pub fn auth_requirement(&self) -> Option<Vec<ironclaw_host_api::ids::SecretHandle>> {
         match self.reason.as_ref()? {
             GsuiteCredentialDispatchReason::Recovery(recovery) => {
                 match recovery.kind() {
@@ -641,15 +647,15 @@ pub struct GsuiteCredentialStageRequest<'a> {
     /// Runtime invocation scope that receives the staged credential injection.
     pub target_scope: &'a ResourceScope,
     pub capability_id: &'a CapabilityId,
-    pub access_secret: &'a ironclaw_host_api::SecretHandle,
+    pub access_secret: &'a ironclaw_host_api::ids::SecretHandle,
 }
 
-/// Alias for [`ironclaw_host_api::CredentialStageError`].
+/// Alias for [`ironclaw_host_api::dispatch::CredentialStageError`].
 ///
 /// The shared type lives in `ironclaw_host_api` so that both the GSuite staging
 /// trait and the host-runtime staging layer use the same type without a
 /// cross-crate conversion step.
-pub type GsuiteCredentialStageError = ironclaw_host_api::CredentialStageError;
+pub type GsuiteCredentialStageError = ironclaw_host_api::dispatch::CredentialStageError;
 
 #[async_trait]
 pub trait GsuiteCredentialStager: Send + Sync {
@@ -671,7 +677,7 @@ enum CapabilityExecution {
 
 enum CapabilityExecutionOutcome {
     Response {
-        response: ironclaw_host_api::RuntimeHttpEgressResponse,
+        response: ironclaw_host_api::http::RuntimeHttpEgressResponse,
         network_egress_bytes: u64,
     },
     AuthExpired {
@@ -775,7 +781,7 @@ async fn execute_add_attendees(
 }
 
 fn response_outcome(
-    response: ironclaw_host_api::RuntimeHttpEgressResponse,
+    response: ironclaw_host_api::http::RuntimeHttpEgressResponse,
     network_egress_bytes: u64,
 ) -> CapabilityExecutionOutcome {
     if is_google_auth_expired_response(&response) {
@@ -793,7 +799,7 @@ fn response_outcome(
 async fn execute_runtime_http(
     request: RuntimeHttpEgressRequest,
     egress: Arc<dyn RuntimeHttpEgress>,
-) -> Result<ironclaw_host_api::RuntimeHttpEgressResponse, GsuiteDispatchError> {
+) -> Result<ironclaw_host_api::http::RuntimeHttpEgressResponse, GsuiteDispatchError> {
     AssertUnwindSafe(egress.execute(request))
         .catch_unwind()
         .await
@@ -805,7 +811,7 @@ async fn execute_runtime_http(
 }
 
 fn response_output(
-    response: &ironclaw_host_api::RuntimeHttpEgressResponse,
+    response: &ironclaw_host_api::http::RuntimeHttpEgressResponse,
 ) -> Result<Value, GsuiteDispatchError> {
     let body = response_body_json(response)?;
     Ok(json!({
@@ -816,7 +822,7 @@ fn response_output(
 }
 
 fn response_body_json(
-    response: &ironclaw_host_api::RuntimeHttpEgressResponse,
+    response: &ironclaw_host_api::http::RuntimeHttpEgressResponse,
 ) -> Result<Value, GsuiteDispatchError> {
     if response.body.is_empty() {
         Ok(Value::Null)
@@ -827,7 +833,7 @@ fn response_body_json(
 }
 
 fn is_google_auth_expired_response(
-    response: &ironclaw_host_api::RuntimeHttpEgressResponse,
+    response: &ironclaw_host_api::http::RuntimeHttpEgressResponse,
 ) -> bool {
     response.status == 401
 }
@@ -1192,7 +1198,7 @@ fn gmail_trash_message_request(
 
 fn runtime_request(
     request: &GsuiteDispatchRequest<'_>,
-    access_secret: ironclaw_host_api::SecretHandle,
+    access_secret: ironclaw_host_api::ids::SecretHandle,
     method: NetworkMethod,
     url: String,
     body: Vec<u8>,
@@ -1250,7 +1256,7 @@ fn map_credential_error(error: GoogleCredentialError) -> GsuiteDispatchError {
 
 fn map_stage_error(
     error: GsuiteCredentialStageError,
-    required_secret: ironclaw_host_api::SecretHandle,
+    required_secret: ironclaw_host_api::ids::SecretHandle,
 ) -> GsuiteDispatchError {
     match error {
         GsuiteCredentialStageError::AuthRequired => GsuiteDispatchError::new(
@@ -1520,7 +1526,7 @@ fn merge_attendees(mut existing: Vec<Value>, additions: Vec<Value>) -> Vec<Value
 }
 
 fn response_etag(
-    response: &ironclaw_host_api::RuntimeHttpEgressResponse,
+    response: &ironclaw_host_api::http::RuntimeHttpEgressResponse,
     body: &Value,
 ) -> Option<String> {
     response
@@ -1558,7 +1564,7 @@ fn encode_percent(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{HostApiError, RuntimeHttpEgressResponse};
+    use ironclaw_host_api::{error::HostApiError, http::RuntimeHttpEgressResponse};
 
     use super::*;
 
@@ -1708,7 +1714,7 @@ mod tests {
         assert_eq!(missing_access.auth_requirement(), Some(Vec::new()));
 
         // AuthRequired { required_secrets } -> Some with secrets forwarded.
-        let handle = ironclaw_host_api::SecretHandle::new("google-access-token").unwrap();
+        let handle = ironclaw_host_api::ids::SecretHandle::new("google-access-token").unwrap();
         let auth_required = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client).with_reason(
             GsuiteCredentialDispatchReason::AuthRequired {
                 required_secrets: vec![handle.clone()],
@@ -1780,8 +1786,9 @@ mod tests {
             ),
             (
                 RuntimeHttpEgressError::Network {
-                    reason: ironclaw_host_api::RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED
-                        .to_string(),
+                    reason:
+                        ironclaw_host_api::http::RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED
+                            .to_string(),
                     request_bytes: 15,
                     response_bytes: 1024,
                 },

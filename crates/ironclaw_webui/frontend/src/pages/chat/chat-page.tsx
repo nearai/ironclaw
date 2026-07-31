@@ -8,6 +8,7 @@ export function ChatPage() {
   const {
     threadsState,
     gatewayStatus,
+    regressionArtifactExportEnabled = false,
     globalAutoApproveEnabled = false,
     setHeaderStatus,
   } = useOutletContext();
@@ -57,6 +58,7 @@ export function ChatPage() {
       composerDraft={composerDraft}
       composerResetKey={location.key}
       gatewayStatus={gatewayStatus}
+      regressionArtifactExportEnabled={regressionArtifactExportEnabled}
       globalAutoApproveEnabled={globalAutoApproveEnabled}
       onConnectionStatusChange={handleConnectionStatusChange}
     />

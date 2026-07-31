@@ -1,7 +1,13 @@
 use async_trait::async_trait;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    capability::{CapabilityDescriptor, CapabilitySet},
+    decision::{Decision, Obligations},
+    dispatch::CapabilityDispatchResult,
+    resource::ResourceEstimate,
+    scope::ExecutionContext,
+};
 use ironclaw_processes::*;
 use ironclaw_trust::TrustDecision;
 use serde_json::json;

@@ -1,6 +1,6 @@
 //! Context for the `before_prompt` / `before_context` hook points.
 
-use ironclaw_host_api::TenantId;
+use ironclaw_host_api::ids::TenantId;
 
 /// Read-only context handed to a prompt-mutator hook.
 ///

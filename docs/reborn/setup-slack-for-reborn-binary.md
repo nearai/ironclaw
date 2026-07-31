@@ -165,6 +165,10 @@ https://<public-host>/api/reborn/product-auth/oauth/slack/callback
   - `groups:history` if the bot should receive private-channel message events.
   - `mpim:history` if the bot should receive group-DM message events.
   - `files:read` if Slack file attachments should be downloaded and processed.
+  - `files:write` if explicitly attached workspace files should be delivered
+    back to Slack.
+  - `commands` to register the `/ironclaw` slash command (see Slash Command
+    below).
 - Add user token scopes:
   - `users:read` for binding the authenticated Slack user to the Reborn user.
 - Install or reinstall the app to the workspace after changing scopes.
@@ -186,6 +190,26 @@ https://<public-host>/webhooks/extensions/slack/events
   - Optional: `message.groups`
   - Optional: `message.mpim`
 
+Slash Command:
+
+- Slack allows a slash command's Request URL to be any URL, so it can point
+  at the exact same signed endpoint as Event Subscriptions above — there is
+  no second route to register, and the events ingress already accepts the
+  slash command's form payload, answers its `ssl_check` verification probe,
+  and rejects non-DM invocations by design (see Troubleshooting).
+- Create a command:
+  - Command: `/ironclaw`
+  - Request URL:
+
+```text
+https://<public-host>/webhooks/extensions/slack/events
+```
+
+  - Short Description: `Run IronClaw commands`
+  - Usage Hint: `status | model <name> | help`
+- Save. Registering a slash command adds the `commands` bot token scope;
+  install or reinstall the app after saving.
+
 App Home:
 
 - Enable messages so users can DM the app.
@@ -204,6 +228,12 @@ features:
   bot_user:
     display_name: IronClaw Reborn
     always_online: false
+  slash_commands:
+    - command: /ironclaw
+      description: Run IronClaw commands
+      usage_hint: "status | model <name> | help"
+      url: https://<public-host>/webhooks/extensions/slack/events
+      should_escape: false
 oauth_config:
   redirect_urls:
     - https://<public-host>/api/reborn/product-auth/oauth/slack/callback
@@ -217,6 +247,8 @@ oauth_config:
       - groups:history
       - mpim:history
       - files:read
+      - files:write
+      - commands
     user:
       - users:read
 settings:
@@ -234,8 +266,10 @@ settings:
 ```
 
 Use least privilege for production. For example, omit `groups:history` if the
-bot does not need private-channel events, and omit `files:read` if attachment
-processing is not needed.
+bot does not need private-channel events. Omit `files:read` if inbound
+attachment processing is not needed, and omit `files:write` if outbound file
+delivery is not needed. Outbound files use Slack's supported external upload
+flow; the retired `files.upload` method is never called.
 
 ## Start and Verify
 
@@ -266,6 +300,7 @@ Verification checklist:
   connects the Slack extension, the OAuth callback
   binds that Slack user to the authenticated Reborn user.
 - A DM to the app routes through the OAuth-connected Reborn user.
+- `/ironclaw status` sent in the bot DM replies with the rendered status result.
 - A channel `@app` mention replies in the same channel thread.
 - Bot-originated and subtyped Slack messages are ignored.
 
@@ -279,13 +314,23 @@ Confirm the Reborn config sets [slack].enabled = true, or that the deployment en
 
 Confirm the Slack Request URL is exactly https://<public-host>/webhooks/extensions/slack/events, the public URL reaches the Reborn listener, and Socket Mode is disabled for this host path.
 
+### Slash command shows dispatch_failed
+
+The `/ironclaw` command is not registered on this Slack app, or its Request URL does not exactly match https://<public-host>/webhooks/extensions/slack/events. Add or fix the command under Slack App Configuration, Slash Command, then reinstall the app.
+
+### Slash command reply is slow or times out
+
+The ingress only answers 200 once the request is durably admitted, so a healthy deployment replies well inside Slack's short response budget, but a degraded backend can occasionally push that past Slack's client-side timeout even though the bot still posts the reply moments later in the DM. This is a rare, pre-existing exposure and is not unique to slash commands.
+
 ### Slack URL verification fails
 
 Confirm the Admin Configuration Slack signing secret matches the app signing secret and that any proxy preserves the raw request body and Slack signature headers.
 
 ### Slack replies fail with missing_scope
 
-Add or confirm chat:write, reinstall the Slack app, and update the bot token in Admin Configuration if Slack issued a new token.
+Add or confirm `chat:write` for text, `files:read` for inbound attachments, and
+`files:write` for outbound attachments. Reinstall the Slack app, and update the
+bot token in Admin Configuration if Slack issued a new token.
 
 ### Slack OAuth callback fails
 
@@ -299,10 +344,15 @@ Confirm the app is invited to the channel, app_mention is subscribed, and the Te
 
 Configure Shared subject or use the WebUI Slack channel picker to allow the channel.
 
+### Slash command outside the bot DM is denied
+
+This is by design: `/ironclaw` requires a direct conversation, so an invocation from any other channel is rejected with a denial notice posted back into that same channel, and no command executes. Message the app directly instead.
+
 ## Slack References
 
 - Events API: https://docs.slack.dev/apis/events-api/
 - Message events: https://docs.slack.dev/reference/events/message/
 - `app_mention`: https://api.slack.com/events/app_mention
 - Sending messages: https://docs.slack.dev/messaging/sending-and-scheduling-messages/
+- Slash commands: https://docs.slack.dev/interactivity/implementing-slash-commands/
 - Request signing: https://docs.slack.dev/authentication/verifying-requests-from-slack/

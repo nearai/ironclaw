@@ -11,8 +11,11 @@ use std::num::{NonZeroU32, NonZeroU64};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CapabilityId, HostApiError, HostPortId, NetworkMethod,
+    action::NetworkMethod,
     dotted_id::{PrefixRule, validate_dotted_id},
+    error::HostApiError,
+    host_port::HostPortId,
+    ids::CapabilityId,
 };
 
 fn validate_ingress_route_id(value: &str) -> Result<(), HostApiError> {

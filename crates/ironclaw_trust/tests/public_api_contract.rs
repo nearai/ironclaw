@@ -1,7 +1,10 @@
 use std::collections::BTreeSet;
 
 use ironclaw_host_api::{
-    EffectKind, PackageId, PackageIdentity, PackageSource, RequestedTrustClass, TrustClass,
+    capability::EffectKind,
+    ids::PackageId,
+    runtime::TrustClass,
+    trust::{PackageIdentity, PackageSource, RequestedTrustClass},
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, BundledEntry, BundledRegistry, HostTrustAssignment, HostTrustPolicy,

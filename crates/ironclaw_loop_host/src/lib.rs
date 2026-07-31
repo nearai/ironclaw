@@ -8,11 +8,12 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 mod await_edge_port;
@@ -145,13 +146,18 @@ pub use token_estimator::{
 use tokio::sync::{Mutex, OnceCell};
 
 use async_trait::async_trait;
+use ironclaw_host_api::ids::RunId;
+use ironclaw_outbound::{
+    OutboundError, ReplyAttachmentHandle, ReplyAttachmentIntent, ReplyAttachmentIntentPort,
+};
 use ironclaw_threads::{
     AppendAssistantDraftRequest, AppendFinalizedAssistantMessageRequest,
-    AppendToolResultReferenceRequest, ContextMessage, FinalizedAssistantMessageByRunRequest,
-    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, ProviderToolCallReferenceEnvelope, SessionThreadError, SessionThreadService,
-    SummaryArtifact, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    AppendToolResultReferenceRequest, AttachmentKind, AttachmentRef, ContextMessage,
+    FinalizedAssistantMessageByRunRequest, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope,
+    SessionThreadError, SessionThreadService, SummaryArtifact, ThreadHistoryRequest,
+    ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
+    ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
     LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnScope,
@@ -653,10 +659,14 @@ where
     thread_scope: ThreadScope,
     run_context: LoopRunContext,
     milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
+    reply_attachment_intent_port: Option<Arc<dyn ReplyAttachmentIntentPort>>,
     // Only successful milestone publications are recorded here: if best-effort
     // publishing fails after the transcript write, an idempotent retry can try again.
     emitted_assistant_reply_finalized_refs: Arc<Mutex<HashSet<String>>>,
 }
+
+const TRANSCRIPT_WRITE_MAX_ATTEMPTS: usize = 3;
+const TRANSCRIPT_WRITE_RETRY_BASE_DELAY_MS: u64 = 10;
 
 impl<S> ThreadBackedLoopTranscriptPort<S>
 where
@@ -672,6 +682,7 @@ where
             thread_scope,
             run_context,
             milestone_sink: None,
+            reply_attachment_intent_port: None,
             emitted_assistant_reply_finalized_refs: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -687,8 +698,17 @@ where
             thread_scope,
             run_context,
             milestone_sink: Some(milestone_sink),
+            reply_attachment_intent_port: None,
             emitted_assistant_reply_finalized_refs: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    pub fn with_reply_attachment_intent_port(
+        mut self,
+        port: Arc<dyn ReplyAttachmentIntentPort>,
+    ) -> Self {
+        self.reply_attachment_intent_port = Some(port);
+        self
     }
 }
 
@@ -748,16 +768,23 @@ where
         request: FinalizeAssistantMessage,
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
-        let reply_content = request.reply.content;
-        let finalized = match self
-            .thread_service
-            .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
-                scope: self.thread_scope.clone(),
-                thread_id: self.run_context.thread_id.clone(),
-                turn_run_id: self.run_context.run_id.to_string(),
-                content: MessageContent::text(reply_content.clone()),
-            })
-            .await
+        let reply_content = self.finalized_reply_content(request.reply.content).await?;
+        let turn_run_id = self.run_context.run_id.to_string();
+        let append_request = AppendFinalizedAssistantMessageRequest {
+            scope: self.thread_scope.clone(),
+            thread_id: self.run_context.thread_id.clone(),
+            turn_run_id: turn_run_id.clone(),
+            content: reply_content.clone(),
+        };
+        let finalized = match retry_transcript_backend_write(
+            &turn_run_id,
+            "append_finalized_assistant_message",
+            || {
+                self.thread_service
+                    .append_finalized_assistant_message(append_request.clone())
+            },
+        )
+        .await
         {
             Ok(message) => message,
             Err(error) => {
@@ -772,7 +799,7 @@ where
             }
         };
         if finalized.status != MessageStatus::Finalized
-            || finalized.content.as_deref() != Some(reply_content.as_str())
+            || persisted_message_content(&finalized).as_ref() != Some(&reply_content)
         {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::TranscriptWriteFailed,
@@ -829,23 +856,67 @@ where
                     None
                 }
             });
-        let record = self
-            .thread_service
-            .append_tool_result_reference(AppendToolResultReferenceRequest {
-                scope: self.thread_scope.clone(),
-                thread_id: self.run_context.thread_id.clone(),
-                turn_run_id: self.run_context.run_id.to_string(),
-                result_ref: request.result_ref.as_str().to_string(),
-                safe_summary,
-                model_observation,
-                provider_call: request
-                    .provider_call
-                    .map(provider_call_reference_to_envelope),
+        let turn_run_id = self.run_context.run_id.to_string();
+        let append_request = AppendToolResultReferenceRequest {
+            scope: self.thread_scope.clone(),
+            thread_id: self.run_context.thread_id.clone(),
+            turn_run_id: turn_run_id.clone(),
+            result_ref: request.result_ref.as_str().to_string(),
+            safe_summary,
+            model_observation,
+            provider_call: request
+                .provider_call
+                .map(provider_call_reference_to_envelope),
+        };
+        let record =
+            retry_transcript_backend_write(&turn_run_id, "append_tool_result_reference", || {
+                self.thread_service
+                    .append_tool_result_reference(append_request.clone())
             })
             .await
             .map_err(transcript_write_error)?;
         message_ref(record.message_id)
     }
+}
+
+async fn retry_transcript_backend_write<T, F, Fut>(
+    turn_run_id: &str,
+    operation: &'static str,
+    mut write: F,
+) -> Result<T, SessionThreadError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, SessionThreadError>>,
+{
+    let mut attempt = 1;
+    loop {
+        match write().await {
+            Err(SessionThreadError::Backend(_)) if attempt < TRANSCRIPT_WRITE_MAX_ATTEMPTS => {
+                tracing::warn!(
+                    operation,
+                    attempt,
+                    max_attempts = TRANSCRIPT_WRITE_MAX_ATTEMPTS,
+                    "transcript backend write failed; retrying exact idempotent write"
+                );
+                tokio::time::sleep(transcript_write_retry_delay(turn_run_id, attempt)).await;
+                attempt += 1;
+            }
+            result => return result,
+        }
+    }
+}
+
+fn transcript_write_retry_delay(turn_run_id: &str, failed_attempt: usize) -> Duration {
+    let exponent = u32::try_from(failed_attempt.saturating_sub(1)).unwrap_or(u32::MAX);
+    let base_delay_ms = TRANSCRIPT_WRITE_RETRY_BASE_DELAY_MS
+        .checked_shl(exponent)
+        .unwrap_or(u64::MAX);
+    let jitter_seed = turn_run_id
+        .bytes()
+        .fold(failed_attempt as u64, |seed, byte| {
+            seed.wrapping_mul(31).wrapping_add(u64::from(byte))
+        });
+    Duration::from_millis(base_delay_ms.saturating_add(jitter_seed % base_delay_ms))
 }
 
 impl<S> ThreadBackedLoopTranscriptPort<S>
@@ -910,7 +981,7 @@ where
 
     async fn already_finalized_matching_reply_for_current_run(
         &self,
-        reply_content: &str,
+        reply_content: &MessageContent,
     ) -> Result<Option<ThreadMessageRecord>, AgentLoopHostError> {
         let Some(message) = self
             .thread_service
@@ -924,12 +995,64 @@ where
         else {
             return Ok(None);
         };
-        if message.content.as_deref() == Some(reply_content) {
+        if persisted_message_content(&message).as_ref() == Some(reply_content) {
             Ok(Some(message))
         } else {
             Ok(None)
         }
     }
+
+    async fn finalized_reply_content(
+        &self,
+        reply_text: String,
+    ) -> Result<MessageContent, AgentLoopHostError> {
+        let Some(port) = self.reply_attachment_intent_port.as_ref() else {
+            return Ok(MessageContent::text(reply_text));
+        };
+        let mut scope = self.thread_scope.to_resource_scope();
+        scope.thread_id = Some(self.run_context.thread_id.clone());
+        let run_id = RunId::from_uuid(self.run_context.run_id.as_uuid());
+        let intents = port
+            .seal(&scope, &run_id)
+            .await
+            .map_err(reply_attachment_seal_error)?;
+        let attachments = reply_attachment_refs(&run_id, intents);
+        let reply_text =
+            ironclaw_threads::deproject_model_attachment_context(reply_text, &attachments);
+        Ok(MessageContent::with_attachments(reply_text, attachments))
+    }
+}
+
+fn reply_attachment_refs(
+    run_id: &RunId,
+    intents: Vec<ReplyAttachmentIntent>,
+) -> Vec<AttachmentRef> {
+    intents
+        .into_iter()
+        .map(|intent| AttachmentRef {
+            id: ReplyAttachmentHandle::for_run_path(run_id, &intent.path).to_string(),
+            kind: AttachmentKind::from_mime_type(&intent.mime_type),
+            mime_type: intent.mime_type,
+            filename: Some(intent.filename),
+            size_bytes: Some(intent.size_bytes),
+            storage_key: Some(intent.path.to_string()),
+            extracted_text: None,
+        })
+        .collect()
+}
+
+fn persisted_message_content(message: &ThreadMessageRecord) -> Option<MessageContent> {
+    message.content.as_ref().map(|content| {
+        MessageContent::with_attachments(content.clone(), message.attachments.clone())
+    })
+}
+
+fn reply_attachment_seal_error(error: OutboundError) -> AgentLoopHostError {
+    tracing::debug!(error = %error, "reply attachment finalization failed");
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::TranscriptWriteFailed,
+        "reply attachment finalization failed",
+    )
 }
 
 /// Empty capability surface for the text-only loop-host MVP.
@@ -952,7 +1075,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort
     async fn invoke_capability(
         &self,
         request: LoopRequest,
-    ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
+    ) -> Result<ironclaw_host_api::resolution::Resolution, AgentLoopHostError> {
         let empty_surface_version = empty_surface_version()?;
         if request.surface_version != empty_surface_version {
             return Err(AgentLoopHostError::new(
@@ -966,7 +1089,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort
     async fn invoke_capability_batch(
         &self,
         request: LoopRequestBatch,
-    ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
+    ) -> Result<ironclaw_host_api::resolution::ResolutionBatch, AgentLoopHostError> {
         let empty_surface_version = empty_surface_version()?;
         if request
             .invocations
@@ -989,7 +1112,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort
                 .resolution
             })
             .collect();
-        Ok(ironclaw_host_api::ResolutionBatch {
+        Ok(ironclaw_host_api::resolution::ResolutionBatch {
             resolutions,
             stopped_on_suspension: false,
         })
@@ -1735,7 +1858,7 @@ pub struct HostManagedModelImagePart {
 pub trait LoopAttachmentReadPort: Send + Sync {
     async fn read_attachment_bytes(
         &self,
-        scope: &ironclaw_host_api::ResourceScope,
+        scope: &ironclaw_host_api::resource::ResourceScope,
         storage_key: &str,
     ) -> Result<Vec<u8>, LoopAttachmentReadError>;
 }
@@ -2324,12 +2447,14 @@ fn context_read_error(error: SessionThreadError) -> AgentLoopHostError {
 }
 
 fn transcript_write_error(error: SessionThreadError) -> AgentLoopHostError {
-    raw_agent_loop_host_error(
-        "thread_transcript",
-        "write_transcript",
+    // Log only the closed owner-defined variant name. The error message may
+    // contain raw transcript content or storage credentials and must never be
+    // forwarded or formatted here.
+    let error_kind = error.kind_name();
+    tracing::debug!(error_kind, "transcript write failed");
+    AgentLoopHostError::new(
         AgentLoopHostErrorKind::TranscriptWriteFailed,
         "assistant transcript write failed",
-        error,
     )
 }
 
@@ -2528,6 +2653,30 @@ mod tests {
             content: content.to_string(),
             image_attachments: Vec::new(),
         }
+    }
+
+    #[test]
+    fn transcript_write_error_exposes_only_the_fixed_safe_cause() {
+        let secret = concat!("sk-", "TRANSCRIPT0123456789SECRET");
+        let raw_reply = "raw assistant reply that was never persisted";
+        let mapped = transcript_write_error(SessionThreadError::Backend(format!(
+            "write rejected for {raw_reply:?} using {secret}"
+        )));
+
+        assert_eq!(mapped.kind, AgentLoopHostErrorKind::TranscriptWriteFailed);
+        assert_eq!(mapped.safe_summary, "assistant transcript write failed");
+        assert_eq!(mapped.detail, None);
+        let rendered = format!("{mapped:?}");
+        assert!(!rendered.contains(secret));
+        assert!(!rendered.contains(raw_reply));
+    }
+
+    #[test]
+    fn transcript_retry_delay_is_total_for_extreme_attempts() {
+        assert_eq!(
+            transcript_write_retry_delay("run:extreme-attempt", usize::MAX),
+            Duration::from_millis(u64::MAX)
+        );
     }
 
     /// CR review: `latest_user_message_text` returns the latest NON-BLANK user
@@ -2828,7 +2977,7 @@ mod tests {
     /// so it pins what production actually stores.
     #[test]
     fn every_recovery_hint_the_loop_can_emit_survives_persistence() {
-        use ironclaw_host_api::{CapabilityRecoveryHint, SameCallRetryConstraint};
+        use ironclaw_host_api::result_meta::{CapabilityRecoveryHint, SameCallRetryConstraint};
         use ironclaw_threads::{ToolResultReferenceEnvelope, ToolResultSafeSummary};
         use ironclaw_turns::run_profile::{
             MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
@@ -2842,7 +2991,7 @@ mod tests {
                 status: ToolObservationStatus::Error,
                 summary: "The capability failed.".to_string(),
                 detail: ToolObservationDetail::GenericFailure {
-                    failure_kind: ironclaw_host_api::FailureKind::PolicyDenied,
+                    failure_kind: ironclaw_host_api::result_meta::FailureKind::PolicyDenied,
                     detail: None,
                 },
                 artifacts: Vec::new(),

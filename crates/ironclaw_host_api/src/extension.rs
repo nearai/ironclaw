@@ -12,8 +12,12 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CapabilityDescriptor, CapabilityId, ChannelAdapter, ChannelDescriptor, ExtensionId,
-    HostApiError, ToolAdapter,
+    capability::CapabilityDescriptor,
+    channel::ChannelDescriptor,
+    error::HostApiError,
+    ids::{CapabilityId, ExtensionId},
+    product_adapter::ChannelAdapter,
+    tool_adapter::ToolAdapter,
 };
 
 /// One loaded extension instance.
@@ -100,7 +104,10 @@ pub struct ExtensionContract {
 }
 
 impl ExtensionContract {
-    pub fn capability(&self, capability_id: &crate::CapabilityId) -> Option<&CapabilityDescriptor> {
+    pub fn capability(
+        &self,
+        capability_id: &crate::ids::CapabilityId,
+    ) -> Option<&CapabilityDescriptor> {
         self.capabilities
             .iter()
             .find(|descriptor| &descriptor.id == capability_id)

@@ -2,7 +2,7 @@
 //!
 //! `(tenant_id, surface_kind, provider_kind, provider_instance_id,
 //! external_subject_id)` is the canonical key. `tenant_id` is already a
-//! typed [`TenantId`](ironclaw_host_api::TenantId) and `surface_kind` is the
+//! typed [`TenantId`](ironclaw_host_api::ids::TenantId) and `surface_kind` is the
 //! [`SurfaceKind`](crate::SurfaceKind) enum; this module gives the remaining
 //! three adapter-supplied parts the same treatment so they cross the
 //! resolver boundary as specialized types rather than raw `&str`

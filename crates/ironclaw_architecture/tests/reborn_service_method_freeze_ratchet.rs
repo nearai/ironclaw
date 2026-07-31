@@ -3,7 +3,7 @@
 //! `docs/reborn/contracts/kernel-boundary.md`).
 //!
 //! §5.2's target: product consumers share the neutral
-//! `ironclaw_host_api::ProductSurface` vocabulary (`invoke`, `query`, and
+//! `ironclaw_host_api::product_surface::ProductSurface` vocabulary (`invoke`, `query`, and
 //! `stream_events`). Feature work adds a **capability descriptor** and/or a
 //! **view descriptor**, never a product-local service method.
 //!

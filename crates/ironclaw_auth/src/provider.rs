@@ -1,7 +1,7 @@
 use std::fmt;
 
 use async_trait::async_trait;
-use ironclaw_host_api::SecretHandle;
+use ironclaw_host_api::ids::SecretHandle;
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::{

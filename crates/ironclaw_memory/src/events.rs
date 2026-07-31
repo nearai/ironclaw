@@ -6,7 +6,7 @@
 //! metadata through durable audit/event logs without becoming memory backends.
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CorrelationId, ResourceScope};
+use ironclaw_host_api::{ids::CorrelationId, resource::ResourceScope};
 
 use crate::hash::content_sha256;
 use crate::path::{MemoryDocumentPath, MemoryDocumentScope};

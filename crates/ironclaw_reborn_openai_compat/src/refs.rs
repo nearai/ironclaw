@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_product::ProductInboundAck;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};

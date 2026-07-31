@@ -1,4 +1,4 @@
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_wasm::{WasmError, WasmLogLevel, WasmLogRecord};
 
 pub(super) fn log_wasm_runtime_error(capability_id: &CapabilityId, error: &WasmError) {

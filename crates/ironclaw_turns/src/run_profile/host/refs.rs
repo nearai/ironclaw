@@ -1,6 +1,6 @@
 //! Bounded loop-ref newtypes and the shared trait-impl macros that back them.
 
-use ironclaw_host_api::INPUT_ENCODE_HUMAN_SUMMARY;
+use ironclaw_host_api::dispatch::INPUT_ENCODE_HUMAN_SUMMARY;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::run_context::LoopRunContext;
@@ -203,6 +203,15 @@ impl LoopSafeSummary {
     /// [`validate_loop_safe_summary`].
     pub fn model_gateway_timed_out() -> Self {
         Self("model gateway timed out".to_string())
+    }
+
+    /// Fixed host-authored cause for a failed assistant transcript write.
+    ///
+    /// This carries no backend detail: transcript errors may contain raw reply
+    /// text or credentials and occur after the durability boundary needed for
+    /// another model call.
+    pub fn assistant_transcript_write_failed() -> Self {
+        Self("assistant transcript write failed".to_string())
     }
 
     pub fn as_str(&self) -> &str {

@@ -45,7 +45,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
-use ironclaw_host_api::{AgentId, ProjectId, TenantId};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId};
 use ironclaw_webui::{
     EmailUserDirectory, OAuthError, OAuthProvider, OAuthProviderName, OAuthRouterConfig,
     OAuthUserProfile, SessionAuthenticator, signed_session_store, webui_v2_auth_router,

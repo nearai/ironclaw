@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use ironclaw_host_api::CapabilityProfileSchemaRef;
+use ironclaw_host_api::capability_profile::CapabilityProfileSchemaRef;
 
 const REFS: &[&str] = &[
     "schemas/memory/context-retrieve.input.v1.json",

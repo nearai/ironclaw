@@ -2,8 +2,10 @@ use super::*;
 
 #[cfg(feature = "test-support")]
 use ironclaw_host_api::{
-    CapabilityGrant, CapabilityGrantId, EffectKind, ExtensionId, GrantConstraints, NetworkPolicy,
-    Principal,
+    action::NetworkPolicy,
+    capability::{CapabilityGrant, EffectKind, GrantConstraints},
+    ids::{CapabilityGrantId, ExtensionId},
+    scope::Principal,
 };
 #[cfg(feature = "test-support")]
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
@@ -203,7 +205,7 @@ impl RebornRuntimeStores {
     pub(crate) async fn pairing_mint_for_test(
         &self,
         extension_id: &str,
-        user_id: &ironclaw_host_api::UserId,
+        user_id: &ironclaw_host_api::ids::UserId,
     ) -> Option<String> {
         let service = self.channel_pairing.as_ref()?.get(extension_id)?;
         service
@@ -221,7 +223,7 @@ impl RebornRuntimeStores {
     pub(crate) async fn pairing_issue_for_test(
         &self,
         extension_id: &str,
-        user_id: &ironclaw_host_api::UserId,
+        user_id: &ironclaw_host_api::ids::UserId,
     ) -> Option<(String, Option<String>, chrono::DateTime<chrono::Utc>)> {
         let service = self.channel_pairing.as_ref()?.get(extension_id)?;
         service.issue_or_rotate(user_id).await.ok().map(|issue| {
@@ -249,9 +251,9 @@ impl RebornRuntimeStores {
         turn_world: (
             Arc<dyn ironclaw_turns::TurnCoordinator>,
             Arc<dyn ironclaw_processes::ProcessGateQuerySource<Error = ironclaw_turns::TurnError>>,
-            ironclaw_host_api::TenantId,
+            ironclaw_host_api::ids::TenantId,
         ),
-    ) -> Result<Option<ironclaw_host_api::UserId>, String> {
+    ) -> Result<Option<ironclaw_host_api::ids::UserId>, String> {
         let (actor_kind, external_actor_id, conversation_space_id, conversation_id) = actor;
         let Some(service) = self
             .channel_pairing
@@ -302,7 +304,7 @@ impl RebornRuntimeStores {
     pub(crate) async fn pairing_connected_for_test(
         &self,
         extension_id: &str,
-        user_id: &ironclaw_host_api::UserId,
+        user_id: &ironclaw_host_api::ids::UserId,
     ) -> Option<bool> {
         let service = self.channel_pairing.as_ref()?.get(extension_id)?;
         service
@@ -387,9 +389,14 @@ impl RebornRuntimeStores {
     pub(crate) fn read_write_workspace_filesystem(
         &self,
     ) -> Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
+        let attachment_mounts = crate::runtime_mounts::workspace_mount_view(
+            ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
+            &[],
+        )
+        .ok()?;
         Some(Arc::new(ScopedFilesystem::with_fixed_view(
             Arc::clone(&self.extension_filesystem),
-            self.workspace_mounts.clone(),
+            attachment_mounts,
         )))
     }
 
@@ -510,10 +517,9 @@ impl RebornRuntimeStores {
     #[cfg(feature = "test-support")]
     fn standalone_workspace_attachment_reader_for_test(
         &self,
-    ) -> Option<Arc<crate::support::fs::ProjectScopedAttachmentReader<CompositeRootFilesystem>>>
-    {
+    ) -> Option<Arc<ironclaw_product::ProjectScopedAttachmentReader<CompositeRootFilesystem>>> {
         Some(Arc::new(
-            crate::support::fs::ProjectScopedAttachmentReader::new(Arc::clone(
+            ironclaw_product::ProjectScopedAttachmentReader::new(Arc::clone(
                 &self.workspace_filesystem,
             )),
         ))
@@ -540,7 +546,7 @@ impl RebornRuntimeStores {
         let read_write_workspace_filesystem = self.read_write_workspace_filesystem()?;
         Some(AttachmentTestSupport {
             read_port,
-            lander: Arc::new(crate::support::fs::ProjectScopedAttachmentLander::new(
+            lander: Arc::new(ironclaw_product::ProjectScopedAttachmentLander::new(
                 read_write_workspace_filesystem,
             )),
         })

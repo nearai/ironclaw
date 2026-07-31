@@ -29,8 +29,11 @@ use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-    RuntimeHttpEgressRequest, UserId, VirtualPath,
+    http::RuntimeHttpEgressRequest,
+    ids::{CapabilityId, InvocationId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_llm::Role;
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
@@ -188,6 +191,11 @@ pub struct RebornIntegrationHarnessBuilder {
     lease_recovery_interval: Option<Duration>,
     /// Test-only canonical-loop iteration limit override.
     planned_default_iteration_limit: Option<std::num::NonZeroU32>,
+    /// Test-only runtime seam that rejects final assistant transcript writes.
+    fail_append_finalized_assistant_message: bool,
+    fail_append_tool_result_reference: bool,
+    /// Additive raw-provider call recording for terminal side-effect assertions.
+    record_model_calls: bool,
 }
 
 impl RebornIntegrationHarnessBuilder {
@@ -327,6 +335,18 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Return a typed provider decode/response error `failures` times through
+    /// the real vendor-provider seam.
+    pub fn provider_response_error_model_times(
+        mut self,
+        failure: RecoverableModelFailure,
+        failures: usize,
+    ) -> Self {
+        self.model_mode =
+            ThreadModelMode::Recoverable(RecoverableModelFailureScript::new(failure, failures));
+        self
+    }
+
     /// Report output truncation `failures` times, then resume scripted
     /// playback through the real provider gateway and recovery path.
     pub fn output_truncated_model_times(mut self, failures: usize) -> Self {
@@ -334,6 +354,14 @@ impl RebornIntegrationHarnessBuilder {
             RecoverableModelFailure::OutputTruncated,
             failures,
         ));
+        self
+    }
+
+    /// Record provider calls while otherwise delegating normal scripted
+    /// playback. Used by terminal-path tests that need to prove no second model
+    /// call happens after a non-model persistence boundary fails.
+    pub fn record_model_calls_for_test(mut self) -> Self {
+        self.record_model_calls = true;
         self
     }
 
@@ -368,6 +396,19 @@ impl RebornIntegrationHarnessBuilder {
     /// this harness so terminal recovery can be reached without a long script.
     pub fn with_iteration_limit_for_test(mut self, limit: std::num::NonZeroU32) -> Self {
         self.planned_default_iteration_limit = Some(limit);
+        self
+    }
+
+    /// Reject the runtime's final assistant transcript write while retaining
+    /// the real scheduler, loop host, turn store, and thread read path.
+    pub fn fail_append_finalized_assistant_message_for_test(mut self) -> Self {
+        self.fail_append_finalized_assistant_message = true;
+        self
+    }
+
+    /// Reject tool-result transcript persistence after a capability completes.
+    pub fn fail_append_tool_result_reference_for_test(mut self) -> Self {
+        self.fail_append_tool_result_reference = true;
         self
     }
 
@@ -689,6 +730,12 @@ impl RebornIntegrationHarnessBuilder {
         if let Some(limit) = self.planned_default_iteration_limit {
             group_builder = group_builder.with_iteration_limit_for_test(limit);
         }
+        if self.fail_append_finalized_assistant_message {
+            group_builder = group_builder.fail_append_finalized_assistant_message_for_test();
+        }
+        if self.fail_append_tool_result_reference {
+            group_builder = group_builder.fail_append_tool_result_reference_for_test();
+        }
         let group: RebornIntegrationGroup = group_builder
             .build_with_capability(group_capability)
             .await?;
@@ -696,6 +743,7 @@ impl RebornIntegrationHarnessBuilder {
             .thread(self.conversation_id)
             .script(self.replies)
             .model_mode(self.model_mode)
+            .record_model_calls_for_test(self.record_model_calls)
             .build()
             .await
     }
@@ -808,6 +856,9 @@ impl RebornIntegrationHarness {
             runner_lease_ttl: None,
             lease_recovery_interval: None,
             planned_default_iteration_limit: None,
+            fail_append_finalized_assistant_message: false,
+            fail_append_tool_result_reference: false,
+            record_model_calls: false,
         }
     }
 
@@ -834,9 +885,9 @@ impl RebornIntegrationHarness {
 
     /// Number of loop milestones recorded for this harness right now (i.e.
     /// `[baseline_milestone_count..]` so far). Capture at the START of a turn
-    /// on a multi-turn harness and pass to `assert_compaction_failed_since` so
-    /// a prior turn's milestone can't satisfy the assertion — the
-    /// milestone analogue of `history_len`.
+    /// on a multi-turn harness and pass to a named compaction `*_since`
+    /// assertion so a prior turn's milestone can't satisfy it — the milestone
+    /// analogue of `history_len`.
     pub async fn milestone_len(&self) -> HarnessResult<usize> {
         Ok(self.loop_milestones().len())
     }
@@ -890,7 +941,7 @@ impl RebornIntegrationHarness {
             );
         }
         let (event_id, envelope) = self.build_user_envelope(text)?;
-        let attachment = ironclaw_attachments::InboundAttachment {
+        let attachment = ironclaw_host_api::attachment::InboundAttachment {
             id: format!("{event_id}-att-0"),
             mime_type: mime_type.to_string(),
             filename: Some(filename.to_string()),
@@ -927,14 +978,14 @@ impl RebornIntegrationHarness {
         let inbound = attachments
             .into_iter()
             .enumerate()
-            .map(
-                |(index, (filename, mime_type, bytes))| ironclaw_attachments::InboundAttachment {
+            .map(|(index, (filename, mime_type, bytes))| {
+                ironclaw_host_api::attachment::InboundAttachment {
                     id: format!("{event_id}-att-{index}"),
                     mime_type: mime_type.to_string(),
                     filename: Some(filename.to_string()),
                     bytes,
-                },
-            )
+                }
+            })
             .collect();
         let ack = self
             .workflow

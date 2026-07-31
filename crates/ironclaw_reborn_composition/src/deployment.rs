@@ -236,7 +236,7 @@ pub struct DeploymentConfig {
     /// as a separate build-input field. Defaulted empty by every profile
     /// preset; populated by the assembling caller via
     /// [`DeploymentConfig::with_required_runtime_backends`].
-    pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
+    pub(crate) required_runtime_backends: Vec<ironclaw_host_api::runtime::RuntimeKind>,
     /// Whether the build must provision runtime HTTP egress. Declarative
     /// deployment requirement; defaulted `false` by every preset.
     pub(crate) require_runtime_http_egress: bool,

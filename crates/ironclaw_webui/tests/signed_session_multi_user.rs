@@ -22,8 +22,8 @@ use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
-    AgentId, ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProjectId, TenantId,
-    ThreadId, UserId,
+    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+    product_surface::{ProductSurface, ProductSurfaceCaller, ProductSurfaceError},
 };
 use ironclaw_product::RebornCreateThreadResponse;
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
@@ -53,8 +53,9 @@ impl ProductSurface for RecordingServices {
     async fn invoke(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
+    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse, ProductSurfaceError>
+    {
         if request.operation_id.as_str() != "thread.create" {
             return Err(ProductSurfaceError::service_unavailable(false));
         }
@@ -84,22 +85,24 @@ impl ProductSurface for RecordingServices {
             },
         })
         .map_err(ProductSurfaceError::internal_from)?;
-        Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
+        Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
     }
 
     async fn query(
         &self,
         _caller: ProductSurfaceCaller,
-        _request: ironclaw_host_api::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        _request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+    {
         Err(ProductSurfaceError::service_unavailable(false))
     }
 
     async fn stream_events(
         &self,
         _caller: ProductSurfaceCaller,
-        _request: ironclaw_host_api::ProductSurfaceStreamRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+        _request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
+    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceStreamResponse, ProductSurfaceError>
+    {
         Err(ProductSurfaceError::service_unavailable(false))
     }
 }

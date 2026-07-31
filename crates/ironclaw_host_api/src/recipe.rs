@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{HostApiError, SecretHandle};
+use crate::{error::HostApiError, ids::SecretHandle};
 
 /// OAuth authorize-request parameters the host constructs itself. A recipe's
 /// `extra_authorize_params` may never name them (directly or via the
@@ -550,7 +550,7 @@ pub enum ProbeMethod {
 pub struct ProbeInjection {
     pub handle: SecretHandle,
     #[serde(flatten)]
-    pub target: crate::RuntimeCredentialTarget,
+    pub target: crate::http::RuntimeCredentialTarget,
 }
 
 /// Semantic recipe validation failures (path context is added by the

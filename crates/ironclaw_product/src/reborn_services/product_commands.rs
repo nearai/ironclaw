@@ -8,7 +8,7 @@
 //! see or execute an admin-only command through the browser just because the
 //! channel-side admission gate does not apply here.
 
-use ironclaw_host_api::{InstallationState, LifecyclePublicState};
+use ironclaw_host_api::state::{InstallationState, LifecyclePublicState};
 
 use crate::{
     LifecycleExtensionSummary, LifecyclePackageKind, LifecycleProductAction,

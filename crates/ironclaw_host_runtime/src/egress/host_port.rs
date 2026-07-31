@@ -4,10 +4,18 @@ use ironclaw_capabilities::{
     CapabilityObligationHandler, CapabilityObligationPhase, CapabilityObligationRequest,
 };
 use ironclaw_host_api::{
-    CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, MountView, Obligation,
-    ResourceEstimate, ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource,
-    RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TrustClass,
+    capability::CapabilitySet,
+    decision::Obligation,
+    http::{
+        RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
+    ids::{CapabilityId, ExtensionId, SecretHandle},
+    mount::MountView,
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::{RuntimeKind, TrustClass},
+    scope::ExecutionContext,
 };
 use ironclaw_secrets::SecretMaterial;
 
@@ -23,8 +31,8 @@ pub struct RuntimeSecretMaterialStager {
     secret_injection_store: Arc<RuntimeSecretInjectionStore>,
 }
 
-/// Alias for [`ironclaw_host_api::CredentialStageError`].
-pub type RuntimeSecretStageError = ironclaw_host_api::CredentialStageError;
+/// Alias for [`ironclaw_host_api::dispatch::CredentialStageError`].
+pub type RuntimeSecretStageError = ironclaw_host_api::dispatch::CredentialStageError;
 
 impl RuntimeSecretMaterialStager {
     pub(crate) fn new(secret_injection_store: Arc<RuntimeSecretInjectionStore>) -> Self {
@@ -203,7 +211,7 @@ fn execution_context_for_host_http_egress(
         run_id: None,
         origin: None,
         invocation_id: scope.invocation_id,
-        correlation_id: ironclaw_host_api::CorrelationId::new(),
+        correlation_id: ironclaw_host_api::ids::CorrelationId::new(),
         process_id: None,
         parent_process_id: None,
         tenant_id: scope.tenant_id.clone(),
@@ -240,8 +248,9 @@ mod tests {
         CapabilityObligationError, CapabilityObligationFailureKind, CapabilityObligationRequest,
     };
     use ironclaw_host_api::{
-        InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
-        RuntimeHttpEgressResponse, UserId,
+        action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+        http::RuntimeHttpEgressResponse,
+        ids::{InvocationId, UserId},
     };
 
     use super::*;

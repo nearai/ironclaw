@@ -6,7 +6,9 @@ use ironclaw_filesystem::{
     FilesystemOperation, InMemoryBackend, RootFilesystem,
 };
 use ironclaw_host_api::{
-    MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, ScopedPath, VirtualPath,
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, ScopedPath, VirtualPath},
+    resource::ResourceScope,
 };
 
 use super::install_bundle::MAX_INSTALL_BUNDLE_FILE_BYTES;

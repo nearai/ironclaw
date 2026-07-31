@@ -4,9 +4,12 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
-    CapabilityId, DispatchInputIssue, DispatchInputIssueCode, EffectKind, HostApiError,
-    InvocationOrigin, PermissionMode, ResourceScope, ResourceUsage, RunId,
-    RuntimeDispatchErrorKind,
+    capability::{EffectKind, PermissionMode},
+    dispatch::{DispatchInputIssue, DispatchInputIssueCode, RuntimeDispatchErrorKind},
+    error::HostApiError,
+    ids::{CapabilityId, RunId},
+    invocation::InvocationOrigin,
+    resource::{ResourceScope, ResourceUsage},
 };
 use ironclaw_triggers::{
     ACTIVE_HOLD_LOOKUP_TIMEOUT, ActiveHoldProjection, ActiveHoldReason,

@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use crate::{WebuiAuthentication, WebuiAuthenticator};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::ids::UserId;
 use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation, decode, decode_header};
 use parking_lot::RwLock;
 use serde::Deserialize;

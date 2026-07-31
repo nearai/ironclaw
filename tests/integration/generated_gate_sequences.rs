@@ -585,7 +585,7 @@ mod invariant_checker {
     #[test]
     #[should_panic(expected = "expected exactly one Accepted and one RejectedBusy")]
     fn double_submit_checker_rejects_two_accepted_runs() {
-        use ironclaw_host_api::AcceptedMessageRef;
+        use ironclaw_host_api::turn::AcceptedMessageRef;
 
         let ack = |message: &str| ProductInboundAck::Accepted {
             accepted_message_ref: AcceptedMessageRef::new(message)
@@ -646,7 +646,10 @@ mod invariant_checker {
 
     #[tokio::test]
     async fn orphan_checker_rejects_a_capability_resource_hold() {
-        use ironclaw_host_api::{InvocationId, ResourceEstimate, ResourceScope};
+        use ironclaw_host_api::{
+            ids::InvocationId,
+            resource::{ResourceEstimate, ResourceScope},
+        };
 
         let group = RebornIntegrationGroup::live_approvals()
             .await
@@ -692,7 +695,7 @@ mod invariant_checker {
 
     #[test]
     fn orphan_checker_rejects_a_process_with_a_missing_parent() {
-        use ironclaw_host_api::ProcessId;
+        use ironclaw_host_api::ids::ProcessId;
         use ironclaw_processes::ProcessKind;
 
         let process_id = ProcessId::new();
@@ -714,7 +717,7 @@ mod invariant_checker {
 
     #[test]
     fn orphan_checker_rejects_an_expected_id_with_the_wrong_process_kind() {
-        use ironclaw_host_api::ProcessId;
+        use ironclaw_host_api::ids::ProcessId;
         use ironclaw_processes::ProcessKind;
 
         let expected_process_id = ProcessId::new();

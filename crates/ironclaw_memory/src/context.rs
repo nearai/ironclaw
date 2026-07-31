@@ -1,6 +1,6 @@
 //! Host-resolved scoped memory context.
 
-use ironclaw_host_api::{CorrelationId, ResourceScope};
+use ironclaw_host_api::{ids::CorrelationId, resource::ResourceScope};
 
 use crate::events::MemoryAuditContext;
 use crate::path::MemoryDocumentScope;

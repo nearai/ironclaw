@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
-use ironclaw_host_api::sha256_digest_token;
+use ironclaw_host_api::approval::sha256_digest_token;
 
 use crate::{
     error::ProjectionStreamError,

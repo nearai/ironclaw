@@ -11,13 +11,7 @@ use ironclaw_filesystem::{
     CasExpectation, Entry, Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue,
     LibSqlRootFilesystem, Page, PostgresRootFilesystem, RootFilesystem, ScopedFilesystem, SeqNo,
 };
-use ironclaw_host_api::{
-    Action, AgentId, ApprovalRequest, ApprovalRequestId, AuditMode, CorrelationId, DeploymentMode,
-    FilesystemBackendKind, MountAlias, MountGrant, MountPermissions, MountView, NetworkMode,
-    Principal, ProcessBackendKind, ProjectId, ResourceEstimate, ResourceScope, ResourceUsage,
-    RuntimeProfile, ScopedPath, SecretHandle, SecretMode, TenantId, ThreadId, UserId, VirtualPath,
-    runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy},
-};
+use ironclaw_host_api::{action::Action, ids::{AgentId, ApprovalRequestId, CorrelationId, ProjectId, SecretHandle, TenantId, ThreadId, UserId}, approval::ApprovalRequest, runtime_policy::{AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode, {ApprovalPolicy, EffectiveRuntimePolicy}}, path::{MountAlias, ScopedPath, VirtualPath}, mount::{MountGrant, MountPermissions, MountView}, scope::Principal, resource::{ResourceEstimate, ResourceScope, ResourceUsage}};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, CommandExecutionOutput, CommandExecutionRequest,
     ProductionWiringConfig, RuntimeProcessError, SandboxCommandTransport,
@@ -939,7 +933,7 @@ fn workload_prefix(
     run_id: &str,
     workload: &str,
     depth: usize,
-) -> Result<VirtualPath, ironclaw_host_api::HostApiError> {
+) -> Result<VirtualPath, ironclaw_host_api::error::HostApiError> {
     let mut path = format!(
         "/engine/tenants/latency/users/{}/runs/{run_id}/{workload}",
         backend.as_str()
@@ -950,7 +944,7 @@ fn workload_prefix(
     VirtualPath::new(path)
 }
 
-fn child(prefix: &VirtualPath, name: &str) -> Result<VirtualPath, ironclaw_host_api::HostApiError> {
+fn child(prefix: &VirtualPath, name: &str) -> Result<VirtualPath, ironclaw_host_api::error::HostApiError> {
     VirtualPath::new(format!("{}/{name}", prefix.as_str().trim_end_matches('/')))
 }
 

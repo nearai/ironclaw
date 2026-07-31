@@ -11,9 +11,12 @@ use std::{
 use chrono::Utc;
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    CapabilityId, HostApiError, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-    ProcessId, ResourceReservation, ResourceReservationId, ResourceScope, ThreadId, TurnGateRef,
-    VirtualPath,
+    error::HostApiError,
+    ids::{CapabilityId, InvocationId, ProcessId, ResourceReservationId, ThreadId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::{ResourceReservation, ResourceScope},
+    turn::TurnGateRef,
 };
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, LlmError, LlmProvider, SessionManager,
@@ -2091,6 +2094,7 @@ fn provider_latency_failure(error: LlmError) -> OperationFailure {
         LlmError::QuotaExceeded { .. } => "model_provider_quota_exceeded",
         LlmError::BadGateway { .. }
         | LlmError::RequestFailed { .. }
+        | LlmError::StreamInterrupted { .. }
         | LlmError::InvalidResponse { .. }
         | LlmError::EmptyResponse { .. }
         | LlmError::Http(_)

@@ -36,8 +36,11 @@ use crate::{
 };
 use chrono::Utc;
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, PackageId, PackageIdentity, PackageSource, RequestedTrustClass,
-    ResourceCeiling, TrustClass,
+    capability::EffectKind,
+    ids::{CapabilityId, PackageId},
+    resource::ResourceCeiling,
+    runtime::TrustClass,
+    trust::{PackageIdentity, PackageSource, RequestedTrustClass},
 };
 use static_assertions::assert_not_impl_any;
 
@@ -62,7 +65,7 @@ mod support {
 
     use crate::EffectiveTrustClass;
     use crate::invalidation::{TrustChange, TrustChangeListener};
-    use ironclaw_host_api::{CapabilityId, PackageIdentity};
+    use ironclaw_host_api::{ids::CapabilityId, trust::PackageIdentity};
 
     /// Records every invalidation that fires on the bus, in order, with the
     /// timestamp at which it was observed. Used to assert ordering against

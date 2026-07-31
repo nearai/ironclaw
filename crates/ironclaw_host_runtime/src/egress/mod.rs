@@ -5,8 +5,13 @@ mod sanitize;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityId, NetworkPolicy, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    action::NetworkPolicy,
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
+    ids::CapabilityId,
+    resource::ResourceScope,
 };
 use ironclaw_network::{NetworkHttpEgress, NetworkHttpError};
 use ironclaw_safety::LeakDetector;
@@ -309,7 +314,7 @@ fn log_raw_network_http_error_for_local_diagnostics(
 pub(super) fn runtime_response(
     response: ironclaw_network::NetworkHttpResponse,
     redaction_applied: bool,
-    saved_body: Option<ironclaw_host_api::RuntimeHttpSavedBody>,
+    saved_body: Option<ironclaw_host_api::http::RuntimeHttpSavedBody>,
 ) -> RuntimeHttpEgressResponse {
     RuntimeHttpEgressResponse {
         status: response.status,

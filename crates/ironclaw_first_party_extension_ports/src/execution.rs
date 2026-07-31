@@ -175,7 +175,7 @@ mod tests {
         SkillActivationMode, SkillActivationRequest, SkillActivationSelectorConfig,
     };
     use super::*;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
 
     struct StaticSkillBundleSource {
         descriptors: Vec<SkillBundleDescriptor>,

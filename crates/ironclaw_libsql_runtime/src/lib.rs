@@ -127,8 +127,27 @@ impl LibSqlReadConnectionLease {
 /// Exclusive checkout from the single-slot writer pool.
 pub struct LibSqlWriteConnectionLease {
     connection: Object<LibSqlConnectionManager>,
+    _holder: LibSqlWriterHolderGuard,
+}
+
+struct LibSqlWriterHolderGuard {
     writer_holder: Arc<Mutex<Option<tokio::task::Id>>>,
     holder_task_id: Option<tokio::task::Id>,
+}
+
+impl LibSqlWriteConnectionLease {
+    /// Permanently remove this connection from the pool.
+    ///
+    /// Cancellation cleanup uses this when the connection may still own an
+    /// open transaction. Physically dropping it releases SQLite's writer lock
+    /// immediately; a later checkout creates a clean replacement.
+    pub fn discard(self) {
+        let Self {
+            connection,
+            _holder,
+        } = self;
+        drop(Object::take(connection));
+    }
 }
 
 impl Deref for LibSqlWriteConnectionLease {
@@ -139,7 +158,7 @@ impl Deref for LibSqlWriteConnectionLease {
     }
 }
 
-impl Drop for LibSqlWriteConnectionLease {
+impl Drop for LibSqlWriterHolderGuard {
     fn drop(&mut self) {
         let Some(holder_task_id) = self.holder_task_id else {
             return;
@@ -247,8 +266,10 @@ impl LibSqlRuntime {
         }
         Ok(LibSqlWriteConnectionLease {
             connection,
-            writer_holder: Arc::clone(&self.writer_holder),
-            holder_task_id,
+            _holder: LibSqlWriterHolderGuard {
+                writer_holder: Arc::clone(&self.writer_holder),
+                holder_task_id,
+            },
         })
     }
 }
@@ -336,13 +357,28 @@ async fn checkout(
     let started = Instant::now();
     let result = pool.get().await;
     let wait_ms = started.elapsed().as_millis();
-    tracing::debug!(
-        lane = %lane,
-        wait_ms,
-        queued,
-        "libSQL connection checkout completed"
-    );
-    result.map_err(|error| map_pool_error(error, lane))
+    match result {
+        Ok(connection) => {
+            tracing::trace!(
+                lane = %lane,
+                wait_ms,
+                queued,
+                "libSQL connection checkout completed"
+            );
+            Ok(connection)
+        }
+        Err(error) => {
+            let error = map_pool_error(error, lane);
+            tracing::debug!(
+                lane = %lane,
+                wait_ms,
+                queued,
+                reason = %error,
+                "libSQL connection checkout failed"
+            );
+            Err(error)
+        }
+    }
 }
 
 fn map_pool_error(error: PoolError<LibSqlRuntimeError>, lane: LibSqlLane) -> LibSqlRuntimeError {

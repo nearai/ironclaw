@@ -1,7 +1,7 @@
 //! Constrained protocol HTTP egress and outbound delivery sink.
 
-use crate::ProtocolHttpEgressError;
-use crate::{ReplyTargetBindingRef, TurnRunId};
+use crate::product_adapter_error::ProtocolHttpEgressError;
+use crate::turn::{ReplyTargetBindingRef, TurnRunId};
 use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;

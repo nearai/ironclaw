@@ -14,7 +14,9 @@ use async_trait::async_trait;
 use futures::{StreamExt, stream};
 use ironclaw_approvals::ApprovalRequestStorePort;
 use ironclaw_host_api::{
-    Action, ApprovalRequest, InvocationId, NetworkMethod, NetworkScheme, UserId,
+    action::{Action, NetworkMethod, NetworkScheme},
+    approval::ApprovalRequest,
+    ids::{InvocationId, UserId},
 };
 use ironclaw_turns::{
     GateRef, GetRunStateRequest, ModelInvalidOutputDetailReason, SanitizedFailure, TurnActor,
@@ -162,7 +164,7 @@ impl TurnEventBridge {
 
     pub(super) async fn drain(
         &self,
-        caller_user_id: &ironclaw_host_api::UserId,
+        caller_user_id: &ironclaw_host_api::ids::UserId,
         scope: &TurnScope,
         after: Option<TurnEventProjectionCursor>,
         auth_challenges: Option<&dyn AuthChallengeProvider>,
@@ -246,7 +248,7 @@ impl TurnEventBridge {
 }
 
 async fn turn_event_payloads_for_page(
-    caller_user_id: &ironclaw_host_api::UserId,
+    caller_user_id: &ironclaw_host_api::ids::UserId,
     coordinator: &dyn TurnCoordinator,
     failure_explainer: &dyn FailureExplanationProvider,
     failure_explanation_cache: &Arc<Mutex<FailureExplanationCache>>,
@@ -288,7 +290,7 @@ async fn turn_event_payloads_for_page(
 }
 
 async fn turn_event_payloads(
-    caller_user_id: &ironclaw_host_api::UserId,
+    caller_user_id: &ironclaw_host_api::ids::UserId,
     coordinator: &dyn TurnCoordinator,
     failure_explainer: &dyn FailureExplanationProvider,
     failure_explanation_cache: &Arc<Mutex<FailureExplanationCache>>,
@@ -372,7 +374,7 @@ impl FailureExplanationProvider for ModelFailureExplanationProvider {
 }
 
 async fn blocked_prompt_payload(
-    caller_user_id: &ironclaw_host_api::UserId,
+    caller_user_id: &ironclaw_host_api::ids::UserId,
     coordinator: &dyn TurnCoordinator,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
     approval_requests: Option<&dyn ApprovalRequestStorePort>,

@@ -2,12 +2,15 @@ name: Regression Test Check
 
 on:
   pull_request:
+  pull_request_review:
+    types: [submitted, dismissed]
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
-  group: regression-check-${{ github.head_ref || github.ref }}
+  group: regression-check-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -15,206 +18,97 @@ jobs:
     name: Regression test enforcement
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout PR head for diffing
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Checkout trusted regression gate
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: gate
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Resolve regression gate source
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          gate_root=gate
+          if [[ ! -f "$gate_root/scripts/ci/regression-test-check.py" ]]; then
+            if [[ "$EVENT_NAME" != "pull_request" ]]; then
+              # The PR that introduces this checker can receive review events
+              # before its trusted base contains the script. Do not execute
+              # PR-controlled gate code on that event; the ordinary
+              # pull_request run remains the bootstrap enforcement result.
+              echo "GATE_AVAILABLE=false" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            # One-time bootstrap for the PR that first adds the checker. The
+            # pull_request event has no secrets; review events never execute
+            # PR-controlled enforcement code.
+            gate_root=.
+          fi
+          echo "GATE_AVAILABLE=true" >> "$GITHUB_ENV"
+          echo "GATE_ROOT=$gate_root" >> "$GITHUB_ENV"
+
       - name: Fetch PR base
+        if: env.GATE_AVAILABLE == 'true'
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
-          git fetch origin -- "$BASE_REF"
+          set -euo pipefail
+          git fetch --no-tags origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
 
-      - name: Check for regression tests
+      - name: Collect current approving reviews
+        if: env.GATE_AVAILABLE == 'true'
+        id: reviews
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          approvers=$(
+            gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100" |
+              jq -s -r '
+                (add // [])
+                | map(select(.state != "COMMENTED"))
+                | group_by(.user.login)
+                | map(max_by(.submitted_at))
+                | map(select(.state == "APPROVED") | .user.login)
+                | join(",")
+              '
+          )
+          echo "approvers=$approvers" >> "$GITHUB_OUTPUT"
+
+      - name: Check for a meaningful regression test or reviewed exemption
+        if: env.GATE_AVAILABLE == 'true'
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_APPROVERS: ${{ steps.reviews.outputs.approvers }}
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
+          python3 "$GATE_ROOT/scripts/ci/regression-test-check.py" \
+            --repo . \
+            --base "origin/${PR_BASE_REF}" \
+            --head "$PR_HEAD_SHA" \
+            --title "$PR_TITLE" \
+            --body "$PR_BODY" \
+            --labels "$PR_LABELS" \
+            --author "$PR_AUTHOR" \
+            --approving-reviewers "$PR_APPROVERS"
 
-          BASE_REF="origin/${PR_BASE_REF}"
-          # Use the PR head SHA from the event payload directly. The previous
-          # approach fetched `refs/pull/N/head`, which GitHub occasionally
-          # fails to publish for in-repo PRs (hit on #3324, blocking this
-          # workflow before any of its actual checks could run). The SHA is
-          # reachable locally because actions/checkout (fetch-depth: 0)
-          # already pulled the merge commit, whose second parent is this SHA.
-          HEAD_REF="$PR_HEAD_SHA"
-
-          # --- 1. Is this a fix PR? Check title first, then commit messages ---
-          IS_FIX=false
-
-          if grep -qiE '^(fix(\(.*\))?|hotfix|bugfix):' <<< "$PR_TITLE"; then
-            IS_FIX=true
-          fi
-
-          if [ "$IS_FIX" = false ]; then
-            COMMITS=$(git log --format='%s' "${BASE_REF}..${HEAD_REF}")
-            if grep -qiE '^(fix(\(.*\))?|hotfix|bugfix):' <<< "$COMMITS"; then
-              IS_FIX=true
-            fi
-          fi
-
-          # --- 1b. Does this PR touch high-risk state machine or resilience code? ---
-          CHANGED_FILES=$(git diff --name-only "${BASE_REF}...${HEAD_REF}")
-
-          TOUCHES_HIGH_RISK=false
-          HIGH_RISK_PATTERNS=(
-            "crates/ironclaw_turns/src/coordinator.rs"
-            "crates/ironclaw_turns/src/status.rs"
-            "crates/ironclaw_processes/src/journal_store"
-            "crates/ironclaw_processes/src/supervisor.rs"
-            "crates/ironclaw_llm/src/circuit_breaker.rs"
-            "crates/ironclaw_llm/src/retry.rs"
-            "crates/ironclaw_llm/src/failover.rs"
-            "crates/ironclaw_agent_loop/src/executor"
-            "crates/ironclaw_agent_loop/src/state"
-            "crates/ironclaw_safety/src/"
-          )
-
-          for pattern in "${HIGH_RISK_PATTERNS[@]}"; do
-            if echo "$CHANGED_FILES" | grep -q "$pattern"; then
-              TOUCHES_HIGH_RISK=true
-              echo "High-risk file matched: $pattern"
-              break
-            fi
-          done
-
-          # Skip only if NEITHER condition holds — no double-firing on fix PRs
-          if [ "$IS_FIX" = false ] && [ "$TOUCHES_HIGH_RISK" = false ]; then
-            echo "Not a fix PR and no high-risk files changed — skipping."
-            exit 0
-          fi
-
-          if [ "$IS_FIX" = true ]; then
-            echo "Fix PR detected."
-          fi
-          if [ "$TOUCHES_HIGH_RISK" = true ]; then
-            echo "High-risk state machine or resilience code modified."
-          fi
-
-          # --- 2. Skip label or commit message marker ---
-          if grep -qF ',skip-regression-check,' <<< ",$PR_LABELS,"; then
-            echo "skip-regression-check label present — skipping."
-            exit 0
-          fi
-
-          COMMIT_BODIES=$(git log --format='%B' "${BASE_REF}..${HEAD_REF}")
-          if grep -qF '[skip-regression-check]' <<< "$COMMIT_BODIES"; then
-            echo "[skip-regression-check] found in commit message — skipping."
-            exit 0
-          fi
-
-          # --- 3. Exempt static-only / docs-only changes ---
-          if [ -z "$CHANGED_FILES" ]; then
-            echo "No changed files — skipping."
-            exit 0
-          fi
-
-          ALL_EXEMPT=true
-          while IFS= read -r file; do
-            case "$file" in
-              crates/ironclaw_webui/frontend/public/*) ;;
-              *.md) ;;
-              *) ALL_EXEMPT=false; break ;;
-            esac
-          done <<< "$CHANGED_FILES"
-
-          if [ "$ALL_EXEMPT" = true ]; then
-            echo "All changes are static assets or docs — skipping."
-            exit 0
-          fi
-
-          # --- 4. Look for test changes ---
-
-          # Fast path: new test attributes or test modules in added lines.
-          if git diff "${BASE_REF}...${HEAD_REF}" -U0 -- '*.rs' | grep -E '^\+.*(#\[test\]|#\[tokio::test\]|#\[cfg\(test\)\]|mod tests)' >/dev/null; then
-            echo "Test changes found in .rs files."
-            exit 0
-          fi
-
-          # Whole-function context: detect edits inside existing test functions.
-          # Uses -W (whole function) which works when git recognises function boundaries.
-          if git diff "${BASE_REF}...${HEAD_REF}" -W -- '*.rs' | awk '
-            /^@@/           { if (has_test && has_add) found=1; has_test=0; has_add=0 }
-            /^ .*#\[test\]/ || /^ .*#\[tokio::test\]/ || /^ .*#\[cfg\(test\)\]/ || /^ .*mod tests/ { has_test=1 }
-            /^\+.*#\[test\]/ || /^\+.*#\[tokio::test\]/ || /^\+.*#\[cfg\(test\)\]/ || /^\+.*mod tests/ { has_test=1 }
-            /^\+[^+]/       { has_add=1 }
-            END             { if (has_test && has_add) found=1; exit !found }
-          '; then
-            echo "Test changes found in existing test functions."
-            exit 0
-          fi
-
-          # Line-level check: detect changes inside #[cfg(test)] mod blocks.
-          # git -W relies on function boundary detection which misses Rust mod blocks,
-          # so this fallback checks whether changed line numbers fall within test modules.
-          # We specifically match #[cfg(test)] that is followed by `mod` (same or next
-          # line) to avoid false positives from standalone #[cfg(test)] items like
-          # individual statics or functions.
-          CHANGED_RS=$(echo "$CHANGED_FILES" | grep '\.rs$' || true)
-          if [ -n "$CHANGED_RS" ]; then
-            while IFS= read -r rs_file; do
-              [ -f "$rs_file" ] || continue
-
-              # Find the line where #[cfg(test)] precedes a `mod` declaration.
-              # Handles both `#[cfg(test)] mod tests` (same line) and the two-line form.
-              TEST_MOD_START=$(awk '
-                /^[[:space:]]*#\[cfg\(test\)\].*mod / { print NR; exit }
-                /^[[:space:]]*#\[cfg\(test\)\][[:space:]]*$/ { pending=NR; next }
-                pending && /^[[:space:]]*mod / { print pending; exit }
-                { pending=0 }
-              ' "$rs_file")
-              [ -n "$TEST_MOD_START" ] || continue
-
-              # Get changed line numbers in this file from the diff hunk headers.
-              # Each @@ line looks like: @@ -old,count +new,count @@
-              while IFS= read -r hunk_line; do
-                line_no=$(echo "$hunk_line" | sed -E 's/^@@ -[0-9,]+ \+([0-9]+).*/\1/')
-                [ -n "$line_no" ] || continue
-                if [ "$line_no" -ge "$TEST_MOD_START" ]; then
-                  echo "Test changes found: $rs_file has changes at line $line_no inside #[cfg(test)] mod block (starts at line $TEST_MOD_START)."
-                  exit 0
-                fi
-              done < <(git diff "${BASE_REF}...${HEAD_REF}" -U0 -- "$rs_file" | grep -E '^@@')
-            done <<< "$CHANGED_RS"
-          fi
-
-          if grep -qE '^tests/' <<< "$CHANGED_FILES"; then
-            echo "Test file changes found under tests/."
-            exit 0
-          fi
-
-          if grep -qE '(^|/)test_[^/]*\.py$|(^|/)[^/]*_test\.py$' <<< "$CHANGED_FILES"; then
-            echo "Python test file changes found."
-            exit 0
-          fi
-
-          if grep -qE '^crates/ironclaw_webui/frontend/src/.*\.test\.(ts|mts)$' <<< "$CHANGED_FILES"; then
-            echo "Reborn WebUI v2 JS test file changes found."
-            exit 0
-          fi
-
-          # Harness and CI-guard behaviour is tested by shell self-tests, not by
-          # cargo or pytest — scripts/test-*.sh and scripts/ci/test-*.sh are an
-          # established convention here (14 of them at time of writing). Without
-          # this, a fix to a guard script plus its new self-test reads to this
-          # check as "a bug fix with no tests", which is the opposite of true.
-          if grep -qE '^scripts/(ci/)?test-[^/]*\.sh$' <<< "$CHANGED_FILES"; then
-            echo "Shell self-test changes found under scripts/."
-            exit 0
-          fi
-
-          # --- 5. No tests found ---
-          if [ "$IS_FIX" = true ]; then
-            echo "::warning::This PR looks like a bug fix but contains no test changes."
-          fi
-          if [ "$TOUCHES_HIGH_RISK" = true ]; then
-            echo "::warning::This PR modifies high-risk state machine or resilience code but includes no test changes."
-          fi
-          echo "::warning::Please add tests exercising the changed behavior, or apply the 'skip-regression-check' label if not feasible."
-          exit 1
+      - name: Run regression-gate self-tests
+        if: env.GATE_AVAILABLE == 'true'
+        run: bash "$GATE_ROOT/scripts/ci/test-regression-test-check.sh"

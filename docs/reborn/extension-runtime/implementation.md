@@ -197,8 +197,9 @@ already exists.
   - `egress.rs` — `RestrictedEgress` implementation: scheme/host/method
     allowlist from the resolved contract, credential injection by handle
     (adapter-supplied `Authorization` rejected where injection is declared),
-    response size caps, redirect denial across hosts, private-IP/DNS-rebind
-    denial (reuse existing network policy), deadlines.
+    request size caps checked before approval and again after host-side body
+    credential injection, response size caps, redirect denial across hosts,
+    private-IP/DNS-rebind denial (reuse existing network policy), deadlines.
 - Composition/CLI: CLI assembles `Vec<NativeExtensionFactory>` and passes it
   into composition; composition constructs `ExtensionHost` with stores +
   loaders and injects resolver handles into dispatcher/workflow/engine/router.
@@ -333,13 +334,28 @@ oauth-connect integration test rather than adding a parallel one).
     key: `(installation, event_id)`), **then** 2xx; persistence failure →
     retryable 5xx. Then existing workflow: identity and conversation binding,
     turn submission.
+  - `BatchFragment` → validate bounded batch/fragment identities and settle
+    window, durably stage the verified fragment in the tenant-scoped
+    host-private filesystem, **then** 2xx. A leased worker atomically claims
+    the latest revision after the quiet window, merges fragments in provider
+    order, and performs one ordinary admission. Durable revisions prevent a
+    stale timer from admitting a partial batch; leases and startup recovery
+    cover crashes. Conflicts reject and tombstone the whole batch, while
+    completed tombstones absorb provider redelivery.
   - `Respond` → bounded immediate response (post-verification), no enqueue.
   - `Ignore` → 2xx after the same durable no-op commit.
 - `reply_context` from the message is stored host-side with the conversation
   source binding and handed back in `OutboundEnvelope`.
-- Inbound attachments are `AttachmentRef`s (vendor URL/id + mime hint) so
-  `inbound` stays pure; the host-side fetch through restricted channel egress
-  is specified but implemented only when a consumer needs bytes.
+- Inbound attachments are host-private `ChannelAttachmentRef`s (descriptor +
+  opaque vendor reference), so `inbound` stays pure. Ordinary-message
+  references remain transient; provider-batch fragments serialize them only
+  into the bounded tenant-scoped staging snapshot required for safe
+  acknowledge-before-settle behavior. They never enter events, projections,
+  transcripts, or model-visible state. After replay dedupe and before-inbound
+  policy, the product workflow bounds the original metadata; after policy it
+  reconciles rewritten descriptors, fetches through the exact adapter
+  generation and manifest-restricted egress, validates the returned bytes, and
+  lands them through the project filesystem before message acceptance.
 - Conversation binding consumes the channel's declared `conversation_model`:
   `continuous` channels bind one IronClaw conversation per external
   conversation ref (today's Slack/Telegram behavior, now declared instead of
@@ -381,6 +397,11 @@ signed vendor POST → verified → normalized → turn admitted.
   retry/backoff/dedupe/single-flight/shutdown-drain. Crash after possible
   vendor success → `Unknown`, never blind resend. Sole delivery-state writer —
   adapters get no store. Production construction rejects a no-op sink.
+- For final and triggered replies, the coordinator materializes recognized
+  `/workspace/...` references through the turn-scoped project filesystem after
+  target/channel resolution and before `Sending`. It enforces shared
+  count/per-file/total budgets, rejects caller-supplied file parts, and passes
+  only transient `OutboundPart::File` values to the adapter.
 - `CommunicationPresentationPolicy` derived from `[channel.presentation]`
   flows into prompt construction; delete the concrete
   Discord/WhatsApp/Telegram/Slack branches in

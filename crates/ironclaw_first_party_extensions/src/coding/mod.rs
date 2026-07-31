@@ -20,8 +20,10 @@ use std::sync::Arc;
 
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityDisplayOutputPreview, CapabilityId, MountView, ResourceScope, RunId,
-    RuntimeDispatchErrorKind,
+    dispatch::{CapabilityDisplayOutputPreview, RuntimeDispatchErrorKind},
+    ids::{CapabilityId, RunId},
+    mount::MountView,
+    resource::ResourceScope,
 };
 use serde_json::Value;
 
@@ -268,8 +270,11 @@ mod tests {
 
     use ironclaw_filesystem::{DiskFilesystem, RootFilesystem};
     use ironclaw_host_api::{
-        CapabilityId, HostPath, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-        ResourceScope, RuntimeDispatchErrorKind, UserId, VirtualPath,
+        dispatch::RuntimeDispatchErrorKind,
+        ids::{CapabilityId, InvocationId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{HostPath, MountAlias, VirtualPath},
+        resource::ResourceScope,
     };
     use ironclaw_turns::run_profile::LoopSafeSummary;
     use serde_json::json;

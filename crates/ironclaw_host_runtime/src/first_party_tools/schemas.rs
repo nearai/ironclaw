@@ -97,6 +97,41 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["routed"],
             "additionalProperties": false
         }),
+        "schemas/builtin/attach_workspace_file_to_reply.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Existing file path under /workspace to attach to the final reply."
+                },
+                "filename": {
+                    "type": "string",
+                    "description": "Optional safe download filename. Defaults to the workspace basename."
+                },
+                "mime_type": {
+                    "type": "string",
+                    "description": "Optional MIME type override. Defaults from common filename extensions or application/octet-stream."
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/attach_workspace_file_to_reply.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "attached": { "type": "boolean", "const": true },
+                "attachment_ref": {
+                    "type": "string",
+                    "pattern": "^att_[0-9a-f]{64}$",
+                    "description": "Opaque host-issued reference for the registered attachment."
+                },
+                "filename": { "type": "string" },
+                "mime_type": { "type": "string" },
+                "size_bytes": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["attached", "attachment_ref", "filename", "mime_type", "size_bytes"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/http-save.input.v1.json" => http_schema(true),
         "schemas/builtin/shell.input.v1.json" => json!({
             "type": "object",
@@ -1010,6 +1045,31 @@ mod tests {
                 "default_modality"
             ])
         );
+    }
+
+    #[test]
+    fn reply_attachment_output_schema_exposes_only_opaque_identity_and_safe_metadata() {
+        let output = resolve_builtin_input_schema_ref(
+            "schemas/builtin/attach_workspace_file_to_reply.output.v1.json",
+        )
+        .expect("reply attachment output schema is registered");
+
+        assert!(output["properties"].get("path").is_none());
+        assert_eq!(
+            output["properties"]["attachment_ref"]["pattern"],
+            "^att_[0-9a-f]{64}$"
+        );
+        assert_eq!(
+            output["required"],
+            serde_json::json!([
+                "attached",
+                "attachment_ref",
+                "filename",
+                "mime_type",
+                "size_bytes"
+            ])
+        );
+        assert_eq!(output["additionalProperties"], false);
     }
 
     #[test]

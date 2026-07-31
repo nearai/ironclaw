@@ -227,6 +227,31 @@ capture "${merge_sh}" "${tmp_root}/m3_merged.lcov" "${fixtures_dir}/m3_no_match.
 assert_exit_code "M3: merge exits 0 when nothing matches the crate filter" 0 "${CAP_RC}"
 assert_eq "M3: merge writes an empty tracefile when nothing matches" "" "$(cat "${tmp_root}/m3_merged.lcov")"
 
+# M4: separate cargo-llvm-cov reports without trailing newlines remain
+# separate records. This is the shape consumed by the crate-bucket workflow;
+# raw concatenation would corrupt the boundary as `end_of_recordSF:...`.
+printf '%s' \
+  'SF:/work/ironclaw/crates/ironclaw_slack_extension/src/attachment_transfer.rs
+DA:100,7
+LF:1
+LH:1
+end_of_record' > "${fixtures_dir}/m4_slack.lcov"
+printf '%s' \
+  'SF:/work/ironclaw/crates/ironclaw_telegram_extension/src/attachment_transfer.rs
+DA:100,5
+LF:1
+LH:1
+end_of_record' > "${fixtures_dir}/m4_telegram.lcov"
+capture "${merge_sh}" "${tmp_root}/m4_merged.lcov" \
+  "${fixtures_dir}/m4_slack.lcov" \
+  "${fixtures_dir}/m4_telegram.lcov"
+assert_exit_code "M4: merge accepts reports without trailing newlines" 0 "${CAP_RC}"
+m4_merged_body="$(cat "${tmp_root}/m4_merged.lcov")"
+assert_contains "M4: merge keeps the first package report" \
+  "${m4_merged_body}" "ironclaw_slack_extension/src/attachment_transfer.rs"
+assert_contains "M4: merge keeps the next package report" \
+  "${m4_merged_body}" "ironclaw_telegram_extension/src/attachment_transfer.rs"
+
 # ---------------------------------------------------------------------------
 # A. reborn-coverage-summary.sh (default report mode)
 # ---------------------------------------------------------------------------

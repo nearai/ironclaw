@@ -1,7 +1,7 @@
 //! Reborn WebChat v2 HTTP route surface.
 //!
 //! This crate ships the minimal native WebUI v2 route set on top of the
-//! [`ironclaw_host_api::ProductSurface`] service. It is compiled into
+//! [`ironclaw_host_api::product_surface::ProductSurface`] service. It is compiled into
 //! every build.
 //!
 //! ## Boundaries
@@ -34,9 +34,9 @@
 //! maximum lifetime so leaked guards or stuck pollers cannot wedge a
 //! caller's slot indefinitely.
 //!
-//! [`ProductSurface`]: ironclaw_host_api::ProductSurface
+//! [`ProductSurface`]: ironclaw_host_api::product_surface::ProductSurface
 //! [`WebChatV2EventFrame`]: crate::WebChatV2EventFrame
-//! [`ProductSurfaceCaller`]: ironclaw_host_api::ProductSurfaceCaller
+//! [`ProductSurfaceCaller`]: ironclaw_host_api::product_surface::ProductSurfaceCaller
 //! [`IngressRouteDescriptor`]: ironclaw_host_api::ingress::IngressRouteDescriptor
 
 mod descriptors;
@@ -63,7 +63,8 @@ pub use descriptors::{
     WEBUI_V2_ROUTE_GET_EXTENSION_SETUP, WEBUI_V2_ROUTE_GET_LLM_CONFIG,
     WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES, WEBUI_V2_ROUTE_GET_PROJECT,
     WEBUI_V2_ROUTE_GET_RUN_ARTIFACT, WEBUI_V2_ROUTE_GET_SESSION, WEBUI_V2_ROUTE_GET_SKILL,
-    WEBUI_V2_ROUTE_GET_TIMELINE, WEBUI_V2_ROUTE_IMPORT_EXTENSION, WEBUI_V2_ROUTE_INSTALL_EXTENSION,
+    WEBUI_V2_ROUTE_GET_THREAD_ARTIFACT, WEBUI_V2_ROUTE_GET_TIMELINE,
+    WEBUI_V2_ROUTE_IMPORT_EXTENSION, WEBUI_V2_ROUTE_INSTALL_EXTENSION,
     WEBUI_V2_ROUTE_INSTALL_SKILL, WEBUI_V2_ROUTE_LIST_AUTOMATIONS, WEBUI_V2_ROUTE_LIST_COMMANDS,
     WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY, WEBUI_V2_ROUTE_LIST_EXTENSIONS,
     WEBUI_V2_ROUTE_LIST_FS_MOUNTS, WEBUI_V2_ROUTE_LIST_LLM_MODELS,
@@ -93,6 +94,7 @@ pub use descriptors::{
     WEBUI_V2_ROUTE_UPDATE_PROJECT, WEBUI_V2_ROUTE_UPDATE_PROJECT_MEMBER,
     WEBUI_V2_ROUTE_UPDATE_SKILL, WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER,
     is_webui_v2_operator_webui_config_route_id, webui_v2_routes,
+    webui_v2_routes_with_regression_artifact_export,
 };
 pub use error::{WebUiV2HttpError, WebUiV2HttpErrorBody};
 pub use handlers::{

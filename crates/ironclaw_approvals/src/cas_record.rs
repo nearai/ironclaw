@@ -8,7 +8,7 @@ use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, RootFilesystem, ScopedFilesystem,
     VersionedEntry,
 };
-use ironclaw_host_api::{ResourceScope, ScopedPath};
+use ironclaw_host_api::{path::ScopedPath, resource::ResourceScope};
 
 pub(crate) struct CasRecordStore<F, K>
 where

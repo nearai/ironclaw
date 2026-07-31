@@ -20,9 +20,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_host_api::ProductSurfaceCaller;
+use ironclaw_host_api::product_surface::ProductSurfaceCaller;
 use ironclaw_host_api::{
-    AgentId, TenantId, UserId,
+    ids::{AgentId, TenantId, UserId},
     runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -142,12 +142,13 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
     // the `ProductSurface` default and this returned
     // `service_unavailable`. A successful create proves `with_project_service`
     // was wired from the production store graph.
-    let owner_surface = ironclaw_host_api::BoundProductSurface::new(bundle.clone(), owner.clone());
+    let owner_surface =
+        ironclaw_host_api::product_surface::BoundProductSurface::new(bundle.clone(), owner.clone());
     let created = PROJECT_CREATE_COMMAND
         .invoke_on(
             &owner_surface,
             create_request("Prod Project"),
-            ironclaw_host_api::ActivityId::new(),
+            ironclaw_host_api::ids::ActivityId::new(),
         )
         .await
         .expect("production project service must be reachable (not service_unavailable)");
@@ -177,7 +178,8 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
         Some(AgentId::new(RUNTIME_AGENT).unwrap()),
         None,
     );
-    let other_surface = ironclaw_host_api::BoundProductSurface::new(bundle.clone(), other_tenant);
+    let other_surface =
+        ironclaw_host_api::product_surface::BoundProductSurface::new(bundle.clone(), other_tenant);
     let other_listed = PROJECTS_VIEW
         .query_on(
             &other_surface,

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use ironclaw_extensions::ExtensionPackage;
-use ironclaw_host_api::RuntimeCredentialAuthRequirement;
+use ironclaw_host_api::decision::RuntimeCredentialAuthRequirement;
 use ironclaw_product::ProductSurfaceFailure;
 
 use crate::package_runtime_credential_auth_requirements;

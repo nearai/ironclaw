@@ -1,7 +1,7 @@
 use chrono::{DateTime, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc};
 use chrono_tz::Tz;
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
-use ironclaw_host_api::{EffectKind, PermissionMode};
+use ironclaw_host_api::capability::{EffectKind, PermissionMode};
 use rust_decimal::Decimal;
 use serde_json::{Number, Value, json};
 

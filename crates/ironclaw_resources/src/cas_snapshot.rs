@@ -34,7 +34,7 @@ use ironclaw_filesystem::{
     CasApply, CasUpdateError, ContentType, Entry, RecordKind, RootFilesystem, ScopedFilesystem,
     cas_update,
 };
-use ironclaw_host_api::{ResourceScope, ScopedPath};
+use ironclaw_host_api::{path::ScopedPath, resource::ResourceScope};
 use serde::{Serialize, de::DeserializeOwned};
 
 /// Snapshot encoding boundary shared by all filesystem-backed stores
@@ -499,7 +499,9 @@ mod tests {
         InMemoryBackend, RecordVersion, RootFilesystem, ScopedFilesystem, VersionedEntry,
     };
     use ironclaw_host_api::{
-        MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+        resource::ResourceScope,
     };
     use serde::{Deserialize, Serialize};
 

@@ -1,4 +1,4 @@
-use ironclaw_host_api::ExtensionId;
+use ironclaw_host_api::ids::ExtensionId;
 
 use crate::{
     AuthChallenge, AuthErrorCode, AuthFlowRecord, AuthFlowStatus, AuthProductError,
@@ -544,7 +544,10 @@ mod tests {
         ProviderScope,
     };
     use chrono::Utc;
-    use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
+    use ironclaw_host_api::{
+        ids::{InvocationId, SecretHandle, UserId},
+        resource::ResourceScope,
+    };
     use secrecy::SecretString;
 
     #[test]

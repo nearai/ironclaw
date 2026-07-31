@@ -25,7 +25,7 @@
 pub async fn materialize_trigger_prompt_for_test(
     binding_service: ironclaw_conversations::InMemoryConversationServices,
     thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
-    default_agent_id: ironclaw_host_api::AgentId,
+    default_agent_id: ironclaw_host_api::ids::AgentId,
     fire: ironclaw_triggers::TriggerFire,
 ) -> Result<
     (

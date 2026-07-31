@@ -6,10 +6,17 @@ use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
 };
 use ironclaw_host_api::{
-    CapabilityDisplayOutputPreview, CapabilityId, CapabilityProfileSchemaRef, CredentialStageError,
-    DispatchInputIssue, DispatchInputIssueCode, EffectKind, HostApiError, InstallationState,
-    OriginGateMatrix, OriginGatePolicy, PermissionMode, ResourceEstimate, ResourceProfile,
-    ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgress,
+    capability::{EffectKind, OriginGateMatrix, OriginGatePolicy, PermissionMode},
+    capability_profile::CapabilityProfileSchemaRef,
+    dispatch::{
+        CapabilityDisplayOutputPreview, CredentialStageError, DispatchInputIssue,
+        DispatchInputIssueCode, RuntimeDispatchErrorKind,
+    },
+    error::HostApiError,
+    http::RuntimeHttpEgress,
+    ids::CapabilityId,
+    resource::{ResourceEstimate, ResourceProfile, ResourceUsage},
+    state::InstallationState,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -660,10 +667,17 @@ mod tests {
         CredentialAccountStatus, CredentialOwnership, NewCredentialAccount, ProviderScope,
     };
     use ironclaw_host_api::{
-        CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilitySet, ExecutionContext,
-        ExtensionId, FailureKind, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern,
-        OriginGatePolicy, PermissionMode, Principal, ResourceScope, RuntimeKind, SecretHandle,
-        TrustClass, UNGATED_LOOP_RUN_CAPABILITIES, UserId,
+        action::{NetworkPolicy, NetworkTargetPattern},
+        capability::{
+            CapabilityDescriptor, CapabilityGrant, CapabilitySet, GrantConstraints,
+            OriginGatePolicy, PermissionMode, UNGATED_LOOP_RUN_CAPABILITIES,
+        },
+        ids::{CapabilityGrantId, ExtensionId, SecretHandle, UserId},
+        mount::MountView,
+        resource::ResourceScope,
+        result_meta::FailureKind,
+        runtime::{RuntimeKind, TrustClass},
+        scope::{ExecutionContext, Principal},
     };
     use ironclaw_host_runtime::{
         CapabilitySurfacePolicy, RuntimeCapabilityOutcome, SurfaceKind, VisibleCapabilityRequest,
@@ -682,7 +696,7 @@ mod tests {
         ExtensionLifecycleTestServices, build_lifecycle_test_services,
         invoke_json_with_standalone_approval, invoke_with_standalone_approval,
     };
-    use ironclaw_host_api::InstallationState;
+    use ironclaw_host_api::state::InstallationState;
     use ironclaw_product::{
         ChannelConnectionRequirement, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
         LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
@@ -1925,7 +1939,7 @@ mod tests {
         )
         .expect("valid execution context");
         context.authenticated_actor_user_id = Some(user_id);
-        context.run_id = Some(ironclaw_host_api::RunId::new());
+        context.run_id = Some(ironclaw_host_api::ids::RunId::new());
         context
     }
 
@@ -2037,7 +2051,8 @@ mod tests {
         // The TRUSTED channel, not the untrusted diagnostic one: this reason is
         // host-authored, and the untrusted channel collapses it to the
         // safe-summary placeholder at the host_api boundary (#6299).
-        let ironclaw_host_api::DispatchFailureDetail::HostRemediation { text } = *detail else {
+        let ironclaw_host_api::dispatch::DispatchFailureDetail::HostRemediation { text } = *detail
+        else {
             panic!("expected a HostRemediation detail, got {detail:?}");
         };
         assert!(text.as_str().contains("config set google.client_id"));
@@ -2061,7 +2076,8 @@ mod tests {
         };
         assert_eq!(kind, RuntimeDispatchErrorKind::InputEncode);
         let detail = detail.expect("diagnostic detail must be present");
-        let ironclaw_host_api::DispatchFailureDetail::Diagnostic { text } = *detail else {
+        let ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic { text } = *detail
+        else {
             panic!("expected a Diagnostic detail, got {detail:?}");
         };
         assert!(text.contains("mounted host"));
@@ -2096,7 +2112,7 @@ mod tests {
         assert!(
             matches!(
                 detail.as_deref(),
-                Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { .. })
+                Some(ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic { .. })
             ),
             "externally-influenced text must stay on the scanned channel, got {detail:?}"
         );

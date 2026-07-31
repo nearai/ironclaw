@@ -27,7 +27,7 @@ use ironclaw_turns::{
     },
 };
 
-use crate::model_failure_mapping::model_stage_failure_category;
+use crate::model_failure_mapping::host_stage_failure_category;
 use crate::{
     failure_categories::CHECKPOINT_REJECTED_CATEGORY,
     failure_summary::checkpoint_rejection_host_explanation,
@@ -329,16 +329,11 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
                 safe_summary = %safe_summary,
                 "planned driver host stage unavailable"
             );
-            if let Some(category) =
-                model_stage_failure_category(stage == HostStage::Model, kind, reason_kind)
-            {
-                // Prefer the secret-scrubbed model-visible detail; fall back to
-                // the bounded safe summary so the explainer still gets the real
-                // cause rather than only the category. Fail-closed backstop:
-                // executor-side producers can only run the token-prefix scrub
-                // (ironclaw_agent_loop cannot depend on the hardened scrubber),
-                // so re-scrub through the full LeakDetector registry +
-                // injection fencing here, where the detail becomes visible.
+            if let Some(category) = host_stage_failure_category(stage, kind, reason_kind) {
+                // Model-stage details may reach the failure explainer after a
+                // hardened re-scrub. Transcript failures carry only the fixed
+                // host-authored cause; their pinned projection bypasses model
+                // inference because no further output can be committed.
                 let detail = detail
                     .or_else(|| Some(safe_summary.as_str().to_string()))
                     .map(ironclaw_loop_host::scrub_model_visible_detail);
@@ -658,6 +653,26 @@ mod tests {
                 reason_kind: MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY.to_string(),
                 // No upstream detail: the bounded safe summary is the fallback.
                 detail: Some("model credentials are unavailable".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn executor_transcript_diagnostics_map_to_terminal_transcript_category() {
+        let mapped = map_executor_error(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Transcript,
+            kind: AgentLoopHostErrorKind::TranscriptWriteFailed,
+            safe_summary: LoopSafeSummary::assistant_transcript_write_failed(),
+            reason_kind: None,
+            detail: None,
+        });
+
+        assert_eq!(
+            mapped,
+            AgentLoopDriverError::Failed {
+                reason_kind: crate::failure_categories::TRANSCRIPT_WRITE_FAILED_CATEGORY
+                    .to_string(),
+                detail: Some("assistant transcript write failed".to_string()),
             }
         );
     }
@@ -1254,14 +1269,14 @@ mod tests {
         async fn invoke_capability(
             &self,
             request: LoopRequest,
-        ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
+        ) -> Result<ironclaw_host_api::resolution::Resolution, AgentLoopHostError> {
             self.inner.invoke_capability(request).await
         }
 
         async fn invoke_capability_batch(
             &self,
             request: LoopRequestBatch,
-        ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
+        ) -> Result<ironclaw_host_api::resolution::ResolutionBatch, AgentLoopHostError> {
             self.inner.invoke_capability_batch(request).await
         }
     }
@@ -1363,7 +1378,7 @@ mod tests {
         context: &LoopRunContext,
     ) -> ironclaw_agent_loop::state::LoopExecutionState {
         use ironclaw_agent_loop::state::PendingAuthResume;
-        use ironclaw_host_api::CapabilityId;
+        use ironclaw_host_api::ids::CapabilityId;
         use ironclaw_turns::LoopGateRef;
         use ironclaw_turns::run_profile::{CapabilityInputRef, CapabilitySurfaceVersion};
 
@@ -1542,7 +1557,7 @@ mod tests {
         context: &LoopRunContext,
     ) -> ironclaw_agent_loop::state::LoopExecutionState {
         use ironclaw_agent_loop::state::PendingApprovalResume;
-        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId};
+        use ironclaw_host_api::ids::{ApprovalRequestId, CapabilityId, CorrelationId};
         use ironclaw_turns::LoopGateRef;
         use ironclaw_turns::run_profile::{
             CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion,
@@ -1652,7 +1667,7 @@ mod tests {
         context: &LoopRunContext,
     ) -> ironclaw_agent_loop::state::LoopExecutionState {
         use ironclaw_agent_loop::state::PendingExternalToolResume;
-        use ironclaw_host_api::CapabilityId;
+        use ironclaw_host_api::ids::CapabilityId;
         use ironclaw_turns::CapabilityActivityId;
         use ironclaw_turns::LoopGateRef;
         use ironclaw_turns::run_profile::{CapabilityInputRef, CapabilitySurfaceVersion};
@@ -1730,7 +1745,7 @@ mod tests {
         context: &LoopRunContext,
     ) -> ironclaw_agent_loop::state::LoopExecutionState {
         use ironclaw_agent_loop::state::{PendingApprovalResume, PendingAuthResume};
-        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId};
+        use ironclaw_host_api::ids::{ApprovalRequestId, CapabilityId, CorrelationId};
         use ironclaw_turns::LoopGateRef;
         use ironclaw_turns::run_profile::{
             CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion,
@@ -1917,7 +1932,7 @@ mod tests {
         context: &LoopRunContext,
     ) -> ironclaw_agent_loop::state::LoopExecutionState {
         use ironclaw_agent_loop::state::{PendingApprovalResume, PendingAuthResume};
-        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId};
+        use ironclaw_host_api::ids::{ApprovalRequestId, CapabilityId, CorrelationId};
         use ironclaw_turns::LoopGateRef;
         use ironclaw_turns::run_profile::{
             CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion,

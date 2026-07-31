@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_host_api::{ResourceScope, SecretHandle};
+use ironclaw_host_api::{ids::SecretHandle, resource::ResourceScope};
 use ironclaw_secrets::{
     SecretLease, SecretLeaseId, SecretLeaseStatus, SecretMaterial, SecretMetadata,
     SecretStoreError, SecretStorePort,

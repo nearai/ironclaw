@@ -5,7 +5,9 @@ use ironclaw_auth::{
     CredentialOwnership, NewCredentialAccount, ProviderScope,
 };
 use ironclaw_host_api::{
-    AgentId, InvocationId, MountView, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+    ids::{AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId},
+    mount::{MountPermissions, MountView},
+    resource::ResourceScope,
 };
 
 use std::sync::Arc;
@@ -16,9 +18,9 @@ use super::super::super::extension_surface::{
 use super::super::super::github;
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{
-    HarnessResult, HostRuntimeCapabilityHarness, RecordingNetworkHttpEgress,
+    HarnessResult, HostRuntimeCapabilityHarness, RecordingNetworkHttpEgress, VendorResponseRouter,
     bundled_extension_provider_trust, capability_ids_from_strs, standalone_all_effects,
-    wildcard_test_policy,
+    wildcard_test_policy, workspace_mounts,
 };
 
 pub(crate) fn extension_lifecycle_tools_profile() -> HarnessResult<ToolsProfile> {
@@ -211,7 +213,7 @@ fn visibility_probe_package() -> HarnessResult<(
     ironclaw_extensions::ExtensionPackage,
     ironclaw_extensions::ResolvedExtensionManifest,
 )> {
-    let root = ironclaw_host_api::VirtualPath::new("/system/extensions/visprobe")?;
+    let root = ironclaw_host_api::path::VirtualPath::new("/system/extensions/visprobe")?;
     let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
         VISIBILITY_PROBE_MANIFEST,
         ironclaw_extensions::ManifestSource::HostBundled,
@@ -247,7 +249,7 @@ pub(crate) fn extension_visibility_probe_tools_profile() -> HarnessResult<ToolsP
         .with_activated_bundled_extension_resolved(package, resolved),
         network_policy_override: Some(wildcard_test_policy()),
         provider_trust_override: Some(vec![(
-            ironclaw_host_api::ExtensionId::new("visprobe")?,
+            ironclaw_host_api::ids::ExtensionId::new("visprobe")?,
             standalone_all_effects(),
         )]),
         // Surface resolution reads each advertised capability's
@@ -432,11 +434,11 @@ pub(crate) fn extension_prompt_description_trust_probe_tools_profile() -> Harnes
         network_policy_override: Some(wildcard_test_policy()),
         provider_trust_override: Some(vec![
             (
-                ironclaw_host_api::ExtensionId::new("verifiedprompt")?,
+                ironclaw_host_api::ids::ExtensionId::new("verifiedprompt")?,
                 standalone_all_effects(),
             ),
             (
-                ironclaw_host_api::ExtensionId::new("localprompt")?,
+                ironclaw_host_api::ids::ExtensionId::new("localprompt")?,
                 standalone_all_effects(),
             ),
         ]),
@@ -699,7 +701,7 @@ impl ironclaw_product::ChannelAdapter for AcmeFixtureChannelAdapter {
     async fn deliver(
         &self,
         envelope: ironclaw_product::OutboundEnvelope,
-        egress: &dyn ironclaw_host_api::RestrictedEgress,
+        egress: &dyn ironclaw_host_api::tool_adapter::RestrictedEgress,
     ) -> Result<ironclaw_product::DeliveryReport, ironclaw_product::ChannelError> {
         use ironclaw_product::{ChannelError, OutboundPart, PartDeliveryOutcome};
         if envelope.parts.is_empty() {
@@ -716,8 +718,8 @@ impl ironclaw_product::ChannelAdapter for AcmeFixtureChannelAdapter {
                         "text": text,
                     });
                     let response = egress
-                        .send(ironclaw_host_api::RestrictedEgressRequest {
-                            method: ironclaw_host_api::NetworkMethod::Post,
+                        .send(ironclaw_host_api::tool_adapter::RestrictedEgressRequest {
+                            method: ironclaw_host_api::action::NetworkMethod::Post,
                             url: "https://api.acme.example/messages".to_string(),
                             headers: vec![(
                                 "content-type".to_string(),
@@ -759,12 +761,15 @@ impl ironclaw_product::ChannelAdapter for AcmeFixtureChannelAdapter {
 struct AcmeFixtureToolAdapter;
 
 #[async_trait::async_trait]
-impl ironclaw_host_api::ToolAdapter for AcmeFixtureToolAdapter {
+impl ironclaw_host_api::tool_adapter::ToolAdapter for AcmeFixtureToolAdapter {
     async fn invoke(
         &self,
-        call: ironclaw_host_api::ToolCall,
-        _ports: &ironclaw_host_api::ToolPorts<'_>,
-    ) -> Result<ironclaw_host_api::ToolResult, ironclaw_host_api::ToolError> {
+        call: ironclaw_host_api::tool_adapter::ToolCall,
+        _ports: &ironclaw_host_api::tool_adapter::ToolPorts<'_>,
+    ) -> Result<
+        ironclaw_host_api::tool_adapter::ToolResult,
+        ironclaw_host_api::tool_adapter::ToolError,
+    > {
         match call.capability_id.as_str() {
             ACME_SEND_NOTE_CAPABILITY_ID => {
                 let text = call
@@ -778,14 +783,14 @@ impl ironclaw_host_api::ToolAdapter for AcmeFixtureToolAdapter {
                 let output_bytes = serde_json::to_vec(&output)
                     .map(|bytes| bytes.len() as u64)
                     .unwrap_or_default();
-                Ok(ironclaw_host_api::ToolResult {
+                Ok(ironclaw_host_api::tool_adapter::ToolResult {
                     output,
                     display_preview: None,
                     output_bytes,
                 })
             }
-            _ => Err(ironclaw_host_api::ToolError::Failed {
-                kind: ironclaw_host_api::RuntimeDispatchErrorKind::UndeclaredCapability,
+            _ => Err(ironclaw_host_api::tool_adapter::ToolError::Failed {
+                kind: ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::UndeclaredCapability,
                 safe_summary: None,
                 model_visible_cause: None,
             }),
@@ -802,7 +807,7 @@ pub(crate) fn extension_runtime_acme_tools_profile() -> HarnessResult<ToolsProfi
     let mut profile = extension_lifecycle_tools_profile()?;
     profile
         .capability_ids
-        .push(ironclaw_host_api::CapabilityId::new(
+        .push(ironclaw_host_api::ids::CapabilityId::new(
             ACME_SEND_NOTE_CAPABILITY_ID,
         )?);
     // The real Slack package's five tools (TOOL-7 drives them through the
@@ -816,15 +821,15 @@ pub(crate) fn extension_runtime_acme_tools_profile() -> HarnessResult<ToolsProfi
     ] {
         profile
             .capability_ids
-            .push(ironclaw_host_api::CapabilityId::new(slack_tool)?);
+            .push(ironclaw_host_api::ids::CapabilityId::new(slack_tool)?);
     }
     if let Some(trust) = profile.provider_trust_override.as_mut() {
         trust.push((
-            ironclaw_host_api::ExtensionId::new("acme-messenger")?,
+            ironclaw_host_api::ids::ExtensionId::new("acme-messenger")?,
             standalone_all_effects(),
         ));
         trust.push((
-            ironclaw_host_api::ExtensionId::new("slack")?,
+            ironclaw_host_api::ids::ExtensionId::new("slack")?,
             standalone_all_effects(),
         ));
     }
@@ -915,8 +920,14 @@ fn delivery_vendor_router(
         ));
     }
     if request.url.contains("api.telegram.org") {
+        if request.url.contains("api.telegram.org/file/") {
+            // The manifest's path-prefixed download target streams raw bytes.
+            return Some((200, b"DATA".to_vec()));
+        }
         let body: &[u8] = if request.url.ends_with("/sendMessage") {
             br#"{"ok":true,"result":{"message_id":4242}}"#
+        } else if request.url.ends_with("/getFile") {
+            br#"{"ok":true,"result":{"file_path":"documents/report.pdf","file_size":4}}"#
         } else {
             // setWebhook / deleteWebhook and friends return a bool result.
             br#"{"ok":true,"result":true}"#
@@ -924,6 +935,22 @@ fn delivery_vendor_router(
         return Some((200, body.to_vec()));
     }
     None
+}
+
+/// The delivery router plus a scripted transient failure on the FIRST
+/// Telegram `getFile` lookup, so the attachment journey can prove the
+/// retryable-release-then-refetch ledger semantics on the production mount.
+fn delivery_vendor_router_with_flaky_get_file() -> Arc<VendorResponseRouter> {
+    let get_file_calls = std::sync::atomic::AtomicUsize::new(0);
+    Arc::new(move |request: &ironclaw_network::NetworkHttpRequest| {
+        if request.url.contains("api.telegram.org")
+            && request.url.ends_with("/getFile")
+            && get_file_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+        {
+            return Some((500, br#"{"ok":false,"error_code":500}"#.to_vec()));
+        }
+        delivery_vendor_router(request)
+    })
 }
 
 /// The acme runtime profile extended for the §5.4 delivery proofs: the
@@ -935,18 +962,24 @@ pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> 
     let mut profile = extension_runtime_acme_tools_profile()?;
     profile
         .capability_ids
-        .push(ironclaw_host_api::CapabilityId::new(
+        .push(ironclaw_host_api::ids::CapabilityId::new(
             ironclaw_host_runtime::OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
         )?);
+    profile
+        .capability_ids
+        .push(ironclaw_host_api::ids::CapabilityId::new(
+            ironclaw_host_runtime::ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
+        )?);
+    profile.options.mounts = workspace_mounts(MountPermissions::read_only())?;
     if let Some(trust) = profile.provider_trust_override.as_mut() {
         trust.push((
-            ironclaw_host_api::ExtensionId::new("telegram")?,
+            ironclaw_host_api::ids::ExtensionId::new("telegram")?,
             standalone_all_effects(),
         ));
     }
     let network_egress = Arc::new(
         RecordingNetworkHttpEgress::with_body(br#"{"ok":true}"#.to_vec())
-            .with_vendor_router(Arc::new(delivery_vendor_router)),
+            .with_vendor_router(delivery_vendor_router_with_flaky_get_file()),
     );
     profile.options = profile
         .options

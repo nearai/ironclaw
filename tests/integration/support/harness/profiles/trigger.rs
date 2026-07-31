@@ -1,6 +1,10 @@
 //! trigger domain capability profile.
 
-use ironclaw_host_api::{CapabilityId, EffectKind, MountPermissions, MountView};
+use ironclaw_host_api::{
+    capability::EffectKind,
+    ids::CapabilityId,
+    mount::{MountPermissions, MountView},
+};
 use ironclaw_host_runtime::{
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,

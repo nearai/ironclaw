@@ -20,8 +20,13 @@ use ironclaw_approvals::{
 };
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, EffectKind, ExecutionContext, ExtensionId, MountView,
-    PermissionMode, Principal, ResourceEstimate, RuntimeKind, Timestamp, TrustClass, UserId,
+    Timestamp,
+    capability::{CapabilityDescriptor, EffectKind, PermissionMode},
+    ids::{CapabilityId, ExtensionId, UserId},
+    mount::MountView,
+    resource::ResourceEstimate,
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
     BUILTIN_FIRST_PARTY_PROVIDER, PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
@@ -238,7 +243,7 @@ impl ironclaw_approvals::PersistentApprovalPolicyStorePort
     async fn revoke_if_source_approval_request(
         &self,
         key: &PersistentApprovalPolicyKey,
-        source_approval_request_id: ironclaw_host_api::ApprovalRequestId,
+        source_approval_request_id: ironclaw_host_api::ids::ApprovalRequestId,
     ) -> Result<Option<PersistentApprovalPolicy>, PersistentApprovalPolicyError> {
         self.inner
             .revoke_if_source_approval_request(key, source_approval_request_id)
@@ -281,7 +286,7 @@ impl ironclaw_approvals::CapabilityPermissionOverrideStorePort
 async fn local_host_shell_decision_with_authorizer(
     authorizer: &dyn TrustAwareCapabilityDispatchAuthorizer,
     scope_user: &UserId,
-) -> ironclaw_host_api::Decision {
+) -> ironclaw_host_api::decision::Decision {
     let (descriptor, context, trust_decision) = local_host_shell_authorization_inputs(scope_user);
     authorizer
         .authorize_dispatch_with_trust(
@@ -310,9 +315,9 @@ async fn enable_global_auto_approve(
     store: &AutoApproveSettingStore<InMemoryBackend>,
     user_id: &UserId,
 ) {
-    let scope = ironclaw_host_api::ResourceScope::local_default(
+    let scope = ironclaw_host_api::resource::ResourceScope::local_default(
         user_id.clone(),
-        ironclaw_host_api::InvocationId::new(),
+        ironclaw_host_api::ids::InvocationId::new(),
     )
     .expect("local resource scope");
     store
@@ -330,9 +335,9 @@ async fn seed_shell_tool_override(
     user_id: &UserId,
     state: ToolPermissionOverride,
 ) {
-    let scope = ironclaw_host_api::ResourceScope::local_default(
+    let scope = ironclaw_host_api::resource::ResourceScope::local_default(
         user_id.clone(),
-        ironclaw_host_api::InvocationId::new(),
+        ironclaw_host_api::ids::InvocationId::new(),
     )
     .expect("local resource scope");
     // Mirror the production lookup, which keys the override on
@@ -378,7 +383,7 @@ fn local_host_shell_authorization_inputs(
         &MountView::default(),
         &MountView::default(),
     );
-    let context = ironclaw_host_api::ExecutionContext::local_default(
+    let context = ironclaw_host_api::scope::ExecutionContext::local_default(
         scope_user.clone(),
         provider_id,
         RuntimeKind::FirstParty,
@@ -406,7 +411,7 @@ fn local_host_shell_authorization_inputs(
 async fn trace_commons_authorize_decision(
     capability_id: &str,
     effects: Vec<EffectKind>,
-) -> ironclaw_host_api::Decision {
+) -> ironclaw_host_api::decision::Decision {
     let capability_id = CapabilityId::new(capability_id).expect("capability id");
     let descriptor = CapabilityDescriptor {
         id: capability_id,
@@ -432,8 +437,8 @@ async fn trace_commons_authorize_decision(
         &MountView::default(),
         &MountView::default(),
     );
-    let context = ironclaw_host_api::ExecutionContext::local_default(
-        ironclaw_host_api::UserId::new("test-user").expect("user id"),
+    let context = ironclaw_host_api::scope::ExecutionContext::local_default(
+        ironclaw_host_api::ids::UserId::new("test-user").expect("user id"),
         provider_id,
         RuntimeKind::FirstParty,
         TrustClass::UserTrusted,
@@ -490,7 +495,7 @@ async fn standalone_trace_commons_profile_set_requires_approval_gate() {
     assert!(
         matches!(
             decision,
-            ironclaw_host_api::Decision::RequireApproval { .. }
+            ironclaw_host_api::decision::Decision::RequireApproval { .. }
         ),
         "profile_set (public external write, not exempt) must require an approval gate, got {decision:?}"
     );
@@ -505,7 +510,7 @@ async fn standalone_trace_commons_profile_set_requires_approval_gate() {
 /// regression through the memory provider's own grant entries.
 async fn native_memory_manifest_authorize_decision(
     capability_id: &str,
-) -> ironclaw_host_api::Decision {
+) -> ironclaw_host_api::decision::Decision {
     let package =
         ironclaw_host_runtime::native_memory_first_party_package().expect("native memory package");
     // The registry's descriptor projection is the production path from
@@ -527,8 +532,8 @@ async fn native_memory_manifest_authorize_decision(
         &MountView::default(),
         &MountView::default(),
     );
-    let context = ironclaw_host_api::ExecutionContext::local_default(
-        ironclaw_host_api::UserId::new("test-user").expect("user id"),
+    let context = ironclaw_host_api::scope::ExecutionContext::local_default(
+        ironclaw_host_api::ids::UserId::new("test-user").expect("user id"),
         provider_id,
         RuntimeKind::FirstParty,
         TrustClass::UserTrusted,
@@ -582,7 +587,10 @@ async fn native_memory_manifest_authorize_decision(
 async fn standalone_memory_profile_set_skips_approval_gate() {
     let decision = native_memory_manifest_authorize_decision(PROFILE_SET_CAPABILITY_ID).await;
     assert!(
-        matches!(decision, ironclaw_host_api::Decision::Allow { .. }),
+        matches!(
+            decision,
+            ironclaw_host_api::decision::Decision::Allow { .. }
+        ),
         "ironclaw.memory.profile_set is a private local write (no network/external_write) and is \
              exempt from the approval gate; got {decision:?}"
     );
@@ -605,7 +613,10 @@ async fn standalone_trace_commons_onboard_skips_approval_gate() {
     )
     .await;
     assert!(
-        matches!(decision, ironclaw_host_api::Decision::Allow { .. }),
+        matches!(
+            decision,
+            ironclaw_host_api::decision::Decision::Allow { .. }
+        ),
         "onboard is consented in-turn and exempt, so it should not require a REPL approval gate, got {decision:?}"
     );
 }
@@ -626,9 +637,9 @@ async fn standalone_authorizer_refreshes_approval_settings_on_next_invocation() 
     // Global auto-approve now defaults ON, so explicitly disable it first to
     // establish the gating baseline this test reads back across dispatches.
     {
-        let scope = ironclaw_host_api::ResourceScope::local_default(
+        let scope = ironclaw_host_api::resource::ResourceScope::local_default(
             user_id.clone(),
-            ironclaw_host_api::InvocationId::new(),
+            ironclaw_host_api::ids::InvocationId::new(),
         )
         .expect("local resource scope");
         auto_approve
@@ -643,13 +654,16 @@ async fn standalone_authorizer_refreshes_approval_settings_on_next_invocation() 
 
     let before = local_host_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await;
     assert!(
-        matches!(before, ironclaw_host_api::Decision::RequireApproval { .. }),
+        matches!(
+            before,
+            ironclaw_host_api::decision::Decision::RequireApproval { .. }
+        ),
         "standalone shell dispatch should gate when global auto-approve is off, got {before:?}"
     );
 
-    let scope = ironclaw_host_api::ResourceScope::local_default(
+    let scope = ironclaw_host_api::resource::ResourceScope::local_default(
         user_id.clone(),
-        ironclaw_host_api::InvocationId::new(),
+        ironclaw_host_api::ids::InvocationId::new(),
     )
     .expect("local resource scope");
     auto_approve
@@ -663,7 +677,7 @@ async fn standalone_authorizer_refreshes_approval_settings_on_next_invocation() 
 
     let after = local_host_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await;
     assert!(
-        matches!(after, ironclaw_host_api::Decision::Allow { .. }),
+        matches!(after, ironclaw_host_api::decision::Decision::Allow { .. }),
         "same authorizer should observe the store update on the next invocation, got {after:?}"
     );
 }
@@ -683,13 +697,13 @@ async fn standalone_authorizer_observes_global_auto_approve_revocation_on_next_i
 
     let before = local_host_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await;
     assert!(
-        matches!(before, ironclaw_host_api::Decision::Allow { .. }),
+        matches!(before, ironclaw_host_api::decision::Decision::Allow { .. }),
         "global auto-approve should initially allow the gated shell capability, got {before:?}"
     );
 
-    let scope = ironclaw_host_api::ResourceScope::local_default(
+    let scope = ironclaw_host_api::resource::ResourceScope::local_default(
         user_id.clone(),
-        ironclaw_host_api::InvocationId::new(),
+        ironclaw_host_api::ids::InvocationId::new(),
     )
     .expect("local resource scope");
     auto_approve
@@ -703,7 +717,10 @@ async fn standalone_authorizer_observes_global_auto_approve_revocation_on_next_i
 
     let after = local_host_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await;
     assert!(
-        matches!(after, ironclaw_host_api::Decision::RequireApproval { .. }),
+        matches!(
+            after,
+            ironclaw_host_api::decision::Decision::RequireApproval { .. }
+        ),
         "revoked global auto-approve must gate the next invocation, got {after:?}"
     );
 }
@@ -731,7 +748,10 @@ async fn standalone_authorizer_caches_global_auto_approve_within_one_invocation(
             )
             .await;
         assert!(
-            matches!(decision, ironclaw_host_api::Decision::Allow { .. }),
+            matches!(
+                decision,
+                ironclaw_host_api::decision::Decision::Allow { .. }
+            ),
             "global auto-approve should allow the gated shell capability, got {decision:?}"
         );
     }
@@ -753,7 +773,10 @@ async fn standalone_authorizer_caches_global_auto_approve_within_one_invocation(
         )
         .await;
     assert!(
-        matches!(decision, ironclaw_host_api::Decision::Allow { .. }),
+        matches!(
+            decision,
+            ironclaw_host_api::decision::Decision::Allow { .. }
+        ),
         "later invocation inside the short cache ttl should still allow from cached auto-approve, got {decision:?}"
     );
     assert_eq!(
@@ -773,7 +796,10 @@ async fn standalone_authorizer_caches_global_auto_approve_within_one_invocation(
         )
         .await;
     assert!(
-        matches!(decision, ironclaw_host_api::Decision::Allow { .. }),
+        matches!(
+            decision,
+            ironclaw_host_api::decision::Decision::Allow { .. }
+        ),
         "later invocation after the short cache ttl should still allow from store, got {decision:?}"
     );
     assert_eq!(
@@ -819,7 +845,10 @@ async fn standalone_authorizer_coalesces_concurrent_global_auto_approve_misses()
     for handle in handles {
         let decision = handle.await.expect("authorization task should finish");
         assert!(
-            matches!(decision, ironclaw_host_api::Decision::Allow { .. }),
+            matches!(
+                decision,
+                ironclaw_host_api::decision::Decision::Allow { .. }
+            ),
             "global auto-approve should allow the gated shell capability, got {decision:?}"
         );
     }
@@ -834,9 +863,9 @@ async fn standalone_authorizer_coalesces_concurrent_global_auto_approve_misses()
 #[tokio::test]
 async fn standalone_authorizer_coalesces_concurrent_scope_listing_settings_misses() {
     let user_id = UserId::new("test-user").expect("user id");
-    let scope = ironclaw_host_api::ResourceScope::local_default(
+    let scope = ironclaw_host_api::resource::ResourceScope::local_default(
         user_id,
-        ironclaw_host_api::InvocationId::new(),
+        ironclaw_host_api::ids::InvocationId::new(),
     )
     .expect("local resource scope");
     let capability_id = CapabilityId::new("builtin.shell").expect("capability id");
@@ -925,9 +954,9 @@ async fn standalone_authorizer_coalesces_concurrent_scope_listing_settings_misse
 #[tokio::test]
 async fn standalone_authorizer_releases_global_auto_approve_inflight_when_leader_is_cancelled() {
     let user_id = UserId::new("test-user").expect("user id");
-    let scope = ironclaw_host_api::ResourceScope::local_default(
+    let scope = ironclaw_host_api::resource::ResourceScope::local_default(
         user_id,
-        ironclaw_host_api::InvocationId::new(),
+        ironclaw_host_api::ids::InvocationId::new(),
     )
     .expect("local resource scope");
     let auto_approve = Arc::new(CountingAutoApproveSettingStore::enabled_with_delay(
@@ -972,9 +1001,9 @@ async fn standalone_authorizer_releases_global_auto_approve_inflight_when_leader
 async fn standalone_authorizer_fails_closed_when_override_lookup_errors() {
     let user_id = UserId::new("test-user").expect("user id");
     let auto_approve = Arc::new(in_memory_backed_auto_approve_setting_store());
-    let scope = ironclaw_host_api::ResourceScope::local_default(
+    let scope = ironclaw_host_api::resource::ResourceScope::local_default(
         user_id.clone(),
-        ironclaw_host_api::InvocationId::new(),
+        ironclaw_host_api::ids::InvocationId::new(),
     )
     .expect("local resource scope");
     auto_approve
@@ -998,7 +1027,7 @@ async fn standalone_authorizer_fails_closed_when_override_lookup_errors() {
     assert!(
         matches!(
             decision,
-            ironclaw_host_api::Decision::RequireApproval { .. }
+            ironclaw_host_api::decision::Decision::RequireApproval { .. }
         ),
         "override-store read errors must fail closed even when global auto-approve is enabled, got {decision:?}"
     );
@@ -1022,7 +1051,7 @@ async fn per_tool_disabled_overrides_global_auto_approve_through_store() {
 
     let decision = local_host_shell_decision_with_authorizer(authorizer.as_ref(), &user_id).await;
     assert!(
-        matches!(decision, ironclaw_host_api::Decision::Deny { .. }),
+        matches!(decision, ironclaw_host_api::decision::Decision::Deny { .. }),
         "a per-tool Disabled override must deny even with global auto-approve on, got {decision:?}"
     );
 }
@@ -1047,7 +1076,7 @@ async fn per_tool_ask_each_time_overrides_global_auto_approve_through_store() {
     assert!(
         matches!(
             decision,
-            ironclaw_host_api::Decision::RequireApproval { .. }
+            ironclaw_host_api::decision::Decision::RequireApproval { .. }
         ),
         "a per-tool AskEachTime override must gate even with global auto-approve on, got {decision:?}"
     );
@@ -1084,7 +1113,7 @@ async fn global_auto_approve_does_not_bypass_manifest_ineligible_tool_through_st
     assert!(
         matches!(
             decision,
-            ironclaw_host_api::Decision::RequireApproval { .. }
+            ironclaw_host_api::decision::Decision::RequireApproval { .. }
         ),
         "global auto-approve must not bypass a manifest-ineligible tool, got {decision:?}"
     );

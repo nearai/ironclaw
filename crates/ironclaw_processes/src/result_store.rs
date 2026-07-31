@@ -5,7 +5,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_events::sanitize_error_kind;
 use ironclaw_filesystem::{CasExpectation, ContentType, Entry, RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{ProcessId, ResourceScope, ScopedPath, VirtualPath};
+use ironclaw_host_api::{
+    ids::ProcessId,
+    path::{ScopedPath, VirtualPath},
+    resource::ResourceScope,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

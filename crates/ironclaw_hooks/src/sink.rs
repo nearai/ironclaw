@@ -420,7 +420,7 @@ mod tests {
 
         let mut recording = RecordingGateSink::new();
         let ctx = BeforeCapabilityHookContext::new_unresolved(
-            ironclaw_host_api::TenantId::new("t".to_string()).expect("valid tenant"),
+            ironclaw_host_api::ids::TenantId::new("t".to_string()).expect("valid tenant"),
             "cap.x".to_string(),
             [0u8; 32],
         );
@@ -446,7 +446,7 @@ mod tests {
 
         let mut recording = RecordingGateSink::new();
         let ctx = BeforeCapabilityHookContext::new_unresolved(
-            ironclaw_host_api::TenantId::new("t".to_string()).expect("valid tenant"),
+            ironclaw_host_api::ids::TenantId::new("t".to_string()).expect("valid tenant"),
             "cap.x".to_string(),
             [0u8; 32],
         );
@@ -472,7 +472,7 @@ mod tests {
 
         let mut recording = RecordingGateSink::new();
         let ctx = BeforeCapabilityHookContext::new_unresolved(
-            ironclaw_host_api::TenantId::new("t".to_string()).expect("valid tenant"),
+            ironclaw_host_api::ids::TenantId::new("t".to_string()).expect("valid tenant"),
             "cap.x".to_string(),
             [0u8; 32],
         );
@@ -500,7 +500,7 @@ mod tests {
 
         let mut recording = RecordingMutatorSink::new(HookTrustClass::Installed);
         let ctx = BeforePromptHookContext::new(
-            ironclaw_host_api::TenantId::new("t".to_string()).expect("valid tenant"),
+            ironclaw_host_api::ids::TenantId::new("t".to_string()).expect("valid tenant"),
             4096,
         );
         EnvelopeOnly
@@ -528,14 +528,14 @@ mod tests {
             }
         }
 
-        let tenant = ironclaw_host_api::TenantId::new("t".to_string()).expect("valid tenant");
-        let user = ironclaw_host_api::UserId::new("u".to_string()).expect("valid user");
-        let invocation_id = ironclaw_host_api::InvocationId::new();
-        let scope = ironclaw_host_api::ResourceScope::local_default(user, invocation_id)
+        let tenant = ironclaw_host_api::ids::TenantId::new("t".to_string()).expect("valid tenant");
+        let user = ironclaw_host_api::ids::UserId::new("u".to_string()).expect("valid user");
+        let invocation_id = ironclaw_host_api::ids::InvocationId::new();
+        let scope = ironclaw_host_api::resource::ResourceScope::local_default(user, invocation_id)
             .expect("valid scope");
         let event = ironclaw_events::RuntimeEvent::hook_failed(
             scope,
-            ironclaw_host_api::CapabilityId::new("hooks.failed").expect("valid capability"),
+            ironclaw_host_api::ids::CapabilityId::new("hooks.failed").expect("valid capability"),
             crate::identity::HookId::for_builtin("tests::event", crate::identity::HookVersion::ONE)
                 .to_hex(),
             "panic",

@@ -4,7 +4,9 @@ use std::{
 };
 
 use axum::{Router, http::Uri};
-use ironclaw_host_api::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern};
+use ironclaw_host_api::action::{
+    NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
+};
 use ironclaw_network::{
     NetworkHttpError, NetworkHttpResponse, NetworkHttpTransport, NetworkTransportRequest,
     PolicyNetworkHttpEgress,

@@ -1,6 +1,6 @@
 use std::net::{IpAddr, ToSocketAddrs};
 
-use ironclaw_host_api::{NetworkPolicy, NetworkTarget};
+use ironclaw_host_api::action::{NetworkPolicy, NetworkTarget};
 
 use crate::{error::NetworkHttpError, policy::is_private_or_loopback_ip, url_target::default_port};
 

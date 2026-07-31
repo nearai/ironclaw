@@ -1458,6 +1458,8 @@ registerPack("en", {
   "chat.generatedImageUnavailable": "Generated image unavailable in history payload",
   "chat.messageAttachmentAlt": "Message attachment",
   "chat.copyMessage": "Copy message",
+  "chat.downloadRunArtifact": "Download this run",
+  "chat.downloadThreadArtifact": "Download full thread",
   "chat.retryMessage": "Retry message",
   "chat.history.loadFailed": "Failed to load conversation history.",
   "chat.failure.connectionLost": "Connection to the server was lost. Please reconnect and try again.",

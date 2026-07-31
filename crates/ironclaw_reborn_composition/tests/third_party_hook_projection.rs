@@ -21,7 +21,7 @@ use ironclaw_filesystem::{
 };
 use ironclaw_hooks::identity::{ExtensionId as HookExtensionId, HookId, HookLocalId, HookVersion};
 use ironclaw_hooks::registry::HookPointSpec;
-use ironclaw_host_api::{TenantId, VirtualPath};
+use ironclaw_host_api::{ids::TenantId, path::VirtualPath};
 use ironclaw_reborn_composition::{
     HookProjectionRegistry, HooksActivationConfig, MAX_INSTALLED_EXTENSIONS_CONSIDERED,
     ThirdPartyDiscoveryInput, build_hook_dispatcher_builder_factory,
@@ -435,7 +435,7 @@ async fn matrix_before_capability_installed_deny_is_allowed_and_fires() {
         "gate-ext.run".to_string(),
         [0u8; 32],
         SanitizedArguments::unresolved(),
-        Some(ironclaw_host_api::ExtensionId::new("gate-ext").expect("ext")),
+        Some(ironclaw_host_api::ids::ExtensionId::new("gate-ext").expect("ext")),
     );
     let outcome = dispatcher.dispatch_before_capability(&ctx).await;
     assert!(
@@ -541,7 +541,7 @@ async fn matrix_owning_extension_is_derived_not_spoofable() {
         .expect("claimant hook bound");
     assert_eq!(
         binding.owning_extension.as_ref(),
-        Some(&ironclaw_host_api::ExtensionId::new("claimant").expect("ext")),
+        Some(&ironclaw_host_api::ids::ExtensionId::new("claimant").expect("ext")),
         "owning_extension must be the discovered extension id, never spoofable via the manifest"
     );
 }

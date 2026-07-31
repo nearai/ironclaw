@@ -1,7 +1,7 @@
 use std::{collections::HashSet, hash::Hash, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_host_api::RuntimeCredentialAuthRequirement;
+use ironclaw_host_api::decision::RuntimeCredentialAuthRequirement;
 use ironclaw_processes::{
     FailProcessRequest, JournaledProcessSnapshot, ProcessCheckpointRef, ProcessLeaseRequest,
     ProcessLeaseToken, ProcessStateTransitionRequest, ProcessSuspension, ProcessSuspensionKind,

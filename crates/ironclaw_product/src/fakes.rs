@@ -8,8 +8,8 @@ use crate::{ProductInboundEnvelope, ProductInboundPayload, ProductRejection, Use
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    AgentId, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind, TenantId,
-    ThreadId, UserId,
+    ids::{AgentId, TenantId, ThreadId, UserId},
+    product_surface::{ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind},
 };
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
@@ -690,5 +690,40 @@ impl InboundTurnService for FakeInboundTurnService {
 
         self.accept_fresh_user_message(envelope_for_turn)
             .map(crate::inbound_turn::InboundUserMessageDispatch::Accepted)
+    }
+}
+
+/// A project filesystem that holds nothing.
+///
+/// Delivery and channel-host tests that never reference a `/workspace/...`
+/// path still have to supply the reader the coordinator materializes through.
+/// One inert double lives here, beside the trait it implements, so those
+/// suites do not each carry an identical copy.
+pub struct NoProjectFilesystem;
+
+#[async_trait]
+impl crate::ProjectFilesystemReader for NoProjectFilesystem {
+    async fn list_dir(
+        &self,
+        _thread_scope: &ironclaw_threads::ThreadScope,
+        _path: &str,
+    ) -> Result<Vec<crate::ProjectFsEntry>, crate::ProjectFsError> {
+        Err(crate::ProjectFsError::NotFound)
+    }
+
+    async fn read_file(
+        &self,
+        _thread_scope: &ironclaw_threads::ThreadScope,
+        _path: &str,
+    ) -> Result<ironclaw_host_api::attachment::WorkspaceFile, crate::ProjectFsError> {
+        Err(crate::ProjectFsError::NotFound)
+    }
+
+    async fn stat(
+        &self,
+        _thread_scope: &ironclaw_threads::ThreadScope,
+        _path: &str,
+    ) -> Result<crate::ProjectFsStat, crate::ProjectFsError> {
+        Err(crate::ProjectFsError::NotFound)
     }
 }

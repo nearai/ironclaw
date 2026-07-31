@@ -149,7 +149,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.has_e2e_scope == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE: "1"
     steps:

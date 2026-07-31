@@ -7,7 +7,7 @@ use std::{
 use tokio::sync::Mutex as AsyncMutex;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef,
     SubmitTurnResponse, TurnActor, TurnScope,

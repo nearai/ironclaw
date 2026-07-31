@@ -17,7 +17,7 @@ provenance — they are NOT live pointers on this branch. The structural map:
    `crates/ironclaw_auth/src/engine/`
    (`AuthEngine`, `scopes_for_exchange`, `MissingScopeBehavior`). On the
    rollup it is the recipe-driven `AuthEngine` in **`crates/ironclaw_auth/src/engine/`**
-   (`exchange.rs` + `mod.rs`), executing `ironclaw_host_api::OAuth2CodeRecipe` data.
+   (`exchange.rs` + `mod.rs`), executing `ironclaw_host_api::recipe::OAuth2CodeRecipe` data.
    Scope extraction is `extract_token_response` and the exchange-scope policy enum is
    `MissingScopeBehavior::{Reject, FallbackToRequested}` (not `ExchangeScopePolicy`).
    "Recipe-only" still holds: a vendor difference is recipe data, never engine

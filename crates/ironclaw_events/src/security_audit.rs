@@ -54,7 +54,7 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use ironclaw_host_api::{CapabilityId, ResourceScope};
+use ironclaw_host_api::{ids::CapabilityId, resource::ResourceScope};
 
 /// Identifies *which* security boundary produced an audit event.
 ///
@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn event_can_be_enriched_with_scope_and_capability() {
-        use ironclaw_host_api::{InvocationId, UserId};
+        use ironclaw_host_api::ids::{InvocationId, UserId};
 
         let scope = ResourceScope::local_default(
             UserId::new("alice").expect("valid user id"),
@@ -386,7 +386,7 @@ mod tests {
         // just boundary/decision/code/capability. A scope-bearing event must
         // record without panicking through both the concrete type and the
         // `Arc<dyn>` boundary used in composition.
-        use ironclaw_host_api::{InvocationId, UserId};
+        use ironclaw_host_api::ids::{InvocationId, UserId};
 
         let scope = ResourceScope::local_default(
             UserId::new("alice").expect("valid user id"),

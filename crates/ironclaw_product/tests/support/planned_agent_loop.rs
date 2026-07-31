@@ -8,9 +8,16 @@ use chrono::Utc;
 use ironclaw_approvals::AutoApproveSettingInput;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
-    AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-    ExtensionId, GrantConstraints, InvocationId, NetworkPolicy, Principal, Resolution,
-    ResolutionBatch, ResourceScope, RuntimeKind, TenantId, ThreadId, TrustClass, UserId,
+    action::NetworkPolicy,
+    capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
+    ids::{
+        AgentId, CapabilityGrantId, CapabilityId, ExtensionId, InvocationId, TenantId, ThreadId,
+        UserId,
+    },
+    resolution::{Resolution, ResolutionBatch},
+    resource::ResourceScope,
+    runtime::{RuntimeKind, TrustClass},
+    scope::Principal,
 };
 use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind};
 use ironclaw_loop_host::{
@@ -373,6 +380,7 @@ impl ProductLiveAgentLoopHarness {
         ));
         let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
             attachment_read_port: None,
+            reply_attachment_intent_port: None,
             gate_record_store: turn_executor_gate_store,
             process_system,
             thread_service: Arc::new(thread_service.clone()),
@@ -1203,7 +1211,7 @@ fn dispatch_grants_for_user<const N: usize>(
                 issued_by: Principal::HostRuntime,
                 constraints: GrantConstraints {
                     allowed_effects: vec![EffectKind::DispatchCapability],
-                    mounts: ironclaw_host_api::MountView::default(),
+                    mounts: ironclaw_host_api::mount::MountView::default(),
                     network: NetworkPolicy::default(),
                     secrets: Vec::new(),
                     resource_ceiling: None,

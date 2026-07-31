@@ -10,10 +10,17 @@ use ironclaw_extensions::{
     ManifestSectionPath, ManifestSource, ManifestV2Error,
 };
 use ironclaw_host_api::{
-    CapabilitySurfaceKind, ExtensionId, HostPortCatalog, HostPortCatalogEntry, HostPortId,
-    NetworkScheme, NetworkTargetPattern, OriginGatePolicy, PermissionMode, RequestedTrustClass,
-    RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource, RuntimeCredentialTarget,
-    RuntimeKind, SecretHandle, TrustClass, VendorId,
+    action::{NetworkScheme, NetworkTargetPattern},
+    capability::{
+        OriginGatePolicy, PermissionMode, RuntimeCredentialAccountSetup,
+        RuntimeCredentialRequirementSource,
+    },
+    host_port::{HostPortCatalog, HostPortCatalogEntry, HostPortId},
+    http::RuntimeCredentialTarget,
+    ids::{ExtensionId, SecretHandle, VendorId},
+    runtime::{RuntimeKind, TrustClass},
+    surface::CapabilitySurfaceKind,
+    trust::RequestedTrustClass,
 };
 
 const TELEGRAM_TOKEN_PORT: &str = "host.secrets.telegram_bot_token";

@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use ironclaw_host_api::{CapabilityId, ResourceScope};
+use ironclaw_host_api::{ids::CapabilityId, resource::ResourceScope};
 pub(crate) use ironclaw_observability::json_value_bytes as json_bytes;
 use serde_json::Value;
 

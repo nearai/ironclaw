@@ -3,7 +3,25 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_extensions::*;
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    host_port::HostPortCatalog,
+    http::{
+        CapabilityHostHttpRequest, RuntimeCredentialInjection, RuntimeCredentialSource,
+        RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError,
+        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    },
+    ids::{
+        CapabilityId, ExtensionId, InvocationId, ProjectId, ResourceReservationId, SecretHandle,
+        TenantId, UserId,
+    },
+    path::VirtualPath,
+    resource::{
+        ReservationStatus, ResourceEstimate, ResourceReceipt, ResourceReservation, ResourceScope,
+        ResourceUsage,
+    },
+    runtime::RuntimeKind,
+};
 use ironclaw_mcp::*;
 use ironclaw_resources::*;
 use serde_json::json;

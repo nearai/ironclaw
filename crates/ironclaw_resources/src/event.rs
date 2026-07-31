@@ -208,7 +208,7 @@ impl BudgetEventSink for CompositeBudgetEventSink {
 mod tests {
     use super::*;
     use crate::{ResourceDimension, ResourceValue};
-    use ironclaw_host_api::TenantId;
+    use ironclaw_host_api::ids::TenantId;
     use rust_decimal::Decimal;
 
     fn sample_warning() -> BudgetWarning {

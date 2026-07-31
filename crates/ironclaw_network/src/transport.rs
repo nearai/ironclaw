@@ -6,7 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::NetworkMethod;
+use ironclaw_host_api::action::NetworkMethod;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
