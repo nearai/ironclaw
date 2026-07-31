@@ -5,30 +5,29 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
 
-use crate::chunking::{content_bytes_sha256, content_sha256};
-use crate::embedding::{EmbeddingProvider, embed_text};
-use crate::events::{
-    MemorySignificantEvent, MemorySignificantEventSink, MemorySignificantEventSource,
-    record_memory_significant_event,
-};
+use crate::events::record_memory_significant_event;
 use crate::indexer::MemoryDocumentIndexer;
 use crate::metadata::{MemoryBackendWriteOptions, MemoryWriteOptions};
-use crate::path::{
-    MemoryDocumentPath, MemoryDocumentScope, memory_backend_unsupported, memory_error,
-    valid_memory_path,
-};
+use crate::path::{memory_backend_unsupported, memory_error, valid_memory_path};
 use crate::repo::{
     MemoryAppendOutcome, MemoryDocumentRepository, MemoryWriteOutcome, scoped_memory_changed_by_key,
 };
 use crate::safety::{
-    DefaultPromptWriteSafetyPolicy, PromptProtectedPathRegistry, PromptWriteOperation,
-    PromptWriteSafetyCheck, PromptWriteSafetyEventSink, PromptWriteSafetyPolicy, PromptWriteSource,
-    enforce_prompt_write_safety, prompt_write_policy_requires_previous_content_hash,
-    prompt_write_protected_classification,
+    DefaultPromptWriteSafetyPolicy, PromptWriteSafetyCheck, enforce_prompt_write_safety,
+    prompt_write_policy_requires_previous_content_hash, prompt_write_protected_classification,
 };
 use crate::schema::validate_content_against_schema;
 use crate::search::{MemorySearchRequest, MemorySearchResult};
 use crate::write_metadata::resolve_write_metadata;
+use ironclaw_memory::{MemoryContext, MemoryDocumentPath, MemoryDocumentScope};
+use ironclaw_memory::{
+    MemorySignificantEvent, MemorySignificantEventSink, MemorySignificantEventSource,
+};
+use ironclaw_memory::{
+    PromptProtectedPathRegistry, PromptWriteOperation, PromptWriteSafetyEventSink,
+    PromptWriteSafetyPolicy, PromptWriteSource,
+};
+use ironclaw_memory::{content_bytes_sha256, content_sha256};
 
 /// Declared behavior supported by a memory backend.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -105,7 +104,6 @@ impl MemoryBackendCapabilities {
 // lives on the native-owned `MemoryBackendWriteOptions`, which only the filesystem
 // adapter sets before deferring backend re-enforcement. (The prompt-write
 // allowance carried on `MemoryContext` is a separate, pre-existing mechanism.)
-pub use ironclaw_memory::MemoryContext;
 
 /// Pluggable memory backend contract.
 ///
@@ -261,7 +259,6 @@ pub trait MemoryBackend: Send + Sync {
 pub struct RepositoryMemoryBackend<R> {
     repository: Arc<R>,
     indexer: Option<Arc<dyn MemoryDocumentIndexer>>,
-    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     capabilities: MemoryBackendCapabilities,
     prompt_safety_policy: Option<Arc<dyn PromptWriteSafetyPolicy>>,
     prompt_safety_event_sink: Option<Arc<dyn PromptWriteSafetyEventSink>>,
@@ -278,7 +275,6 @@ where
         Self {
             repository,
             indexer: None,
-            embedding_provider: None,
             capabilities: MemoryBackendCapabilities::default()
                 .set_file_documents(true)
                 .set_metadata(true)
@@ -298,14 +294,6 @@ where
         I: MemoryDocumentIndexer + 'static,
     {
         self.indexer = Some(indexer);
-        self
-    }
-
-    pub fn with_embedding_provider<P>(mut self, provider: Arc<P>) -> Self
-    where
-        P: EmbeddingProvider + 'static,
-    {
-        self.embedding_provider = Some(provider);
         self
     }
 
@@ -905,10 +893,7 @@ where
                 "memory backend does not support vector search",
             ));
         }
-        if !request.full_text()
-            && (!request.vector()
-                || (request.query_embedding().is_none() && self.embedding_provider.is_none()))
-        {
+        if !request.full_text() && (!request.vector() || request.query_embedding().is_none()) {
             return Err(memory_backend_unsupported(
                 context.scope(),
                 FilesystemOperation::ReadFile,
@@ -916,48 +901,24 @@ where
             ));
         }
 
-        let mut request = request;
+        // No embedding provider port exists: this backend never generated
+        // query vectors (the port had zero implementations and was deleted in
+        // WS0 — restoring generated vector search is PROPOSAL §12.10). A
+        // vector search must therefore arrive with a caller-supplied
+        // embedding; both fail-closed messages are preserved verbatim.
         if request.vector()
             && self.capabilities.vector_search
             && request.query_embedding().is_none()
         {
-            if !self.capabilities.embeddings {
-                return Err(memory_backend_unsupported(
-                    context.scope(),
-                    FilesystemOperation::ReadFile,
-                    "memory backend does not support embedding generation",
-                ));
-            }
-            let Some(provider) = &self.embedding_provider else {
-                return Err(memory_backend_unsupported(
-                    context.scope(),
-                    FilesystemOperation::ReadFile,
-                    "memory backend cannot generate query embeddings",
-                ));
-            };
-            let embedding = embed_text(provider.as_ref(), context.scope(), request.query()).await?;
-            request = request.with_query_embedding(embedding);
-        }
-
-        // Fail-fast on caller-supplied embeddings whose dimension disagrees with the
-        // configured provider, instead of silently producing no/wrong results downstream
-        // (libsql cosine_similarity skips mismatched chunks; postgres pgvector errors
-        // opaquely).
-        if request.vector()
-            && let (Some(provider), Some(embedding)) =
-                (&self.embedding_provider, request.query_embedding())
-        {
-            let expected = provider.dimension();
-            let actual = embedding.len();
-            if expected != actual {
-                return Err(memory_backend_unsupported(
-                    context.scope(),
-                    FilesystemOperation::ReadFile,
-                    format!(
-                        "query embedding dimension {actual} does not match configured provider dimension {expected}"
-                    ),
-                ));
-            }
+            return Err(memory_backend_unsupported(
+                context.scope(),
+                FilesystemOperation::ReadFile,
+                if self.capabilities.embeddings {
+                    "memory backend cannot generate query embeddings"
+                } else {
+                    "memory backend does not support embedding generation"
+                },
+            ));
         }
 
         let results = self
@@ -983,47 +944,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::embedding::EmbeddingError;
     use crate::repo::InMemoryMemoryDocumentRepository;
-    use crate::safety::PromptSafetyAllowanceId;
-
-    struct FailingEmbeddingProvider;
-
-    #[async_trait]
-    impl EmbeddingProvider for FailingEmbeddingProvider {
-        fn dimension(&self) -> usize {
-            3
-        }
-
-        fn model_name(&self) -> &str {
-            "failing"
-        }
-
-        async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbeddingError> {
-            Err(EmbeddingError::ProviderUnavailable {
-                reason:
-                    "provider exploded at /tmp/HOST_PATH_SENTINEL with token RAW_TOKEN_SENTINEL"
-                        .to_string(),
-            })
-        }
-    }
-
-    struct UnitEmbeddingProvider;
-
-    #[async_trait]
-    impl EmbeddingProvider for UnitEmbeddingProvider {
-        fn dimension(&self) -> usize {
-            3
-        }
-
-        fn model_name(&self) -> &str {
-            "unit"
-        }
-
-        async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbeddingError> {
-            Ok(vec![1.0, 0.0, 0.0])
-        }
-    }
+    use ironclaw_memory::PromptSafetyAllowanceId;
 
     #[test]
     fn default_backend_options_do_not_claim_prompt_safety_enforced() {
@@ -1069,7 +991,6 @@ mod tests {
         let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
         RepositoryMemoryBackend::new(repo)
             .without_prompt_write_safety_policy()
-            .with_embedding_provider(Arc::new(UnitEmbeddingProvider))
             .with_capabilities(capabilities)
     }
 
@@ -1184,32 +1105,6 @@ mod tests {
         let request = MemorySearchRequest::new("query").unwrap();
         let err = backend.search(&alpha_context(), request).await.unwrap_err();
         assert!(err.to_string().contains("embedding generation"));
-    }
-
-    #[tokio::test]
-    async fn embedding_provider_error_is_sanitized_at_backend_boundary() {
-        let repo = Arc::new(InMemoryMemoryDocumentRepository::new());
-        let backend = RepositoryMemoryBackend::new(repo)
-            .without_prompt_write_safety_policy()
-            .with_embedding_provider(Arc::new(FailingEmbeddingProvider))
-            .with_capabilities(
-                MemoryBackendCapabilities::default()
-                    .set_full_text_search(true)
-                    .set_vector_search(true)
-                    .set_embeddings(true),
-            );
-
-        let request = MemorySearchRequest::new("query").unwrap();
-        let err = backend.search(&alpha_context(), request).await.unwrap_err();
-        let displayed = err.to_string();
-
-        assert!(displayed.contains("embedding provider unavailable"));
-        assert!(
-            !displayed.contains("HOST_PATH_SENTINEL")
-                && !displayed.contains("RAW_TOKEN_SENTINEL")
-                && !displayed.contains("/tmp/"),
-            "public memory error leaked backend/provider details: {displayed}"
-        );
     }
 
     #[tokio::test]

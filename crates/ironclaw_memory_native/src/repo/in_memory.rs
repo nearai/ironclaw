@@ -6,9 +6,10 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
 
-use crate::chunking::content_bytes_sha256;
 use crate::metadata::MemoryWriteOptions;
-use crate::path::{MemoryDocumentPath, MemoryDocumentScope, memory_error, valid_memory_path};
+use crate::path::{memory_error, valid_memory_path};
+use ironclaw_memory::content_bytes_sha256;
+use ironclaw_memory::{MemoryDocumentPath, MemoryDocumentScope};
 
 use super::{
     MemoryAppendOutcome, MemoryDocumentRepository, MemoryWriteOutcome,

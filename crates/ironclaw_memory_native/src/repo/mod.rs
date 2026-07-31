@@ -7,11 +7,9 @@ use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, FilesystemOperati
 use ironclaw_host_api::path::VirtualPath;
 
 use crate::metadata::MemoryWriteOptions;
-use crate::path::{
-    MemoryDocumentPath, MemoryDocumentScope, memory_backend_unsupported, memory_error,
-    memory_not_found, valid_memory_path,
-};
+use crate::path::{memory_backend_unsupported, memory_error, memory_not_found, valid_memory_path};
 use crate::search::{MemorySearchRequest, MemorySearchResult};
+use ironclaw_memory::{MemoryDocumentPath, MemoryDocumentScope};
 
 mod filesystem;
 mod in_memory;
