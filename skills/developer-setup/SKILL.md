@@ -1,7 +1,7 @@
 ---
 name: developer-setup
 version: 0.2.0
-description: One-time onboarding for the developer workflow — installs github-workflow missions, creates the commitments workspace, registers per-repo projects, writes calibration memories. After successful setup this skill is excluded from selection until the marker file is deleted.
+description: One-time onboarding for the developer workflow — installs github-workflow missions, creates the commitments workspace, registers per-repo projects, writes calibration memories. Excludes itself until its marker file is deleted.
 activation:
   setup_marker: projects/commitments/.developer-setup-complete
   keywords:

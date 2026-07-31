@@ -77,8 +77,16 @@ pub enum DistillError {
     /// The model returned an empty response.
     #[error("model produced an empty response")]
     EmptyResponse,
+    /// The model produced a parseable skill whose routing metadata would poison the
+    /// catalog: generic keywords, generic tags, or a description past the listing cap.
+    ///
+    /// Refused rather than written. Under model-decided selection the DESCRIPTION is the
+    /// model's only signal in the listing, so a learned skill that ships a generic or
+    /// over-long one degrades routing for every later request -- `coding` declares `file`
+    /// and `change` as keywords and fires on ~220 of 328 real prompts.
+    #[error("model produced a skill with unusable routing metadata: {0}")]
+    UnusableRoutingMetadata(String),
 }
-
 /// Distill a skill from a completed run's transcript.
 ///
 /// Calls the inference port with the extraction prompt + transcript, then
@@ -111,6 +119,13 @@ pub fn parse_distillation(raw: &str) -> Result<DistillOutcome, DistillError> {
         )));
     }
     let parsed = parse_skill_md(cleaned)?;
+    // Epic #6941 criterion 7: the descriptor lint runs at learned-skill WRITE time, and a
+    // skill that fails it is not written. Both authoring paths funnel through
+    // `parse_skill_md`, so this is the single enforcement point.
+    let problems = crate::validation::lint_skill_routing_metadata(&parsed.manifest);
+    if !problems.is_empty() {
+        return Err(DistillError::UnusableRoutingMetadata(problems.join("; ")));
+    }
     Ok(DistillOutcome::Skill(DistilledSkill {
         name: parsed.manifest.name,
         skill_md: cleaned.to_string(),
@@ -169,6 +184,13 @@ pub fn parse_refinement(raw: &str) -> Result<RefineOutcome, DistillError> {
         return Ok(RefineOutcome::KeepExisting);
     }
     let parsed = parse_skill_md(cleaned)?;
+    // Epic #6941 criterion 7: the descriptor lint runs at learned-skill WRITE time, and a
+    // skill that fails it is not written. Both authoring paths funnel through
+    // `parse_skill_md`, so this is the single enforcement point.
+    let problems = crate::validation::lint_skill_routing_metadata(&parsed.manifest);
+    if !problems.is_empty() {
+        return Err(DistillError::UnusableRoutingMetadata(problems.join("; ")));
+    }
     Ok(RefineOutcome::Refined(DistilledSkill {
         name: parsed.manifest.name,
         skill_md: cleaned.to_string(),

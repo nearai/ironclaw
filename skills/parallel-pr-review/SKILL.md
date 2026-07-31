@@ -1,7 +1,7 @@
 ---
 name: parallel-pr-review
 version: 0.1.0
-description: Use when asked to "review the open PRs", review a batch or stack of pull requests, or run a recurring PR-review pass on a repo — especially with many PRs, stacked branches, conflicts, or security-sensitive changes. Covers grouping, fan-out to review subagents, verdict synthesis, and posting.
+description: Review a batch or stack of pull requests, or run a recurring PR-review pass on a repo. Best with many PRs, stacked branches, conflicts, or security-sensitive changes. Covers grouping, fan-out to review subagents, verdict synthesis, and posting.
 activation:
   keywords:
     - review the open PRs
