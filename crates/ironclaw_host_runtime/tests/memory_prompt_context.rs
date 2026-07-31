@@ -16,6 +16,10 @@ use ironclaw_loop_contracts::{
     ContextProfileId, MemoryPromptContextRequest, MemoryPromptContextService,
     memory_snippet_display_ref,
 };
+use ironclaw_loop_contracts::{
+    ContextProfileId, MemoryPromptContextRequest, MemoryPromptContextService,
+    memory_snippet_display_ref,
+};
 use ironclaw_memory::{
     MemoryInvocation, MemoryService, MemoryServiceContextRequest, MemoryServiceContextSnippet,
     MemoryServiceError,
