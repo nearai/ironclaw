@@ -59,10 +59,7 @@ use ironclaw_runner::subagent::{
 };
 use ironclaw_runner::turn_scheduler::{SchedulerTurnRunWakeNotifier, TurnRunSchedulerHandle};
 use ironclaw_runner::{
-    loop_exit_applier::{
-        BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
-        FinalCheckpointEvidenceRequest, LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort,
-    },
+    loop_exit_applier::ThreadCheckpointLoopExitEvidencePort,
     milestone_events::{DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink},
     runtime::{
         DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, ProcessRuntimeSystem,
@@ -72,6 +69,10 @@ use ironclaw_runner::{
 use ironclaw_threads::{
     FilesystemSessionThreadService, SessionThreadService, ThreadHistoryRequest,
     ThreadMessageRecord, ThreadScope,
+};
+use ironclaw_turns::loop_exit::{
+    BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
+    FinalCheckpointEvidenceRequest, LoopExitEvidencePort,
 };
 use ironclaw_turns::{
     AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort, CancelRunRequest,

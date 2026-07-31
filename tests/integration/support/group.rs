@@ -83,9 +83,7 @@ use ironclaw_resources::{
     ResourceAccount, ResourceGovernor,
 };
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
-use ironclaw_runner::loop_exit_applier::{
-    LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort,
-};
+use ironclaw_runner::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
 use ironclaw_runner::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
 use ironclaw_runner::runtime::{
     DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, ProcessRuntimeSystem,
@@ -99,6 +97,7 @@ use ironclaw_runner::subagent::{
 };
 use ironclaw_runner::turn_scheduler::TurnRunSchedulerHandle;
 use ironclaw_threads::SessionThreadService;
+use ironclaw_turns::loop_exit::LoopExitEvidencePort;
 use ironclaw_turns::{
     AgentTurnProcessRuntime, AgentTurnRuntimePort, InMemoryTurnEventSink, LoopCheckpointStore,
     ProcessLoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope,
