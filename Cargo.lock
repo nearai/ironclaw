@@ -3549,7 +3549,6 @@ dependencies = [
  "toml 1.1.2+spec-1.1.0",
  "tracing",
  "url",
- "urlencoding",
  "uuid",
 ]
 
@@ -3679,8 +3678,6 @@ dependencies = [
  "ironclaw_extensions",
  "ironclaw_filesystem",
  "ironclaw_host_api",
- "ironclaw_memory",
- "ironclaw_memory_native",
  "ironclaw_reborn_event_store",
  "ironclaw_turns",
  "serde",
@@ -4172,7 +4169,6 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_memory",
  "ironclaw_memory_native",
- "ironclaw_prompt_envelope",
  "ironclaw_safety",
  "jsonschema",
  "serde",
@@ -4402,7 +4398,6 @@ dependencies = [
  "ironclaw_common",
  "ironclaw_conversations",
  "ironclaw_event_projections",
- "ironclaw_event_streams",
  "ironclaw_events",
  "ironclaw_extension_host",
  "ironclaw_extensions",
@@ -4822,23 +4817,16 @@ name = "ironclaw_skills"
 version = "0.3.0"
 dependencies = [
  "async-trait",
- "chrono",
- "futures",
- "hex",
  "ironclaw_filesystem",
  "ironclaw_host_api",
- "libc",
  "regex",
- "reqwest 0.12.28",
  "serde",
  "serde_json",
  "serde_norway",
- "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "urlencoding",
 ]
 
 [[package]]
