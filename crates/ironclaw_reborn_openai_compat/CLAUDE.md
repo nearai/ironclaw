@@ -33,9 +33,10 @@ The `refs` module owns the OpenAI-compatible identity contract:
 - Mappings start as pending and are later bound to internal product-action /
   turn-run / projection refs by ProductSurface wiring slices.
 - The side-effect-free `OpenAiCompatRefStore` port and ref vocabulary are the
-  default surface. The durable `OpenAiCompatRefStore` adapter lives
-  behind the `storage`/`libsql`/`postgres` features, so contract-only consumers
-  pull no `ironclaw_filesystem` dependency.
+  default surface. The durable `OpenAiCompatRefStore` adapter compiles
+  unconditionally — this crate declares no cargo features at all, and
+  `ironclaw_filesystem` is a plain `[dependencies]` entry that every consumer
+  pulls.
 
 ## Chat Completions Workflow
 

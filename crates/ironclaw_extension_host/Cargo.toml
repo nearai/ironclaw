@@ -16,7 +16,7 @@ layer = "products"
 [features]
 # Lightweight in-crate test fakes (fixtures, scripted adapters) reused by
 # downstream integration tests. Zero-byte in production.
-test-support = ["dep:ironclaw_first_party_extensions"]
+test-support = ["dep:ironclaw_first_party_extensions", "ironclaw_auth/test-support"]
 # Dormant marker for the two moved test modules that still require composition
 # runtime-substrate fixtures. Keep disabled until those tests are rewritten over
 # extension-host-local fakes.
@@ -81,6 +81,7 @@ serde_json = "1"
 [dev-dependencies]
 # Property testing for the shared ingress verifier (#6524 workstream 9).
 proptest = "1"
+ironclaw_auth = { path = "../ironclaw_auth", features = ["test-support"] }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }
 ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }

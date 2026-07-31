@@ -42,15 +42,12 @@ Reborn should not grow:
 
 ### Relationship to the legacy v1 engine
 
-`crates/ironclaw_engine` ("engine v2") is the **v1 monolith's** agent loop — a
-complete parallel machinery with its own capability registry, lease manager,
-and policy engine, consumed only by the root `ironclaw` crate through
-`src/bridge/`. It is **not part of Reborn**: the dependency-boundary tests
-forbid Reborn crates from importing it, and nothing else in this document
-describes it. Do not build new Reborn behavior on it; it retires with the
-monolith. `ironclaw_tui` and `ironclaw_gateway` are in the same v1-only
-category despite living in `crates/`. The v1 loopback
-OAuth transport is folded into `ironclaw_auth::oauth` until v1 retires.
+There is no longer one. The v1 monolith (root `src/`, package `ironclaw_legacy`)
+and its crates — `ironclaw_engine`, `ironclaw_tui`, `ironclaw_gateway`,
+`ironclaw_oauth` — have been deleted from the tree, so `crates/` is entirely
+Reborn and this document describes all of it. Older guidance and comments still
+name those crates; treat any such reference as drift. The v1 loopback OAuth
+transport landed in `ironclaw_auth::oauth`, which is where OAuth lives now.
 
 ## Mental Model
 
@@ -295,7 +292,7 @@ flowchart TD
     CLI["ironclaw_reborn_cli\nUX shell"]
     WebUI["ironclaw_webui /\nweb ingress"]
     Runtime["ironclaw_reborn_composition::RebornRuntime\nproduct-facing handle"]
-    Factory["build_reborn_runtime /\nbuild_reborn_services"]
+    Factory["build_reborn_runtime\ncomposition assembly entry point"]
     Coordinator["ironclaw_turns::TurnCoordinator\nadapter-safe turn API"]
     Processes["ProcessJournalStore\nneutral lifecycle authority"]
     TurnView["AgentTurnRuntimePort\nagent-turn projection"]
@@ -907,7 +904,9 @@ their data models:
 `ironclaw_reborn_composition::build_reborn_runtime` is the intended assembled
 entry point for CLI, WebUI, and harness callers. It:
 
-- builds substrate services with `build_reborn_services`;
+- builds substrate services through composition's internal
+  `build_runtime_substrate` factory (`src/factory.rs`, `pub(crate)` — callers
+  outside composition go through `build_reborn_runtime`);
 - wires thread, turn, checkpoint, event, approval, auth, skill, and projection
   services;
 - builds the default planned runtime through `ironclaw_runner`;
@@ -1006,7 +1005,7 @@ Partial or evolving:
 - `crates/ironclaw_turns/src/lib.rs`
 - `crates/ironclaw_turns/src/runner.rs`
 - `crates/ironclaw_turns/src/run_profile/driver.rs`
-- `crates/ironclaw_turns/src/run_profile/host.rs`
+- `crates/ironclaw_turns/src/run_profile/host/`
 - `crates/ironclaw_agent_loop/src/executor.rs`
 - `crates/ironclaw_agent_loop/src/family.rs`
 - `crates/ironclaw_agent_loop/src/state.rs`

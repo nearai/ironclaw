@@ -14,17 +14,16 @@ use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
 use ironclaw_host_api::path::VirtualPath;
 use ironclaw_safety::{Sanitizer, Severity};
 
-use crate::chunking::content_sha256;
-use crate::events::MemoryAuditContext;
-use crate::path::{MemoryDocumentPath, MemoryDocumentScope, memory_error, valid_memory_path};
-
-pub use ironclaw_memory::{
-    DEFAULT_PROMPT_PROTECTED_PATHS, PromptProtectedPathClass, PromptProtectedPathRegistry,
-    PromptSafetyAllowanceId, PromptSafetyPolicyVersion, PromptSafetyReason, PromptSafetyReasonCode,
-    PromptSafetySeverity, PromptSafetySummary, PromptWriteOperation, PromptWriteSafetyDecision,
-    PromptWriteSafetyError, PromptWriteSafetyEvent, PromptWriteSafetyEventKind,
-    PromptWriteSafetyEventSink, PromptWriteSafetyPolicy, PromptWriteSafetyRequest,
-    PromptWriteSource,
+use crate::path::{memory_error, valid_memory_path};
+use ironclaw_memory::MemoryAuditContext;
+use ironclaw_memory::content_sha256;
+use ironclaw_memory::{MemoryDocumentPath, MemoryDocumentScope};
+use ironclaw_memory::{
+    PromptProtectedPathClass, PromptProtectedPathRegistry, PromptSafetyAllowanceId,
+    PromptSafetyPolicyVersion, PromptSafetyReason, PromptSafetyReasonCode, PromptSafetySeverity,
+    PromptSafetySummary, PromptWriteOperation, PromptWriteSafetyDecision, PromptWriteSafetyError,
+    PromptWriteSafetyEvent, PromptWriteSafetyEventKind, PromptWriteSafetyEventSink,
+    PromptWriteSafetyPolicy, PromptWriteSafetyRequest, PromptWriteSource,
 };
 
 /// Map a sanitizer severity to the contract's sanitized severity bucket.
@@ -451,6 +450,7 @@ pub(crate) fn take_prompt_safety_allowance(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_memory::DEFAULT_PROMPT_PROTECTED_PATHS;
     use std::collections::HashSet;
 
     #[test]

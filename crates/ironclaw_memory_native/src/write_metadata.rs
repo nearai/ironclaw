@@ -2,9 +2,10 @@
 
 use ironclaw_filesystem::FilesystemError;
 
-use crate::metadata::{DocumentMetadata, MemoryBackendWriteOptions, resolve_document_metadata};
-use crate::path::MemoryDocumentPath;
+use crate::metadata::{MemoryBackendWriteOptions, resolve_document_metadata};
 use crate::repo::MemoryDocumentRepository;
+use ironclaw_memory::DocumentMetadata;
+use ironclaw_memory::MemoryDocumentPath;
 
 pub(crate) async fn resolve_write_metadata<R>(
     repository: &R,

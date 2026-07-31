@@ -38,6 +38,7 @@ unicode-normalization = "0.1"
 url = "2"
 
 [dev-dependencies]
+ironclaw_auth = { path = "../ironclaw_auth", features = ["test-support"] }
 # Dev-only: coding-tool tests re-run the loop-boundary safe-summary validator
 # (`LoopSafeSummary`) to pin that dispatch failure reasons survive it.
 ironclaw_turns = { path = "../ironclaw_turns" }

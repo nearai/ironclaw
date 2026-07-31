@@ -4,10 +4,9 @@ use std::collections::HashMap;
 
 use ironclaw_filesystem::FilesystemError;
 
-use crate::path::MemoryDocumentPath;
 use crate::repo::MemoryDocumentRepository;
-
-pub use ironclaw_memory::{CONFIG_FILE_NAME, DocumentMetadata, HygieneMetadata};
+use ironclaw_memory::MemoryDocumentPath;
+use ironclaw_memory::{CONFIG_FILE_NAME, DocumentMetadata};
 
 /// Options resolved by the memory backend before persisting a document write.
 #[derive(Debug, Clone, Default)]
