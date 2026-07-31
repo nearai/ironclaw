@@ -385,12 +385,7 @@ fn list_projects_response(
     active_projects: usize,
     archived_projects: usize,
 ) -> RebornListProjectsResponse {
-    RebornListProjectsResponse::new(
-        projects,
-        total_projects,
-        active_projects,
-        archived_projects,
-    )
+    RebornListProjectsResponse::new(projects, total_projects, active_projects, archived_projects)
 }
 
 fn project_info(record: ProjectRecord, role: ProjectRole) -> RebornProjectInfo {
