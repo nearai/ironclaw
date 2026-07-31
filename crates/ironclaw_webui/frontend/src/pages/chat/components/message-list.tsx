@@ -3,6 +3,7 @@ import { Link } from "react-router";
 import { useT } from "../../../lib/i18n";
 import { ActivityRun } from "./activity-run";
 import { MessageBubble } from "./message-bubble";
+import { TypingIndicator } from "./typing-indicator";
 import { Icon } from "../../../design-system/icons";
 import { groupMessages } from "../lib/message-groups";
 
@@ -395,14 +396,22 @@ export function MessageList({
                   activeRunId={activeRunId}
                 />
               )
-            : (<MessageBubble
-                key={item.id}
-                message={item.message}
-                onRetry={onRetryMessage}
-                threadId={threadId}
-                activeRunId={activeRunId}
-                commands={commands}
-              />)
+            : item.type === "run-completion"
+              ? (
+                  <TypingIndicator
+                    key={item.id}
+                    state="done"
+                    durationSeconds={item.durationSeconds}
+                  />
+                )
+              : (<MessageBubble
+                  key={item.id}
+                  message={item.message}
+                  onRetry={onRetryMessage}
+                  threadId={threadId}
+                  activeRunId={activeRunId}
+                  commands={commands}
+                />)
         )}
         {children}
       </div>

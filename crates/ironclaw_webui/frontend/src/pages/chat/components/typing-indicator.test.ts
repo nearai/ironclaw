@@ -36,3 +36,28 @@ test("TypingIndicator keeps the brief action label beside the working indicator"
     },
   );
 });
+
+test("TypingIndicator keeps the static mark with elapsed time after completion", () => {
+  const components = {
+    NearProcessIndicator() {},
+  };
+  const context = {
+    ...components,
+    globalThis: {},
+  };
+
+  vm.runInNewContext(typingIndicatorSourceForTest(), context);
+  const tree = context.globalThis.__testExports.TypingIndicator({
+    state: "done",
+    durationSeconds: 12,
+  });
+  const indicator = findComponent(tree, components.NearProcessIndicator);
+
+  assert.deepEqual(
+    componentProps(indicator, components.NearProcessIndicator),
+    {
+      state: "done",
+      label: "Worked for 12s",
+    },
+  );
+});

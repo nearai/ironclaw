@@ -56,7 +56,8 @@ Thinking narration (`ProductProjectionItem::Thinking`); grouped tool run with ex
 (`WebChatV2Event::CapabilityActivity` + `activity-run.tsx`); the **safety-approval gate**
 (`WebChatV2Event::Gate` + `approval-card.tsx` — a surface Cowork has no equivalent for); the
 **connector / auth card** (`WebChatV2Event::AuthRequired`); text streaming / final
-(`ModelTextDelta` → `Text` / `final_reply`); run status; skill activation.
+(`ModelTextDelta` → `Text` / `final_reply`); run status; skill activation; and a durable
+completed-run duration derived from the run-scoped user/final transcript timestamps.
 
 ## Needs a new payload (follow-up Rust work + tests)
 
@@ -65,7 +66,8 @@ Thinking narration (`ProductProjectionItem::Thinking`); grouped tool run with ex
    `CapabilityCompleted` milestone.
 2. **Live Plan / todo tracker** — no plan event exists (`plan-card.tsx` is fed by a client-side
    mock); add a `PlanUpdate { steps: [{id,title,status}] }` projection item + producing milestone.
-3. **Elapsed timer** — only point timestamps stream; emit a run/step start timestamp.
+3. **Live elapsed timer** — the completed duration can use durable transcript timestamps, but
+   a precise ticking live timer still needs a run/step start timestamp on the stream.
 4. **Background-job on the turn stream** — jobs are REST-polled (`ProcessStatus` Running→Completed);
    bridge job status into the projection for the inline job chip.
 5. **Multi-channel handoff** — new UI + action (no event today).
@@ -76,7 +78,8 @@ Each of the above follows `.claude/rules/gateway-events.md` (durable event → p
 ## Rollout
 
 - **This PR (foundation):** the design reference above + the `NearProcessIndicator` component
-  (the branded live indicator), wired into `TypingIndicator`. Presentation-only, no backend change.
+  (the branded live indicator), wired into `TypingIndicator` and retained as a static
+  “Worked for Ns” line after completion. Presentation-only, no backend change.
 - **Next:** activity-trail consolidation (top toggle + bottom status), composer mode selector,
   card-family unification + artifact card, floating rail.
 - **Then:** the five new SSE payloads, one focused PR each, each with tests through the caller.
