@@ -194,11 +194,11 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
 name = "ironclaw_events"
-floor_percent = 81.04
-floor_covered_lines = 1252
-captured_total_lines = 1545
+floor_percent = 80.55
+floor_covered_lines = 1197
+captured_total_lines = 1486
 captured_date = "2026-07-31"
-rationale = "Durable event envelopes are the typed redacted audit substrate; recalibrated after current-main covered-code shrinkage."
+rationale = "Durable event envelopes are the typed redacted audit substrate; recalibrated after #6943 removed the dead JSONL implementation and its tests."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
