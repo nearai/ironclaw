@@ -23,6 +23,23 @@ def current_date(override: dt.date | None) -> dt.date:
     return override if override is not None else dt.date.today()
 
 
+def live_qa_matrix_cases(workflow: str, errors: list[str]) -> set[str]:
+    job_match = re.search(
+        r"(?ms)^  reborn-webui-v2-live-qa:\n(?P<job>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
+        workflow,
+    )
+    if not job_match:
+        errors.append("live-canary workflow has no reborn-webui-v2-live-qa job")
+        return set()
+
+    cases: set[str] = set()
+    for value in re.findall(r"(?m)^ {12}cases:\s*([^#\n]+)$", job_match.group("job")):
+        cases.update(case.strip() for case in value.split(",") if case.strip())
+    if not cases:
+        errors.append("reborn-webui-v2-live-qa matrix has no cases")
+    return cases
+
+
 def validate(
     manifest_path: pathlib.Path, today: dt.date, repo_root: pathlib.Path
 ) -> list[str]:
@@ -170,6 +187,12 @@ def validate(
     workflow = (repo_root / ".github/workflows/live-canary.yml").read_text(
         encoding="utf-8"
     )
+    matrix_cases = live_qa_matrix_cases(workflow, errors)
+    for case in sorted(matrix_cases - selected):
+        errors.append(f"matrix case is not in the harvested inventory: {case}")
+    for case in sorted(selected - matrix_cases):
+        errors.append(f"harvested case is missing from live-canary matrix: {case}")
+
     scheduled_match = re.search(
         r"REQUESTED_CASES:\s*\$\{\{\s*github\.event_name == 'schedule'\s*&&\s*'([^']+)'",
         workflow,
@@ -180,7 +203,7 @@ def validate(
     else:
         scheduled_selector = scheduled_match.group(1).strip()
         if scheduled_selector.lower() == "all" or scheduled_selector == "*":
-            scheduled = set(selected)
+            scheduled = set(matrix_cases)
         else:
             scheduled = {
                 case.strip()
@@ -190,6 +213,8 @@ def validate(
 
     for case in sorted(scheduled - selected):
         errors.append(f"scheduled case is not in the harvested inventory: {case}")
+    for case in sorted(scheduled - matrix_cases):
+        errors.append(f"scheduled case is not in the live-canary matrix: {case}")
     for case in sorted(drift_set - scheduled):
         errors.append(f"representative drift case is not scheduled: {case}")
     for case in sorted(retired_set & scheduled):

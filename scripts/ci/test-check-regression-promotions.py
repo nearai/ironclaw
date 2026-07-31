@@ -29,6 +29,7 @@ class RegressionPromotionMetadataTest(unittest.TestCase):
         manifest: dict[str, object],
         today: dt.date = dt.date(2026, 7, 30),
         scheduled_cases: str = "all",
+        removed_matrix_case: str | None = None,
     ) -> list[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -46,6 +47,20 @@ class RegressionPromotionMetadataTest(unittest.TestCase):
                 f"github.event_name == 'schedule' && '{scheduled_cases}'",
                 1,
             )
+            if removed_matrix_case is not None:
+                lines = workflow.splitlines()
+                for index, line in enumerate(lines):
+                    if not line.startswith("            cases: "):
+                        continue
+                    matrix_cases = line.removeprefix("            cases: ").split(",")
+                    if removed_matrix_case not in matrix_cases:
+                        continue
+                    matrix_cases.remove(removed_matrix_case)
+                    lines[index] = "            cases: " + ",".join(matrix_cases)
+                    break
+                else:
+                    self.fail(f"matrix case not found: {removed_matrix_case}")
+                workflow = "\n".join(lines) + "\n"
             workflow_path.write_text(workflow, encoding="utf-8")
             lifecycle = manifest.get("promotion_metadata", {}).get("live_retirement", {})
             for entry in lifecycle.get("retired_cases", []):
@@ -123,6 +138,16 @@ class RegressionPromotionMetadataTest(unittest.TestCase):
                 in error
                 for error in errors
             ),
+            errors,
+        )
+
+    def test_all_selector_fails_when_matrix_omits_harvested_case(self) -> None:
+        removed = "qa_10i_slack_raw_entity_hygiene"
+
+        errors = self.validate(self.manifest, removed_matrix_case=removed)
+
+        self.assertIn(
+            f"harvested case is missing from live-canary matrix: {removed}",
             errors,
         )
 
