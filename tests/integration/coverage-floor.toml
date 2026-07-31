@@ -185,12 +185,12 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
 name = "ironclaw_extension_host"
-floor_percent = 83.82
-floor_covered_lines = 22271
-captured_total_lines = 26569
+floor_percent = 83.55
+floor_covered_lines = 21263
+captured_total_lines = 25449
 captured_date = "2026-07-31"
-rationale = "Channel ingress deduplication and outbound delivery routing are production-composed; recalibrated after current-main production growth while raising the covered-line floor."
-issue = "https://github.com/nearai/ironclaw/issues/6524"
+rationale = "Recaptures the extension-host baseline after PR #6780 extracted IronHub into the standalone ironclaw_ironhub crate while preserving the remaining host coverage."
+issue = "https://github.com/nearai/ironclaw/pull/6780"
 
 [[crate]]
 name = "ironclaw_events"
