@@ -149,11 +149,11 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
 name = "ironclaw_llm"
-floor_percent = 79.92
-floor_covered_lines = 22566
-captured_total_lines = 28235
+floor_percent = 79.22
+floor_covered_lines = 20885
+captured_total_lines = 26364
 captured_date = "2026-07-31"
-rationale = "Provider retry classification and the complete decorator chain are production-critical; recalibrated after current-main covered-code shrinkage."
+rationale = "Provider retry classification and the complete decorator chain are production-critical; recalibrated for #6964's verified-dead `reasoning` deletion (-1871 instrumented lines) — the dead half carried denser test coverage than the crate average, so deleting it with its tests lowered the percentage."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
@@ -203,11 +203,11 @@ issue = "https://github.com/nearai/ironclaw/pull/6780"
 
 [[crate]]
 name = "ironclaw_events"
-floor_percent = 81.04
-floor_covered_lines = 1252
-captured_total_lines = 1545
+floor_percent = 80.55
+floor_covered_lines = 1197
+captured_total_lines = 1486
 captured_date = "2026-07-31"
-rationale = "Durable event envelopes are the typed redacted audit substrate; recalibrated after current-main covered-code shrinkage."
+rationale = "Durable event envelopes are the typed redacted audit substrate; recalibrated because #6943's `events::{parse_jsonl, replay_jsonl}` deletion (-59 instrumented lines and their covered code) landed after the previous capture — inherited from main, not caused by #6964."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
