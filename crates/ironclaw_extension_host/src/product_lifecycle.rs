@@ -2639,17 +2639,19 @@ pub(crate) async fn ensure_lifecycle_package_registered(
             ),
         })?;
     // This repair path exists for hosted MCP discovery, whose refreshed tool
-    // catalog is persisted in the resolved contract. Do not rebuild a
-    // non-MCP package that the loader already registered: v3 channel loaders
-    // add runtime-only host APIs such as `product_adapter.inbound`, which are
-    // intentionally absent from the durable resolved manifest.
+    // catalog is persisted in the resolved contract. Preserve only packages
+    // whose loader supplied a runtime-only inbound adapter; other first-party
+    // packages still need the durable-contract rebuild to refresh credentials.
+    let current_package = lifecycle_service
+        .lock()
+        .await
+        .registry()
+        .get_extension(extension_id)
+        .cloned();
     if record.resolved().mcp.is_none()
-        && lifecycle_service
-            .lock()
-            .await
-            .registry()
-            .get_extension(extension_id)
-            .is_some()
+        && current_package
+            .as_ref()
+            .is_some_and(package_declares_inbound_product_adapter)
     {
         return Ok(());
     }
