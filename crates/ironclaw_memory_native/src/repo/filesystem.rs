@@ -42,13 +42,16 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::path::VirtualPath;
 
-use crate::chunking::{MemoryChunkWrite, content_bytes_sha256, content_sha256};
+use crate::chunking::MemoryChunkWrite;
 use crate::indexer::{MemoryChunkReplaceOutcome, MemoryDocumentIndexRepository};
-use crate::metadata::{DocumentMetadata, MemoryWriteOptions, find_nearest_config, is_config_path};
-use crate::path::{MemoryDocumentPath, MemoryDocumentScope, memory_error, valid_memory_path};
+use crate::metadata::{MemoryWriteOptions, find_nearest_config, is_config_path};
+use crate::path::{memory_error, valid_memory_path};
 use crate::search::{
     MemorySearchRequest, MemorySearchResult, RankedMemorySearchResult, fuse_memory_search_results,
 };
+use ironclaw_memory::DocumentMetadata;
+use ironclaw_memory::{MemoryDocumentPath, MemoryDocumentScope};
+use ironclaw_memory::{content_bytes_sha256, content_sha256};
 
 use super::{
     MemoryAppendOutcome, MemoryDocumentRepository, MemoryWriteOutcome,
