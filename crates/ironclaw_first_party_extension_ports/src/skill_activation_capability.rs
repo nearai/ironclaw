@@ -19,7 +19,7 @@ use crate::{
 
 pub const SKILL_ACTIVATE_CAPABILITY_ID: &str = "builtin.skill_activate";
 const SKILL_ACTIVATE_PROVIDER_TOOL_NAME: &str = "builtin__skill_activate";
-const SKILL_ACTIVATE_DESCRIPTION: &str = "Load full instructions for one or more skills from the available-skills list. Call this before answering when a listed skill could help with any part of the task; use only exact listed names. Choose the smallest relevant set, with at most four active skills total per run; large skills may reduce that number. Ambiguous names fail without loading a skill.";
+const SKILL_ACTIVATE_DESCRIPTION: &str = "A skill is a packaged set of instructions someone has already written for a particular kind of task. Available skills are listed for you, each with a one-line description. When the task at hand is one a listed skill covers, call this FIRST: the skill's instructions load into the run and you follow them instead of your own default approach, which is the point -- a listed skill encodes decisions you would otherwise have to rediscover. Use exact listed names, pick the smallest relevant set (at most four active; large skills may reduce that), and do not activate skills unrelated to the task. An ambiguous name fails without loading anything.";
 
 pub fn skill_activation_capability<S>(
     skill_activation_source: Arc<SelectableSkillContextSource<S>>,

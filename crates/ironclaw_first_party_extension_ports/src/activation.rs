@@ -58,7 +58,21 @@ const SKILL_LISTING_HEADER: &str = include_str!("../prompts/skill_listing_header
 /// than on a long description for the alphabetically-lucky first 100. Names are what
 /// make a skill reachable; descriptions only help rank it, and the model can always
 /// activate a skill to read its body.
-const LISTING_CHAR_BUDGET: usize = 100 * (250 + 64);
+/// Total character budget for the rendered listing, excluding its header.
+///
+/// Sized so a real catalog lists in FULL, because that is what claude-code does and what the
+/// measurement says matters. An earlier version of this kept the old 100-skill cap's budget
+/// (`100 * (250 + 64)`) and shrank per-entry descriptions to fit more names in -- 90 chars each
+/// at 227 skills. That traded the wrong thing away: the model activated on 52% of tasks with 88
+/// full-length entries and on 0% with 227 shrunken ones. Names make a skill addressable;
+/// descriptions are what let the model judge relevance, and a 90-char description does not.
+///
+/// claude-code pays this cost outright -- it lists every skill with its whole one-line
+/// description and no cap -- and reaches 60% correct activation on the same tasks and catalog.
+/// 512 entries at full length is ~160k chars (~40k tokens) worst case, which is why the
+/// per-entry cap and the enumeration cap (512) both still exist: this is a budget for a real
+/// catalog, not a licence for an unbounded one. Past that, `skill_search` (#4428).
+const LISTING_CHAR_BUDGET: usize = 512 * (MAX_LISTING_DESCRIPTION_CHARS + 64);
 /// Longest description rendered for a single entry, when the catalog is small enough
 /// to afford it. Preserves the previous rendering for ordinary catalogs.
 const MAX_LISTING_DESCRIPTION_CHARS: usize = 250;
