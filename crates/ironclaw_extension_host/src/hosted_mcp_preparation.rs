@@ -134,15 +134,19 @@ impl HostedMcpPreparationService {
                 .await
                 .map_err(crate::product_lifecycle::map_extension_installation_error)?
                 .ok_or_else(crate::hosted_mcp_manifest::name_unavailable)?;
+            // No `[mcp]` declaration at all: nothing to discover, ever. This
+            // holds for every such package regardless of what it publishes —
+            // a channel-only extension declares no model-visible capability
+            // and still has nothing to prepare, so it must not fall through
+            // to the hosted-MCP lookup below.
+            if manifest.resolved().mcp.is_none() {
+                self.sync_lifecycle_package(&extension_id).await?;
+                return Ok(None);
+            }
             // A package that already publishes something model-visible is not
             // waiting on discovery to become usable: any discovery run for it
             // is a refresh, so failure must stay non-fatal.
             let best_effort = manifest.resolved().has_model_visible_capabilities();
-            if best_effort && manifest.resolved().mcp.is_none() {
-                // No `[mcp]` declaration at all: nothing to discover, ever.
-                self.sync_lifecycle_package(&extension_id).await?;
-                return Ok(None);
-            }
             // `best_effort` here means `Ready` with `[mcp]` still declared
             // (e.g. NEAR AI, which ships a static model-visible template tool
             // so activation never depends on live discovery). It gets the
