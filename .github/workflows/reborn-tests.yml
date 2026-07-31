@@ -112,6 +112,9 @@ jobs:
           # one-way boundary on every PR/merge_group run, in the same step as
           # the scope classifier above (both are cheap, checkout-only checks).
           scripts/ci/check-test-suite-boundaries.sh
+          scripts/ci/test-reborn-changed-coverage.sh
+          scripts/ci/test-reborn-coverage.sh
+          scripts/ci/test-check-reborn-branch-coverage-flags.sh
 
   package-matrix:
     name: Discover Reborn package crates
@@ -157,6 +160,8 @@ jobs:
       LLM_USE_CODEX_AUTH: "false"
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
+      RUSTC_BOOTSTRAP: "1"
+      RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold -Zcrate-attr=feature(array_windows,debug_closure_helpers,slice_as_array)"
     strategy:
       fail-fast: false
       matrix:
@@ -179,8 +184,9 @@ jobs:
           df -h /
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # branch coverage
         with:
+          toolchain: nightly-2025-11-01
           components: llvm-tools-preview
 
       - name: Resolve bucket settings
@@ -263,7 +269,7 @@ jobs:
           # always-resident entry, so the registry is downloaded once, not ~60x.
           #
           # `-cov` suffix: instrumented llvm-cov build is a different artifact than plain `reborn-tests-crates`; separate lineage avoids corrupting whichever restores second (same as `reborn-integration-cov` below).
-          shared-key: reborn-tests-crates-cov
+          shared-key: reborn-tests-crates-cov-llvm21
           # Keep saves to protected-branch and merge_group runs so the ~10 GB
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
@@ -312,9 +318,9 @@ jobs:
             # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
             scripts/ci/run-hermetic-deterministic-suite.sh command \
               timeout --signal=INT --kill-after=30s 40m \
-              "${incremental_env[@]}" cargo llvm-cov -p "$package" ${feature_flags} --all-targets \
+              "${incremental_env[@]}" cargo llvm-cov --branch --skip-functions -p "$package" ${feature_flags} --all-targets \
                 --lcov --output-path "coverage/${package}.lcov" \
-                test -- --nocapture
+                test --ignore-rust-version -- --nocapture
             echo "::endgroup::"
           done < <(printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[]')
 
@@ -542,6 +548,8 @@ jobs:
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
       CARGO_INCREMENTAL: "0"
+      RUSTC_BOOTSTRAP: "1"
+      RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold -Zcrate-attr=feature(array_windows,debug_closure_helpers,slice_as_array)"
       # llvm-cov instrumentation inflates stack frames; the deep channel
       # admission futures (webhook -> pairing gate -> workflow) overflow the
       # default 2 MiB test-thread stack under instrumentation only. The
@@ -573,8 +581,9 @@ jobs:
         run: docker pull postgres:16-alpine
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # branch coverage
         with:
+          toolchain: nightly-2025-11-01
           components: llvm-tools-preview
 
       - name: Enable pnpm for setup-node cache
@@ -609,7 +618,7 @@ jobs:
           # cache LRU. A dedicated key (never the plain `reborn-tests-*` keys
           # above) keeps an instrumented (llvm-cov) build from ever evicting
           # or being evicted by a plain one — the artifacts are incompatible.
-          shared-key: reborn-integration-cov
+          shared-key: reborn-integration-cov-llvm21
           # Keep saves to protected-branch and merge_group runs so the ~10 GB
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
@@ -730,18 +739,18 @@ jobs:
       - name: Test changed-code coverage gate
         run: python3 scripts/ci/test_reborn_changed_coverage.py
 
-      - name: Enforce changed production-line coverage
-        if: github.event_name == 'pull_request'
+      - name: Gate changed Reborn lines and branches
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
           python3 scripts/ci/reborn_changed_coverage.py \
             --lcov reborn-integration-merged.lcov \
+            --manifest tests/integration/changed-coverage-exemptions.toml \
             --base "$BASE_SHA" \
             --head "$HEAD_SHA" \
-            --threshold 85 \
             --json reborn-changed-coverage.json \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -775,6 +784,64 @@ jobs:
             reborn-integration-merged.lcov
             reborn-changed-coverage.json
           if-no-files-found: warn
+
+  critical-mutation:
+    name: Critical named-function mutation gate
+    needs: changes
+    if: >-
+      needs.changes.outputs.docs_only != 'true' &&
+      needs.changes.outputs.has_reborn_tests == 'true' &&
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run critical-gate harness self-tests
+        run: scripts/ci/test-critical-mutation-gate.sh
+
+      - name: Resolve affected critical functions
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          git diff --name-only "$BASE_SHA"..."$HEAD_SHA" > changed-files.txt
+          should_run="$(
+            python3 scripts/ci/critical_mutation_gate.py \
+              --manifest tests/integration/critical-mutation-functions.toml \
+              --changed-files changed-files.txt \
+              --selection-only
+          )"
+          echo "should_run=${should_run}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        if: steps.scope.outputs.should_run == 'true'
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install mold and clang
+        if: steps.scope.outputs.should_run == 'true'
+        run: |
+          scripts/ci/install-ci-apt-packages.sh clang mold
+          test -x /usr/bin/mold
+
+      - name: Install cargo-mutants
+        if: steps.scope.outputs.should_run == 'true'
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-mutants@27.1.0
+
+      - name: Run affected named critical invariants
+        run: |
+          python3 scripts/ci/critical_mutation_gate.py \
+            --manifest tests/integration/critical-mutation-functions.toml \
+            --changed-files changed-files.txt
 
   webui-v2-js-tests:
     name: Reborn WebUI v2 JS tests
@@ -865,7 +932,9 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
 
       - name: Scrub Reborn QA fixtures
-        run: scripts/ci/check-reborn-qa-fixtures.sh
+        run: |
+          scripts/ci/test-check-reborn-qa-fixtures.sh
+          scripts/ci/check-reborn-qa-fixtures.sh
 
       - name: Test fixture promotion guards
         run: |
@@ -896,6 +965,7 @@ jobs:
       - reborn-group-tests
       - reborn-integration-coverage
       - coverage-report
+      - critical-mutation
       - webui-v2-js-tests
       - qa-recorded-fixtures
     steps:
@@ -964,6 +1034,11 @@ jobs:
           # during the dry-run soak period — see the floor file's own header.)
           if ! job_result_ok "coverage-report" "${{ needs.coverage-report.result }}" false "allow"; then
             echo "Reborn coverage-report job failed (merge/summary error, or a coverage ratchet violation): ${{ needs.coverage-report.result }}"
+            exit 1
+          fi
+
+          if ! job_result_ok "critical-mutation" "${{ needs.critical-mutation.result }}" false "allow"; then
+            echo "Critical named-function mutation gate failed: ${{ needs.critical-mutation.result }}"
             exit 1
           fi
 

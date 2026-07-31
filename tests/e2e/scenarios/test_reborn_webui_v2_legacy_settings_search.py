@@ -1,14 +1,16 @@
-"""Legacy settings search coverage ported to Reborn WebChat v2."""
+"""Legacy settings coverage ported to Reborn WebChat v2."""
 
+import asyncio
 import json
 from urllib.parse import urlparse
 
 from playwright.async_api import expect
 
-from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, capture_native_dialogs
+from helpers import SEL_V2, capture_native_dialogs
 from reborn_webui_harness import (
-    reborn_v2_browser,  # noqa: F401 - imported fixture
-    reborn_v2_server,  # noqa: F401 - imported fixture
+    reborn_v2_browser,  # noqa: F401 - fixture dependency of page factory
+    reborn_v2_page_factory,  # noqa: F401 - imported fixture
+    reborn_v2_server,  # noqa: F401 - fixture dependency of page factory
 )
 
 
@@ -71,23 +73,18 @@ MOCK_SKILLS = [
 ]
 
 async def _open_mocked_settings_page(
-    reborn_v2_server,
-    reborn_v2_browser,
+    reborn_v2_page_factory,
     *,
     tab: str,
     llm_state: dict | None = None,
     llm_requests: list[dict] | None = None,
     skill_requests: list[str] | None = None,
+    settings_tools_gate: asyncio.Event | None = None,
+    tool_settings_requests: list[bool] | None = None,
 ):
-    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
-    page = await context.new_page()
     browser_messages: list[str] = []
-    page.on(
-        "console",
-        lambda message: browser_messages.append(f"{message.type}: {message.text}"),
-    )
-    page.on("pageerror", lambda error: browser_messages.append(f"pageerror: {error}"))
     skills_state = [dict(skill) for skill in MOCK_SKILLS]
+    tool_entries = [dict(entry) for entry in MOCK_TOOL_ENTRIES]
 
     async def fulfill_json(route, payload, status=200):
         await route.fulfill(
@@ -120,7 +117,17 @@ async def _open_mocked_settings_page(
         path = urlparse(request.url).path
 
         if path == "/api/webchat/v2/settings/tools" and request.method == "GET":
-            await fulfill_json(route, {"entries": MOCK_TOOL_ENTRIES})
+            if settings_tools_gate is not None:
+                await settings_tools_gate.wait()
+            await fulfill_json(route, {"entries": tool_entries})
+            return
+
+        if path == "/api/webchat/v2/settings/tools" and request.method == "POST":
+            enabled = bool(json.loads(request.post_data or "{}").get("enabled"))
+            if tool_settings_requests is not None:
+                tool_settings_requests.append(enabled)
+            tool_entries[0] = {**tool_entries[0], "value": enabled}
+            await fulfill_json(route, {"entry": tool_entries[0]})
             return
 
         await route.continue_()
@@ -276,12 +283,26 @@ async def _open_mocked_settings_page(
 
         await route.continue_()
 
-    await page.route("**/api/webchat/v2/session", handle_session)
-    await page.route("**/api/webchat/v2/settings/tools**", handle_settings_tools)
-    await page.route("**/api/webchat/v2/skills**", handle_skills)
-    await page.route("**/api/webchat/v2/llm/**", handle_llm)
+    async def prepare_page(page):
+        page.on(
+            "console",
+            lambda message: browser_messages.append(f"{message.type}: {message.text}"),
+        )
+        page.on(
+            "pageerror",
+            lambda error: browser_messages.append(f"pageerror: {error}"),
+        )
+        await page.route("**/api/webchat/v2/session", handle_session)
+        await page.route("**/api/webchat/v2/settings/tools**", handle_settings_tools)
+        await page.route("**/api/webchat/v2/skills**", handle_skills)
+        await page.route("**/api/webchat/v2/llm/**", handle_llm)
 
-    await page.goto(f"{reborn_v2_server}/settings/{tab}?token={REBORN_V2_AUTH_TOKEN}")
+    page_handle = await reborn_v2_page_factory(
+        path=f"/settings/{tab}",
+        before_navigation=prepare_page,
+        ready_selector=None,
+    )
+    page = page_handle["page"]
     search = page.get_by_placeholder(SEL_V2["settings_search_placeholder"])
     try:
         await expect(search).to_be_visible(timeout=15000)
@@ -293,7 +314,7 @@ async def _open_mocked_settings_page(
             f"Body text:\n{body_text}"
         ) from error
 
-    return {"context": context, "page": page, "search": search}
+    return {**page_handle, "search": search}
 
 
 def _provider_card(page, provider_id: str):
@@ -357,11 +378,10 @@ def _mock_llm_state() -> dict:
 
 
 async def test_reborn_legacy_settings_tools_search_and_clear(
-    reborn_v2_server, reborn_v2_browser
+    reborn_v2_page_factory,
 ):
     harness = await _open_mocked_settings_page(
-        reborn_v2_server,
-        reborn_v2_browser,
+        reborn_v2_page_factory,
         tab="tools",
     )
     try:
@@ -386,13 +406,106 @@ async def test_reborn_legacy_settings_tools_search_and_clear(
         await harness["context"].close()
 
 
+async def test_reborn_settings_switches_share_accessible_keyboard_behavior(
+    reborn_v2_page_factory,
+):
+    appearance = await _open_mocked_settings_page(
+        reborn_v2_page_factory,
+        tab="appearance",
+    )
+    try:
+        appearance_switch = appearance["page"].get_by_role(
+            "switch", name="Show chat terminal shortcut"
+        )
+        await expect(appearance_switch).to_be_visible()
+        await expect(appearance_switch).to_be_enabled()
+        await expect(appearance_switch).to_have_attribute("aria-checked", "true")
+        appearance_box = await appearance_switch.bounding_box()
+        appearance_thumb = appearance_switch.locator("span[aria-hidden='true']")
+        checked_thumb_box = await appearance_thumb.bounding_box()
+        assert appearance_box is not None
+        assert checked_thumb_box is not None
+        checked_right_gap = (
+            appearance_box["x"]
+            + appearance_box["width"]
+            - checked_thumb_box["x"]
+            - checked_thumb_box["width"]
+        )
+
+        await appearance_switch.focus()
+        await appearance_switch.press("Space")
+        await expect(appearance_switch).to_have_attribute("aria-checked", "false")
+        switch_handle = await appearance_switch.element_handle()
+        thumb_handle = await appearance_thumb.element_handle()
+        assert switch_handle is not None
+        assert thumb_handle is not None
+        await appearance["page"].wait_for_function(
+            """({ switchElement, thumbElement, checkedRightGap }) => {
+                const switchBox = switchElement.getBoundingClientRect();
+                const thumbBox = thumbElement.getBoundingClientRect();
+                const uncheckedLeftGap = thumbBox.x - switchBox.x;
+                return Math.abs(uncheckedLeftGap - checkedRightGap) < 0.5;
+            }""",
+            arg={
+                "switchElement": switch_handle,
+                "thumbElement": thumb_handle,
+                "checkedRightGap": checked_right_gap,
+            },
+        )
+        unchecked_thumb_box = await appearance_thumb.bounding_box()
+        assert unchecked_thumb_box is not None
+        unchecked_left_gap = unchecked_thumb_box["x"] - appearance_box["x"]
+        assert abs(unchecked_left_gap - checked_right_gap) < 0.5
+
+        await appearance_switch.press("Enter")
+        await expect(appearance_switch).to_have_attribute("aria-checked", "true")
+    finally:
+        await appearance["context"].close()
+
+    settings_tools_gate = asyncio.Event()
+    tool_settings_requests: list[bool] = []
+    tools = await _open_mocked_settings_page(
+        reborn_v2_page_factory,
+        tab="tools",
+        settings_tools_gate=settings_tools_gate,
+        tool_settings_requests=tool_settings_requests,
+    )
+    try:
+        tools_switch = tools["page"].get_by_role(
+            "switch", name="Always allow eligible tools"
+        )
+        await expect(tools_switch).to_be_visible()
+        await expect(tools_switch).to_be_disabled()
+        await expect(tools_switch).to_have_attribute("aria-checked", "true")
+
+        await tools_switch.press("Space")
+        await expect(tools_switch).to_have_attribute("aria-checked", "true")
+        assert tool_settings_requests == []
+
+        settings_tools_gate.set()
+        await expect(tools_switch).to_be_enabled()
+        await expect(tools_switch).to_have_attribute("aria-checked", "false")
+        tools_box = await tools_switch.bounding_box()
+        assert tools_box is not None
+        assert tools_box["width"] == appearance_box["width"]
+        assert tools_box["height"] == appearance_box["height"]
+
+        await tools_switch.press("Space")
+        await expect(tools_switch).to_have_attribute("aria-checked", "true")
+        await tools_switch.click()
+        await expect(tools_switch).to_have_attribute("aria-checked", "false")
+        assert tool_settings_requests == [True, False]
+    finally:
+        settings_tools_gate.set()
+        await tools["context"].close()
+
+
 async def test_reborn_legacy_settings_skills_search_empty_state(
-    reborn_v2_server, reborn_v2_browser
+    reborn_v2_page_factory,
 ):
     skill_requests: list[str] = []
     harness = await _open_mocked_settings_page(
-        reborn_v2_server,
-        reborn_v2_browser,
+        reborn_v2_page_factory,
         tab="skills",
         skill_requests=skill_requests,
     )
@@ -436,11 +549,10 @@ async def test_reborn_legacy_settings_skills_search_empty_state(
 
 
 async def test_reborn_legacy_settings_language_search(
-    reborn_v2_server, reborn_v2_browser
+    reborn_v2_page_factory,
 ):
     harness = await _open_mocked_settings_page(
-        reborn_v2_server,
-        reborn_v2_browser,
+        reborn_v2_page_factory,
         tab="language",
     )
     try:
@@ -465,13 +577,12 @@ async def test_reborn_legacy_settings_language_search(
 
 
 async def test_reborn_legacy_settings_inference_add_test_and_activate_provider(
-    reborn_v2_server, reborn_v2_browser
+    reborn_v2_page_factory,
 ):
     llm_state = _mock_llm_state()
     llm_requests: list[dict] = []
     harness = await _open_mocked_settings_page(
-        reborn_v2_server,
-        reborn_v2_browser,
+        reborn_v2_page_factory,
         tab="inference",
         llm_state=llm_state,
         llm_requests=llm_requests,
@@ -563,13 +674,12 @@ async def test_reborn_legacy_settings_inference_add_test_and_activate_provider(
 
 
 async def test_reborn_legacy_settings_inference_edit_and_delete_custom_provider(
-    reborn_v2_server, reborn_v2_browser
+    reborn_v2_page_factory,
 ):
     llm_state = _mock_llm_state()
     llm_requests: list[dict] = []
     harness = await _open_mocked_settings_page(
-        reborn_v2_server,
-        reborn_v2_browser,
+        reborn_v2_page_factory,
         tab="inference",
         llm_state=llm_state,
         llm_requests=llm_requests,

@@ -1,0 +1,19 @@
+# Changed-code coverage is intentionally strict: every LLVM-instrumentable
+# production line and branch arm added by a PR must execute. An exemption is
+# exact-line only and requires an owner, reason, tracking issue, and review
+# date. Whole-file and glob exemptions are not supported.
+
+[policy]
+line_percent = 100.0
+branch_percent = 100.0
+
+# Example (remove the comment markers only after reviewer approval):
+#
+# [[exemption]]
+# path = "crates/ironclaw_example/src/platform_only.rs"
+# lines = [42]
+# branch_lines = [57]
+# owner = "@nearai/runtime"
+# reason = "Target-specific arm cannot execute on the Linux coverage runner."
+# issue = "https://github.com/nearai/ironclaw/issues/NNNN"
+# review_after = "2026-10-30"

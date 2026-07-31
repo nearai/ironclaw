@@ -1220,7 +1220,7 @@ registerPack("en", {
   "admin.users.jobsCount": "{count} jobs",
   "admin.users.suspendTitle": "Suspend user",
   "admin.users.suspendDesc":
-    "This will prevent the user from authenticating. Continue?",
+    'This will prevent "{name}" from authenticating. Continue?',
   "admin.users.tokenNamePrompt": "Token name for {name}:",
   "admin.users.tokenCreated": "Token created",
   "admin.users.tokenCreatedDesc": "Copy this now — it will not be shown again.",
@@ -1310,6 +1310,9 @@ registerPack("en", {
   "logs.entryCount": "{count} entries",
   "logs.pausedBadge": "● paused",
   "logs.empty": "Waiting for log entries…",
+  "logs.loadOlder": "Load older logs",
+  "logs.retentionLimitReached":
+    "Showing the most recent {count} log entries. Pause live updates or narrow the filters to inspect a stable range.",
   "common.recent": "Recent",
   "common.searchChats": "Search chats...",
   "common.gatewaySession": "Gateway session",

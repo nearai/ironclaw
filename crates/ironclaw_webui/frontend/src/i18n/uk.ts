@@ -1118,7 +1118,7 @@ registerPack("uk", {
   "admin.users.token": "Токен",
   "admin.users.jobsCount": "{count} задач",
   "admin.users.suspendTitle": "Призупинити користувача",
-  "admin.users.suspendDesc": "Це заборонить користувачу автентифікуватися. Продовжити?",
+  "admin.users.suspendDesc": "Це заборонить користувачу «{name}» автентифікуватися. Продовжити?",
   "admin.users.tokenNamePrompt": "Назва токена для {name}:",
   "admin.users.tokenCreated": "Токен створено",
   "admin.users.tokenCreatedDesc": "Скопіюйте зараз — він більше не буде показаний.",
@@ -1207,6 +1207,9 @@ registerPack("uk", {
   "logs.entryCount": "{count} записів",
   "logs.pausedBadge": "● пауза",
   "logs.empty": "Очікування записів журналу…",
+  "logs.loadOlder": "Завантажити старіші журнали",
+  "logs.retentionLimitReached":
+    "Показано {count} найновіших записів журналу. Призупиніть оновлення наживо або звузьте фільтри, щоб переглянути стабільний діапазон.",
   "common.recent": "Нещодавно",
   "common.searchChats": "Пошук чатів...",
   "common.gatewaySession": "Сеанс шлюзу",

@@ -127,7 +127,8 @@ echo "▶ G. the audit hands the generator the directory cargo-mutants wrote to"
 # itself. Testing the helper proved nothing about the caller wiring it — the
 # gap .claude/rules/testing.md calls "test through the caller".
 #
-# A stub cargo reproduces that layout without compiling anything.
+# A stub cargo reproduces that layout and cargo-mutants' non-recursive creation
+# of --output without compiling anything.
 stub_bin="$work/stub-bin"
 mkdir -p "$stub_bin"
 for tool in bash sed grep python3 mktemp rm dirname cat mkdir; do
@@ -138,7 +139,10 @@ done
 chmod +x "$stub_bin/cargo-mutants"
 cat >"$stub_bin/cargo" <<'STUB'
 #!/usr/bin/env bash
-# Mimic the one behaviour under test: `--output DIR` yields DIR/mutants.out.
+set -euo pipefail
+
+# Mimic the behaviours under test: cargo-mutants creates --output with a
+# single-level mkdir, then creates mutants.out inside it.
 out="."
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -146,13 +150,14 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
-mkdir -p "$out/mutants.out"
+[ -d "$out" ] || mkdir "$out"
+mkdir "$out/mutants.out"
 echo 'crates/demo/src/lib.rs:12:5: replace add with ()' >"$out/mutants.out/missed.txt"
 : >"$out/mutants.out/caught.txt"
 STUB
 chmod +x "$stub_bin/cargo"
 
-audit_out="$work/audit-out"
+audit_out="$work/missing-parent/audit-out"
 check "audit completes and writes the queue where cargo-mutants wrote results" \
   bash -c "PATH='$stub_bin' MUT_OUT='$audit_out' '$audit' -p demo >/dev/null 2>&1 \
     && [ -f '$audit_out/mutants.out/triage-queue.md' ]"

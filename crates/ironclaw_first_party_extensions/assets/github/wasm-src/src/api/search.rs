@@ -1,4 +1,5 @@
 use crate::request::github_request;
+use crate::response::compact_issue_search;
 use crate::validation::*;
 
 pub(crate) fn search_repositories(
@@ -71,5 +72,5 @@ pub(crate) fn search_issues_pull_requests(
         limit
     );
     append_search_params(&mut path, page, sort, order)?;
-    github_request("GET", &path, None)
+    github_request("GET", &path, None).and_then(compact_issue_search)
 }

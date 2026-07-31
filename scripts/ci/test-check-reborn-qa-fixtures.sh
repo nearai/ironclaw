@@ -79,4 +79,39 @@ if grep -qF "$unsafe_token" "$unsafe_output"; then
   exit 1
 fi
 
+write_fixture "$tmp_dir/malformed" '{"final_response":{"contains":["done"]}}'
+printf '%s\n' '{"schema_version": 1,' > "$tmp_dir/malformed/case.json"
+malformed_output="$tmp_dir/malformed-output"
+if "$checker" "$tmp_dir/malformed" >"$malformed_output" 2>&1; then
+  echo "checker accepted malformed JSON" >&2
+  exit 1
+fi
+if ! grep -Fq "case.json:2: malformed JSON fixture" "$malformed_output"; then
+  echo "checker did not report the malformed fixture and line" >&2
+  exit 1
+fi
+
+write_fixture "$tmp_dir/non-object" '{"final_response":{"contains":["done"]}}'
+printf '%s\n' '[]' > "$tmp_dir/non-object/case.json"
+non_object_output="$tmp_dir/non-object-output"
+if "$checker" "$tmp_dir/non-object" >"$non_object_output" 2>&1; then
+  echo "checker accepted a non-object fixture root" >&2
+  exit 1
+fi
+if ! grep -Fq "root must be an object" "$non_object_output"; then
+  echo "checker accepted or did not explain a non-object fixture root" >&2
+  exit 1
+fi
+
+mkdir -p "$tmp_dir/empty"
+empty_output="$tmp_dir/empty-output"
+if "$checker" "$tmp_dir/empty" >"$empty_output" 2>&1; then
+  echo "checker accepted empty fixture discovery" >&2
+  exit 1
+fi
+if ! grep -Fq "no Reborn QA fixture JSON files found" "$empty_output"; then
+  echo "checker accepted or did not explain empty fixture discovery" >&2
+  exit 1
+fi
+
 echo "Reborn QA fixture checker self-tests passed"
