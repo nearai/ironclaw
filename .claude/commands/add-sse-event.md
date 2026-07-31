@@ -5,7 +5,32 @@ argument-hint: <event_name> [description]
 model: opus
 ---
 
-> ⚠ **This command is stale and cannot be followed as written.** Steps 4–5 scaffold into `crates/ironclaw_gateway/static/`, which was deleted with the v1 monolith along with the rest of `src/`. Do not create those files. New user-visible events belong Reborn-side: the projection/SSE frame via `ironclaw_webui` (+ `crates/ironclaw_webui/frontend/` for the client) over the event-stream substrate — start from the `reborn-feature` skill and `.claude/rules/gateway-events.md`.
+> # ⚠ DO NOT FOLLOW THIS COMMAND — IT TARGETS A DELETED CODEBASE
+>
+> **Every file path in the steps below is gone.** This procedure scaffolds into
+> the retired v1 gateway SSE path: `src/channels/` (Steps 1–3),
+> `crates/ironclaw_gateway/static/` (Steps 4–5), and `src/agent/` / `src/worker/`
+> (Step 6) — the final checklist names the same dead files. The
+> `ironclaw_gateway` crate and the entire root `src/` monolith were deleted from
+> the tree; none of these files exist and none should be created. Only Step 7
+> (`cargo fmt` / `clippy`) still means anything. Following this command produces
+> new files in a directory layout the build does not know about.
+>
+> **This command needs rewriting onto the `ironclaw_webui` streaming path** —
+> the Reborn projection/SSE frame served by `crates/ironclaw_webui`, with the
+> client side in `crates/ironclaw_webui/frontend/`, over the event-stream
+> substrate (`ironclaw_events` → `ironclaw_event_projections` →
+> `ironclaw_event_streams`). That rewrite has not been done: the correct
+> Reborn procedure is **not** written down here, and this banner deliberately
+> does not guess at it.
+>
+> Until then, for a new user-visible event start from the `reborn-feature`
+> skill and `.claude/rules/gateway-events.md` (the live Reborn events and
+> transport-projection rules), not from the steps below.
+>
+> *Identified in PR #6944 (WS11.3 guidance drift hotfixes), which found the
+> paths dead but scoped the rewrite out — replacing a scaffold procedure is new
+> guidance, not a drift fix.*
 
 Add a new SSE event called `$ARGUMENTS` to the IronClaw web gateway. This involves changes across 5 files in a specific order. Follow each step exactly.
 

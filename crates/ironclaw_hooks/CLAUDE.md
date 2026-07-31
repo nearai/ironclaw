@@ -186,5 +186,10 @@ exist** (`ls crates/ironclaw_runner/tests/`; `rg` for either name returns only
 this file). The intended semantic — a fresh dispatcher per build has an
 un-poisoned slot and re-applies the fail-closed deny, while the legacy
 `with_hook_dispatcher` adapter shares state across builds — is currently
-unpinned by any test. Treat it as the explicit
-opt-in baseline.
+**unpinned by any test**, tracked in
+[#6945](https://github.com/nearai/ironclaw/issues/6945). The property holds in
+production today (composition wires the isolating
+`with_hook_dispatcher_builder_factory`), but nothing fails if that changes.
+`dispatch/mod.rs::poisoned_during_dispatch_skips_subsequent_invocations` covers
+poisoning *within* one dispatcher, not across builds. Treat the legacy adapter
+as the explicit opt-in baseline.
