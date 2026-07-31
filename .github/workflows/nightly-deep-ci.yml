@@ -113,10 +113,13 @@ jobs:
           MUT_JOBS: "3"
           MUT_OUT: target/nightly-mutation
           MUT_TIMEOUT: "300"
+        # Targets the dispatch routing logic itself. Keep this pointed at a file
+        # with real mutable statements — a pure `pub use` re-export file yields
+        # zero mutants and makes this step silently vacuous.
         run: >-
           scripts/mutation-audit.sh
-          -p ironclaw_dispatcher
-          crates/ironclaw_dispatcher/src/lib.rs
+          -p ironclaw_capabilities
+          crates/ironclaw_capabilities/src/dispatch.rs
       - name: Upload mutation triage queue
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

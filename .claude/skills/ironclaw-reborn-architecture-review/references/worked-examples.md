@@ -30,7 +30,6 @@ Why it's wrong: one production impl means the trait encodes no variation — it'
 | --- | --- | --- |
 | `RootFilesystem` (`crates/ironclaw_filesystem/src/root.rs`) | local / postgres / libsql / in-memory / composite / HSM / memory-adapter | `rg -n "impl RootFilesystem for" crates/ironclaw_filesystem/src crates/ironclaw_memory_native/src` |
 | `PolicySource` (`crates/ironclaw_trust/src/sources.rs`) | AdminConfig / BundledRegistry / DevTrustOverride / SignedRegistry | `grep -n "impl PolicySource" crates/ironclaw_trust/src/sources.rs` |
-| `EmbeddingProvider` (`crates/ironclaw_embeddings/src/provider.rs`) | OpenAI / NearAI / Ollama / Bedrock + caching decorator (v1-only shape example) | `rg -n "impl EmbeddingProvider for (OpenAi|NearAi|Ollama|Bedrock|Cached)" crates/ironclaw_embeddings/src` |
 
 **GOOD — one impl but a real boundary** (the acceptable exception): `SkillInferencePort` (`crates/ironclaw_skills/src/learning.rs`) has one production adapter — `SkillLearningInferenceAdapter` in `crates/ironclaw_extension_host/src/skill_learning.rs`, constructed by composition — because the port exists to keep LLM/runtime deps *out* of the skills domain crate. The justification is verifiable in Cargo.toml (`ironclaw_skills` has no LLM or runtime deps), not in a comment.
 

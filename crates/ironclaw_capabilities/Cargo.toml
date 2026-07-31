@@ -46,3 +46,6 @@ ironclaw_events = { path = "../ironclaw_events" }
 # Enables the shared TestDispatcher CapabilityDispatcher double for tests only.
 ironclaw_host_api = { path = "../ironclaw_host_api", features = ["test-support"] }
 tokio = { version = "1", features = ["macros", "rt"] }
+# `runtime_dispatch_event_contract` asserts the dispatcher's tracing output via
+# `#[traced_test]` (moved in with the suite from the deleted ironclaw_dispatcher).
+tracing-test = { version = "0.2", features = ["no-env-filter"] }

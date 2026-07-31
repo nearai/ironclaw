@@ -40,7 +40,7 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 
 ## Boundary rules
 
-Must NOT depend on: `ironclaw_dispatcher`, `ironclaw_extensions`,
+Must NOT depend on: `ironclaw_extensions`,
 `ironclaw_host_runtime`, `ironclaw_mcp`, `ironclaw_wasm`, `ironclaw_scripts`,
 `ironclaw_network`.
 

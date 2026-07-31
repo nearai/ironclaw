@@ -1,4 +1,9 @@
-//! Dispatcher contract at the resolver seam (TOOL-1/TOOL-2).
+//! `RuntimeDispatcher` contract at the resolver seam (TOOL-1/TOOL-2).
+//!
+//! Moved here from the deleted `ironclaw_dispatcher` compatibility shim (WS8):
+//! the implementation under test has always been
+//! `ironclaw_capabilities::dispatch`, so this suite now sits with the code it
+//! pins instead of behind a re-export crate.
 //!
 //! The dispatcher resolves a prebound [`BoundCapabilityAdapter`] by capability
 //! id through the injected [`ToolResolver`] and never selects a package or
@@ -11,7 +16,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_dispatcher::*;
+use ironclaw_capabilities::{
+    BoundCapabilityAdapter, ChainToolResolver, ResolvedCapability, RuntimeAdapterResult,
+    RuntimeDispatcher, ToolResolver,
+};
 use ironclaw_host_api::{
     authorized::Authorized,
     dispatch::{

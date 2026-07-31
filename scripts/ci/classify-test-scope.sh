@@ -1,10 +1,159 @@
 #!/usr/bin/env bash
+#
+# Classify a list of changed paths (one per line on stdin) into the test scopes
+# the CI workflows select on: docs_only / has_core_code / has_legacy_tests /
+# has_reborn_tests.
+#
+# Crate paths are normalized to `crates/<crate>/...` BEFORE the case arms run,
+# so the arms below stay keyed to crate identity rather than to how deep the
+# crate sits under `crates/`. Without that, the target-architecture family move
+# (`crates/ironclaw_events` -> `crates/substrates/ironclaw_events`, PROPOSAL §5)
+# makes every crate-scoped arm stop matching: the paths still look like code, so
+# they fall through to `is_code_path` and get bucketed legacy-only, and the whole
+# Reborn suite is silently skipped on a green PR. See
+# docs/reborn/target-architecture/CHECKLIST.md WS10.
+#
+# Test/override env vars (unset in prod):
+#   IRONCLAW_REPO_ROOT  repository root whose crate tree defines the inventory
+#                       (default: this script's ../..)
+#
+# Exit codes: 0 = classified ; 1 = a `crates/` path could not be attributed to
+# a crate, or crate discovery failed. Both are refusals, not classifications.
+
 set -euo pipefail
 
 has_core_code=false
 docs_only=true
 has_legacy_tests=false
 has_reborn_tests=false
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="${IRONCLAW_REPO_ROOT:-$(cd "${script_dir}/../.." && pwd)}"
+
+# Fail-closed floor for crate discovery. Mirrors MIN_CRATE_DIRECTORIES in
+# scripts/ci/lib/crate_tree.py, which owns the same rule for the Python-side
+# gates; test-classify-test-scope.sh pins the two inventories equal.
+min_crate_directories=20
+
+# Newline-delimited inventory of directories under `crates/` that own a
+# Cargo.toml, at any depth. Nested manifests (ironclaw_safety/fuzz, the
+# assets/*/wasm-src guests) are kept in the list but never win a lookup:
+# resolution walks path segments outward-in and stops at the first hit, so the
+# *outermost* crate always owns the path — exactly what `crates/<crate>/*`
+# globs did before.
+crate_dirs=""
+discover_crate_dirs() {
+  local crates_root="${repo_root}/crates"
+  if [ ! -d "${crates_root}" ]; then
+    echo "classify-test-scope: no crates/ directory under ${repo_root}; refusing to" \
+      "classify against an empty crate inventory (CHECKLIST WS10)." >&2
+    exit 1
+  fi
+
+  local manifest dir count
+  while IFS= read -r manifest; do
+    dir="${manifest%/Cargo.toml}"
+    crate_dirs="${crate_dirs}${dir#"${repo_root}/"}
+"
+  done < <(
+    find "${crates_root}" -type f -name Cargo.toml \
+      -not -path '*/target/*' -not -path '*/.*' 2>/dev/null | sort
+  )
+
+  count="$(printf '%s' "${crate_dirs}" | grep -c . || true)"
+  if [ "${count}" -lt "${min_crate_directories}" ]; then
+    echo "classify-test-scope: found only ${count} crate director(ies) under" \
+      "${crates_root} (floor ${min_crate_directories}). The crate tree moved out from" \
+      "under this classifier, or the repo root is wrong. Refusing to bucket every" \
+      "crate change as out-of-scope (CHECKLIST WS10)." >&2
+    exit 1
+  fi
+}
+
+newline='
+'
+
+# Sets OWNING_CRATE_DIR to the crate directory that owns "$1"; returns 1 if the
+# path is inside no known crate directory.
+OWNING_CRATE_DIR=""
+owning_crate_dir() {
+  local rest="${1#crates/}" acc="crates" segment
+  OWNING_CRATE_DIR=""
+  while [ -n "${rest}" ]; do
+    segment="${rest%%/*}"
+    if [ "${segment}" = "${rest}" ]; then
+      rest=""
+    else
+      rest="${rest#*/}"
+    fi
+    acc="${acc}/${segment}"
+    case "${newline}${crate_dirs}" in
+      *"${newline}${acc}${newline}"*)
+        OWNING_CRATE_DIR="${acc}"
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+# Sets NORMALIZED_PATH: `crates/<...>/<crate>/<rest>` becomes `crates/<crate>/<rest>`,
+# everything else passes through. On today's flat tree every crate directory
+# already is `crates/<crate>`, so this is a no-op for every path in the
+# repository. Exits 1 (not a subshell — the caller must die too) when a
+# `crates/` path cannot be attributed at all.
+NORMALIZED_PATH=""
+normalize_crate_path() {
+  local path="$1" tail
+  NORMALIZED_PATH="${path}"
+
+  case "${path}" in
+    crates/*) ;;
+    *) return 0 ;;
+  esac
+
+  tail="${path#crates/}"
+  case "${tail}" in
+    */*) ;;
+    # A file sitting directly in crates/ (AGENTS.md, README.md) belongs to no
+    # crate and never did.
+    *) return 0 ;;
+  esac
+
+  if owning_crate_dir "${path}"; then
+    NORMALIZED_PATH="crates/${OWNING_CRATE_DIR##*/}/${path#"${OWNING_CRATE_DIR}/"}"
+    return 0
+  fi
+
+  # The crate directory is absent from the checkout — the normal case for a
+  # path the diff *deletes*. Fall back to the naming convention so a
+  # crate-removal PR classifies exactly as it did before this normalization
+  # existed.
+  case "${tail}" in
+    ironclaw_*/*)
+      return 0
+      ;;
+    */ironclaw_*/*)
+      # Drop every family segment ahead of the crate, not just the first, so the
+      # fallback is as depth-independent as the tree lookup above it. Anchored on
+      # the FIRST `ironclaw_` segment (`%%` keeps the shortest prefix): a greedy
+      # match on the last one would fold
+      # `crates/f/ironclaw_events/src/ironclaw_helper.rs` down to
+      # `crates/ironclaw_helper.rs`.
+      NORMALIZED_PATH="crates/${tail#"${tail%%/ironclaw_*}"/}"
+      return 0
+      ;;
+  esac
+
+  # Default arm: a path under crates/ that resolves to no crate, by tree or by
+  # convention. Historically this silently fell through to "legacy tests only",
+  # which is how a re-shaped crate tree drops the Reborn suite. Refuse instead.
+  echo "classify-test-scope: cannot attribute '${path}' to any crate under" \
+    "${repo_root}/crates. Add the crate to the tree, or teach this classifier the" \
+    "new path shape — silently bucketing it would skip whichever suite owns it" \
+    "(CHECKLIST WS10)." >&2
+  exit 1
+}
 
 is_docs_only_path() {
   local path="$1"
@@ -54,7 +203,7 @@ is_shared_test_path() {
     crates/ironclaw_prompt_envelope/*|crates/ironclaw_hooks/*|crates/ironclaw_first_party_extensions/*|crates/ironclaw_llm/*)
       return 0
       ;;
-    crates/ironclaw_embeddings/*|crates/ironclaw_safety/*|crates/ironclaw_skills/*|crates/ironclaw_oauth/*)
+    crates/ironclaw_safety/*|crates/ironclaw_skills/*|crates/ironclaw_oauth/*)
       return 0
       ;;
     *)
@@ -114,8 +263,13 @@ is_code_path() {
   esac
 }
 
-while IFS= read -r path || [ -n "$path" ]; do
-  [ -n "$path" ] || continue
+discover_crate_dirs
+
+while IFS= read -r raw_path || [ -n "$raw_path" ]; do
+  [ -n "$raw_path" ] || continue
+
+  normalize_crate_path "$raw_path"
+  path="${NORMALIZED_PATH}"
 
   if ! is_docs_only_path "$path"; then
     docs_only=false

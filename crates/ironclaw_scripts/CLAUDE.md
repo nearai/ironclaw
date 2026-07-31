@@ -5,4 +5,4 @@
 - Runtime HTTP, secret injection, network policy, and approval/authorization must be mediated by host-runtime services, not implemented in script backends.
 - If a prepared resource reservation is provided, reconcile/release that reservation exactly once instead of reserving again.
 - Bound stdout/stderr and wall-clock behavior through configuration; runtime-visible errors must be stable and sanitized.
-- Keep script-specific execution semantics here. Extension parsing belongs in `ironclaw_extensions`, dispatch selection in `ironclaw_dispatcher`, process lifecycle in `ironclaw_processes`, and product workflow outside this crate.
+- Keep script-specific execution semantics here. Extension parsing belongs in `ironclaw_extensions`, dispatch selection in `ironclaw_capabilities`, process lifecycle in `ironclaw_processes`, and product workflow outside this crate.
