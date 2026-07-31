@@ -25,9 +25,10 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{
     MAX_TRANSACTION_RETRIES, ProcessJournalStore, ProcessJournalStoreError, StoredCommandOutcome,
-    StoredProcessCommand, process_journal_sequence_path, processes_prefix, rows,
+    StoredProcessCommand, observer::CommittedBatch, process_journal_sequence_path,
+    processes_prefix, rows,
 };
-use crate::ProcessJournalCursor;
+use crate::{ProcessJournalCommit, ProcessJournalEntry};
 
 /// Upper bound on how many commands share one transaction. The flusher never
 /// waits to fill a batch: it commits whatever is already queued, so a single
@@ -98,11 +99,28 @@ where
 }
 
 struct DeliveryBatch {
-    target: ProcessJournalCursor,
+    committed: CommittedBatch,
     waiters: Vec<(CommandResponder, CommandResult)>,
 }
 
 impl DeliveryBatch {
+    /// Whether `next` starts exactly where this batch ends.
+    ///
+    /// Only then may the two be delivered as one range: a gap could hold
+    /// another writer's committed entries, and folding over it would advance
+    /// the observer cursor past entries that were never delivered.
+    fn precedes(&self, next: &DeliveryBatch) -> bool {
+        self.committed.last.0.saturating_add(1) == next.committed.first.0
+    }
+
+    /// Fold a directly following batch into this one so a run of commits is
+    /// delivered in a single pass, in cursor order.
+    fn absorb(&mut self, next: DeliveryBatch) {
+        self.committed.last = next.committed.last;
+        self.committed.commits.extend(next.committed.commits);
+        self.waiters.extend(next.waiters);
+    }
+
     fn release(self) {
         for (responder, result) in self.waiters {
             let _ = responder.send(result);
@@ -151,33 +169,52 @@ async fn run_delivery<F>(
 ) where
     F: RootFilesystem + Send + Sync + 'static,
 {
-    while let Some(first) = receiver.recv().await {
-        let mut target = first.target;
-        let mut waiters = first.waiters;
+    let mut carried: Option<DeliveryBatch> = None;
+    loop {
+        let mut batch = match carried.take() {
+            Some(batch) => batch,
+            None => match receiver.recv().await {
+                Some(batch) => batch,
+                None => break,
+            },
+        };
         while let Ok(next) = receiver.try_recv() {
-            if next.target.0 > target.0 {
-                target = next.target;
-            }
-            waiters.extend(next.waiters);
-        }
-        for observer in store.registered_observers() {
-            if let Err(error) = store
-                .replay_durable_observer_once(&observer, Some(target))
-                .await
-            {
-                tracing::warn!(
-                    observer_id = %observer.id,
-                    cursor = target.0,
-                    %error,
-                    "process journal observer delivery failed after durable commit"
-                );
-                // Commit durability is the caller's contract; delivery retries
-                // in the background exactly as it did per commit.
-                store.spawn_observer_replay(observer);
+            if batch.precedes(&next) {
+                batch.absorb(next);
+            } else {
+                carried = Some(next);
+                break;
             }
         }
-        DeliveryBatch { target, waiters }.release();
+        deliver_batch(&store, &batch.committed).await;
+        batch.release();
     }
+}
+
+/// Deliver one committed range to every observer.
+///
+/// Observers own independent cursors and stores, so they run concurrently:
+/// delivery sits between a commit and the release of its foreground waiters,
+/// and serializing independent observers there adds their latencies together.
+async fn deliver_batch<F>(store: &ProcessJournalStore<F>, committed: &CommittedBatch)
+where
+    F: RootFilesystem + Send + Sync + 'static,
+{
+    let observers = store.registered_observers();
+    futures::future::join_all(observers.into_iter().map(|observer| async move {
+        if let Err(error) = store.deliver_committed_batch(&observer, committed).await {
+            tracing::warn!(
+                observer_id = %observer.id,
+                cursor = committed.last.0,
+                %error,
+                "process journal observer delivery failed after durable commit"
+            );
+            // Commit durability is the caller's contract; delivery retries in
+            // the background exactly as it did per commit.
+            store.spawn_observer_replay(observer);
+        }
+    }))
+    .await;
 }
 
 struct PendingCommand {
@@ -365,7 +402,6 @@ where
                 Err(error) => command.respond(Err(error)),
             }
         }
-        let committed_cursor = entries.last().map(|entry| entry.cursor);
         let result = async {
             rows::persist(store.filesystem.as_ref(), txn.as_mut(), &loaded, &state).await?;
             rows::persist_journal(store.filesystem.as_ref(), txn.as_mut(), entries.as_slice())
@@ -376,7 +412,10 @@ where
         match result {
             Ok(()) => match txn.commit().await {
                 Ok(()) => {
-                    release_committed_batch(store, pending, committed_cursor, deliveries);
+                    // The committed entries are the delivery payload: observers
+                    // are fed from memory instead of paging the journal back
+                    // out of the backend.
+                    release_committed_batch(store, pending, committed_batch(entries), deliveries);
                     return Ok(());
                 }
                 Err(error) if rows::retryable_transaction_error(&error) => {
@@ -411,17 +450,41 @@ fn discard_outcomes(pending: &mut [PendingCommand]) {
     }
 }
 
+/// Turn the entries this transaction committed into the delivery payload.
+///
+/// Entries without committed state advance the observer cursor but carry
+/// nothing to deliver, so they bound the range without joining `commits`.
+fn committed_batch(entries: Vec<ProcessJournalEntry>) -> Option<CommittedBatch> {
+    let first = entries.first()?.cursor;
+    let last = entries.last()?.cursor;
+    let commits = entries
+        .into_iter()
+        .filter_map(|entry| {
+            entry.committed_state.map(|state| ProcessJournalCommit {
+                state: *state,
+                kind: entry.kind,
+                sanitized_reason: entry.sanitized_reason,
+            })
+        })
+        .collect();
+    Some(CommittedBatch {
+        first,
+        last,
+        commits,
+    })
+}
+
 /// Answer a committed batch, holding back callers that require read-your-writes
 /// until this batch has been delivered to every registered observer.
 fn release_committed_batch<F>(
     store: &ProcessJournalStore<F>,
     pending: &mut [PendingCommand],
-    committed_cursor: Option<ProcessJournalCursor>,
+    committed: Option<CommittedBatch>,
     deliveries: &mpsc::UnboundedSender<DeliveryBatch>,
 ) where
     F: RootFilesystem + Send + Sync + 'static,
 {
-    let deliver = committed_cursor.is_some() && !store.registered_observers().is_empty();
+    let deliver = committed.is_some() && !store.registered_observers().is_empty();
     let mut waiters = Vec::new();
     for command in pending.iter_mut() {
         let Some(outcome) = command.outcome.take() else {
@@ -436,13 +499,14 @@ fn release_committed_batch<F>(
             let _ = responder.send(Ok(outcome));
         }
     }
-    let Some(target) = committed_cursor.filter(|_| deliver) else {
+    let Some(committed) = committed.filter(|_| deliver) else {
         return;
     };
-    let batch = DeliveryBatch { target, waiters };
+    let cursor = committed.last.0;
+    let batch = DeliveryBatch { committed, waiters };
     if let Err(undeliverable) = deliveries.send(batch) {
         tracing::warn!(
-            cursor = target.0,
+            cursor,
             "process journal delivery task is gone; committed batch will not be delivered"
         );
         undeliverable.0.release();

@@ -74,6 +74,8 @@ impl ProcessJournalCommitObserver for RecordingProcessObserver {
 #[derive(Default)]
 struct SuspendingProcessObserver {
     commits: Mutex<Vec<ProcessJournalCommit>>,
+    /// Size of every batch this observer was handed, in delivery order.
+    batch_sizes: Mutex<Vec<usize>>,
 }
 
 #[async_trait]
@@ -88,6 +90,20 @@ impl ProcessJournalCommitObserver for SuspendingProcessObserver {
             .lock()
             .map_err(|_| "observer mutex poisoned".to_string())?
             .push(commit);
+        Ok(())
+    }
+
+    async fn observe_process_commits(
+        &self,
+        commits: Vec<ProcessJournalCommit>,
+    ) -> Result<(), String> {
+        self.batch_sizes
+            .lock()
+            .map_err(|_| "observer mutex poisoned".to_string())?
+            .push(commits.len());
+        for commit in commits {
+            self.observe_process_commit(commit).await?;
+        }
         Ok(())
     }
 }
@@ -1691,6 +1707,17 @@ async fn group_committed_submissions_deliver_every_entry_once_before_returning()
     });
     let snapshots = futures::future::join_all(submissions).await;
     assert_eq!(snapshots.len(), process_ids.len());
+
+    // The 32 group-committed submissions reach the observer as one batched
+    // call, not 32: delivery sits between the commit and the caller's response,
+    // so a per-entry hand-off there costs a round trip per entry.
+    let batch_sizes = observer.batch_sizes.lock().expect("observer batch sizes");
+    assert!(
+        batch_sizes.contains(&process_ids.len()),
+        "expected one delivery of {} commits, saw batches {batch_sizes:?}",
+        process_ids.len()
+    );
+    drop(batch_sizes);
 
     let commits = observer.commits.lock().expect("observer commits");
     assert_eq!(

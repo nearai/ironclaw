@@ -20,8 +20,34 @@ use crate::{
 pub(super) struct RegisteredProcessObserver {
     pub(super) id: String,
     pub(super) observer: Arc<dyn ProcessJournalCommitObserver>,
-    pub(super) delivery: Arc<Mutex<()>>,
+    pub(super) delivery: Arc<Mutex<ObserverDeliveryState>>,
     pub(super) replay_running: Arc<AtomicBool>,
+}
+
+/// Delivery progress for one observer, guarded by its delivery lock.
+#[derive(Default)]
+pub(super) struct ObserverDeliveryState {
+    /// Last cursor known to be durably acknowledged, when this process has
+    /// already read or written the observer's cursor row.
+    ///
+    /// Caching it is what lets a committed batch be delivered straight from the
+    /// entries the flusher already holds: without it every batch would re-read
+    /// the cursor row and page the journal back out of the backend just to
+    /// rediscover what it had in memory.
+    acknowledged: Option<ProcessJournalCursor>,
+}
+
+/// One or more committed transactions' deliverable entries, carried in memory
+/// from the flusher to observer delivery so the common path never reads the
+/// journal back out of the backend.
+pub(super) struct CommittedBatch {
+    /// Cursor of the first journal entry the batch committed.
+    pub(super) first: ProcessJournalCursor,
+    /// Cursor of the last journal entry the batch committed.
+    pub(super) last: ProcessJournalCursor,
+    /// Entries that carry committed state, in cursor order. Entries without
+    /// committed state advance the cursor but are not delivered.
+    pub(super) commits: Vec<ProcessJournalCommit>,
 }
 
 tokio::task_local! {
@@ -70,12 +96,74 @@ where
         }
     }
 
+    /// Deliver one committed batch straight from the entries the flusher holds.
+    ///
+    /// This is the hot path: it costs one cursor write per observer and reads
+    /// nothing back out of the backend. It is only valid when the observer's
+    /// acknowledged cursor sits immediately before the batch, which is the
+    /// normal case because the flusher delivers batches in commit order. Any
+    /// gap — a cold cache, another writer's entries, or a cursor range this
+    /// process reserved but did not use — falls back to the paged replay, which
+    /// is authoritative.
+    pub(super) async fn deliver_committed_batch(
+        &self,
+        observer: &RegisteredProcessObserver,
+        batch: &CommittedBatch,
+    ) -> Result<(), String> {
+        let mut delivery = observer.delivery.lock().await;
+        let contiguous = delivery
+            .acknowledged
+            .is_some_and(|acknowledged| acknowledged.0.saturating_add(1) == batch.first.0);
+        if !contiguous {
+            drop(delivery);
+            return self
+                .replay_durable_observer_once(observer, Some(batch.last))
+                .await;
+        }
+        if !batch.commits.is_empty() {
+            // Callbacks may re-enter the journal store; the marker lets those
+            // nested commits skip the delivery wait that this very call holds
+            // (see `flusher`).
+            observer_delivery_scope(
+                observer
+                    .observer
+                    .observe_process_commits(batch.commits.clone()),
+            )
+            .await?;
+        }
+        self.acknowledge_observer_cursor(observer, &mut delivery, batch.last)
+            .await
+    }
+
+    /// Persist an observer's delivery cursor and refresh the cached value.
+    async fn acknowledge_observer_cursor(
+        &self,
+        observer: &RegisteredProcessObserver,
+        delivery: &mut ObserverDeliveryState,
+        cursor: ProcessJournalCursor,
+    ) -> Result<(), String> {
+        let cursor_path =
+            process_observer_cursor_path(&observer.id).map_err(|error| error.to_string())?;
+        let cursor_body = serde_json::to_vec(&cursor.0).map_err(|error| error.to_string())?;
+        self.filesystem
+            .put(
+                &ResourceScope::system(),
+                &cursor_path,
+                Entry::bytes(cursor_body),
+                CasExpectation::Any,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        delivery.acknowledged = Some(cursor);
+        Ok(())
+    }
+
     pub(super) async fn replay_durable_observer_once(
         &self,
         observer: &RegisteredProcessObserver,
         target: Option<ProcessJournalCursor>,
     ) -> Result<(), String> {
-        let _delivery = observer.delivery.lock().await;
+        let mut delivery = observer.delivery.lock().await;
         let cursor_path =
             process_observer_cursor_path(&observer.id).map_err(|error| error.to_string())?;
         let mut after = self
@@ -89,6 +177,11 @@ where
                     .map_err(|error| error.to_string())
             })
             .transpose()?;
+        // Cursor 0 precedes every real entry, so an observer with no cursor row
+        // has provably acknowledged nothing. Recording that (rather than
+        // "unknown") lets a journal that starts empty take the in-memory
+        // delivery path from its very first batch.
+        delivery.acknowledged = Some(after.unwrap_or(ProcessJournalCursor(0)));
         loop {
             // A concurrent replay may already have delivered past this target
             // while this call waited for the delivery lock.
@@ -103,19 +196,14 @@ where
                 .map_err(|error| error.to_string())?;
             let mut delivered = None;
             let mut reached_target = false;
+            let mut commits = Vec::new();
             for entry in &page.entries {
                 if let Some(state) = entry.committed_state.as_deref() {
-                    // Callbacks may re-enter the journal store; the marker lets
-                    // those nested commits skip the delivery wait that this
-                    // very call is holding (see `flusher`).
-                    observer_delivery_scope(observer.observer.observe_process_commit(
-                        ProcessJournalCommit {
-                            state: state.clone(),
-                            kind: entry.kind,
-                            sanitized_reason: entry.sanitized_reason.clone(),
-                        },
-                    ))
-                    .await?;
+                    commits.push(ProcessJournalCommit {
+                        state: state.clone(),
+                        kind: entry.kind,
+                        sanitized_reason: entry.sanitized_reason.clone(),
+                    });
                 }
                 delivered = Some(entry.cursor);
                 if target.is_some_and(|target| entry.cursor.0 >= target.0) {
@@ -123,21 +211,15 @@ where
                     break;
                 }
             }
+            if !commits.is_empty() {
+                observer_delivery_scope(observer.observer.observe_process_commits(commits)).await?;
+            }
             // One cursor write per delivered page rather than per entry. A
-            // crash between pages redelivers the page; observers already
-            // tolerate redelivery because every retry path replays.
+            // crash mid-page redelivers the page; observers already tolerate
+            // redelivery because every retry path replays.
             if let Some(cursor) = delivered {
-                let cursor_body =
-                    serde_json::to_vec(&cursor.0).map_err(|error| error.to_string())?;
-                self.filesystem
-                    .put(
-                        &ResourceScope::system(),
-                        &cursor_path,
-                        Entry::bytes(cursor_body),
-                        CasExpectation::Any,
-                    )
-                    .await
-                    .map_err(|error| error.to_string())?;
+                self.acknowledge_observer_cursor(observer, &mut delivery, cursor)
+                    .await?;
             }
             if reached_target || !page.truncated {
                 return Ok(());
@@ -190,7 +272,7 @@ where
         let registered = RegisteredProcessObserver {
             id: observer.process_observer_id().to_string(),
             observer,
-            delivery: Arc::new(Mutex::new(())),
+            delivery: Arc::new(Mutex::new(ObserverDeliveryState::default())),
             replay_running: Arc::new(AtomicBool::new(false)),
         };
         if observers
