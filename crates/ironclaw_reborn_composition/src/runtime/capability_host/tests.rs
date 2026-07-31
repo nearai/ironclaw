@@ -2461,11 +2461,45 @@ mod tests {
                 .contains("An ambiguous name fails without loading anything"),
             "skill_activate description must not imply every visible bare name is actionable"
         );
+        // Per-skill relevance gate. Telling the model to activate FIRST lifts activation and
+        // over-reach together: measured, the ported build activated `docx` for a task whose only
+        // deliverable is an .xlsx file. The old guard said "do not activate skills unrelated to
+        // the task", which is too vague to stop an adjacent guess. This makes the test concrete
+        // and evidence-based -- does the task EXPLICITLY involve what the description names --
+        // and it gates each skill individually rather than capping the set size, which is what
+        // the reverted "smallest relevant set" wording did wrong.
         assert!(
             descriptor
                 .safe_description
-                .contains("at most eight active skills total per run"),
+                .contains("only when the task EXPLICITLY involves what its description names"),
+            "skill_activate description must gate each skill on explicit task relevance"
+        );
+        assert!(
+            descriptor
+                .safe_description
+                .contains("at most eight active per run"),
             "skill_activate description must advertise the selector's activation limit"
+        );
+        // One skill per call, which is claude-code's `Skill` tool shape. The array form invited
+        // over-reach: measured over 29 runs, single-skill calls were 12 correct and 0 wrong while
+        // multi-skill calls were 10 correct and 1 wrong -- every wrong activation came from a
+        // submitted list. Several skills stay reachable by calling again, so this bounds
+        // commitment per call, not the total.
+        assert!(
+            descriptor
+                .safe_description
+                .contains("one skill per call"),
+            "skill_activate must ask for one skill per call, as claude-code's Skill tool does"
+        );
+        assert_eq!(
+            descriptor
+                .parameters_schema
+                .get("properties")
+                .and_then(|p| p.get("skill"))
+                .and_then(|sk| sk.get("type"))
+                .and_then(serde_json::Value::as_str),
+            Some("string"),
+            "the advertised input must be a single skill name, not an array"
         );
         assert!(
             descriptor
@@ -2473,30 +2507,6 @@ mod tests {
                 .get("properties")
                 .and_then(|properties| properties.get("names"))
                 .is_some()
-        );
-        assert_eq!(
-            descriptor
-                .parameters_schema
-                .get("properties")
-                .and_then(|properties| properties.get("names"))
-                .and_then(|names| names.get("description"))
-                .and_then(serde_json::Value::as_str),
-            Some(
-                "Exact skill names copied from the available-skills list; at most eight total per run"
-            )
-        );
-        assert_eq!(
-            descriptor
-                .parameters_schema
-                .get("properties")
-                .and_then(|properties| properties.get("names"))
-                .and_then(|names| names.get("maxItems"))
-                .and_then(serde_json::Value::as_u64),
-            // Tracks DEFAULT_MAX_ACTIVE_SKILLS, raised 4 -> 8. Four made correct routing
-            // impossible on real tasks: 3 of 31 SkillsBench routing tasks expect five skills
-            // and 4 more expect four, so recall was capped by this constant rather than by
-            // anything the model did.
-            Some(8)
         );
         let tool_definition = port
             .tool_definitions()

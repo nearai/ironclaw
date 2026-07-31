@@ -19,7 +19,7 @@ use crate::{
 
 pub const SKILL_ACTIVATE_CAPABILITY_ID: &str = "builtin.skill_activate";
 const SKILL_ACTIVATE_PROVIDER_TOOL_NAME: &str = "builtin__skill_activate";
-const SKILL_ACTIVATE_DESCRIPTION: &str = "A skill is a packaged set of instructions someone has already written for a particular kind of task. Available skills are listed for you, each with a one-line description. When the task at hand is one a listed skill covers, call this FIRST: the skill's instructions load into the run and you follow them instead of your own default approach, which is the point -- a listed skill encodes decisions you would otherwise have to rediscover. Use exact listed names, pick the smallest relevant set (at most eight active skills total per run; large skills may reduce that), and do not activate skills unrelated to the task. An ambiguous name fails without loading anything.";
+const SKILL_ACTIVATE_DESCRIPTION: &str = "A skill is a packaged set of instructions someone has already written for a particular kind of task. Available skills are listed for you, each with a one-line description. When the task at hand is one a listed skill covers, call this FIRST: the skill's instructions load into the run and you follow them instead of your own default approach, which is the point -- a listed skill encodes decisions you would otherwise have to rediscover. Use an exact listed name, one skill per call -- call again for each further skill the task needs (at most eight active per run; large skills may reduce that). Activate a skill only when the task EXPLICITLY involves what its description names -- a file format the task actually uses, a domain the task actually is about. If the task never mentions it, do not activate it even when it looks adjacent: an adjacent skill spends the budget and its instructions pull you off-task. An ambiguous name fails without loading anything.";
 
 pub fn skill_activation_capability<S>(
     skill_activation_source: Arc<SelectableSkillContextSource<S>>,
@@ -128,44 +128,76 @@ fn skill_activate_input_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
-            "names": {
-                "type": "array",
-                "items": { "type": "string" },
-                "minItems": 1,
-                "maxItems": DEFAULT_MAX_ACTIVE_SKILLS,
-                "description": "Exact skill names copied from the available-skills list; at most eight total per run"
+            // ONE skill per call, which is claude-code's `Skill` tool shape (`{"skill": "pdf"}`),
+            // reached by copying it rather than inventing a variant.
+            //
+            // The array form invited over-reach. Measured across 29 runs: single-skill calls were
+            // 12 correct and 0 wrong, while multi-skill calls were 10 correct and 1 wrong -- every
+            // wrong activation came from a call that submitted a list. Naming a set lets an
+            // adjacent skill ride along ("xlsx, and docx while I'm at it"); naming one forces a
+            // commitment per skill.
+            //
+            // This does NOT cap how many skills a run may activate: call again. `max_active_skills`
+            // still bounds the total, and that is where the budget belongs.
+            "skill": {
+                "type": "string",
+                "description": "One exact skill name copied from the available-skills list. To activate several, call again once per skill."
             }
         },
-        "required": ["names"],
+        "required": ["skill"],
         "additionalProperties": false
     })
 }
 
+/// Parse the one skill name this call activates.
+///
+/// Returns a `Vec` of exactly one so the downstream selection path, which is set-shaped and
+/// stays that way, needs no change. The array input form was removed because it invited
+/// over-reach: measured across 29 runs, single-skill calls were 12 correct and 0 wrong while
+/// multi-skill calls were 10 correct and 1 wrong -- every wrong activation came from a submitted
+/// list. Several skills are still reachable, by calling again.
+///
+/// A legacy `names` array is still accepted so an in-flight caller or recorded trace does not
+/// hard-fail, but it is not advertised in the schema.
 fn parse_skill_activate_names(
     input: &serde_json::Value,
 ) -> Result<Vec<String>, AgentLoopHostError> {
+    fn clean(value: &serde_json::Value) -> Option<String> {
+        value
+            .as_str()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+    }
+
+    if let Some(skill) = input.get("skill") {
+        let name = clean(skill).ok_or_else(|| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "skill_activate requires a non-empty skill name",
+            )
+        })?;
+        return Ok(vec![name]);
+    }
+
+    // Legacy array form, undocumented and deliberately still bounded.
     let names = input
         .get("names")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| {
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
-                "skill_activate requires a names array",
+                "skill_activate requires a skill name",
             )
         })?;
     let parsed = names
         .iter()
         .map(|value| {
-            value
-                .as_str()
-                .map(|name| name.trim().to_string())
-                .filter(|name| !name.is_empty())
-                .ok_or_else(|| {
-                    AgentLoopHostError::new(
-                        AgentLoopHostErrorKind::InvalidInvocation,
-                        "skill_activate names must be non-empty strings",
-                    )
-                })
+            clean(value).ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "skill_activate names must be non-empty strings",
+                )
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
     if parsed.is_empty() {
