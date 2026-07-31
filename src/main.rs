@@ -39,10 +39,22 @@ fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
     ironclaw::bootstrap::load_ironclaw_env();
 
-    let result = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(async_main());
+    // Check if we're running acp-serve — it needs a current_thread runtime
+    // because the ACP protocol's LocalSet + stdin compat doesn't work on multi_thread.
+    let args: Vec<String> = std::env::args().collect();
+    let is_acp_serve = args.iter().any(|a| a == "acp-serve");
+
+    let result = if is_acp_serve {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(async_main())
+    } else {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(async_main())
+    };
 
     if let Err(ref e) = result {
         format_top_level_error(e);
@@ -229,6 +241,21 @@ async fn async_main() -> anyhow::Result<()> {
         Some(Command::Acp(acp_cmd)) => {
             init_cli_tracing();
             return ironclaw::cli::run_acp_command(acp_cmd.clone()).await;
+        }
+        Some(Command::AcpServe { args }) => {
+            // Tracing to stderr — stdout is the ACP protocol channel.
+            // Bridge `log` crate (used by agent-client-protocol RPC) to tracing
+            // so we can see protocol-level errors and trace messages.
+            // Order matters: init the subscriber FIRST, then bridge log → tracing.
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+                )
+                .init();
+            let _ = tracing_log::LogTracer::init();
+            return ironclaw::cli::acp_serve::run_acp_serve(args.clone()).await;
         }
         Some(Command::Worker {
             job_id,

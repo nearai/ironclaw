@@ -29,6 +29,128 @@ use crate::llm::{ChatMessage, ToolCall};
 use crate::tools::redact_params;
 use ironclaw_common::truncate_preview;
 
+/// Publish a response as a Buzz channel message via `buzz messages send`.
+///
+/// Buzz Desktop's main chat feed only renders Nostr channel events (kind 9).
+/// `agent_message_chunk` via ACP goes to the Activity panel only. To appear in
+/// the main chat, the agent must publish a channel message using `buzz messages send`.
+///
+/// This function parses the `[Context]` block from the prompt to extract:
+/// - Channel UUID
+/// - Reply-to event ID (for threading)
+///
+/// Then spawns `buzz messages send` as a subprocess using env vars
+/// `BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG` (set by buzz-acp).
+pub(crate) fn publish_to_buzz_channel(prompt: &str, response: &str) {
+    eprintln!("[BUZZ_CHANNEL] prompt len={}, first 300 chars: {}", prompt.len(), &prompt[..prompt.len().min(300)]);
+    let (channel_id, reply_to) = match parse_buzz_context(prompt) {
+        Some(v) => v,
+        None => {
+            eprintln!("[BUZZ_CHANNEL] no [Context] block found in prompt, skipping publish");
+            return;
+        }
+    };
+    let response = response.trim();
+    if response.is_empty() {
+        eprintln!("[BUZZ_CHANNEL] empty response, skipping publish");
+        return;
+    }
+    if std::env::var("BUZZ_RELAY_URL").is_err() || std::env::var("BUZZ_PRIVATE_KEY").is_err() {
+        eprintln!("[BUZZ_CHANNEL] missing BUZZ_RELAY_URL or BUZZ_PRIVATE_KEY env vars");
+        eprintln!("[BUZZ_CHANNEL] BUZZ_RELAY_URL={}", std::env::var("BUZZ_RELAY_URL").unwrap_or_else(|_| "NOT SET".into()));
+        eprintln!("[BUZZ_CHANNEL] BUZZ_PRIVATE_KEY={}", if std::env::var("BUZZ_PRIVATE_KEY").is_ok() { "SET" } else { "NOT SET" });
+        return;
+    }
+
+    let mut cmd = std::process::Command::new("buzz");
+    cmd.arg("messages").arg("send").arg("--channel").arg(&channel_id);
+    if let Some(ref event_id) = reply_to {
+        cmd.arg("--reply-to").arg(event_id);
+    }
+    cmd.arg("--content").arg(response);
+
+    eprintln!("[BUZZ_CHANNEL] channel={}, reply_to={:?}", channel_id, reply_to);
+    match cmd.output() {
+        Ok(output) => {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                eprintln!("[BUZZ_CHANNEL] published OK: {}", stdout.trim());
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                eprintln!("[BUZZ_CHANNEL] FAILED (status={}): {}", output.status, stderr.trim());
+            }
+        }
+        Err(e) => {
+            eprintln!("[BUZZ_CHANNEL] failed to run buzz: {}", e);
+        }
+    }
+}
+
+/// Parse the `[Context]` block from a Buzz-acp prompt to extract channel UUID
+/// and optional reply-to event ID.
+///
+/// The context block format:
+/// ```text
+/// [Context]
+/// Scope: thread|channel|dm
+/// Channel: Name (#uuid)
+/// Thread root: event_id
+/// IMPORTANT: ... use `--reply-to event_id` ...
+/// ```
+fn parse_buzz_context(prompt: &str) -> Option<(String, Option<String>)> {
+    let ctx_start = prompt.find("[Context]")?;
+    let ctx_end = prompt[ctx_start..]
+        .find("\n\n")
+        .map(|i| ctx_start + i)
+        .unwrap_or(prompt.len());
+    let ctx = &prompt[ctx_start..ctx_end];
+
+    // Extract channel UUID from "Channel: ... (#uuid)" or bare UUID
+    let channel_id = if let Some(uuid_start) = ctx.find("(#") {
+        let rest = &ctx[uuid_start + 2..];
+        let uuid_end = rest.find(')').unwrap_or(rest.len());
+        rest[..uuid_end].to_string()
+    } else {
+        // Try bare UUID on a Channel: line
+        let channel_line = ctx.lines().find(|l| l.starts_with("Channel:"))?;
+        // Extract hex UUID (8-4-4-4-12 format)
+        let re = regex::Regex::new(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+            .ok()?;
+        let caps = re.captures(channel_line)?;
+        caps[0].to_string()
+    };
+
+    // Extract reply-to event ID. Prefer "Parent:" (immediate parent) so replies
+    // nest under the user's message. Fallback to `--reply-to` (thread root anchor).
+    let reply_to = {
+        let from_parent = ctx.lines().find(|l| l.trim().starts_with("Parent:")).and_then(|l| {
+            l.split(':').nth(1).map(str::trim).and_then(|id| {
+                if id.len() >= 32 && id.chars().all(|c| c.is_ascii_hexdigit()) {
+                    Some(id.to_string())
+                } else {
+                    None
+                }
+            })
+        });
+        from_parent.or_else(|| {
+            ctx.find("--reply-to ").and_then(|reply_start| {
+                let rest = &ctx[reply_start + 11..];
+                let reply_end = rest
+                    .find(|c: char| c == '`' || c == '\n' || c == ' ')
+                    .unwrap_or(rest.len());
+                let event_id = rest[..reply_end].to_string();
+                if event_id.len() >= 32 && event_id.chars().all(|c| c.is_ascii_hexdigit()) {
+                    Some(event_id)
+                } else {
+                    None
+                }
+            })
+        })
+    };
+
+    Some((channel_id, reply_to))
+}
+
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
 const LIVE_STATE_METADATA_KEY: &str = "live_state";
 
@@ -782,6 +904,16 @@ impl Agent {
                     .last()
                     .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                     .unwrap_or_default();
+
+                // When the LLM returned empty text (e.g. refusal), fall back to
+                // the turn narrative so the publish hook and main chat still get
+                // content. The narrative captures the agent's reasoning which is
+                // what the user sees as "thinking" in the Activity panel.
+                let response = if response.trim().is_empty() {
+                    narrative.clone().unwrap_or_default()
+                } else {
+                    response
+                };
                 drop(sess);
 
                 // Persist tool calls then assistant response (user message already persisted at turn start)
@@ -816,6 +948,35 @@ impl Agent {
 
                 self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                     .await;
+
+                // Emit the final response as a StreamChunk so ACP sends it
+                // as agent_message_chunk. Must arrive BEFORE the prompt
+                // response so Buzz Desktop has time to render the message.
+                // Without this gap the notification and JSON-RPC response
+                // arrive in the same read cycle and the frontend skips the
+                // notification in favour of the (empty) prompt result.
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::StreamChunk(response.clone()),
+                        &message.metadata,
+                    )
+                    .await;
+
+                // Give Buzz time to process the notification before we
+                // send the prompt response on the same stdout pipe.
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+                // Publish response to Buzz channel so it appears in the
+                // main chat feed (Nostr kind 9). agent_message_chunk only
+                // goes to the Activity panel. Fire-and-forget — don't
+                // block the prompt response on the CLI publish.
+                let prompt_text = content.to_string();
+                let resp_text = response.clone();
+                tokio::task::spawn_blocking(move || {
+                    publish_to_buzz_channel(&prompt_text, &resp_text);
+                });
 
                 Ok(SubmissionResult::response(response))
             }

@@ -16,6 +16,7 @@
 //! - Checking system health (`status`)
 
 pub mod acp;
+pub mod acp_serve;
 mod channels;
 mod completion;
 mod config;
@@ -358,6 +359,14 @@ pub enum Command {
         long_about = "Add, list, remove, or test ACP-compliant coding agents.\nExample: ironclaw acp add goose --command goose --arg \"--stdio\""
     )]
     Acp(AcpCommand),
+
+    /// Speak ACP server protocol on stdio, running the full IronClaw agent.
+    /// Use this as a custom harness in ACP clients (e.g. Buzz Desktop).
+    #[command(about = "ACP server mode — full IronClaw agent over stdio")]
+    AcpServe {
+        #[command(flatten)]
+        args: acp_serve::AcpServeArgs,
+    },
 
     /// Run as a Claude Code bridge inside a Docker container (internal use).
     /// Spawns the `claude` CLI and streams output back to the orchestrator.

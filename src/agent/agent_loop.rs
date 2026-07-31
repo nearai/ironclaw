@@ -384,7 +384,9 @@ impl Agent {
         message: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        eprintln!("[AGENT] respond_then_done called: len={}", response.content.len());
         let respond_result = self.channels.respond(message, response).await;
+        eprintln!("[AGENT] channels.respond() returned: {:?}", respond_result.is_ok());
         // Always emit Done regardless of whether respond succeeded, so the
         // client knows the turn is over even when the response delivery fails.
         if let Err(e) = self
@@ -1176,6 +1178,7 @@ impl Agent {
 
             match self.handle_message(&message).await {
                 Ok(HandleOutcome::Respond(response)) => {
+                    eprintln!("[AGENT] HandleOutcome::Respond: len={}", response.len());
                     // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
                     let event = crate::hooks::HookEvent::Outbound {
                         user_id: message.user_id.clone(),

@@ -3963,6 +3963,7 @@ dependencies = [
  "tower 0.5.3",
  "tower-http 0.6.8",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
  "tracing-test",
  "url",
