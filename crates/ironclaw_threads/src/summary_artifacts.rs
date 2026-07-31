@@ -68,7 +68,7 @@ fn ranges_overlap(left_start: u64, left_end: u64, right_start: u64, right_end: u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 
     fn scope() -> crate::ThreadScope {
         crate::ThreadScope {

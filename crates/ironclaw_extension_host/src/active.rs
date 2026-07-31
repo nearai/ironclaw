@@ -10,8 +10,12 @@ use std::sync::Arc;
 
 use ironclaw_extensions::ResolvedExtensionManifest;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, Extension, ExtensionContract, ExtensionInstanceId,
-    ExtensionRuntimeIdentity, RequestedTrustClass, ToolAdapter, TrustClass,
+    capability::CapabilityDescriptor,
+    extension::{Extension, ExtensionContract, ExtensionInstanceId, ExtensionRuntimeIdentity},
+    ids::CapabilityId,
+    runtime::TrustClass,
+    tool_adapter::ToolAdapter,
+    trust::RequestedTrustClass,
 };
 use ironclaw_product::ChannelAdapter;
 
@@ -38,7 +42,7 @@ impl BoundExtension {
         installation_id: &str,
         tools: Option<Arc<dyn ToolAdapter>>,
         channel: Option<Arc<dyn ChannelAdapter>>,
-    ) -> Result<Self, ironclaw_host_api::HostApiError> {
+    ) -> Result<Self, ironclaw_host_api::error::HostApiError> {
         Ok(Self {
             contract: ExtensionContract {
                 identity: ExtensionRuntimeIdentity {

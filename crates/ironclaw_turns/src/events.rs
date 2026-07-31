@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{sync::Arc, sync::Mutex};
 use thiserror::Error;
 
-use ironclaw_host_api::{RuntimeCredentialAuthRequirement, Timestamp, UserId};
+use ironclaw_host_api::{Timestamp, decision::RuntimeCredentialAuthRequirement, ids::UserId};
 
 use crate::{
     CapabilityActivityId, GateKind, GateRef, TurnError, TurnRunId, TurnRunState, TurnScope,
@@ -555,8 +555,8 @@ pub(crate) fn project_turn_events(
 mod tests {
     use async_trait::async_trait;
     use ironclaw_host_api::{
-        AgentId, ExtensionId, ProjectId, RuntimeCredentialAuthRequirement, TenantId, ThreadId,
-        UserId, VendorId,
+        decision::RuntimeCredentialAuthRequirement,
+        ids::{AgentId, ExtensionId, ProjectId, TenantId, ThreadId, UserId, VendorId},
     };
 
     use crate::{

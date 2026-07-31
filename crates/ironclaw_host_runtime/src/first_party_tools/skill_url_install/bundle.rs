@@ -1,6 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 
-use ironclaw_host_api::RuntimeDispatchErrorKind;
+use ironclaw_host_api::dispatch::RuntimeDispatchErrorKind;
 use ironclaw_skills::normalize_safe_relative_path;
 
 use crate::FirstPartyCapabilityError;

@@ -10,10 +10,16 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CapabilityGrantId, CapabilityId, ExtensionId, InvocationOrigin, MountView, NetworkPolicy,
-    NetworkTargetPattern, Principal, ResourceCeiling, ResourceProfile,
-    RuntimeCredentialAuthRequirement, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
-    Timestamp, TrustClass, VendorId,
+    Timestamp,
+    action::{NetworkPolicy, NetworkTargetPattern},
+    decision::RuntimeCredentialAuthRequirement,
+    http::RuntimeCredentialTarget,
+    ids::{CapabilityGrantId, CapabilityId, ExtensionId, SecretHandle, VendorId},
+    invocation::InvocationOrigin,
+    mount::MountView,
+    resource::{ResourceCeiling, ResourceProfile},
+    runtime::{RuntimeKind, TrustClass},
+    scope::Principal,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -340,7 +346,10 @@ pub struct GrantConstraints {
 #[cfg(test)]
 mod capability_descriptor_runtime_kind_tests {
     use super::{CapabilityDescriptor, PermissionMode};
-    use crate::{CapabilityId, ExtensionId, RuntimeKind, TrustClass};
+    use crate::{
+        ids::{CapabilityId, ExtensionId},
+        runtime::{RuntimeKind, TrustClass},
+    };
 
     fn descriptor() -> CapabilityDescriptor {
         CapabilityDescriptor {
@@ -428,7 +437,10 @@ mod credential_setup_wire_tests {
 #[cfg(test)]
 mod origin_gate_wire_tests {
     use super::{OriginGateMatrix, OriginGatePolicy, UNGATED_LOOP_RUN_CAPABILITIES};
-    use crate::{CapabilityId, InvocationOrigin, ProductKind, RoutineId, RunId};
+    use crate::{
+        ids::{CapabilityId, ProductKind, RoutineId, RunId},
+        invocation::InvocationOrigin,
+    };
 
     /// The checked-in Ungated-for-LoopRun allowlist seed (§5.2.1/§10) must be
     /// internally consistent: non-empty, free of duplicates, and every entry a

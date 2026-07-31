@@ -1188,6 +1188,74 @@ test("mergeFullRefresh keeps same-run activity before confirmed assistant replie
   assert.equal(merged[2].keepFollowingActivityAfter, undefined);
 });
 
+test("mergeFullRefresh preserves completed intermediate assistant phases", () => {
+  const context = {
+    globalThis: {},
+    React: createReactStub(),
+    carryFinalAssistantOrderFlags,
+    isFinalAssistantMessage,
+    isRunActivityMessage,
+  };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [
+      {
+        id: "msg-user-1",
+        role: "user",
+        turnRunId: "run-1",
+      },
+      {
+        id: "tool-web-search",
+        role: "tool_activity",
+        toolName: "web_search",
+        turnRunId: "run-1",
+      },
+      {
+        id: "msg-assistant-1",
+        role: "assistant",
+        content: "Here is the final answer.",
+        isFinalReply: true,
+        turnRunId: "run-1",
+      },
+    ],
+    [
+      {
+        id: "msg-user-1",
+        role: "user",
+        turnRunId: "run-1",
+      },
+      {
+        id: "text-text:run-1:1",
+        role: "assistant",
+        content: "I’ll research this first.",
+        isFinalReply: false,
+        turnRunId: "run-1",
+      },
+      {
+        id: "tool-web-search",
+        role: "tool_activity",
+        toolName: "web_search",
+        turnRunId: "run-1",
+      },
+      {
+        id: "text-text:run-1:2",
+        role: "assistant",
+        content: "Here is the final",
+        isFinalReply: false,
+        turnRunId: "run-1",
+      },
+    ],
+  );
+
+  assert.equal(
+    merged.map((message) => message.id).join(","),
+    "msg-user-1,text-text:run-1:1,tool-web-search,msg-assistant-1",
+    "the durable final replaces only the last live phase; earlier phases keep their original order",
+  );
+});
+
 test("mergeFullRefresh preserves final assistant activity-order flag by run", () => {
   const context = {
     globalThis: {},

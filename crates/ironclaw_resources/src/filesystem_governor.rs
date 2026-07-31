@@ -22,7 +22,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem, SeqNo};
-use ironclaw_host_api::{ResourceReservation, ResourceReservationId, ResourceScope};
+use ironclaw_host_api::{
+    ids::ResourceReservationId,
+    resource::{ResourceReservation, ResourceScope},
+};
 use tracing::warn;
 
 use crate::cas_snapshot::{AsyncStorageWorkerPoolCell, new_worker_pool_cell, run_on_worker_pool};
@@ -713,8 +716,10 @@ mod tests {
 
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
-        InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
-        ResourceScope, TenantId, UserId, VirtualPath,
+        ids::{InvocationId, ProjectId, TenantId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+        resource::ResourceScope,
     };
     use rust_decimal_macros::dec;
 

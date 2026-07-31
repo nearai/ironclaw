@@ -2,7 +2,7 @@
 //! identity, and preserved originating loop refs (arch-simplification §3/§5.3
 //! **Stage 1**).
 //!
-//! These types make [`Resolution`](crate::Resolution) a **non-lossy** carrier for
+//! These types make [`Resolution`](crate::resolution::Resolution) a **non-lossy** carrier for
 //! every `CapabilityOutcome` case, so a later stage can delete that overloaded
 //! enum (§5.3). Today the `CapabilityOutcome` → `Resolution` mapping drops five
 //! classes of field for want of a host_api home (the old "G1/G4 dropped"
@@ -30,12 +30,15 @@
 //! a typed raw `HostPath`, an unscrubbed backend error, or a runtime handle. A
 //! [`LoopRef`] is a bounded correlation identifier with path delimiters and
 //! control characters refused at construction — not free text, and distinct
-//! from the kernel record refs ([`GateRef`](crate::GateRef) et al.), which stay
+//! from the kernel record refs ([`GateRef`](crate::ids::GateRef) et al.), which stay
 //! opaque uuids precisely so a caller cannot compose one from a string.
 
 use serde::{Deserialize, Serialize};
 
-use crate::{DispatchInputIssueCode, HostApiError, HostRemediation, SafeSummary};
+use crate::{
+    dispatch::DispatchInputIssueCode, error::HostApiError, host_remediation::HostRemediation,
+    safe_summary::SafeSummary,
+};
 
 /// Stable digest over a capability's normalized output content — the host_api
 /// mirror of `ironclaw_turns`' `ContentDigest` (a Blake3 keyed hash truncated to
@@ -631,8 +634,8 @@ impl<'de> Deserialize<'de> for ResumeToken {
 }
 
 /// The preserved *originating* loop ref (`result:*` / `gate:*` / `process:*`) a
-/// kernel handle was minted for. The kernel record refs ([`GateRef`](crate::GateRef),
-/// [`ResultRef`](crate::ResultRef), [`ProcessRef`](crate::ProcessRef)) are opaque
+/// kernel handle was minted for. The kernel record refs ([`GateRef`](crate::ids::GateRef),
+/// [`ResultRef`](crate::ids::ResultRef), [`ProcessRef`](crate::ids::ProcessRef)) are opaque
 /// uuids by design, so they cannot carry the loop's own ref identity; without
 /// this, state the loop keyed under its ref (e.g. output staged by the result
 /// writer) becomes unreachable once the handle is minted. `LoopRef` carries that
@@ -787,7 +790,7 @@ impl std::ops::Index<usize> for ModelInputIssues {
 /// free-text field is a bounded, redacted [`SafeSummary`] (no raw payload, path,
 /// or secret), and the issue `code` is the stable [`DispatchInputIssueCode`]
 /// host_api enum (already the canonical code for the loop-side issue). Distinct
-/// from the fuller internal [`DispatchInputIssue`](crate::DispatchInputIssue),
+/// from the fuller internal [`DispatchInputIssue`](crate::dispatch::DispatchInputIssue),
 /// which carries raw `String` fields on the dispatch port — this is the redacted
 /// projection that may cross the sanitized `Resolution` boundary (a
 /// security-boundary mirror, `type-placement.md`).
@@ -843,7 +846,7 @@ impl ModelInputIssue {
 
 /// The model-visible structured diagnostic a recoverable failure carries so the
 /// model can correct a bad tool call — the redacted host_api mirror of the loop's
-/// `CapabilityFailureDetail`. Rides [`ToolVerdict::RecoverableFailure`](crate::ToolVerdict)
+/// `CapabilityFailureDetail`. Rides [`ToolVerdict::RecoverableFailure`](crate::resolution::ToolVerdict)
 /// so the loop can render the correction hint without reading host storage (§5.3
 /// flip prep).
 ///

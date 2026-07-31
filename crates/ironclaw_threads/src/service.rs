@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::ids::ThreadId;
 
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -70,7 +70,7 @@ pub trait SessionThreadService: Send + Sync {
                 scope: scope.clone(),
                 thread_id: thread_id.clone(),
                 turn_run_id: request.turn_run_id,
-                content: content.clone(),
+                content: crate::MessageContent::text(content.as_text()),
             })
             .await?;
         if message.status != crate::MessageStatus::Draft {

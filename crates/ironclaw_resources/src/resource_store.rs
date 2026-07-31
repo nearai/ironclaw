@@ -9,7 +9,7 @@
 //!   at `/resources/budget-gates.json`.
 //!
 //! Both persist a single JSON snapshot under the caller-supplied
-//! [`MountView`](ironclaw_host_api::MountView) and route every
+//! [`MountView`](ironclaw_host_api::mount::MountView) and route every
 //! read-modify-write transaction through
 //! [`crate::cas_snapshot::CasSnapshotStore`], which provides:
 //!
@@ -38,7 +38,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::ResourceScope;
+use ironclaw_host_api::resource::ResourceScope;
 use serde::{Deserialize, Serialize};
 
 use crate::cas_snapshot::{CasSnapshotStore, Snapshot};
@@ -60,8 +60,8 @@ const GATES_SNAPSHOT_PATH: &str = "/resources/budget-gates.json";
 ///
 /// Construct with a [`ScopedFilesystem`] over any [`RootFilesystem`].
 /// The [`ScopedFilesystem`] resolves the `/resources` alias to a
-/// tenant/user-scoped [`VirtualPath`](ironclaw_host_api::VirtualPath)
-/// per its [`MountView`](ironclaw_host_api::MountView) and enforces
+/// tenant/user-scoped [`VirtualPath`](ironclaw_host_api::path::VirtualPath)
+/// per its [`MountView`](ironclaw_host_api::mount::MountView) and enforces
 /// per-op ACL before any backend dispatch — so tenant isolation is
 /// structural rather than something this crate has to re-derive from
 /// `ResourceScope`.
@@ -381,8 +381,10 @@ fn prune_terminal_gates(snapshot: &mut BudgetGateSnapshot, cutoff: DateTime<Utc>
 mod tests {
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
-        ResourceEstimate, TenantId, UserId, VirtualPath,
+        ids::{InvocationId, ProjectId, TenantId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+        resource::ResourceEstimate,
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;

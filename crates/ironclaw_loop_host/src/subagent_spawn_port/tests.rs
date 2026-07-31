@@ -1,5 +1,9 @@
 use chrono::Utc;
-use ironclaw_host_api::{AgentId, ProviderToolName, SafeSummary, Suspension, TenantId, UserId};
+use ironclaw_host_api::{
+    ids::{AgentId, ProviderToolName, TenantId, UserId},
+    resolution::Suspension,
+    safe_summary::SafeSummary,
+};
 use ironclaw_threads::{
     AcceptedInboundMessage, AcceptedInboundMessageReplay, AppendAssistantDraftRequest,
     AppendCapabilityDisplayPreviewRequest, AppendToolResultReferenceRequest, ContextMessages,
@@ -1299,7 +1303,7 @@ fn denied_reason(resolution: Resolution) -> String {
     let summary = denial
         .summary
         .as_ref()
-        .map(ironclaw_host_api::SafeSummary::as_str)
+        .map(ironclaw_host_api::safe_summary::SafeSummary::as_str)
         .expect("denial carries a model-visible summary");
     summary
         .strip_prefix("subagent spawn rejected: ")
@@ -2213,7 +2217,7 @@ async fn invoke_spawn_surfaces_scope_recovery_in_progress_as_retryable_capabilit
     };
     assert_eq!(
         done.verdict.error_kind(),
-        Some(&ironclaw_host_api::FailureKind::Transient)
+        Some(&ironclaw_host_api::result_meta::FailureKind::Transient)
     );
     assert!(
         done.summary.as_str().contains("scope recovery in progress"),
@@ -2845,7 +2849,7 @@ async fn invoke_spawn_denies_malformed_model_input_without_side_effects() {
         let summary = denial
             .summary
             .as_ref()
-            .map(ironclaw_host_api::SafeSummary::as_str)
+            .map(ironclaw_host_api::safe_summary::SafeSummary::as_str)
             .expect("denial carries a model-visible summary");
         assert!(
             summary.contains(expected_summary_fragment),
@@ -2900,7 +2904,7 @@ async fn invoke_spawn_batch_denies_malformed_model_input_without_side_effects() 
     let summary = denial
         .summary
         .as_ref()
-        .map(ironclaw_host_api::SafeSummary::as_str)
+        .map(ironclaw_host_api::safe_summary::SafeSummary::as_str)
         .expect("denial carries a model-visible summary");
     assert!(
         summary.contains("invalid spawn_subagent input"),
@@ -3036,13 +3040,15 @@ fn spawn_rejected_preserves_spawn_specific_reason_in_summary() {
     // The §5.3 collapse maps the open-set loop reason ("depth_cap_exceeded",
     // which is not a host_api `DenyReason` tag) to the model-visible catch-all
     // `PolicyDenied`; the spawn-specific reason rides the redacted summary.
-    let ironclaw_host_api::Resolution::Denied(denial) = spawn_rejected("depth_cap_exceeded") else {
+    let ironclaw_host_api::resolution::Resolution::Denied(denial) =
+        spawn_rejected("depth_cap_exceeded")
+    else {
         panic!("spawn_rejected should deny");
     };
 
     assert_eq!(
         denial.reason_kind,
-        Some(ironclaw_host_api::DenyReason::PolicyDenied)
+        Some(ironclaw_host_api::decision::DenyReason::PolicyDenied)
     );
     assert!(
         denial
@@ -3254,7 +3260,7 @@ async fn invoke_batch_mixed_spawn_and_non_spawn_capabilities() {
             .refs
             .origin
             .as_ref()
-            .map(ironclaw_host_api::LoopRef::as_str),
+            .map(ironclaw_host_api::result_meta::LoopRef::as_str),
         Some("result:auth")
     );
     assert_eq!(child_runs.requests().len(), 2);

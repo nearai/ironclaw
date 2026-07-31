@@ -7,7 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{
+use ironclaw_host_api::ids::{
     AgentId, CapabilityId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
 };
 use ironclaw_llm::{
@@ -4705,16 +4705,20 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
     async fn invoke_capability(
         &self,
         _request: ironclaw_turns::run_profile::LoopRequest,
-    ) -> Result<ironclaw_host_api::Resolution, ironclaw_turns::run_profile::AgentLoopHostError>
-    {
+    ) -> Result<
+        ironclaw_host_api::resolution::Resolution,
+        ironclaw_turns::run_profile::AgentLoopHostError,
+    > {
         panic!("gateway tests do not invoke capabilities")
     }
 
     async fn invoke_capability_batch(
         &self,
         _request: ironclaw_turns::run_profile::LoopRequestBatch,
-    ) -> Result<ironclaw_host_api::ResolutionBatch, ironclaw_turns::run_profile::AgentLoopHostError>
-    {
+    ) -> Result<
+        ironclaw_host_api::resolution::ResolutionBatch,
+        ironclaw_turns::run_profile::AgentLoopHostError,
+    > {
         panic!("gateway tests do not invoke capability batches")
     }
 }

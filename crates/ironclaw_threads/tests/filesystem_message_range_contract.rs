@@ -12,8 +12,9 @@ use ironclaw_filesystem::{
     ScopedFilesystem, SeqNo, StorageTxn, VersionedEntry,
 };
 use ironclaw_host_api::{
-    AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, ScopedPath, TenantId,
-    ThreadId, UserId, VirtualPath,
+    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, ScopedPath, VirtualPath},
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendFinalizedAssistantMessageRequest, BoundedThreadMessages,

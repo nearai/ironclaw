@@ -1,1 +1,1 @@
-pub use crate::{REDACTED_PLACEHOLDER, RedactedDebug, RedactedString};
+pub use crate::product_adapter_error::{REDACTED_PLACEHOLDER, RedactedDebug, RedactedString};

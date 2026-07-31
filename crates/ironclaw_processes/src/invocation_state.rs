@@ -10,8 +10,10 @@ use crate::{
 use async_trait::async_trait;
 use ironclaw_events::sanitize_error_kind;
 use ironclaw_host_api::{
-    ApprovalRequest, ApprovalRequestId, CapabilityId, InvocationId, ProcessId, ResourceScope,
-    SanitizedFailure, TurnGateRef, UserId,
+    approval::ApprovalRequest,
+    ids::{ApprovalRequestId, CapabilityId, InvocationId, ProcessId, UserId},
+    resource::ResourceScope,
+    turn::{SanitizedFailure, TurnGateRef},
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -507,7 +509,9 @@ mod tests {
     use crate::ProcessJournalSource;
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
-        MountAlias, MountGrant, MountPermissions, MountView, TenantId, VirtualPath,
+        ids::TenantId,
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
     };
 
     fn process_store() -> (

@@ -8,7 +8,8 @@ mod reborn_support;
 mod support;
 
 use ironclaw_host_api::{
-    CapabilityId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
+    action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    ids::CapabilityId,
 };
 use ironclaw_host_runtime::{
     HTTP_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,

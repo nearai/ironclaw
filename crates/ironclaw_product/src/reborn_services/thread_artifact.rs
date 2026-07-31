@@ -1,7 +1,9 @@
 //! Caller-owned, redacted evidence bundle for a complete thread.
 
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode};
+use ironclaw_host_api::product_surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+};
 use ironclaw_reborn_traces::contribution::DeterministicTraceRedactor;
 
 use ironclaw_threads::{BoundedThreadMessages, BoundedThreadMessagesRequest};

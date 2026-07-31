@@ -1,7 +1,10 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    NetworkMethod, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse,
+    action::NetworkMethod,
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
 };
 
 /// Scripted hosted-MCP discovery egress: answers the `initialize` →

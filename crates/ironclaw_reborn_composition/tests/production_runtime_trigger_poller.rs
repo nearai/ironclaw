@@ -47,7 +47,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ExternalActorRef};
 use ironclaw_host_api::{
-    AgentId, TenantId, UserId,
+    ids::{AgentId, TenantId, UserId},
     runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,

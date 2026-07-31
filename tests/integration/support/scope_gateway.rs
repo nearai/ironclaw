@@ -95,10 +95,10 @@ mod tests {
 
     fn make_scope(thread_id: &str) -> TurnScope {
         TurnScope::new(
-            ironclaw_host_api::TenantId::from_trusted("tenant:test".to_string()),
+            ironclaw_host_api::ids::TenantId::from_trusted("tenant:test".to_string()),
             None,
             None,
-            ironclaw_host_api::ThreadId::from_trusted(thread_id.to_string()),
+            ironclaw_host_api::ids::ThreadId::from_trusted(thread_id.to_string()),
         )
     }
 

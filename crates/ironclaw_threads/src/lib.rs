@@ -30,6 +30,7 @@ pub use filesystem_service::FilesystemSessionThreadService;
 // to it via semver. Sibling modules import directly through
 // `crate::title::derive_thread_title`.
 
+pub use attachment_context::deproject_model_attachment_context;
 pub use capability_display_preview::{
     CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
     CapabilityDisplayPreviewStatus,

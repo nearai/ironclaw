@@ -1,6 +1,8 @@
 use axum::Json;
 use axum::extract::{Extension, Path, State};
-use ironclaw_host_api::{ProductSurfaceCaller, ProductSurfaceError};
+use ironclaw_host_api::product_surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceQueryRequest,
+};
 use ironclaw_product::{
     RUN_ARTIFACT_VIEW, RebornRunArtifact, RebornRunArtifactRequest, RebornThreadArtifact,
     RebornThreadArtifactRequest, THREAD_ARTIFACT_VIEW,
@@ -34,7 +36,7 @@ where
     let input = serde_json::to_value(request).map_err(ProductSurfaceError::internal_from)?;
     let page = state
         .bind_services(caller)
-        .query(ironclaw_host_api::ProductSurfaceQueryRequest {
+        .query(ProductSurfaceQueryRequest {
             view_id: view_id.to_string(),
             input,
             cursor: None,

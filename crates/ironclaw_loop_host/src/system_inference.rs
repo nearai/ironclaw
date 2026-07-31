@@ -262,7 +262,7 @@ fn system_inference_ref(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
     use ironclaw_turns::{
         RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
         run_profile::{

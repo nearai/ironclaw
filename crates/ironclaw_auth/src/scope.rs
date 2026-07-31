@@ -34,14 +34,14 @@ impl AuthSurface {
 /// records cannot rehydrate invalid UI/session refs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthProductScope {
-    pub resource: ironclaw_host_api::ResourceScope,
+    pub resource: ironclaw_host_api::resource::ResourceScope,
     pub surface: AuthSurface,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<AuthSessionId>,
 }
 
 impl AuthProductScope {
-    pub fn new(resource: ironclaw_host_api::ResourceScope, surface: AuthSurface) -> Self {
+    pub fn new(resource: ironclaw_host_api::resource::ResourceScope, surface: AuthSurface) -> Self {
         Self {
             resource,
             surface,
@@ -72,9 +72,9 @@ impl AuthProductScope {
     /// resolver). Do not re-derive the strip inline — that drift is exactly
     /// what bound Google credentials to a thread.
     ///
-    /// [`ResourceScope::without_thread_and_mission`]: ironclaw_host_api::ResourceScope::without_thread_and_mission
+    /// [`ResourceScope::without_thread_and_mission`]: ironclaw_host_api::resource::ResourceScope::without_thread_and_mission
     pub fn credential_owner(
-        resource: &ironclaw_host_api::ResourceScope,
+        resource: &ironclaw_host_api::resource::ResourceScope,
         surface: AuthSurface,
     ) -> Self {
         Self::new(resource.without_thread_and_mission(), surface)

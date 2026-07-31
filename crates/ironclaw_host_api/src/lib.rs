@@ -33,6 +33,7 @@
 
 pub mod action;
 pub mod approval;
+pub mod attachment;
 pub mod audit;
 pub mod authorized;
 pub mod capability;
@@ -82,54 +83,14 @@ pub mod product_adapter;
 pub mod product_adapter_error;
 pub mod product_surface;
 
-// Flat re-exports are intentional: downstream Reborn service crates consume
-// `ironclaw_host_api` as a contract prelude, while module docs remain the
-// authoritative grouping for each vocabulary family.
-pub use action::*;
-pub use approval::*;
-pub use audit::*;
-pub use authorized::*;
-pub use capability::*;
-pub use capability_profile::*;
-pub use channel::*;
-pub use channel_identity::*;
-pub use decision::*;
-pub use dispatch::*;
-pub use error::*;
-pub use extension::*;
-pub use failure::*;
-pub use gate_record::*;
-pub use host_port::*;
-pub use host_remediation::*;
-pub use http::*;
-pub use ids::*;
-pub use ingress::*;
-pub use invocation::*;
-pub use lane::*;
-pub use memory::*;
-pub use model_result_preview::*;
-pub use mount::*;
-pub use operator_llm::*;
-pub use outbound::*;
-pub use package_lifecycle::*;
-pub use path::*;
-pub use product_adapter::*;
-pub use product_adapter_error::*;
-pub use product_surface::*;
-pub use recipe::*;
-pub use resolution::*;
-pub use resource::*;
-pub use result_meta::*;
-pub use runtime::*;
-pub use runtime_policy::*;
-pub use safe_summary::*;
-pub use scope::*;
-pub use state::*;
-pub use surface::*;
-pub use tool_adapter::*;
-pub use trust::*;
-pub use turn::*;
-pub use user_identity::*;
+// There is deliberately no flat re-export prelude here. Every contract is
+// reached through the module that owns it — `ironclaw_host_api::scope::
+// ExecutionContext`, not `ironclaw_host_api::ExecutionContext` — so each
+// consumer's real dependency is compiler-visible. That visibility is what
+// lets a vocabulary family be carved out of this crate without having to
+// guess which consumers used it. Do not re-add per-module glob re-exports here
+// (see this crate's CLAUDE.md); the `Timestamp` alias below is the only item
+// this crate exposes at its root.
 
 /// Canonical timestamp type for host API wire contracts.
 pub type Timestamp = chrono::DateTime<chrono::Utc>;

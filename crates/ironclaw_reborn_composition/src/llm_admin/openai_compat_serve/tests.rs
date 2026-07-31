@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use chrono::Utc;
-use ironclaw_host_api::{CapabilityId, ProviderToolName, ThreadId, UserId};
+use ironclaw_host_api::ids::{CapabilityId, ProviderToolName, ThreadId, UserId};
 use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, ProductAdapterError, ProductAdapterId,
     ProductOutboundTarget, ProjectionCursor,

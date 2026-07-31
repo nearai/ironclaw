@@ -55,7 +55,7 @@ use std::{
 
 use async_trait::async_trait;
 use bollard::{Docker, container::ListContainersOptions, models::ContainerSummary};
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::ids::{TenantId, UserId};
 
 use crate::RuntimeProcessError;
 

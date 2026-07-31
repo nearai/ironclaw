@@ -22,6 +22,7 @@ import pytest
 from playwright.async_api import Error as PlaywrightError
 
 from fixtures.mock_oauth_idp import MockOidcProfile, start_mock_oauth_idp
+from hermetic_process import forward_hermetic_process_env
 from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, wait_for_ready
 
 USER_ID = "reborn-v2-e2e-user"
@@ -380,6 +381,7 @@ def forward_coverage_env(env: dict[str, str]) -> None:
             "CARGO_INCREMENTAL",
         }:
             env[key] = value
+    forward_hermetic_process_env(env)
 
 
 async def stop_process(proc, *, sig=signal.SIGINT, timeout: float = 10) -> None:

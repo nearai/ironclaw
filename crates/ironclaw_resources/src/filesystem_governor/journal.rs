@@ -3,7 +3,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem, SeqNo};
-use ironclaw_host_api::{ReservationStatus, ResourceReservationId, ResourceScope, ScopedPath};
+use ironclaw_host_api::{
+    ids::ResourceReservationId,
+    path::ScopedPath,
+    resource::{ReservationStatus, ResourceScope},
+};
 use serde::{Deserialize, Serialize};
 use tokio::runtime::{Handle, RuntimeFlavor};
 use tracing::warn;
@@ -469,7 +473,9 @@ mod tests {
         RootFilesystem,
     };
     use ironclaw_host_api::{
-        MountAlias, MountGrant, MountPermissions, MountView, TenantId, VirtualPath,
+        ids::TenantId,
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
     };
     use tokio::sync::oneshot;
 

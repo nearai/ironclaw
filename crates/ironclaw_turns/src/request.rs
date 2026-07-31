@@ -166,7 +166,7 @@ pub struct GetRunStateRequest {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{TenantId, ThreadId, UserId};
+    use ironclaw_host_api::ids::{TenantId, ThreadId, UserId};
 
     use super::*;
 

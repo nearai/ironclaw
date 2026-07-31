@@ -230,7 +230,7 @@ use ironclaw_triggers::{
 };
 
 fn test_record(active_fire_slot: Option<DateTime<Utc>>) -> TriggerRecord {
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
     let now = Utc::now();
     TriggerRecord {
         trigger_id: TriggerId::new(),
@@ -331,7 +331,10 @@ fn trigger_output_includes_active_hold_when_present() {
 
 use std::sync::Mutex;
 
-use ironclaw_host_api::{InvocationId, InvocationOrigin, ProductKind, RoutineId, RunId, UserId};
+use ironclaw_host_api::{
+    ids::{InvocationId, ProductKind, RoutineId, RunId, UserId},
+    invocation::InvocationOrigin,
+};
 use ironclaw_triggers::{InMemoryTriggerRepository, TriggerDeliveryTargetId};
 
 const MUTATION_CAPABILITIES: &[&str] = &[

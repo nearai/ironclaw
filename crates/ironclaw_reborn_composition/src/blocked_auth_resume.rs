@@ -243,8 +243,10 @@ mod tests {
         AuthFlowId, AuthGateRef, AuthProductScope, AuthProviderId, AuthSurface, TurnRunRef,
     };
     use ironclaw_host_api::{
-        ExtensionId, InvocationId, ProcessId, ResourceScope, RuntimeCredentialAccountSetup,
-        RuntimeCredentialAuthRequirement, TenantId, ThreadId, UserId, VendorId,
+        capability::RuntimeCredentialAccountSetup,
+        decision::RuntimeCredentialAuthRequirement,
+        ids::{ExtensionId, InvocationId, ProcessId, TenantId, ThreadId, UserId, VendorId},
+        resource::ResourceScope,
     };
     use ironclaw_processes::{ProcessGateRecord, ProcessSuspension};
     use ironclaw_turns::{

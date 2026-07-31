@@ -44,7 +44,7 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let g = RebornIntegrationGroup::extension_lifecycle_google_oauth_configured().await?;
     let g = &g;
     let google_provider =
-        ironclaw_host_api::VendorId::new("google").map_err(|error| error.to_string())?;
+        ironclaw_host_api::ids::VendorId::new("google").map_err(|error| error.to_string())?;
 
     // ── Phase 1: calendar install parks at the google gate despite the
     //    existing (gmail-scoped) google account ─────────────────────────────

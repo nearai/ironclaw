@@ -44,7 +44,7 @@ Applies to:
 
 ## 3. Scope cascade
 
-Resource scope comes from `ironclaw_host_api::ResourceScope`.
+Resource scope comes from `ironclaw_host_api::resource::ResourceScope`.
 
 Canonical cascade:
 

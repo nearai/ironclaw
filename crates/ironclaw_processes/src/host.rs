@@ -6,7 +6,7 @@
 
 use std::{fmt, sync::Arc};
 
-use ironclaw_host_api::{ProcessId, ResourceScope};
+use ironclaw_host_api::{ids::ProcessId, resource::ResourceScope};
 use serde_json::Value;
 use tokio::time::{Duration, sleep};
 

@@ -1,7 +1,7 @@
 //! Bounded transcript materialization for filesystem-backed exports.
 
 use ironclaw_filesystem::{OrderedPage, OrderedQueryCursor, Page, RootFilesystem, SortDirection};
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::ids::ThreadId;
 
 use crate::{SessionThreadError, ThreadMessageRecord, ThreadScope};
 

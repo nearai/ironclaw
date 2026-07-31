@@ -8,10 +8,15 @@ use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
 };
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileSchemaRef, EffectKind, HostApiError, OriginGateMatrix,
-    PermissionMode, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-    ProductSurfaceErrorKind, ResourceEstimate, ResourceProfile, ResourceUsage,
-    RuntimeDispatchErrorKind,
+    capability::{EffectKind, OriginGateMatrix, PermissionMode},
+    capability_profile::CapabilityProfileSchemaRef,
+    dispatch::RuntimeDispatchErrorKind,
+    error::HostApiError,
+    ids::CapabilityId,
+    product_surface::{
+        ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    },
+    resource::{ResourceEstimate, ResourceProfile, ResourceUsage},
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,

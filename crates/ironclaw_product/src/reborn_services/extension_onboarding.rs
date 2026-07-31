@@ -1,4 +1,4 @@
-use ironclaw_host_api::InstallationState;
+use ironclaw_host_api::state::InstallationState;
 
 use crate::{
     LifecycleExtensionCredentialSetup, LifecycleExtensionRuntimeKind, LifecycleExtensionSummary,

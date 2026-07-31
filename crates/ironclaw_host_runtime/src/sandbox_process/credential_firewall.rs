@@ -49,7 +49,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ironclaw_host_api::{SecretHandle, TenantId, UserId};
+use ironclaw_host_api::ids::{SecretHandle, TenantId, UserId};
 use ironclaw_secrets::CredentialTargetPolicy;
 
 /// The key the proxy can actually derive at connection time (see module

@@ -5,6 +5,7 @@ import { ChatInput } from "./chat-input";
 export function EmptyState({
   onSuggestion,
   onSend,
+  commands = [],
   disabled,
   sendDisabled,
   initialText,
@@ -54,6 +55,7 @@ export function EmptyState({
       <div className="mt-9 w-full max-w-5xl">
         <ChatInput
           onSend={onSend}
+          commands={commands}
           disabled={disabled}
           sendDisabled={sendDisabled}
           initialText={initialText}

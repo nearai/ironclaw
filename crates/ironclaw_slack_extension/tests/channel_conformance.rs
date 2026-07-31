@@ -9,7 +9,7 @@ use ironclaw_host_api::product_adapter::test_support::conformance::{
 use ironclaw_host_api::product_adapter::{
     ExternalConversationRef, OutboundEnvelope, OutboundPart, OutboundTarget,
 };
-use ironclaw_host_api::{RestrictedEgressRequest, RestrictedEgressResponse};
+use ironclaw_host_api::tool_adapter::{RestrictedEgressRequest, RestrictedEgressResponse};
 use ironclaw_slack_extension::SlackChannelAdapter;
 
 fn scripted_slack_api(request: &RestrictedEgressRequest) -> RestrictedEgressResponse {

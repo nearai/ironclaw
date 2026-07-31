@@ -2,9 +2,13 @@
 
 use ironclaw_events::sanitize_error_kind;
 use ironclaw_host_api::{
-    CapabilityId, CapabilitySet, ExtensionId, InvocationId, MountView,
-    ProcessAuthorizedContinuation, ProcessId, ResourceEstimate, ResourceReservationId,
-    ResourceScope, RuntimeKind, SanitizedFailure, UserId,
+    authorized::ProcessAuthorizedContinuation,
+    capability::CapabilitySet,
+    ids::{CapabilityId, ExtensionId, InvocationId, ProcessId, ResourceReservationId, UserId},
+    mount::MountView,
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::RuntimeKind,
+    turn::SanitizedFailure,
 };
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +32,7 @@ pub(crate) struct CapabilityProcessMetadata {
     pub(crate) authenticated_actor_user_id: Option<UserId>,
     pub(crate) extension_id: ExtensionId,
     pub(crate) capability_id: CapabilityId,
-    #[serde(deserialize_with = "ironclaw_host_api::deserialize_trusted_runtime_kind")]
+    #[serde(deserialize_with = "ironclaw_host_api::runtime::deserialize_trusted_runtime_kind")]
     pub(crate) runtime: RuntimeKind,
     pub(crate) grants: CapabilitySet,
     pub(crate) mounts: MountView,

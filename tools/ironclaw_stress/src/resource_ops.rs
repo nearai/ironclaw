@@ -1,4 +1,4 @@
-use ironclaw_host_api::{ResourceEstimate, ResourceUsage};
+use ironclaw_host_api::resource::{ResourceEstimate, ResourceUsage};
 use ironclaw_resources::ResourceError;
 use rust_decimal_macros::dec;
 

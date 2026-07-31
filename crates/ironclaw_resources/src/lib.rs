@@ -52,12 +52,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use chrono::{DateTime, Duration, Utc};
 use fs2::FileExt;
 
-use ironclaw_host_api::ReservationStatus;
+use ironclaw_host_api::resource::ReservationStatus;
+pub use ironclaw_host_api::resource::{ResourceReceipt, ResourceReservation};
 use ironclaw_host_api::{
-    AgentId, MissionId, ProjectId, ResourceEstimate, ResourceReservationId, ResourceScope,
-    ResourceUsage, TenantId, ThreadId, UserId,
+    ids::{AgentId, MissionId, ProjectId, ResourceReservationId, TenantId, ThreadId, UserId},
+    resource::{ResourceEstimate, ResourceScope, ResourceUsage},
 };
-pub use ironclaw_host_api::{ResourceReceipt, ResourceReservation};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1672,7 +1672,7 @@ struct StrictResourceScope {
     mission_id: Option<MissionId>,
     #[serde(default)]
     thread_id: Option<ThreadId>,
-    invocation_id: ironclaw_host_api::InvocationId,
+    invocation_id: ironclaw_host_api::ids::InvocationId,
 }
 
 #[derive(Deserialize)]

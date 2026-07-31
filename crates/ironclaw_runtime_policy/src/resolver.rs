@@ -407,7 +407,7 @@ fn backends_for(
         ),
         // `RuntimeProfile` is `#[non_exhaustive]` so this wildcard is
         // required to compile from a downstream crate. Reaching it means a
-        // new variant was added to `ironclaw_host_api::RuntimeProfile`
+        // new variant was added to `ironclaw_host_api::runtime_policy::RuntimeProfile`
         // without a corresponding case here — fail closed loudly so the
         // gap surfaces in development rather than as a silent default.
         _ => panic!(

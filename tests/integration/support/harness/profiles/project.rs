@@ -1,6 +1,6 @@
 //! Project domain tools profiles (`project_tools`, `project_tools_with_fault_injection`).
 
-use ironclaw_host_api::{CapabilityId, EffectKind, MountView};
+use ironclaw_host_api::{capability::EffectKind, ids::CapabilityId, mount::MountView};
 
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{HarnessResult, HostRuntimeCapabilityHarness};

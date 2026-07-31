@@ -66,7 +66,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::TenantId;
+use ironclaw_host_api::ids::TenantId;
 use rust_decimal::Decimal;
 
 use crate::identity::HookId;

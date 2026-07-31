@@ -16,7 +16,10 @@ use ironclaw_hooks::middleware::{
     HookedLoopCapabilityPort, HookedLoopCheckpointPort, HookedLoopModelPort, HookedLoopPromptPort,
     HookedLoopTranscriptPort,
 };
-use ironclaw_host_api::{CapabilityId, ExtensionId, Resolution, ResolutionBatch};
+use ironclaw_host_api::{
+    ids::{CapabilityId, ExtensionId},
+    resolution::{Resolution, ResolutionBatch},
+};
 use ironclaw_loop_host::{
     ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, AgentTurnRunCancellationFactory, CapabilityAllowSet,
     CapabilityResolveError, CapabilitySurfaceProfileFilter, CapabilitySurfaceProfileResolver,
@@ -29,6 +32,7 @@ use ironclaw_loop_host::{
     ThreadBackedLoopTranscriptPort, ThreadContextWindowCache, active_task_compaction_prompt_id,
     host_managed_loop_compaction_port_with_prompt_id,
 };
+use ironclaw_outbound::ReplyAttachmentIntentPort;
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
 use crate::driver_registry::{DriverRequirements, LoopDriverRegistryKey, RequirementLevel};
@@ -747,7 +751,7 @@ impl EventTriggeredHookSubscription {
     async fn spawn(
         self,
         dispatcher: Arc<HookDispatcher>,
-        tenant_id: ironclaw_host_api::TenantId,
+        tenant_id: ironclaw_host_api::ids::TenantId,
         run_context: LoopRunContext,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     ) -> EventTriggeredHookSubscriptionHandle {
@@ -821,7 +825,7 @@ impl EventTriggeredHookSubscription {
     async fn run(
         self,
         dispatcher: Arc<HookDispatcher>,
-        tenant_id: ironclaw_host_api::TenantId,
+        tenant_id: ironclaw_host_api::ids::TenantId,
         run_context: LoopRunContext,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
         startup_head: EventCursor,
@@ -1020,6 +1024,7 @@ where
     config: TextOnlyLoopHostConfig,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
+    reply_attachment_intent_port: Option<Arc<dyn ReplyAttachmentIntentPort>>,
     /// Optional hook dispatcher factory. When set, the factory invokes the
     /// closure on every `build_text_only_host*` call to obtain a fresh
     /// `HookDispatcher`, wraps it in `Arc`, and then plumbs it through
@@ -1136,6 +1141,7 @@ where
             config,
             skill_context_source: None,
             attachment_read_port: None,
+            reply_attachment_intent_port: None,
             hook_dispatcher_factory: None,
             hook_dispatcher_builder_factory: None,
             hook_security_audit_sink: None,
@@ -1228,6 +1234,14 @@ where
 
     pub fn with_attachment_read_port(mut self, port: Arc<dyn LoopAttachmentReadPort>) -> Self {
         self.attachment_read_port = Some(port);
+        self
+    }
+
+    pub fn with_reply_attachment_intent_port(
+        mut self,
+        port: Arc<dyn ReplyAttachmentIntentPort>,
+    ) -> Self {
+        self.reply_attachment_intent_port = Some(port);
         self
     }
 
@@ -1927,13 +1941,17 @@ where
                 Arc::clone(&self.loop_checkpoint_store),
                 Arc::clone(&self.milestone_sink),
             ));
-        let mut transcript: Arc<dyn LoopTranscriptPort> =
-            Arc::new(ThreadBackedLoopTranscriptPort::with_milestone_sink(
-                Arc::clone(&self.thread_service),
-                effective_scope.clone(),
-                run_context.clone(),
-                Arc::clone(&self.milestone_sink),
-            ));
+        let mut transcript_adapter = ThreadBackedLoopTranscriptPort::with_milestone_sink(
+            Arc::clone(&self.thread_service),
+            effective_scope.clone(),
+            run_context.clone(),
+            Arc::clone(&self.milestone_sink),
+        );
+        if let Some(port) = self.reply_attachment_intent_port.as_ref() {
+            transcript_adapter =
+                transcript_adapter.with_reply_attachment_intent_port(Arc::clone(port));
+        }
+        let mut transcript: Arc<dyn LoopTranscriptPort> = Arc::new(transcript_adapter);
         if let Some(dispatcher) = per_build_dispatcher.as_ref() {
             model = Arc::new(HookedLoopModelPort::new(
                 Arc::clone(&model),
@@ -2696,7 +2714,7 @@ mod hook_resolver_adapter_tests {
     //! exercise every error branch without standing up a full Reborn host.
 
     use super::*;
-    use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId};
     use ironclaw_turns::run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, CapabilitySurfaceVersion,
         LoopRequest,
@@ -2849,7 +2867,7 @@ mod compaction_tests;
 mod tests {
     use super::*;
 
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_turns::test_support::in_memory_loop_checkpoint_store;
     use ironclaw_turns::{
         InMemoryRunProfileResolver, ProcessLoopCheckpointStore, RunProfileResolver, TurnActor,
@@ -3080,7 +3098,8 @@ mod event_subscription_scope_tests {
     use super::*;
     use ironclaw_events::{InMemoryDurableEventLog, RuntimeEvent};
     use ironclaw_host_api::{
-        AgentId, CapabilityId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+        ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
+        resource::ResourceScope,
     };
     use ironclaw_threads::ThreadScope;
     use ironclaw_turns::TurnScope;
@@ -3276,7 +3295,8 @@ mod event_subscription_scope_tests {
     #[test]
     fn effective_read_scope_rejects_mission_widening() {
         let (tenant, agent, user, project, thread) = ids();
-        let foreign_mission = ironclaw_host_api::MissionId::new("mission-OTHER").expect("mission");
+        let foreign_mission =
+            ironclaw_host_api::ids::MissionId::new("mission-OTHER").expect("mission");
         let supplied = ReadScope {
             mission_id: Some(foreign_mission),
             ..ReadScope::any()
@@ -3334,11 +3354,11 @@ mod event_subscription_scope_tests {
             project_id: Some(project.clone()),
             mission_id: None,
             thread_id: Some(thread.clone()),
-            invocation_id: ironclaw_host_api::InvocationId::new(),
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         };
         let foreign_scope = ResourceScope {
             project_id: Some(other_project.clone()),
-            invocation_id: ironclaw_host_api::InvocationId::new(),
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
             ..our_scope.clone()
         };
 

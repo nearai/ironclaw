@@ -81,6 +81,7 @@ async fn compaction_success_updates_state_and_emits_progress() {
         .compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
             compression_ratio_ppm: 250_000,
+            redacted_leak_count: 0,
         }))
         .build();
     let mut state = LoopExecutionState::initial_for_run(host.run_context());
@@ -518,6 +519,7 @@ async fn executor_proactive_byte_cap_drives_full_compaction_cycle() {
         .compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-f14").unwrap(),
             compression_ratio_ppm: 250_000,
+            redacted_leak_count: 0,
         }))
         .build();
 

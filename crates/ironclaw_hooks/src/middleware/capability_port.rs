@@ -27,7 +27,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{Resolution, ResolutionBatch, TenantId};
+use ironclaw_host_api::{
+    ids::TenantId,
+    resolution::{Resolution, ResolutionBatch},
+};
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, CapabilityCallCandidate, CapabilityDeniedReasonKind, LoopCapabilityPort,
     LoopRequest, LoopRequestBatch, ProviderToolCall, ProviderToolCallCapabilityIds,
@@ -137,7 +140,7 @@ impl HookedLoopCapabilityPort {
     pub(crate) async fn hook_context(
         &self,
         invocation: &LoopRequest,
-        provider: Option<ironclaw_host_api::ExtensionId>,
+        provider: Option<ironclaw_host_api::ids::ExtensionId>,
     ) -> BeforeCapabilityHookContext {
         // Lazy input resolution probe (PR #3573 follow-up): when no
         // active hook would actually read the capability arguments, we
@@ -222,7 +225,7 @@ impl HookedLoopCapabilityPort {
     async fn run_dispatch(
         &self,
         invocation: &LoopRequest,
-        provider: Option<ironclaw_host_api::ExtensionId>,
+        provider: Option<ironclaw_host_api::ids::ExtensionId>,
     ) -> BeforeCapabilityDispatchOutcome {
         let ctx = self.hook_context(invocation, provider).await;
         self.dispatcher.dispatch_before_capability(&ctx).await
@@ -336,11 +339,11 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
             /// Hook produced a final resolution — no inner call needed.
             Resolved {
                 resolution: Box<Resolution>,
-                provider: Option<ironclaw_host_api::ExtensionId>,
+                provider: Option<ironclaw_host_api::ids::ExtensionId>,
             },
             /// Hooks allowed; the inner port will produce the resolution.
             Pending {
-                provider: Option<ironclaw_host_api::ExtensionId>,
+                provider: Option<ironclaw_host_api::ids::ExtensionId>,
             },
         }
 
@@ -654,7 +657,7 @@ mod tests {
     use crate::sink::{RestrictedBeforeCapabilityHook, RestrictedGateSink};
     use crate::trust::HookTrustClass;
     use async_trait::async_trait;
-    use ironclaw_host_api::{CapabilityId, DenyReason, RuntimeKind};
+    use ironclaw_host_api::{decision::DenyReason, ids::CapabilityId, runtime::RuntimeKind};
     use ironclaw_turns::LoopResultRef;
     use ironclaw_turns::run_profile::{
         CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceVersion,
@@ -964,7 +967,7 @@ mod tests {
     /// catches it while the helper-only snapshot would stay green.
     #[tokio::test]
     async fn hook_context_arguments_digest_is_stable_at_middleware_boundary() {
-        use ironclaw_host_api::TenantId;
+        use ironclaw_host_api::ids::TenantId;
         use std::sync::Arc as StdArc;
         struct NoopInner;
         #[async_trait]
@@ -1687,7 +1690,7 @@ mod tests {
 
     use crate::middleware::resolver::CapabilityProviderResolver;
     use crate::points::BeforeCapabilityHookContext as HookCtxForTest;
-    use ironclaw_host_api::ExtensionId as HostExtensionId;
+    use ironclaw_host_api::ids::ExtensionId as HostExtensionId;
 
     /// Resolver that records every capability_id it was queried for and
     /// returns a fixed provider for each call.
@@ -1853,7 +1856,7 @@ mod tests {
             .install_installed_before_capability(
                 hook_id,
                 HookPhase::Policy,
-                ironclaw_host_api::ExtensionId::new("ext-test").expect("valid"),
+                ironclaw_host_api::ids::ExtensionId::new("ext-test").expect("valid"),
                 HookBindingScope::Global,
                 Box::new(hook),
             )

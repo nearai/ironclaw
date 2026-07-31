@@ -8,8 +8,11 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityActivityId, ProcessId, ResourceScope, RuntimeCredentialAuthRequirement,
-    SanitizedFailure, TenantId, Timestamp, TurnGateRef, UserId,
+    Timestamp,
+    decision::RuntimeCredentialAuthRequirement,
+    ids::{ProcessId, TenantId, UserId},
+    resource::ResourceScope,
+    turn::{CapabilityActivityId, SanitizedFailure, TurnGateRef},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

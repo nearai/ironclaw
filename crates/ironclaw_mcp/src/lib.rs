@@ -21,12 +21,18 @@ use ironclaw_extensions::{
     ExtensionPackage, ExtensionRuntime, HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations,
 };
 use ironclaw_host_api::{
-    CapabilityHostHttpRequest, CapabilityHostResult, CapabilityId, ExtensionId, NetworkMethod,
-    NetworkPolicy, ResourceEstimate, ResourceReservation, ResourceReservationId, ResourceScope,
-    ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeCredentialInjection,
-    RuntimeCredentialRequirement, RuntimeCredentialRequirementSource, RuntimeCredentialSource,
-    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressResponse, RuntimeKind,
-    SecretHandle,
+    action::{NetworkMethod, NetworkPolicy},
+    capability::{RuntimeCredentialRequirement, RuntimeCredentialRequirementSource},
+    decision::RuntimeCredentialAuthRequirement,
+    http::{
+        CapabilityHostHttpRequest, RuntimeCredentialInjection, RuntimeCredentialSource,
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressResponse,
+    },
+    ids::{CapabilityId, ExtensionId, ResourceReservationId, SecretHandle},
+    resource::{
+        CapabilityHostResult, ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
+    },
+    runtime::RuntimeKind,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
@@ -1862,18 +1868,18 @@ mod tests {
         let credential = RuntimeCredentialRequirement {
             handle: SecretHandle::new("google-drive-access").unwrap(),
             source: RuntimeCredentialRequirementSource::ProductAuthAccount {
-                provider: ironclaw_host_api::VendorId::new("google").unwrap(),
-                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                provider: ironclaw_host_api::ids::VendorId::new("google").unwrap(),
+                setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                     scopes: scopes.clone(),
                 },
             },
             provider_scopes: scopes.clone(),
-            audience: ironclaw_host_api::NetworkTargetPattern {
+            audience: ironclaw_host_api::action::NetworkTargetPattern {
                 scheme: None,
                 host_pattern: "*".to_string(),
                 port: None,
             },
-            target: ironclaw_host_api::RuntimeCredentialTarget::Header {
+            target: ironclaw_host_api::http::RuntimeCredentialTarget::Header {
                 name: "authorization".to_string(),
                 prefix: Some("Bearer ".to_string()),
             },
@@ -1886,8 +1892,10 @@ mod tests {
         assert_eq!(
             context.credential_requirements,
             vec![RuntimeCredentialAuthRequirement {
-                provider: ironclaw_host_api::VendorId::new("google").unwrap(),
-                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes },
+                provider: ironclaw_host_api::ids::VendorId::new("google").unwrap(),
+                setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
+                    scopes
+                },
                 requester_extension: ExtensionId::new("google-drive").unwrap(),
                 provider_scopes: vec!["https://www.googleapis.com/auth/drive.readonly".to_string()],
             }]

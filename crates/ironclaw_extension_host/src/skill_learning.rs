@@ -65,7 +65,10 @@ mod learning {
     use std::sync::{Arc, LazyLock, Mutex};
 
     use async_trait::async_trait;
-    use ironclaw_host_api::{InvocationId, ResourceScope, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::{
+        ids::{InvocationId, TenantId, ThreadId, UserId},
+        resource::ResourceScope,
+    };
     use ironclaw_llm::{ChatMessage, CompletionRequest, LlmProvider};
     use ironclaw_safety::{Sanitizer, validate_trusted_trigger_prompt};
     use ironclaw_skills::{
@@ -951,7 +954,7 @@ mod learning {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use ironclaw_host_api::{AgentId, ThreadId};
+        use ironclaw_host_api::ids::{AgentId, ThreadId};
         use ironclaw_threads::{
             AppendToolResultReferenceRequest, EnsureThreadRequest, InMemorySessionThreadService,
             MessageStatus, ThreadHistoryRequest, ToolResultSafeSummary,

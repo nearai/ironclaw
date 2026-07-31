@@ -324,7 +324,7 @@ impl HookDispatcher {
     /// dispatch-time protocol violation and never reach `evaluate`.
     pub fn before_capability_needs_input(
         &self,
-        provider: Option<&ironclaw_host_api::ExtensionId>,
+        provider: Option<&ironclaw_host_api::ids::ExtensionId>,
     ) -> bool {
         let bindings = self.active_bindings_snapshot(HookPointSpec::BeforeCapability);
         for binding in bindings {
@@ -392,7 +392,7 @@ impl HookDispatcher {
     /// per-extension cap cumulatively across multiple `install()` calls.
     pub(crate) fn count_bindings_for_extension(
         &self,
-        extension: &ironclaw_host_api::ExtensionId,
+        extension: &ironclaw_host_api::ids::ExtensionId,
     ) -> usize {
         let registry = self.registry.lock().expect("hook registry mutex poisoned"); // safety: mutex poison means another thread panicked; failing closed here is correct
         registry.count_for_extension(extension)
@@ -414,7 +414,7 @@ impl HookDispatcher {
     /// one attach point. Powers the D4 (per-extension-per-kind) cap.
     pub(crate) fn count_bindings_for_extension_at(
         &self,
-        extension: &ironclaw_host_api::ExtensionId,
+        extension: &ironclaw_host_api::ids::ExtensionId,
         point: HookPointSpec,
     ) -> usize {
         let registry = self.registry.lock().expect("hook registry mutex poisoned"); // safety: mutex poison means another thread panicked; failing closed here is correct
@@ -526,7 +526,7 @@ impl HookDispatcher {
     /// `RestrictedBeforeCapabilityHook`, whose sink cannot mint `allow` — this
     /// makes "Installed cannot Allow" a type-level fact.
     ///
-    /// `owning_extension` is the [`ironclaw_host_api::ExtensionId`] of the
+    /// `owning_extension` is the [`ironclaw_host_api::ids::ExtensionId`] of the
     /// extension that authored the hook (from the manifest), and `scope`
     /// reflects the manifest-declared scope. The dispatcher consults both at
     /// invocation time to filter out hooks that shouldn't fire against the
@@ -535,7 +535,7 @@ impl HookDispatcher {
         &mut self,
         hook_id: HookId,
         phase: HookPhase,
-        owning_extension: ironclaw_host_api::ExtensionId,
+        owning_extension: ironclaw_host_api::ids::ExtensionId,
         scope: HookBindingScope,
         hook: Box<dyn RestrictedBeforeCapabilityHook>,
     ) -> Result<(), crate::error::HookError> {
@@ -562,7 +562,7 @@ impl HookDispatcher {
         &mut self,
         hook_id: HookId,
         phase: HookPhase,
-        owning_extension: ironclaw_host_api::ExtensionId,
+        owning_extension: ironclaw_host_api::ids::ExtensionId,
         scope: HookBindingScope,
         hook: WasmBeforeCapabilityHook,
     ) -> Result<(), crate::error::HookError> {
@@ -635,7 +635,7 @@ impl HookDispatcher {
         &mut self,
         hook_id: HookId,
         phase: HookPhase,
-        owning_extension: ironclaw_host_api::ExtensionId,
+        owning_extension: ironclaw_host_api::ids::ExtensionId,
         scope: HookBindingScope,
         hook: Box<dyn RestrictedBeforePromptHook>,
     ) -> Result<(), crate::error::HookError> {
@@ -662,7 +662,7 @@ impl HookDispatcher {
         &mut self,
         hook_id: HookId,
         phase: HookPhase,
-        owning_extension: ironclaw_host_api::ExtensionId,
+        owning_extension: ironclaw_host_api::ids::ExtensionId,
         scope: HookBindingScope,
         hook: WasmBeforePromptHook,
     ) -> Result<(), crate::error::HookError> {
@@ -698,7 +698,7 @@ impl HookDispatcher {
         phase: HookPhase,
         point: HookPointSpec,
         trust_class: HookTrustClass,
-        owning_extension: Option<ironclaw_host_api::ExtensionId>,
+        owning_extension: Option<ironclaw_host_api::ids::ExtensionId>,
         scope: HookBindingScope,
         hook: Box<dyn ObserverHook>,
     ) -> Result<(), crate::error::HookError> {
@@ -787,7 +787,7 @@ impl HookDispatcher {
         hook_id: HookId,
         phase: HookPhase,
         point: HookPointSpec,
-        owning_extension: ironclaw_host_api::ExtensionId,
+        owning_extension: ironclaw_host_api::ids::ExtensionId,
         scope: HookBindingScope,
         hook: Box<dyn ObserverHook>,
     ) -> Result<(), crate::error::HookError> {
@@ -809,7 +809,7 @@ impl HookDispatcher {
         hook_id: HookId,
         phase: HookPhase,
         point: HookPointSpec,
-        owning_extension: ironclaw_host_api::ExtensionId,
+        owning_extension: ironclaw_host_api::ids::ExtensionId,
         scope: HookBindingScope,
         hook: WasmObserverHook,
     ) -> Result<(), crate::error::HookError> {
@@ -838,7 +838,7 @@ impl HookDispatcher {
         phase: HookPhase,
         event_kind: RuntimeEventKind,
         trust_class: HookTrustClass,
-        owning_extension: Option<ironclaw_host_api::ExtensionId>,
+        owning_extension: Option<ironclaw_host_api::ids::ExtensionId>,
         scope: HookBindingScope,
         hook: Box<dyn EventTriggeredHook>,
     ) -> Result<(), crate::error::HookError> {
@@ -900,7 +900,7 @@ impl HookDispatcher {
         hook_id: HookId,
         phase: HookPhase,
         event_kind: RuntimeEventKind,
-        owning_extension: ironclaw_host_api::ExtensionId,
+        owning_extension: ironclaw_host_api::ids::ExtensionId,
         scope: HookBindingScope,
         hook: Box<dyn EventTriggeredHook>,
     ) -> Result<(), crate::error::HookError> {
@@ -1154,7 +1154,7 @@ impl HookDispatcher {
     pub async fn dispatch_observer_at(
         &self,
         point: HookPointSpec,
-        tenant: ironclaw_host_api::TenantId,
+        tenant: ironclaw_host_api::ids::TenantId,
     ) -> ObserverDispatchOutcome {
         self.dispatch_observer_at_with_provider(point, tenant, None)
             .await
@@ -1168,8 +1168,8 @@ impl HookDispatcher {
     pub async fn dispatch_observer_at_with_provider(
         &self,
         point: HookPointSpec,
-        tenant: ironclaw_host_api::TenantId,
-        provider: Option<ironclaw_host_api::ExtensionId>,
+        tenant: ironclaw_host_api::ids::TenantId,
+        provider: Option<ironclaw_host_api::ids::ExtensionId>,
     ) -> ObserverDispatchOutcome {
         let (ordered, mut poisoned) = self.ordered_bindings_with_poison_snapshot(point);
         let mut facts = Vec::new();
@@ -1285,7 +1285,7 @@ impl HookDispatcher {
     /// record audit facts but cannot gate or patch already-completed work.
     pub async fn dispatch_event_triggered_at(
         &self,
-        tenant: ironclaw_host_api::TenantId,
+        tenant: ironclaw_host_api::ids::TenantId,
         event_cursor: EventCursor,
         event: &RuntimeEvent,
     ) -> ObserverDispatchOutcome {
@@ -1298,7 +1298,7 @@ impl HookDispatcher {
     /// dedupe against `event.event_id` (PR #3640 finding A3).
     pub async fn dispatch_event_triggered_replay_at(
         &self,
-        tenant: ironclaw_host_api::TenantId,
+        tenant: ironclaw_host_api::ids::TenantId,
         event_cursor: EventCursor,
         event: &RuntimeEvent,
     ) -> ObserverDispatchOutcome {
@@ -1308,7 +1308,7 @@ impl HookDispatcher {
 
     async fn dispatch_event_triggered_at_inner(
         &self,
-        tenant: ironclaw_host_api::TenantId,
+        tenant: ironclaw_host_api::ids::TenantId,
         event_cursor: EventCursor,
         event: &RuntimeEvent,
         is_replay: bool,
@@ -1388,7 +1388,7 @@ impl HookDispatcher {
     fn scope_provider_for_runtime_event(
         &self,
         event: &RuntimeEvent,
-    ) -> Option<ironclaw_host_api::ExtensionId> {
+    ) -> Option<ironclaw_host_api::ids::ExtensionId> {
         // The lifecycle provider-ownership security policy lives in
         // `lifecycle_owner` (PR #3931 P2 extraction). Here we only translate
         // the registry-lock probe into a `LifecycleOwnerLookup` value; the
@@ -1869,7 +1869,7 @@ impl HookDispatcher {
     ///
     /// `capability_name` is the raw capability name from
     /// [`BeforeCapabilityHookContext::capability_name`]; it is converted to
-    /// [`ironclaw_host_api::CapabilityId`] on a best-effort basis. If the
+    /// [`ironclaw_host_api::ids::CapabilityId`] on a best-effort basis. If the
     /// conversion fails (already-validated capability names should not, but
     /// the parse is guarded for safety), the event still records with no
     /// capability id. No free-form reason is forwarded — the `code` field
@@ -1884,7 +1884,7 @@ impl HookDispatcher {
             SecurityDecision::Blocked,
             HOOK_DENY_PREDICATE_CODE,
         );
-        if let Ok(cap_id) = ironclaw_host_api::CapabilityId::new(capability_name.to_string()) {
+        if let Ok(cap_id) = ironclaw_host_api::ids::CapabilityId::new(capability_name.to_string()) {
             event = event.with_capability_id(cap_id);
         }
         sink.record(event);
@@ -1914,7 +1914,10 @@ impl HookDispatcher {
     /// Returns `None` if the registry mutex is poisoned, the hook id isn't
     /// found, or the binding has no owning extension (Builtin / Trusted /
     /// SelfAuthored hooks).
-    fn lookup_owning_extension(&self, hook_id_hex: &str) -> Option<ironclaw_host_api::ExtensionId> {
+    fn lookup_owning_extension(
+        &self,
+        hook_id_hex: &str,
+    ) -> Option<ironclaw_host_api::ids::ExtensionId> {
         match self.registry.lock() {
             Ok(registry) => registry.owning_extension_for_hook_hex(hook_id_hex).cloned(),
             Err(_) => None,
@@ -2097,7 +2100,7 @@ impl HookDispatcherBuilder {
         mut self,
         hook_id: HookId,
         phase: HookPhase,
-        owning_extension: ironclaw_host_api::ExtensionId,
+        owning_extension: ironclaw_host_api::ids::ExtensionId,
         scope: HookBindingScope,
         hook: Box<dyn RestrictedBeforeCapabilityHook>,
     ) -> Result<Self, crate::error::HookError> {
@@ -2137,7 +2140,7 @@ impl HookDispatcherBuilder {
         mut self,
         hook_id: HookId,
         phase: HookPhase,
-        owning_extension: ironclaw_host_api::ExtensionId,
+        owning_extension: ironclaw_host_api::ids::ExtensionId,
         scope: HookBindingScope,
         hook: Box<dyn RestrictedBeforePromptHook>,
     ) -> Result<Self, crate::error::HookError> {
@@ -2159,7 +2162,7 @@ impl HookDispatcherBuilder {
         phase: HookPhase,
         point: HookPointSpec,
         trust_class: HookTrustClass,
-        owning_extension: Option<ironclaw_host_api::ExtensionId>,
+        owning_extension: Option<ironclaw_host_api::ids::ExtensionId>,
         scope: HookBindingScope,
         hook: Box<dyn ObserverHook>,
     ) -> Result<Self, crate::error::HookError> {
@@ -2204,7 +2207,7 @@ impl HookDispatcherBuilder {
         hook_id: HookId,
         phase: HookPhase,
         point: HookPointSpec,
-        owning_extension: ironclaw_host_api::ExtensionId,
+        owning_extension: ironclaw_host_api::ids::ExtensionId,
         scope: HookBindingScope,
         hook: Box<dyn ObserverHook>,
     ) -> Result<Self, crate::error::HookError> {
@@ -2227,7 +2230,7 @@ impl HookDispatcherBuilder {
         phase: HookPhase,
         event_kind: RuntimeEventKind,
         trust_class: HookTrustClass,
-        owning_extension: Option<ironclaw_host_api::ExtensionId>,
+        owning_extension: Option<ironclaw_host_api::ids::ExtensionId>,
         scope: HookBindingScope,
         hook: Box<dyn EventTriggeredHook>,
     ) -> Result<Self, crate::error::HookError> {
@@ -2272,7 +2275,7 @@ impl HookDispatcherBuilder {
         hook_id: HookId,
         phase: HookPhase,
         event_kind: RuntimeEventKind,
-        owning_extension: ironclaw_host_api::ExtensionId,
+        owning_extension: ironclaw_host_api::ids::ExtensionId,
         scope: HookBindingScope,
         hook: Box<dyn EventTriggeredHook>,
     ) -> Result<Self, crate::error::HookError> {
@@ -2325,12 +2328,12 @@ mod tests {
     };
     use async_trait::async_trait;
 
-    fn tenant() -> ironclaw_host_api::TenantId {
-        ironclaw_host_api::TenantId::new("alpha").expect("tenant ok")
+    fn tenant() -> ironclaw_host_api::ids::TenantId {
+        ironclaw_host_api::ids::TenantId::new("alpha").expect("tenant ok")
     }
 
-    fn host_ext() -> ironclaw_host_api::ExtensionId {
-        ironclaw_host_api::ExtensionId::new("ext").expect("ext id ok")
+    fn host_ext() -> ironclaw_host_api::ids::ExtensionId {
+        ironclaw_host_api::ids::ExtensionId::new("ext").expect("ext id ok")
     }
 
     fn ext_hook_id(local: &str) -> HookId {
@@ -2527,7 +2530,7 @@ mod tests {
             event
                 .capability_id
                 .as_ref()
-                .map(ironclaw_host_api::CapabilityId::as_str),
+                .map(ironclaw_host_api::ids::CapabilityId::as_str),
             Some("cap.x"),
             "capability id should propagate from ctx.capability_name"
         );
@@ -2561,7 +2564,7 @@ mod tests {
         // parse in `record_capability_block_audit` falls through to the
         // else-arm.
         assert!(
-            ironclaw_host_api::CapabilityId::new(String::new()).is_err(),
+            ironclaw_host_api::ids::CapabilityId::new(String::new()).is_err(),
             "empty capability name must fail to parse for this test to exercise the else-arm"
         );
 
@@ -2675,7 +2678,7 @@ mod tests {
             events[0]
                 .capability_id
                 .as_ref()
-                .map(ironclaw_host_api::CapabilityId::as_str),
+                .map(ironclaw_host_api::ids::CapabilityId::as_str),
             Some("cap.x"),
         );
     }
@@ -3290,8 +3293,8 @@ mod tests {
     /// regardless of provider.
     #[tokio::test]
     async fn own_capabilities_observer_filters_foreign_providers() {
-        let owner = ironclaw_host_api::ExtensionId::new("ext.owner").expect("ok");
-        let other = ironclaw_host_api::ExtensionId::new("ext.other").expect("ok");
+        let owner = ironclaw_host_api::ids::ExtensionId::new("ext.owner").expect("ok");
+        let other = ironclaw_host_api::ids::ExtensionId::new("ext.other").expect("ok");
         let id = HookId::derive(
             &crate::identity::ExtensionId::new("ext.owner").expect("valid ExtensionId in test"),
             "1.0",
@@ -3505,7 +3508,7 @@ mod tests {
             .install_installed_before_capability(
                 installed_cap,
                 HookPhase::Policy,
-                ironclaw_host_api::ExtensionId::new("loader-installed").expect("valid ext"),
+                ironclaw_host_api::ids::ExtensionId::new("loader-installed").expect("valid ext"),
                 crate::registry::HookBindingScope::Global,
                 Box::new(PassingInstalledHook),
             )
@@ -3546,7 +3549,7 @@ mod tests {
             .install_installed_before_prompt(
                 installed_prompt,
                 HookPhase::Policy,
-                ironclaw_host_api::ExtensionId::new("loader-installed").expect("valid ext"),
+                ironclaw_host_api::ids::ExtensionId::new("loader-installed").expect("valid ext"),
                 crate::registry::HookBindingScope::Global,
                 Box::new(EnvelopePatchHook),
             )
@@ -4262,13 +4265,13 @@ mod tests {
 
     // ── C3 regression: manifest-declared scope enforced at dispatch time ────
 
-    fn host_ext_named(name: &str) -> ironclaw_host_api::ExtensionId {
-        ironclaw_host_api::ExtensionId::new(name).expect("valid ext id")
+    fn host_ext_named(name: &str) -> ironclaw_host_api::ids::ExtensionId {
+        ironclaw_host_api::ids::ExtensionId::new(name).expect("valid ext id")
     }
 
     fn ctx_with_provider(
         capability: &str,
-        provider: Option<ironclaw_host_api::ExtensionId>,
+        provider: Option<ironclaw_host_api::ids::ExtensionId>,
     ) -> BeforeCapabilityHookContext {
         BeforeCapabilityHookContext::new(
             tenant(),
@@ -4447,14 +4450,15 @@ mod tests {
 
     // ─── Event-triggered hook dispatch tests (PR #3640 D8/D11/D12 + B) ─────
 
-    fn event_resource_scope() -> ironclaw_host_api::ResourceScope {
-        let user = ironclaw_host_api::UserId::new("user-ev").expect("valid user");
-        let invocation = ironclaw_host_api::InvocationId::new();
-        ironclaw_host_api::ResourceScope::local_default(user, invocation).expect("valid scope")
+    fn event_resource_scope() -> ironclaw_host_api::resource::ResourceScope {
+        let user = ironclaw_host_api::ids::UserId::new("user-ev").expect("valid user");
+        let invocation = ironclaw_host_api::ids::InvocationId::new();
+        ironclaw_host_api::resource::ResourceScope::local_default(user, invocation)
+            .expect("valid scope")
     }
 
-    fn event_capability() -> ironclaw_host_api::CapabilityId {
-        ironclaw_host_api::CapabilityId::new("event.fixture").expect("valid capability")
+    fn event_capability() -> ironclaw_host_api::ids::CapabilityId {
+        ironclaw_host_api::ids::CapabilityId::new("event.fixture").expect("valid capability")
     }
 
     struct NotingEventHook;
@@ -4589,7 +4593,7 @@ mod tests {
     /// would silently always-skip those events for `OwnCapabilities` hooks.
     #[tokio::test]
     async fn providerless_hook_meta_event_resolves_provider_via_registry() {
-        let owner = ironclaw_host_api::ExtensionId::new("ext").expect("valid extension id");
+        let owner = ironclaw_host_api::ids::ExtensionId::new("ext").expect("valid extension id");
         // Subject: an installed `before_capability` hook owned by `ext`.
         // We need this binding in the registry so the resolver can look up
         // its owning extension by the event's `hook_id` field.
@@ -4667,8 +4671,8 @@ mod tests {
     /// must stay inert.
     #[tokio::test]
     async fn hook_failed_with_spoofed_provider_does_not_fire_target_extension_hooks() {
-        let ext_a = ironclaw_host_api::ExtensionId::new("ext-a").expect("valid extension id");
-        let ext_b = ironclaw_host_api::ExtensionId::new("ext-b").expect("valid extension id");
+        let ext_a = ironclaw_host_api::ids::ExtensionId::new("ext-a").expect("valid extension id");
+        let ext_b = ironclaw_host_api::ids::ExtensionId::new("ext-b").expect("valid extension id");
 
         // Subject hook genuinely owned by ext-B. Its hook_id is what the
         // spoofed event will reference.
@@ -4802,7 +4806,8 @@ mod tests {
     /// (hook inert).
     #[tokio::test]
     async fn unknown_lifecycle_hook_id_with_carried_provider_stays_inert() {
-        let target = ironclaw_host_api::ExtensionId::new("target").expect("valid extension id");
+        let target =
+            ironclaw_host_api::ids::ExtensionId::new("target").expect("valid extension id");
 
         // Watcher owned by `target`, OwnCapabilities-scoped, listening for
         // HookFailed. It must only observe events whose true owner is `target`.
@@ -4869,7 +4874,8 @@ mod tests {
     /// to `None` (fail-closed), never the spoofable claim.
     #[tokio::test]
     async fn poisoned_registry_with_carried_provider_resolves_none() {
-        let target = ironclaw_host_api::ExtensionId::new("target").expect("valid extension id");
+        let target =
+            ironclaw_host_api::ids::ExtensionId::new("target").expect("valid extension id");
         let id = ext_hook_id("hole2-poison-watcher");
         let mut registry = HookRegistry::new();
         registry

@@ -2,7 +2,11 @@
 //! / `write_only()`, sharing `file_tools_with_runtime_policy` as their
 //! internal tail. See `harness/options.rs` for the `ToolsProfile` pattern.
 
-use ironclaw_host_api::{CapabilityId, EffectKind, MountPermissions, UserId};
+use ironclaw_host_api::{
+    capability::EffectKind,
+    ids::{CapabilityId, UserId},
+    mount::MountPermissions,
+};
 use ironclaw_host_runtime::{
     JSON_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
 };

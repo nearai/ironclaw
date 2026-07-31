@@ -3,7 +3,7 @@
 use std::{error::Error, fmt, sync::Arc};
 
 use ironclaw_events::SecurityAuditSink;
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_loop_host::{
     AgentTurnRunCancellationFactory, AwaitEdgeSettler, AwaitEdgeWriter,
     CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier, HostIdentityContextSource,
@@ -16,6 +16,7 @@ use ironclaw_loop_host::{
     SubagentSpawnLimits, verify_product_live_cancellation_probe,
 };
 use ironclaw_memory::MemoryService;
+use ironclaw_outbound::ReplyAttachmentIntentPort;
 use ironclaw_processes::ProcessTransitionPort;
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::{
@@ -298,6 +299,10 @@ where
     /// textual `<attachments>` pointer (the same fallback a text-only model
     /// gets) rather than failing the turn.
     pub attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
+    /// Shared run-scoped intent store used by the explicit attachment
+    /// capability and transcript finalizer. Production must pass the exact
+    /// same handle to both sides so sealing cannot split from registration.
+    pub reply_attachment_intent_port: Option<Arc<dyn ReplyAttachmentIntentPort>>,
     /// Durable store the loop-host persisted `GateRecord::Auth` into (§5.2.9),
     /// threaded to the turn executor so an auth block re-sources its
     /// `credential_requirements` from the host record (render-from-record) after
@@ -776,6 +781,9 @@ where
     if let Some(port) = parts.attachment_read_port {
         host_factory = host_factory.with_attachment_read_port(port);
     }
+    if let Some(port) = parts.reply_attachment_intent_port {
+        host_factory = host_factory.with_reply_attachment_intent_port(port);
+    }
     if let Some(source) = parts.skill_context_source {
         host_factory = host_factory.with_skill_context_source(source);
     }
@@ -960,8 +968,9 @@ mod tests {
     };
     use async_trait::async_trait;
     use ironclaw_host_api::{
-        AgentId, CapabilityId, ProjectId, Resolution, ResolutionBatch, RuntimeKind, TenantId,
-        ThreadId,
+        ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId},
+        resolution::{Resolution, ResolutionBatch},
+        runtime::RuntimeKind,
     };
     use ironclaw_host_runtime::{
         TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,

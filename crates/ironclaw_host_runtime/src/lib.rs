@@ -26,11 +26,14 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, CorrelationId,
-    DispatchFailureDetail, ExecutionContext, ExtensionId, FailureFate, FailureKind, ProcessId,
-    ResourceEstimate, ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeKind,
-    SecretHandle,
+    decision::RuntimeCredentialAuthRequirement,
+    dispatch::{CapabilityDisplayOutputPreview, DispatchFailureDetail},
+    ids::{ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, ProcessId, SecretHandle},
+    resource::{ResourceEstimate, ResourceScope, ResourceUsage},
+    result_meta::{FailureFate, FailureKind},
+    runtime::RuntimeKind,
     runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
+    scope::ExecutionContext,
 };
 use ironclaw_trust::TrustDecision;
 use serde_json::Value;
@@ -85,11 +88,12 @@ pub use first_party::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 pub use first_party_tools::{
-    APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, BuiltinFirstPartyTools,
-    ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
-    HTTP_SAVE_CAPABILITY_ID, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
-    MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    MemoryToolProfile, NATIVE_MEMORY_FIRST_PARTY_PROVIDER, NativeMemoryToolHandler,
+    APPLY_PATCH_CAPABILITY_ID, ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
+    BUILTIN_FIRST_PARTY_PROVIDER, BuiltinFirstPartyTools, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
+    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, JSON_CAPABILITY_ID,
+    LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID,
+    MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MemoryToolProfile,
+    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, NativeMemoryToolHandler,
     OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID,
     READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
@@ -107,7 +111,7 @@ pub use first_party_tools::{
     ensure_memory_mount, finish_memory_tool_result, is_allowed_code_artifact_host,
     map_memory_service_error, memory_invocation_for_request, memory_tool_profiles,
     normalize_memory_tool_input, register_memory_tool_handler, register_native_memory_tools,
-    register_outbound_delivery_first_party_handler,
+    register_outbound_delivery_first_party_handler, register_reply_attachment_first_party_handler,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use first_party_tools::{
@@ -705,7 +709,7 @@ pub fn capability_failure_disposition(kind: FailureKind) -> CapabilityFailureDis
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum RuntimeWorkId {
-    Invocation(ironclaw_host_api::InvocationId),
+    Invocation(ironclaw_host_api::ids::InvocationId),
     Process(ProcessId),
     Gate(RuntimeGateId),
 }
@@ -955,7 +959,9 @@ impl HostRuntimeError {
 #[cfg(test)]
 mod unsupported_operation_default_tests {
     use super::*;
-    use ironclaw_host_api::{CapabilitySet, MountView, TrustClass, UserId};
+    use ironclaw_host_api::{
+        capability::CapabilitySet, ids::UserId, mount::MountView, runtime::TrustClass,
+    };
 
     /// A `HostRuntime` that implements only the required methods, so every
     /// optional operation falls through to the trait's default body.

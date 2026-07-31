@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use ironclaw_host_api::ResourceScope;
+use ironclaw_host_api::resource::ResourceScope;
 
 use crate::sandbox_process::key_codec::{digest_hex, encode_parts};
 
@@ -50,7 +50,8 @@ impl RebornSandboxScopeKey {
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        AgentId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+        ids::{AgentId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
+        resource::ResourceScope,
     };
 
     fn scope(

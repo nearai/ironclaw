@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 
 use ironclaw_host_api::{
-    NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, ResourceUsage,
-    RuntimeDispatchErrorKind, RuntimeHttpEgressError, RuntimeHttpEgressReasonCode,
-    RuntimeHttpEgressRequest, RuntimeKind,
+    action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    dispatch::RuntimeDispatchErrorKind,
+    http::{RuntimeHttpEgressError, RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest},
+    resource::ResourceUsage,
+    runtime::RuntimeKind,
 };
 
 use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
@@ -225,8 +227,9 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_host_api::{
-        CapabilityId, InvocationId, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressResponse,
-        TenantId, UserId,
+        http::{RuntimeHttpEgress, RuntimeHttpEgressResponse},
+        ids::{CapabilityId, InvocationId, TenantId, UserId},
+        resource::ResourceScope,
     };
     use serde_json::json;
 

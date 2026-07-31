@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
-use ironclaw_host_api::ChannelPresentation;
+use ironclaw_host_api::channel::ChannelPresentation;
 use tracing;
 
 use crate::{ProductTurnContext, TurnOriginKind};
@@ -582,7 +582,7 @@ mod tests {
     use super::*;
     use crate::TurnOwner;
     use chrono::TimeZone;
-    use ironclaw_host_api::UserId;
+    use ironclaw_host_api::ids::UserId;
 
     fn stamp() -> chrono::DateTime<chrono::Utc> {
         chrono::Utc
@@ -709,6 +709,7 @@ mod tests {
         );
     }
 
+    // arch-exempt: large_file, mechanical command_prefix ripple from ChannelPresentation gaining a field (PR-3 Task 2), plan #4875
     #[test]
     fn renders_channel_presentation_hint() {
         // OUT-11: a channel's declared `[channel.presentation]` renders as a
@@ -725,6 +726,7 @@ mod tests {
                             supports_markdown: false,
                             supports_threads: false,
                             max_message_chars: Some(4000),
+                            command_prefix: None,
                         }),
                     },
                     ConnectedChannelSummary {
@@ -735,6 +737,7 @@ mod tests {
                             supports_markdown: true,
                             supports_threads: true,
                             max_message_chars: None,
+                            command_prefix: None,
                         }),
                     },
                 ]),

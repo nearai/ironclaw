@@ -1,5 +1,8 @@
 use ironclaw_filesystem::{CasExpectation, ContentType, Entry, RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{InvocationId, ScopedPath, ThreadId};
+use ironclaw_host_api::{
+    ids::{InvocationId, ThreadId},
+    path::ScopedPath,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 

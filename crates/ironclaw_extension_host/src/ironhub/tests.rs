@@ -4,9 +4,15 @@ use ed25519_dalek::{Signer, SigningKey};
 use ironclaw_extensions::{ExtensionInstallationStorePort, InstallationOwner};
 use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, NetworkPolicy, ResourceScope, RuntimeHttpEgress,
-    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
-    UserId, VirtualPath,
+    action::NetworkPolicy,
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
+    ids::{CapabilityId, ExtensionId, UserId},
+    path::VirtualPath,
+    resource::ResourceScope,
+    runtime::RuntimeKind,
 };
 use ironclaw_skills::ManagedSkillSource;
 use std::collections::{HashMap, VecDeque};

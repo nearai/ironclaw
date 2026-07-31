@@ -8,7 +8,7 @@
 //!
 //! The loop never sees raw tool input, only the sanitized projection.
 
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_turns::run_profile::ConcurrencyHint;
 
 use crate::state::LoopExecutionState;
@@ -73,7 +73,7 @@ pub(crate) struct CapabilityCallSummary {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{TenantId, ThreadId};
+    use ironclaw_host_api::ids::{TenantId, ThreadId};
     use ironclaw_turns::{
         AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
         run_profile::{
@@ -164,7 +164,7 @@ mod tests {
 
     fn call(name: &str, hint: ConcurrencyHint) -> CapabilityCallSummary {
         CapabilityCallSummary {
-            name: ironclaw_host_api::CapabilityId::new(name).expect("valid"),
+            name: ironclaw_host_api::ids::CapabilityId::new(name).expect("valid"),
             concurrency_hint: hint,
         }
     }

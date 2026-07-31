@@ -5,7 +5,7 @@ use ironclaw_extensions::{
     ManifestSource,
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
-use ironclaw_host_api::{ExtensionId, RuntimeKind, VirtualPath};
+use ironclaw_host_api::{ids::ExtensionId, path::VirtualPath, runtime::RuntimeKind};
 use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef, ProductSurfaceFailure};
 
 use crate::product_extension_host_api_contract_registry;
@@ -321,7 +321,7 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_extensions::ManifestSource;
     use ironclaw_filesystem::{DirEntry, FileStat, FilesystemOperation, InMemoryBackend};
-    use ironclaw_host_api::RuntimeKind;
+    use ironclaw_host_api::runtime::RuntimeKind;
 
     use crate::{AvailableExtensionAssetContent, AvailableExtensionCatalog};
 

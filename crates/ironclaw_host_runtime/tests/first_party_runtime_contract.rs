@@ -13,8 +13,26 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_host_api::FailureKind;
-use ironclaw_host_api::*;
+use ironclaw_host_api::result_meta::FailureKind;
+use ironclaw_host_api::{
+    action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints, PermissionMode},
+    capability_profile::CapabilityProfileSchemaRef,
+    dispatch::RuntimeDispatchErrorKind,
+    http::{
+        RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED, RuntimeCredentialInjection,
+        RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeHttpEgress,
+        RuntimeHttpEgressError, RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
+    ids::{CapabilityGrantId, CapabilityId, ExtensionId, PackageId, RunId, SecretHandle, UserId},
+    mount::MountView,
+    path::VirtualPath,
+    resource::{ResourceEstimate, ResourceScope, ResourceUsage},
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
+    trust::RequestedTrustClass,
+};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityError, FirstPartyCapabilityHandler,
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, FirstPartyCapabilityResult,

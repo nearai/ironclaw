@@ -227,9 +227,8 @@ export function statProjectFile({ threadId, path } = {}) {
 }
 
 // Same-origin relative URL for a project file's bytes. Feeds the shared
-// `fetchAttachmentBlob` (which attaches the bearer) so project-file chips can
-// reuse the message-attachment preview modal: it carries the same byte-fetch
-// shape as `attachmentUrl(...)`.
+// `fetchAttachmentBlob` (which attaches the bearer) so the project workspace
+// browser can reuse the attachment preview modal.
 export function projectFileContentUrl({ threadId, path } = {}) {
   if (!threadId || !path) {
     throw new Error("projectFileContentUrl requires threadId and path");
@@ -481,6 +480,22 @@ export function sendMessage({
   );
 }
 
+// --- Product commands ---
+
+export function listChatCommands() {
+  return apiFetch(`${V2_BASE}/commands`);
+}
+
+export function executeChatCommand({ threadId, text }) {
+  return apiFetch(
+    `${V2_BASE}/threads/${encodeURIComponent(threadId ?? "")}/commands`,
+    {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    },
+  );
+}
+
 // --- Timeline ---
 
 export function fetchTimeline({ threadId, limit, cursor } = {}) {
@@ -583,27 +598,21 @@ export async function fetchAttachmentDataUrl(path) {
 
 // --- Streaming (SSE) ---
 
-// `EventSource` cannot set request headers, so the token rides as a
-// query param. The composition middleware accepts `?token=` for this
-// route specifically (in-scope "SSE query-token exception" from #3886).
-export function openEventStream({
-  threadId,
-  afterCursor,
-  connectionId,
-  connectionGeneration,
-} = {}) {
+export function eventStreamRequest({ threadId, connectionId } = {}) {
   const url = new URL(
     `${V2_BASE}/threads/${encodeURIComponent(threadId)}/events`,
     window.location.origin,
   );
-  const token = readStoredToken();
-  if (token) url.searchParams.set("token", token);
-  if (afterCursor) url.searchParams.set("after_cursor", afterCursor);
   if (connectionId) url.searchParams.set("connection_id", connectionId);
-  if (connectionGeneration != null) {
-    url.searchParams.set("connection_generation", String(connectionGeneration));
-  }
-  return new EventSource(url.toString());
+  return {
+    url: url.toString(),
+    // A function gives every reconnect the latest credential without putting
+    // the bearer in browser history, proxy logs, or the request URL.
+    headers: () => {
+      const token = readStoredToken();
+      return token ? { Authorization: `Bearer ${token}` } : {};
+    },
+  };
 }
 
 // --- Streaming (WebSocket) ---

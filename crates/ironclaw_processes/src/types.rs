@@ -7,10 +7,17 @@
 use async_trait::async_trait;
 use ironclaw_filesystem::FilesystemError;
 use ironclaw_host_api::{
-    AgentId, CapabilityId, CapabilitySet, ExtensionId, HostApiError, InvocationId, MissionId,
-    MountView, ProcessAuthorizedContinuation, ProcessId, ProjectId, ResourceEstimate,
-    ResourceReservation, ResourceReservationId, ResourceScope, RuntimeKind, TenantId, ThreadId,
-    UserId, VirtualPath,
+    authorized::ProcessAuthorizedContinuation,
+    capability::CapabilitySet,
+    error::HostApiError,
+    ids::{
+        AgentId, CapabilityId, ExtensionId, InvocationId, MissionId, ProcessId, ProjectId,
+        ResourceReservationId, TenantId, ThreadId, UserId,
+    },
+    mount::MountView,
+    path::VirtualPath,
+    resource::{ResourceEstimate, ResourceReservation, ResourceScope},
+    runtime::RuntimeKind,
 };
 use ironclaw_resources::ResourceError;
 use serde::{Deserialize, Serialize};
@@ -50,7 +57,7 @@ pub struct ProcessRecord {
     // back through the trusted path so the store round-trips privileged kinds
     // (arch-simplification §4.3 exposed this when the InMemory store — which never
     // serialized — was replaced by the serde-round-tripping filesystem store).
-    #[serde(deserialize_with = "ironclaw_host_api::deserialize_trusted_runtime_kind")]
+    #[serde(deserialize_with = "ironclaw_host_api::runtime::deserialize_trusted_runtime_kind")]
     pub runtime: RuntimeKind,
     pub status: ProcessStatus,
     pub grants: CapabilitySet,

@@ -9,6 +9,7 @@ import {
 } from "../lib/api";
 import { ANON_SCOPE, authScope, setAuthScope } from "../lib/auth-scope";
 import { clearAllPins } from "../lib/pin-store";
+import { clearChatCommandsCache } from "../pages/chat/hooks/useChatCommands";
 import { clearHistoryCache } from "../pages/chat/hooks/useHistory";
 import { clearAllDrafts } from "../pages/chat/lib/draft-store";
 
@@ -236,6 +237,7 @@ export function useAuthSession() {
       clearHistoryCache();
       clearAllDrafts();
       clearAllPins();
+      clearChatCommandsCache();
     }
     lastScopeRef.current = nextScope;
   }, [session]);

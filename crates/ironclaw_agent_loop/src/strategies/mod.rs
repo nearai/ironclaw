@@ -66,7 +66,7 @@ pub(crate) use stop::{
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{TenantId, ThreadId};
+    use ironclaw_host_api::ids::{TenantId, ThreadId};
     use ironclaw_turns::{
         AgentLoopDriverDescriptor, LoopFailureKind, RunProfileId, RunProfileVersion, TurnId,
         TurnRunId, TurnScope,

@@ -130,6 +130,7 @@ export function MessageList({
   regressionArtifactExportEnabled = false,
   logsPath,
   pending = false,
+  commands,
   children,
 }) {
   const t = useT();
@@ -404,6 +405,7 @@ export function MessageList({
                 regressionArtifactExportEnabled={
                   regressionArtifactExportEnabled
                 }
+                commands={commands}
               />)
         )}
         {children}

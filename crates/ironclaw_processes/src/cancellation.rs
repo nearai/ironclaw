@@ -13,7 +13,7 @@ use std::{
     },
 };
 
-use ironclaw_host_api::{ProcessId, ResourceScope};
+use ironclaw_host_api::{ids::ProcessId, resource::ResourceScope};
 use tokio::sync::Notify;
 
 use crate::types::ProcessKey;

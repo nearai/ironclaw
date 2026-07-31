@@ -1,5 +1,5 @@
 use ironclaw_auth::{CredentialAccount, CredentialOwnership};
-use ironclaw_host_api::ExtensionId;
+use ironclaw_host_api::ids::ExtensionId;
 
 use super::manifest::is_gsuite_extension_id;
 
@@ -50,7 +50,10 @@ mod tests {
         CredentialAccountLabel, CredentialAccountStatus, CredentialOwnership, GOOGLE_PROVIDER_ID,
         Timestamp,
     };
-    use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, UserId};
+    use ironclaw_host_api::{
+        ids::{ExtensionId, InvocationId, UserId},
+        resource::ResourceScope,
+    };
 
     use super::gsuite_google_account_visible_to_requester;
 

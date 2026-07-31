@@ -3,8 +3,11 @@ use ironclaw_authorization::{
     CapabilityLease, CapabilityLeaseError, CapabilityLeaseStatus, CapabilityLeaseStorePort,
 };
 use ironclaw_host_api::{
-    Action, ApprovalRequest, CapabilityId, ExecutionContext, InvocationFingerprint, InvocationId,
-    Principal, ResourceEstimate, ResourceScope,
+    action::Action,
+    approval::{ApprovalRequest, InvocationFingerprint},
+    ids::{CapabilityId, InvocationId},
+    resource::{ResourceEstimate, ResourceScope},
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_processes::{ProcessInvocationError, ProcessInvocationStatePort};
 use tracing::warn;
@@ -23,7 +26,7 @@ pub(crate) fn invocation_fingerprint_for_kind(
     capability_id: &CapabilityId,
     estimate: &ResourceEstimate,
     input: &serde_json::Value,
-) -> Result<InvocationFingerprint, ironclaw_host_api::HostApiError> {
+) -> Result<InvocationFingerprint, ironclaw_host_api::error::HostApiError> {
     match kind {
         CapabilityActionKind::Dispatch => {
             InvocationFingerprint::for_dispatch(scope, capability_id, estimate, input)
@@ -341,7 +344,10 @@ pub(crate) fn invocation_state_error_kind(error: &ProcessInvocationError) -> &'s
 mod tests {
     use super::*;
     use crate::CapabilityInvocationError;
-    use ironclaw_host_api::{CapabilityId, DispatchFailureKind, RuntimeDispatchErrorKind};
+    use ironclaw_host_api::{
+        dispatch::{DispatchFailureKind, RuntimeDispatchErrorKind},
+        ids::CapabilityId,
+    };
 
     fn capability() -> CapabilityId {
         CapabilityId::new("test.capability").expect("capability id")

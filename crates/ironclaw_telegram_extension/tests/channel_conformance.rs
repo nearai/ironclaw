@@ -11,7 +11,7 @@ use ironclaw_host_api::product_adapter::{
     ChannelAdapter, ChannelContext, ChannelError, ExternalConversationRef, InboundOutcome,
     OutboundEnvelope, OutboundPart, OutboundTarget, VerifiedInbound,
 };
-use ironclaw_host_api::{
+use ironclaw_host_api::tool_adapter::{
     RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
 };
 use ironclaw_telegram_extension::{

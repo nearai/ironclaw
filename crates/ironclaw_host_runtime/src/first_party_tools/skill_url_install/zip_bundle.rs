@@ -1,6 +1,6 @@
 use std::{collections::HashSet, io::Read, path::Path};
 
-use ironclaw_host_api::RuntimeDispatchErrorKind;
+use ironclaw_host_api::dispatch::RuntimeDispatchErrorKind;
 
 use crate::FirstPartyCapabilityError;
 

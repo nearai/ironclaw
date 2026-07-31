@@ -12,6 +12,7 @@ mod delivery_targets;
 mod error;
 mod ids;
 mod outbound_state_store;
+mod reply_attachment_intents;
 mod resolution_engine;
 mod run_delivery_cleanup;
 mod run_final_reply_handoff;
@@ -55,6 +56,9 @@ pub use ids::{
     TriggerOriginRef,
 };
 pub use outbound_state_store::OutboundStateStore;
+pub use reply_attachment_intents::{
+    ReplyAttachmentHandle, ReplyAttachmentIntent, ReplyAttachmentIntentPort,
+};
 pub use run_delivery_cleanup::{
     MAX_RUN_DELIVERY_CLEANUP_RECORDS, RunDeliveryCleanupRecord, RunDeliveryCleanupRequest,
 };

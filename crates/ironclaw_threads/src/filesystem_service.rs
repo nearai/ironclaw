@@ -3,12 +3,12 @@
 //!
 //! Records live under the `/threads` mount alias on a
 //! [`ScopedFilesystem`](ironclaw_filesystem::ScopedFilesystem). The paths in
-//! this module are alias-relative [`ScopedPath`](ironclaw_host_api::ScopedPath)
+//! this module are alias-relative [`ScopedPath`](ironclaw_host_api::path::ScopedPath)
 //! strings — at every op the [`ScopedFilesystem`] resolves the alias against
-//! its caller-supplied [`MountView`](ironclaw_host_api::MountView) and enforces
+//! its caller-supplied [`MountView`](ironclaw_host_api::mount::MountView) and enforces
 //! per-grant ACL before backend dispatch. The composition layer wires the
 //! alias to a tenant/user-scoped
-//! [`VirtualPath`](ironclaw_host_api::VirtualPath), so tenant isolation is
+//! [`VirtualPath`](ironclaw_host_api::path::VirtualPath), so tenant isolation is
 //! structural rather than something this crate must re-derive from
 //! `ThreadScope.tenant_id`.
 //!
@@ -50,7 +50,12 @@ use ironclaw_filesystem::{
     OrderedPage, OrderedQueryCursor, Page, RecordKind, RecordVersion, RootFilesystem,
     ScopedFilesystem, SortDirection, cas_update,
 };
-use ironclaw_host_api::{HostApiError, InvocationId, ResourceScope, ScopedPath, ThreadId};
+use ironclaw_host_api::{
+    error::HostApiError,
+    ids::{InvocationId, ThreadId},
+    path::ScopedPath,
+    resource::ResourceScope,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -140,8 +145,8 @@ struct InboundIdempotencyRecord {
 /// Construct with an [`Arc<ScopedFilesystem<F>>`](ScopedFilesystem) over
 /// any [`RootFilesystem`]. The [`ScopedFilesystem`] resolves the
 /// `/threads` alias to a tenant/user-scoped
-/// [`VirtualPath`](ironclaw_host_api::VirtualPath) per its
-/// [`MountView`](ironclaw_host_api::MountView) and enforces per-op ACL
+/// [`VirtualPath`](ironclaw_host_api::path::VirtualPath) per its
+/// [`MountView`](ironclaw_host_api::mount::MountView) and enforces per-op ACL
 /// before backend dispatch — so tenant isolation is structural rather
 /// than something this crate must re-derive from
 /// `ThreadScope.tenant_id`. Within-tenant axes (`agent_id`,
@@ -1647,6 +1652,8 @@ where
         &self,
         request: AppendFinalizedAssistantMessageRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let (content, attachments) = request.content.into_parts();
+        crate::contract::validate_attachment_refs(&attachments)?;
         if let Some(existing) = self
             .find_assistant_message_by_run(
                 &request.scope,
@@ -1659,7 +1666,8 @@ where
             if existing.status != MessageStatus::Draft {
                 return Ok(existing);
             }
-            let content = request.content.clone();
+            let content = content.clone();
+            let attachments = attachments.clone();
             let now = Utc::now();
             let finalized = self
                 .apply_message_update(
@@ -1669,8 +1677,8 @@ where
                     |message| {
                         ensure_draft(message)?;
                         message.status = MessageStatus::Finalized;
-                        message.content = Some(content.clone().into_text());
-                        message.attachments = Vec::new();
+                        message.content = Some(content.clone());
+                        message.attachments = attachments.clone();
                         message.updated_at = Some(now);
                         Ok(())
                     },
@@ -1701,8 +1709,8 @@ where
             turn_run_id: Some(request.turn_run_id),
             tool_result_ref: None,
             tool_result_provider_call: None,
-            content: Some(request.content.into_text()),
-            attachments: Vec::new(),
+            content: Some(content),
+            attachments,
             redaction_ref: None,
         };
         self.write_new_message(
@@ -2158,6 +2166,8 @@ where
         message_id: ThreadMessageId,
         content: MessageContent,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let (content, attachments) = content.into_parts();
+        crate::contract::validate_attachment_refs(&attachments)?;
         self.read_thread_versioned(scope, thread_id)
             .await?
             .ok_or_else(|| SessionThreadError::UnknownThread {
@@ -2168,8 +2178,8 @@ where
             .apply_message_update(scope, thread_id, message_id, |message| {
                 ensure_draft(message)?;
                 message.status = MessageStatus::Finalized;
-                message.content = Some(content.clone().into_text());
-                message.attachments = Vec::new();
+                message.content = Some(content.clone());
+                message.attachments = attachments.clone();
                 message.updated_at = Some(now);
                 Ok(())
             })
@@ -3295,7 +3305,7 @@ impl From<FilesystemError> for SessionThreadError {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 
     use super::{InboundIdempotencyKey, idempotency_record_key};
     use crate::ThreadScope;
@@ -3330,7 +3340,9 @@ mod tests {
     async fn reserve_sequence_resumes_existing_thread_counter_not_native_restart() {
         use ironclaw_filesystem::{CasExpectation, InMemoryBackend, ScopedFilesystem};
         use ironclaw_host_api::{
-            MountAlias, MountGrant, MountPermissions, MountView, ThreadId, VirtualPath,
+            ids::ThreadId,
+            mount::{MountGrant, MountPermissions, MountView},
+            path::{MountAlias, VirtualPath},
         };
 
         use super::{FilesystemSessionThreadService, thread_record_path};

@@ -5,8 +5,11 @@ use std::{collections::BTreeMap, sync::Arc};
 use crate::ActiveExtensionCapability;
 use chrono::Utc;
 use ironclaw_host_api::{
-    CapabilityGrant, CapabilityGrantId, CapabilityId, EffectKind, ExtensionId, GrantConstraints,
-    MountView, NetworkPolicy, Principal,
+    action::NetworkPolicy,
+    capability::{CapabilityGrant, EffectKind, GrantConstraints},
+    ids::{CapabilityGrantId, CapabilityId, ExtensionId},
+    mount::MountView,
+    scope::Principal,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
@@ -79,7 +82,7 @@ impl ExtensionCapabilitySurface {
     pub fn grants(
         &self,
         grantee: &ExtensionId,
-        caller: &ironclaw_host_api::UserId,
+        caller: &ironclaw_host_api::ids::UserId,
     ) -> Vec<CapabilityGrant> {
         self.active_capabilities
             .iter()
@@ -105,7 +108,7 @@ impl ExtensionCapabilitySurface {
     /// advertised to other users' surfaces.
     pub fn provider_trust(
         &self,
-        caller: &ironclaw_host_api::UserId,
+        caller: &ironclaw_host_api::ids::UserId,
     ) -> BTreeMap<ExtensionId, TrustDecision> {
         let mut effects_by_provider: BTreeMap<ExtensionId, Vec<EffectKind>> = BTreeMap::new();
         for capability in &self.active_capabilities {
@@ -206,7 +209,9 @@ pub fn extension_network_policy(capability: &ActiveExtensionCapability) -> Netwo
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        CapabilityId, NetworkScheme, NetworkTargetPattern, PermissionMode, UserId,
+        action::{NetworkScheme, NetworkTargetPattern},
+        capability::PermissionMode,
+        ids::{CapabilityId, UserId},
     };
 
     const EXA_MCP_HOST: &str = "mcp.exa.ai";
@@ -431,12 +436,12 @@ mod tests {
             provider: ExtensionId::new("web-access").unwrap(),
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
             default_permission: PermissionMode::Allow,
-            runtime_credentials: vec![ironclaw_host_api::RuntimeCredentialRequirement {
-                handle: ironclaw_host_api::SecretHandle::new("exa_mcp_token").unwrap(),
-                source: ironclaw_host_api::RuntimeCredentialRequirementSource::SecretHandle,
+            runtime_credentials: vec![ironclaw_host_api::capability::RuntimeCredentialRequirement {
+                handle: ironclaw_host_api::ids::SecretHandle::new("exa_mcp_token").unwrap(),
+                source: ironclaw_host_api::capability::RuntimeCredentialRequirementSource::SecretHandle,
                 provider_scopes: Vec::new(),
                 audience: https(EXA_MCP_HOST),
-                target: ironclaw_host_api::RuntimeCredentialTarget::Header {
+                target: ironclaw_host_api::http::RuntimeCredentialTarget::Header {
                     name: "authorization".to_string(),
                     prefix: Some("Bearer ".to_string()),
                 },
@@ -467,12 +472,12 @@ mod tests {
                 EffectKind::UseSecret,
             ],
             default_permission: PermissionMode::Allow,
-            runtime_credentials: vec![ironclaw_host_api::RuntimeCredentialRequirement {
-                handle: ironclaw_host_api::SecretHandle::new("gmail_account").unwrap(),
-                source: ironclaw_host_api::RuntimeCredentialRequirementSource::SecretHandle,
+            runtime_credentials: vec![ironclaw_host_api::capability::RuntimeCredentialRequirement {
+                handle: ironclaw_host_api::ids::SecretHandle::new("gmail_account").unwrap(),
+                source: ironclaw_host_api::capability::RuntimeCredentialRequirementSource::SecretHandle,
                 provider_scopes: Vec::new(),
                 audience: https("gmail.googleapis.com"),
-                target: ironclaw_host_api::RuntimeCredentialTarget::Header {
+                target: ironclaw_host_api::http::RuntimeCredentialTarget::Header {
                     name: "authorization".to_string(),
                     prefix: Some("Bearer ".to_string()),
                 },
@@ -501,12 +506,12 @@ mod tests {
                 EffectKind::UseSecret,
             ],
             default_permission: PermissionMode::Allow,
-            runtime_credentials: vec![ironclaw_host_api::RuntimeCredentialRequirement {
-                handle: ironclaw_host_api::SecretHandle::new("google_calendar_account").unwrap(),
-                source: ironclaw_host_api::RuntimeCredentialRequirementSource::SecretHandle,
+            runtime_credentials: vec![ironclaw_host_api::capability::RuntimeCredentialRequirement {
+                handle: ironclaw_host_api::ids::SecretHandle::new("google_calendar_account").unwrap(),
+                source: ironclaw_host_api::capability::RuntimeCredentialRequirementSource::SecretHandle,
                 provider_scopes: Vec::new(),
                 audience: https("www.googleapis.com"),
-                target: ironclaw_host_api::RuntimeCredentialTarget::Header {
+                target: ironclaw_host_api::http::RuntimeCredentialTarget::Header {
                     name: "authorization".to_string(),
                     prefix: Some("Bearer ".to_string()),
                 },

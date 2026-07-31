@@ -15,7 +15,8 @@ use ironclaw_events::{
     EventStreamKey, InMemoryDurableEventLog, ReadScope, RuntimeEvent,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, ProjectId, ResourceScope, TenantId, UserId,
+    ids::{AgentId, CapabilityId, InvocationId, ProjectId, TenantId, UserId},
+    resource::ResourceScope,
 };
 use ironclaw_reborn_event_store::{CoalescingEventSink, EventBatchConfig};
 

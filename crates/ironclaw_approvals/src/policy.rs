@@ -7,9 +7,17 @@ use ironclaw_filesystem::{
     VersionedEntry,
 };
 use ironclaw_host_api::{
-    Action, ApprovalRequestId, CapabilityGrant, CapabilityGrantId, CapabilityId, GrantConstraints,
-    HostApiError, PermissionMode, Principal, ProjectId, ResourceScope, ScopedPath, SystemServiceId,
-    TenantId, UserId, sha256_digest_token,
+    action::Action,
+    approval::sha256_digest_token,
+    capability::{CapabilityGrant, GrantConstraints, PermissionMode},
+    error::HostApiError,
+    ids::{
+        ApprovalRequestId, CapabilityGrantId, CapabilityId, ProjectId, SystemServiceId, TenantId,
+        UserId,
+    },
+    path::ScopedPath,
+    resource::ResourceScope,
+    scope::Principal,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -90,7 +98,7 @@ impl PersistentApprovalAction {
 pub struct PersistentApprovalScope {
     pub tenant_id: TenantId,
     pub user_id: UserId,
-    pub agent_id: Option<ironclaw_host_api::AgentId>,
+    pub agent_id: Option<ironclaw_host_api::ids::AgentId>,
     pub project_id: Option<ProjectId>,
 }
 
@@ -535,7 +543,7 @@ fn resource_scope_for_policy_key(key: &PersistentApprovalPolicyKey) -> ResourceS
         project_id: key.scope.project_id.clone(),
         mission_id: None,
         thread_id: None,
-        invocation_id: ironclaw_host_api::InvocationId::new(),
+        invocation_id: ironclaw_host_api::ids::InvocationId::new(),
     }
 }
 
@@ -567,8 +575,11 @@ mod tests {
 
     use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
-        AgentId, EffectKind, GrantConstraints, HostPath, InvocationId, MountAlias, MountGrant,
-        MountPermissions, MountView, NetworkPolicy, ProjectId, ThreadId, VirtualPath,
+        action::NetworkPolicy,
+        capability::{EffectKind, GrantConstraints},
+        ids::{AgentId, InvocationId, ProjectId, ThreadId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{HostPath, MountAlias, VirtualPath},
     };
 
     use super::*;

@@ -34,14 +34,17 @@ use crate::webui_v2::{
 };
 use axum::{
     Json, Router,
-    extract::{Request, State},
+    extract::{DefaultBodyLimit, Request, State},
     http::{HeaderName, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
 };
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
-use ironclaw_host_api::{AgentId, ProductSurface, ProjectId, TenantId, UserId};
+use ironclaw_host_api::{
+    ids::{AgentId, ProjectId, TenantId, UserId},
+    product_surface::ProductSurface,
+};
 use ironclaw_host_ingress::{
     ProtectedRouteMount, PublicRouteDrains, PublicRouteMount, SplitRouteMount,
 };
@@ -56,7 +59,7 @@ use crate::webui_operator_auth::{
 };
 use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
 use crate::webui_ws_origin::{build_websocket_origin_state, enforce_websocket_origin};
-use ironclaw_host_api::ProductSurfaceCaller;
+use ironclaw_host_api::product_surface::ProductSurfaceCaller;
 use ironclaw_product::mark_bearer_token_verified_for_tenant;
 use serde::Serialize;
 
@@ -684,8 +687,12 @@ pub fn webui_v2_app_with_lifecycle(
         .merge(static_router_with_config(static_router_config))
         // Outer global cap: applies to unmatched paths (e.g. 404 fallback)
         // as defense in depth. v2 routes are tighter via the per-route
-        // body-limit middleware above.
+        // body-limit middleware above. Disable Axum's implicit 2 MiB extractor
+        // cap so `Json<T>` cannot silently override the descriptor-owned
+        // 14 MiB send-message contract after that middleware accepts and
+        // rebuilds an inline-attachment request body.
         .layer(RequestBodyLimitLayer::new(config.max_body_bytes))
+        .layer(DefaultBodyLimit::disable())
         .layer(CatchPanicLayer::custom(panic_handler))
         .layer(cors)
         .layer(SetResponseHeaderLayer::if_not_present(

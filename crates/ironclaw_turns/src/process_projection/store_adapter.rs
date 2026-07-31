@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::ResourceScope;
+use ironclaw_host_api::resource::ResourceScope;
 use ironclaw_processes::{
     CancelProcessRequest, ClaimProcessesRequest, ClaimedProcess, FailProcessRequest,
     GetProcessCheckpointRequest, GetProcessInputRequest, GetProcessSnapshotRequest,
@@ -52,7 +52,7 @@ impl ProcessTreePort for ProcessJournalStoreTurnAdapter {
     async fn child_processes(
         &self,
         scope: &ResourceScope,
-        parent_process_id: ironclaw_host_api::ProcessId,
+        parent_process_id: ironclaw_host_api::ids::ProcessId,
     ) -> Result<Vec<JournaledProcessSnapshot>, Self::Error> {
         self.runtime
             .child_processes(scope, parent_process_id)
@@ -303,7 +303,7 @@ impl ProcessJournalSource for ProcessJournalStoreTurnAdapter {
     async fn read_process_journal_after(
         &self,
         scope: &ResourceScope,
-        owner_user_id: Option<&ironclaw_host_api::UserId>,
+        owner_user_id: Option<&ironclaw_host_api::ids::UserId>,
         after: Option<ProcessJournalCursor>,
         limit: usize,
     ) -> Result<ProcessJournalPage, Self::Error> {
