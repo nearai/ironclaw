@@ -6,7 +6,7 @@ description: Prompt extensions that activate based on context
 Skills are markdown files that contain domain-specific instructions. When a skill activates, its markdown body is injected into the LLM context — giving the agent specialized knowledge and behavior without retraining.
 
 <Tip>
-IronClaw can search and install skills from the ClawHub registry, a community-driven repository of pre-built skills covering various domains and use cases.
+IronClaw can search and install skills from the IronHub registry, a community-driven repository of pre-built skills covering various domains and use cases. See [IronHub](/hub/overview) for the full catalog.
 </Tip>
 
 ---
@@ -85,7 +85,7 @@ Skills pass through four stages before injection:
   </Step>
 
   <Step title="Attenuate">
-    Trust-based tool ceiling is applied. Installed skills (from ClawHub) lose access to dangerous tools regardless of what the skill requests. Trusted skills retain full tool access. See Trust Levels below.
+    Trust-based tool ceiling is applied. Installed skills (from IronHub) lose access to dangerous tools regardless of what the skill requests. Trusted skills retain full tool access. See Trust Levels below.
   </Step>
 </Steps>
 
@@ -96,7 +96,7 @@ Skills pass through four stages before injection:
 | Trust Level   | Source                                                      | Tool Access                                             |
 |---------------|-------------------------------------------------------------|---------------------------------------------------------|
 | **Trusted**   | User-placed in `~/.ironclaw/skills/` or workspace `skills/` | All tools available to the agent                        |
-| **Installed** | Downloaded from ClawHub registry via `skill_install`        | Read-only tools only — no shell, no file write, no HTTP |
+| **Installed** | Downloaded from IronHub registry via `skill_install`        | Read-only tools only — no shell, no file write, no HTTP |
 
 <Warning>
 Never place a skill file in the trusted directories unless you have reviewed its contents. A skill in `~/.ironclaw/skills/` has the same tool access as you do.
@@ -112,7 +112,7 @@ IronClaw discovers skills from three locations, checked in order:
 |---------------------------------|-----------|-------------------------------------------------------------|
 | `~/.ironclaw/skills/`           | Trusted   | User's global skills, available in all sessions             |
 | `<workspace>/skills/`           | Trusted   | Per-workspace skills, activated in that workspace's context |
-| `~/.ironclaw/installed_skills/` | Installed | Registry-installed skills from ClawHub                      |
+| `~/.ironclaw/installed_skills/` | Installed | Registry-installed skills from IronHub                      |
 
 Skills in trusted directories are loaded as-is. Skills in `installed_skills/` have their tool access capped by the attenuation layer regardless of what they declare.
 
