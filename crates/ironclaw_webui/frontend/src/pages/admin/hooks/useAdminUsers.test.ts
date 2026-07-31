@@ -173,12 +173,14 @@ test("admin user hook loads the next cursor once and disables polling after the 
   const signal = {};
   await queryOptions.queryFn({ signal });
   assert.equal(fetchCalls.length, 1);
+  assert.equal(fetchCalls[0].limit, 20);
   assert.equal(fetchCalls[0].signal, signal);
 
   const firstRequest = state.loadMore();
   const duplicateRequest = state.loadMore();
   assert.equal(firstRequest, duplicateRequest);
   assert.equal(fetchCalls.length, 2);
+  assert.equal(fetchCalls[1].limit, 20);
   assert.equal(fetchCalls[1].cursor, "cursor-1");
   assert.equal(
     queryOptions.refetchInterval({

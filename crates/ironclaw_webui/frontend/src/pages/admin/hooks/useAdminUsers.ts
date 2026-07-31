@@ -14,13 +14,18 @@ import {
   deleteUserSecret,
 } from "../lib/admin-api";
 
+const ADMIN_USERS_PAGE_SIZE = 20;
+
 export function useAdminUsers() {
   const queryClient = useQueryClient();
   const requestedMoreRef = React.useRef(false);
 
   const query = useQuery({
     queryKey: ["admin", "users"],
-    queryFn: ({ signal }) => fetchAdminUsers({ signal }),
+    queryFn: ({ signal }) => fetchAdminUsers({
+      limit: ADMIN_USERS_PAGE_SIZE,
+      signal,
+    }),
     // Poll the initial bounded page, but stop once the administrator attempts
     // to load more. Additional pages are fetched directly below, so polling
     // can never multiply traffic by the number of retained pages.
@@ -65,7 +70,10 @@ export function useAdminUsers() {
 
     setIsLoadingMore(true);
     setLoadMoreError(null);
-    const request = fetchAdminUsers({ cursor: nextCursor })
+    const request = fetchAdminUsers({
+      limit: ADMIN_USERS_PAGE_SIZE,
+      cursor: nextCursor,
+    })
       .then((page) => {
         setAdditionalPages((current) => [...current, page]);
         return page;
