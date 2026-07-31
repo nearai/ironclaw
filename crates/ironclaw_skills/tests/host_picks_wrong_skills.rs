@@ -256,6 +256,12 @@ fn the_host_keyword_scorer_picks_skills_the_task_does_not_need() {
         println!("    {count:2} tasks  {name}");
     }
 
+    // Machine-readable per-task line, so a caller can restrict to any task subset.
+    println!("\n  PERTASK task_id picked correct");
+    for (task, picked, correct, _) in &worst {
+        println!("  PERTASK {task} {picked} {correct}");
+    }
+
     worst.sort_by(|a, b| b.3.len().cmp(&a.3.len()));
     println!("\n  worst tasks:");
     for (task, picked, correct, wrong) in worst.iter().take(6) {
