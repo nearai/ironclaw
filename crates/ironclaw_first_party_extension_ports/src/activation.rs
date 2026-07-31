@@ -1979,6 +1979,86 @@ mod tests {
         assert_no_skill_body_disclosed(&selected, "200-skill catalog, nothing activated");
     }
 
+    /// #5417, on the path that actually has the bug.
+    ///
+    /// Criteria selection needs a RECORDED user message (`take_message_for_run`). The
+    /// coordinator path never records one, so a coordinator-path test passes vacuously and
+    /// proves nothing -- the existing integration test says as much. This records the message,
+    /// which is what the product/WebUI surface does, and the issue itself reports
+    /// "Run origin: WebUI chat".
+    ///
+    /// Two things are asserted, because either alone is weak:
+    ///   * with the default policy (model-decides) the skill does not activate, and
+    ///   * with criteria selection explicitly ON it DOES still activate on this branch -- which
+    ///     is the honest state and is asserted, not hidden.
+    ///
+    /// That second half is the useful part: it shows the two changes are complementary rather
+    /// than redundant. This PR removes the scorer from the decision; #6937's word-boundary
+    /// matcher stops `hack` matching inside "Hacker" for any profile that opts the scorer back
+    /// in (covered there by `hacker_news_does_not_activate_a_skill_declaring_hack`). Neither
+    /// alone closes #5417 on the criteria path, and pinning that here means a future reader
+    /// cannot mistake model-decides for a complete fix.
+    #[tokio::test]
+    async fn hacker_news_does_not_activate_tech_debt_tracker_on_the_recording_path() {
+        const PROMPT: &str =
+            "search Hacker News for any recent posts mentioning 'IronClaw' or 'NEAR AI'";
+        for (label, config, expect_body) in [
+            (
+                "model-decides (default)",
+                SkillActivationSelectorConfig::default(),
+                false,
+            ),
+            // Documents the residual: with the scorer opted back in, this branch alone does not
+            // save you. #6937 is what fixes it.
+            ("criteria explicitly enabled", criteria_config(), true),
+        ] {
+            let source = Arc::new(StaticSkillBundleSource::new(vec![(
+                SkillSourceKind::User,
+                "tech-debt-tracker",
+                &skill_md(
+                    "tech-debt-tracker",
+                    "Detect and track technical debt from conversation and PR review comments.",
+                    &["hack", "hacky", "tech debt"],
+                    "TECH_DEBT_SENTINEL",
+                ),
+            )]));
+            let selectable = SelectableSkillContextSource::new(source, config);
+            let context = run_context().await;
+            selectable
+                .record_user_message(
+                    context.scope.clone(),
+                    accepted_message_ref(&context),
+                    PROMPT,
+                )
+                .expect("record the user message, as the product surface does");
+
+            let selected = selectable
+                .load_skill_context_candidates(&context)
+                .await
+                .expect("selection succeeds");
+
+            let bodies = selected
+                .iter()
+                .filter_map(|candidate| candidate.loaded_skill_md())
+                .collect::<Vec<_>>();
+            if expect_body {
+                assert!(
+                    bodies
+                        .iter()
+                        .any(|body| body.contains("TECH_DEBT_SENTINEL")),
+                    "#5417 [{label}]: expected the KNOWN residual -- opting the scorer back in \
+                     still mis-activates here until #6937's word-boundary matcher lands. If this \
+                     now passes, the matcher has merged and this arm should assert absence."
+                );
+            } else {
+                assert!(
+                    bodies.is_empty(),
+                    "#5417 [{label}]: a Hacker News search must not inject tech-debt-tracker"
+                );
+            }
+        }
+    }
+
     fn criteria_config() -> SkillActivationSelectorConfig {
         SkillActivationSelectorConfig::default()
             .set_selection_mode(SkillActivationSelectionMode::ExplicitAndCriteria)
