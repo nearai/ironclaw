@@ -23,6 +23,23 @@ def current_date(override: dt.date | None) -> dt.date:
     return override if override is not None else dt.date.today()
 
 
+def live_qa_matrix_cases(workflow: str, errors: list[str]) -> set[str]:
+    job_match = re.search(
+        r"(?ms)^  reborn-webui-v2-live-qa:\n(?P<job>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
+        workflow,
+    )
+    if not job_match:
+        errors.append("live-canary workflow has no reborn-webui-v2-live-qa job")
+        return set()
+
+    cases: set[str] = set()
+    for value in re.findall(r"(?m)^ {12}cases:\s*([^#\n]+)$", job_match.group("job")):
+        cases.update(case.strip() for case in value.split(",") if case.strip())
+    if not cases:
+        errors.append("reborn-webui-v2-live-qa matrix has no cases")
+    return cases
+
+
 def validate(
     manifest_path: pathlib.Path, today: dt.date, repo_root: pathlib.Path
 ) -> list[str]:
@@ -167,36 +184,56 @@ def validate(
         elif fixture and not (repo_root / fixture).is_file():
             errors.append(f"{field}.deterministic_fixture does not exist")
 
-    replayable = selected - no_model - quarantined
-    accounted = drift_set | retired_set
-    missing = sorted(replayable - accounted)
-    unexpected = sorted(accounted - replayable)
-    if missing:
-        errors.append(
-            "replayable cases must be representative drift or retired: "
-            + ", ".join(missing)
-        )
-    if unexpected:
-        errors.append(
-            "live/retired cases must have active deterministic replay: "
-            + ", ".join(unexpected)
-        )
+    workflow = (repo_root / ".github/workflows/live-canary.yml").read_text(
+        encoding="utf-8"
+    )
+    matrix_cases = live_qa_matrix_cases(workflow, errors)
+    for case in sorted(matrix_cases - selected):
+        errors.append(f"matrix case is not in the harvested inventory: {case}")
+    for case in sorted(selected - matrix_cases):
+        errors.append(f"harvested case is missing from live-canary matrix: {case}")
 
-    workflow = (repo_root / ".github/workflows/live-canary.yml").read_text(encoding="utf-8")
     scheduled_match = re.search(
         r"REQUESTED_CASES:\s*\$\{\{\s*github\.event_name == 'schedule'\s*&&\s*'([^']+)'",
         workflow,
     )
+    scheduled: set[str] = set()
     if not scheduled_match:
-        errors.append("live-canary workflow has no mechanical scheduled drift selection")
+        errors.append("live-canary workflow has no mechanical scheduled case selection")
     else:
-        scheduled = {
-            case.strip() for case in scheduled_match.group(1).split(",") if case.strip()
-        }
-        if scheduled != drift_set:
-            errors.append(
-                "scheduled live cases must exactly match representative_drift_cases"
-            )
+        scheduled_selector = scheduled_match.group(1).strip()
+        if scheduled_selector.lower() == "all" or scheduled_selector == "*":
+            scheduled = set(matrix_cases)
+        else:
+            scheduled = {
+                case.strip()
+                for case in scheduled_selector.split(",")
+                if case.strip()
+            }
+
+    for case in sorted(scheduled - selected):
+        errors.append(f"scheduled case is not in the harvested inventory: {case}")
+    for case in sorted(scheduled - matrix_cases):
+        errors.append(f"scheduled case is not in the live-canary matrix: {case}")
+    for case in sorted(drift_set - scheduled):
+        errors.append(f"representative drift case is not scheduled: {case}")
+    for case in sorted(retired_set & scheduled):
+        errors.append(f"retired case is still scheduled: {case}")
+
+    replayable = selected - no_model - quarantined
+    accounted = scheduled | retired_set
+    missing = sorted(replayable - accounted)
+    if missing:
+        errors.append(
+            "replayable cases must be scheduled or retired: "
+            + ", ".join(missing)
+        )
+    unscheduled_without_replay = sorted((no_model | quarantined) - scheduled)
+    if unscheduled_without_replay:
+        errors.append(
+            "cases without active deterministic replay must remain scheduled: "
+            + ", ".join(unscheduled_without_replay)
+        )
     return errors
 
 
