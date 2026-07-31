@@ -1,7 +1,7 @@
 use std::fmt;
 
 use async_trait::async_trait;
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -26,26 +26,6 @@ pub struct ManualTokenSetupRequest {
 pub struct SecretSubmitRequest {
     pub interaction_id: AuthInteractionId,
     pub secret: SecretString,
-}
-
-impl SecretSubmitRequest {
-    /// Only the in-memory fake validates here; the durable interaction
-    /// service runs its own `validate_secret` at the storage boundary.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn validate_secret(&self) -> Result<(), AuthProductError> {
-        let exposed = self.secret.expose_secret();
-        if exposed.trim().is_empty() {
-            return Err(AuthProductError::invalid_request(
-                "secret value must not be empty",
-            ));
-        }
-        if exposed.chars().any(|c| c == '\0' || c.is_control()) {
-            return Err(AuthProductError::invalid_request(
-                "secret value must not contain NUL/control characters",
-            ));
-        }
-        Ok(())
-    }
 }
 
 impl fmt::Debug for SecretSubmitRequest {
@@ -84,17 +64,4 @@ pub trait AuthInteractionService: Send + Sync {
         scope: &AuthProductScope,
         interaction_id: AuthInteractionId,
     ) -> Result<bool, AuthProductError>;
-}
-
-/// Pending-interaction record held by the in-memory fake; the durable
-/// service persists its own record shape.
-#[cfg(any(test, feature = "test-support"))]
-#[derive(Debug, Clone)]
-pub(crate) struct PendingSecretInteraction {
-    pub scope: AuthProductScope,
-    pub provider: AuthProviderId,
-    pub label: CredentialAccountLabel,
-    pub continuation: AuthContinuationRef,
-    pub update_binding: Option<CredentialAccountUpdateBinding>,
-    pub expires_at: Timestamp,
 }
