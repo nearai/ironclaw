@@ -311,6 +311,10 @@ class RebornPrTestPlanTests(unittest.TestCase):
             with self.subTest(process=process):
                 self.assertIn(f'wait "${{{process}}}" || status=1', workflow)
 
+        self.assertIn('default_binary="${RUNNER_TEMP}/ironclaw-default"', workflow)
+        self.assertIn('mv "${default_binary}" "${target_dir}/debug/ironclaw"', workflow)
+        self.assertNotIn('--target-dir "${CARGO_TARGET_DIR:-target}/e2e-sso"', workflow)
+
         for shard in range(4):
             with self.subTest(provider_operation_shard=shard):
                 self.assertIn(f'shard: "{shard}/4"', workflow)

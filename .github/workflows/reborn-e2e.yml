@@ -229,10 +229,16 @@ jobs:
           (
             set -o pipefail
             {
+              target_dir="${CARGO_TARGET_DIR:-target}"
+              default_binary="${RUNNER_TEMP}/ironclaw-default"
               cargo build -p ironclaw --bin ironclaw
+              cp "${target_dir}/debug/ironclaw" "${default_binary}"
               cargo build -p ironclaw --bin ironclaw \
-                --features test-support \
-                --target-dir "${CARGO_TARGET_DIR:-target}/e2e-sso"
+                --features test-support
+              mkdir -p "${target_dir}/e2e-sso/debug"
+              cp "${target_dir}/debug/ironclaw" \
+                "${target_dir}/e2e-sso/debug/ironclaw"
+              mv "${default_binary}" "${target_dir}/debug/ironclaw"
             } 2>&1 | sed -u 's/^/[product-build] /'
           ) &
           product_build_pid=$!
