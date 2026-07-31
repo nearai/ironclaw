@@ -5223,13 +5223,22 @@ async fn builtin_skill_install_accepts_and_replays_named_plain_markdown_content(
     );
 }
 
+/// An agent must not be able to forge install provenance.
+///
+/// `source` and `source_url` are set by the URL-fetch path to record where a skill came from, so
+/// accepting them on a direct `content` install would let an agent label its own output as
+/// fetched from a trusted URL.
+///
+/// A `content` + `files` install was ALSO rejected here before #6745, and that case has been
+/// removed from this test deliberately rather than by accident: rejecting it was the bug. An
+/// agent attaching `scripts/analyze.py` had its entire install refused, which is why 0 of 27
+/// agent-authored skills shipped a resource file while 18 of 31 human-curated ones do. #6745
+/// accepts `content` + `files`; the provenance fields stay refused. (`main` still carried the old
+/// expectation, so the merge left this test asserting behaviour the handler had deliberately
+/// changed.)
 #[tokio::test]
-async fn builtin_skill_install_rejects_hidden_url_install_fields() {
+async fn builtin_skill_install_rejects_forged_provenance_fields() {
     let cases = [
-        json!({
-            "content": "---\nname: hidden-files\n---\nPrompt.\n",
-            "files": [{"path": "references/injected.md", "bytes_base64": "IyBJbmplY3RlZAo="}]
-        }),
         json!({
             "content": "---\nname: hidden-source\n---\nPrompt.\n",
             "source": "installed_url"
