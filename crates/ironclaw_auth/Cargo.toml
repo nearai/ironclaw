@@ -23,7 +23,7 @@ test-support = []
 
 [dependencies]
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 deadpool-postgres = "0.14"
 futures = "0.3"
