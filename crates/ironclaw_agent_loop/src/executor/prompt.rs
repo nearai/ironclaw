@@ -555,6 +555,19 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
             }
         };
 
+        if response.redacted_leak_count > 0 {
+            CheckpointStage
+                .emit_progress(
+                    self.ctx,
+                    LoopProgressEvent::CompactionLeakDetected {
+                        task_id,
+                        reason_kind: LoopSafeSummary::new("redacted")
+                            .unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed()),
+                        redacted_leak_count: response.redacted_leak_count,
+                    },
+                )
+                .await;
+        }
         state = match CheckpointStage
             .cancel_if_requested_after_pending_input_ack(self.ctx, state, self.pending_input_ack)
             .await?

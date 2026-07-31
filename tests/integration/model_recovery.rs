@@ -15,7 +15,7 @@ use ironclaw_turns::{TurnEventKind, TurnStatus};
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
 use reborn_support::http_matcher::ScriptedHttpResponse;
 use reborn_support::reply::RebornScriptedReply;
-use reborn_support::scripted_provider::CONTEXT_OVERFLOW_USED_TOKENS;
+use reborn_support::scripted_provider::{CONTEXT_OVERFLOW_USED_TOKENS, ModelProviderCallProbe};
 use serde_json::json;
 
 const UNPERSISTED_ASSISTANT_REPLY: &str =
@@ -23,6 +23,39 @@ const UNPERSISTED_ASSISTANT_REPLY: &str =
 const UNPERSISTED_TOOL_RESULT: &str =
     "raw tool result that must never enter the transcript failure";
 const TRANSCRIPT_FAILURE_TOOL_URL: &str = "https://transcript-failure.example.test/result";
+
+#[test]
+fn call_probe_distinguishes_missing_and_leaking_boundary_traffic() {
+    let probe = ModelProviderCallProbe::default();
+    assert_eq!(probe.text_message_content_contains("secret"), None);
+    assert_eq!(
+        probe.post_text_interactive_message_content_contains("secret"),
+        None
+    );
+
+    probe.record_text_contents_for_test(&["safe input"]);
+    assert_eq!(probe.text_message_content_contains("secret"), Some(false));
+    assert_eq!(
+        probe.post_text_interactive_message_content_contains("secret"),
+        None
+    );
+
+    probe.record_interactive_contents_for_test(&["leaked secret"]);
+    probe.record_interactive_contents_for_test(&["later clean request"]);
+    assert_eq!(
+        probe.post_text_interactive_message_content_contains("secret"),
+        Some(true),
+        "a later clean retry must not hide an earlier post-compaction leak"
+    );
+
+    let clean_probe = ModelProviderCallProbe::default();
+    clean_probe.record_text_contents_for_test(&["safe input"]);
+    clean_probe.record_interactive_contents_for_test(&["safe request"]);
+    assert_eq!(
+        clean_probe.post_text_interactive_message_content_contains("secret"),
+        Some(false)
+    );
+}
 
 #[test]
 fn transcript_backend_error_classification_is_detail_free() {
@@ -105,21 +138,29 @@ async fn content_filtered_completion_recovers_with_model_visible_observation() {
 async fn context_overflow_recovers_with_model_visible_observation() {
     // Seed one oversized user message so forced compaction exercises the real
     // compactor instead of taking its safe "nothing eligible" skip path.
+    let input_secret = concat!("AKIA", "IOSFODNN7EXAMPLE");
+    let second_input_secret = concat!("ghp_", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+    let first_setup_turn =
+        format!("first setup turn credentials {input_secret} and {second_input_secret}");
     let oversized_setup_turn = format!("third setup turn {}", "history ".repeat(5_000));
+    let output_secret = "OUTPUT_PRIVATE_KEY_MATERIAL";
+    let compacted_summary = format!(
+        "compacted recovery history\n-----BEGIN ENCRYPTED PRIVATE KEY-----\n{output_secret}\n-----END ENCRYPTED PRIVATE KEY-----\nretained"
+    );
     let harness = RebornIntegrationHarness::test_default()
         .context_overflow_model_after(3, 3)
         .script([
             RebornScriptedReply::text("first setup reply"),
             RebornScriptedReply::text("second setup reply"),
             RebornScriptedReply::text("third setup reply"),
-            RebornScriptedReply::text("compacted recovery history"),
+            RebornScriptedReply::text(compacted_summary),
             RebornScriptedReply::text("recovered after context overflow"),
         ])
         .build()
         .await
         .expect("harness builds");
     harness
-        .submit_turn("first setup turn")
+        .submit_turn(&first_setup_turn)
         .await
         .expect("first setup turn establishes compactable history");
     harness
@@ -130,6 +171,10 @@ async fn context_overflow_recovers_with_model_visible_observation() {
         .submit_turn(&oversized_setup_turn)
         .await
         .expect("third setup turn establishes compactable history");
+    let before_recovery_milestones = harness
+        .milestone_len()
+        .await
+        .expect("milestone len readable");
     harness
         .submit_turn("answer after compacting")
         .await
@@ -149,6 +194,50 @@ async fn context_overflow_recovers_with_model_visible_observation() {
         .await
         .expect("the final recovery request carries the persisted compaction summary");
     harness
+        .assert_text_model_message_content_not_contains(input_secret)
+        .await
+        .expect("compaction inference input redacts the transcript secret");
+    harness
+        .assert_text_model_message_content_not_contains(second_input_secret)
+        .await
+        .expect("compaction inference input redacts every transcript secret");
+    harness
+        .assert_text_model_message_content_contains("[REDACTED]")
+        .await
+        .expect("compaction inference input carries the deterministic redaction marker");
+    harness
+        .assert_post_compaction_interactive_model_message_content_not_contains(input_secret)
+        .await
+        .expect("the next interactive request does not rehydrate the transcript secret");
+    harness
+        .assert_post_compaction_interactive_model_message_content_not_contains(second_input_secret)
+        .await
+        .expect("the next interactive request does not rehydrate any transcript secret");
+    harness
+        .assert_post_compaction_interactive_model_message_content_not_contains(output_secret)
+        .await
+        .expect("the next interactive request does not rehydrate model-output key material");
+    harness
+        .assert_compaction_redacted_once_since(before_recovery_milestones, 3)
+        .await
+        .expect("input and output redactions produce one typed aggregate milestone");
+    harness
+        .assert_summary_artifacts_lack(input_secret)
+        .await
+        .expect("the durable compaction summary does not persist the transcript secret");
+    harness
+        .assert_summary_artifacts_lack(second_input_secret)
+        .await
+        .expect("the durable compaction summary omits every transcript secret");
+    harness
+        .assert_summary_artifacts_lack(output_secret)
+        .await
+        .expect("the durable compaction summary omits model-output key material");
+    harness
+        .assert_summary_artifact_contains("[REDACTED]")
+        .await
+        .expect("the durable compaction summary contains only redaction markers");
+    harness
         .assert_interactive_model_provider_call_count(7)
         .await
         .expect("setup and context-overflow recovery use the bounded interactive budget");
@@ -164,6 +253,29 @@ async fn context_overflow_recovers_with_model_visible_observation() {
         .assert_model_message_content_not_contains(&CONTEXT_OVERFLOW_USED_TOKENS.to_string())
         .await
         .expect("provider diagnostics do not enter the recovery prompt");
+}
+
+#[tokio::test]
+async fn summary_exclusion_rejects_missing_durable_artifacts() {
+    let harness = RebornIntegrationHarness::test_default()
+        .script([RebornScriptedReply::text("ordinary reply")])
+        .build()
+        .await
+        .expect("harness builds");
+    harness
+        .submit_turn("ordinary turn without compaction")
+        .await
+        .expect("turn establishes a durable thread without a summary");
+
+    let error = harness
+        .assert_summary_artifacts_lack("synthetic secret")
+        .await
+        .expect_err("an empty artifact set must not prove exclusion");
+
+    assert_eq!(
+        error.to_string(),
+        "vacuous exclusion: zero durable summary artifacts persisted"
+    );
 }
 
 #[tokio::test]
