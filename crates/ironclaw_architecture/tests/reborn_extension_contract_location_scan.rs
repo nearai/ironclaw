@@ -309,7 +309,15 @@ fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
         let entry = entry.unwrap_or_else(|err| panic!("failed to read dir entry: {err}"));
         let path = entry.path();
         if path.is_dir() {
-            if path.file_name().and_then(|name| name.to_str()) == Some("target") {
+            // `target` is the build tree; `node_modules` is the WebUI frontend's
+            // vendored tree, which really is present under `crates/` (2,506
+            // directories in a working checkout). Neither can hold a governed
+            // definition, and descending them makes the walk's cost depend on
+            // local build state.
+            if matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some("target") | Some("node_modules")
+            ) {
                 continue;
             }
             collect_rust_files(&path, out);

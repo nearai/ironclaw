@@ -13,7 +13,7 @@ A type is admitted iff all four hold (the contracts-family test, §6.1):
 3. two or more consumers need it without importing an owner;
 4. it carries no execution, persistence, policy engine, or workflow.
 
-Today that is nine modules:
+Today that is ten modules:
 
 | Module | Owns |
 | --- | --- |
