@@ -109,7 +109,7 @@ pub struct TriggerId(Ulid);
 
 impl TriggerId {
     pub fn new() -> Self {
-        Self(Ulid::new())
+        Self(Ulid::generate())
     }
 
     pub fn parse(value: &str) -> Result<Self, TriggerError> {
