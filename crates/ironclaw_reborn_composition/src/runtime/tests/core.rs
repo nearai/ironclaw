@@ -151,6 +151,13 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
             reply_target_binding_id: "runtime-channel-bind-race-reply".to_string(),
         });
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    assert!(
+        runtime
+            .ironhub_register_route_mount()
+            .expect("default-off register route composes")
+            .is_none(),
+        "the public register route must remain absent without a shared key"
+    );
     let extension_management = &runtime.extension_management;
     let operator = extension_management
         .tenant_operator_user_id_for_test()
