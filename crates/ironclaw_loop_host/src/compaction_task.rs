@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::ids::ThreadId;
 use ironclaw_safety::{InjectionScanner, LeakDetector, LeakScanner, Sanitizer};
 use ironclaw_threads::{
     CreateSummaryArtifactRequest, MessageContent, MessageKind, MessageStatus, SessionThreadService,

@@ -23,8 +23,8 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use chrono::Duration as ChronoDuration;
-use ironclaw_host_api::NetworkMethod;
-use ironclaw_host_api::TenantId;
+use ironclaw_host_api::action::NetworkMethod;
+use ironclaw_host_api::ids::TenantId;
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
     IngressJustification, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
@@ -262,7 +262,7 @@ fn public_policy(body_limit: BodyLimitPolicy, max_requests: NonZeroU32) -> Ingre
         auth: IngressAuthPolicy::Public {
             justification: sso_justification(),
         },
-        scope_source: ironclaw_host_api::IngressScopeSource::PublicRoute,
+        scope_source: ironclaw_host_api::ingress::IngressScopeSource::PublicRoute,
         body_limit,
         rate_limit: RateLimitPolicy::Limited {
             scope: RateLimitScope::PerIp,
@@ -284,7 +284,7 @@ fn callback_policy(max_requests: NonZeroU32) -> IngressPolicy {
         auth: IngressAuthPolicy::Public {
             justification: sso_justification(),
         },
-        scope_source: ironclaw_host_api::IngressScopeSource::PublicRoute,
+        scope_source: ironclaw_host_api::ingress::IngressScopeSource::PublicRoute,
         body_limit: BodyLimitPolicy::NoBody,
         rate_limit: RateLimitPolicy::Limited {
             scope: RateLimitScope::PerIp,

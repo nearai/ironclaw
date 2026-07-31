@@ -1,6 +1,9 @@
 //! Skill domain tools profiles.
 
-use ironclaw_host_api::{CapabilityId, EffectKind, TenantId};
+use ironclaw_host_api::{
+    capability::EffectKind,
+    ids::{CapabilityId, TenantId},
+};
 use ironclaw_host_runtime::{
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
 };

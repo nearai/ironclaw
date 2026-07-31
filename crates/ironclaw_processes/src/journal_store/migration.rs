@@ -3,7 +3,11 @@ use std::collections::{HashMap, VecDeque};
 use chrono::Utc;
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    InvocationId, ProcessId, ResourceScope, ScopedPath, Timestamp, TurnActor, TurnRunId, TurnScope,
+    Timestamp,
+    ids::{InvocationId, ProcessId},
+    path::ScopedPath,
+    resource::ResourceScope,
+    turn::{TurnActor, TurnRunId, TurnScope},
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
@@ -823,7 +827,10 @@ mod tests {
     use std::sync::Arc;
 
     use ironclaw_filesystem::{CasExpectation, Entry, InMemoryBackend};
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
 
     use super::*;
 

@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, InvocationId, ProcessId};
+use ironclaw_host_api::ids::{CapabilityId, InvocationId, ProcessId};
 use ironclaw_loop_host::{
     SubagentGoalRecord, SubagentPromptGoal, SubagentPromptMaterial, SubagentPromptMaterialSource,
     SubagentThreadKind, SubagentThreadMetadata,
@@ -293,7 +293,7 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::Utc;
-    use ironclaw_host_api::{AgentId, ThreadId};
+    use ironclaw_host_api::ids::{AgentId, ThreadId};
     use ironclaw_loop_host::{SpawnSubagentMode, SubagentKindId};
     use ironclaw_processes::{
         GetProcessInputRequest, ProcessInputPayload, ProcessInputPort, ProcessInputRecord,

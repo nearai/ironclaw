@@ -33,7 +33,7 @@
 //!   [`ToolVerdict::RecoverableFailure`], plus its structured `detail`
 //!   ([`CapabilityFailureDetail`]) as a redacted [`ModelFailureDiagnostic`] on
 //!   the same verdict (the model-visible correction hint): `InvalidInput` schema
-//!   issues carry their [`DispatchInputIssueCode`](ironclaw_host_api::DispatchInputIssueCode)
+//!   issues carry their [`DispatchInputIssueCode`](ironclaw_host_api::dispatch::DispatchInputIssueCode)
 //!   plus redacted [`SafeSummary`] fields, and a free-text `Diagnostic` is
 //!   carried as a bounded [`ModelDiagnostic`] after producer-side secret
 //!   scrubbing (paths and payload delimiters remain available for recovery).
@@ -63,11 +63,19 @@
 //! read derive the same key (byte-stable resume).
 
 use ironclaw_host_api::{
-    Blocked, Denial, DenyReason, DenyRecord, DenyRef, DependentRunResult, FailureKind, GateRecord,
-    GateRef, GateWaypoint, LoopRef, ModelDiagnostic, ModelFailureDiagnostic, ModelInputIssue,
-    ModelInputIssues, ModelResultPreview, Outcome, OutcomeRefs, OutputDigest, ProcessRef,
-    ProcessWaypoint, Resolution, ResultPreviewMeta, ResultProgress, ResultRef, ResumeToken, RunId,
-    RuntimeCredentialAuthRequirement, SafeSummary, Suspension, TerminateHint, ToolVerdict,
+    decision::{DenyReason, RuntimeCredentialAuthRequirement},
+    gate_record::{DenyRecord, GateRecord},
+    ids::{DenyRef, GateRef, ProcessRef, ResultRef, RunId},
+    model_result_preview::ModelResultPreview,
+    resolution::{
+        Blocked, Denial, DependentRunResult, GateWaypoint, Outcome, OutcomeRefs, ProcessWaypoint,
+        Resolution, ResultPreviewMeta, Suspension, ToolVerdict,
+    },
+    result_meta::{
+        FailureKind, LoopRef, ModelDiagnostic, ModelFailureDiagnostic, ModelInputIssue,
+        ModelInputIssues, OutputDigest, ResultProgress, ResumeToken, TerminateHint,
+    },
+    safe_summary::SafeSummary,
 };
 
 use super::content_digest::ContentDigest;
@@ -363,7 +371,7 @@ pub fn denied(reason_kind: CapabilityDeniedReasonKind, safe_summary: String) -> 
 /// [`ModelFailureDiagnostic`] carried on the verdict.
 ///
 /// The loop's `InvalidInput` schema issues cross with their structured
-/// [`DispatchInputIssueCode`](ironclaw_host_api::DispatchInputIssueCode) and
+/// [`DispatchInputIssueCode`](ironclaw_host_api::dispatch::DispatchInputIssueCode) and
 /// every free-text field re-validated through the [`SafeSummary`] redaction
 /// contract (a field that fails is dropped; an issue whose required `path` fails
 /// is dropped whole). The loop's producer-scrubbed free-text `Diagnostic` keeps
@@ -885,8 +893,10 @@ mod tests {
     use super::super::{CapabilityProgress, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION};
     use super::*;
     use ironclaw_host_api::{
-        ApprovalRequestId, CorrelationId, DispatchInputIssueCode, ExtensionId, GateRecord,
-        RuntimeCredentialAccountSetup, VendorId,
+        capability::RuntimeCredentialAccountSetup,
+        dispatch::DispatchInputIssueCode,
+        gate_record::GateRecord,
+        ids::{ApprovalRequestId, CorrelationId, ExtensionId, VendorId},
     };
 
     fn result_ref() -> LoopResultRef {

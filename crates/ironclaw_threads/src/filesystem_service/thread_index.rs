@@ -6,7 +6,7 @@ use ironclaw_filesystem::{
     IndexSpec, IndexValue, OrderedPage, OrderedQueryCursor, Page, RecordKind, RootFilesystem,
     SortDirection, cas_update,
 };
-use ironclaw_host_api::{ScopedPath, ThreadId};
+use ironclaw_host_api::{ids::ThreadId, path::ScopedPath};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -786,8 +786,9 @@ mod tests {
 
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
-        AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId,
-        ThreadId, UserId, VirtualPath,
+        ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
     };
 
     use crate::{

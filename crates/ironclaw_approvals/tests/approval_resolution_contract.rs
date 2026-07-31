@@ -7,7 +7,24 @@ use ironclaw_events::{AuditSink, EventError, InMemoryAuditSink};
 use ironclaw_filesystem::{
     Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
 };
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    action::{Action, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    approval::{ApprovalRequest, InvocationFingerprint},
+    audit::{AuditEnvelope, AuditStage},
+    capability::{
+        CapabilityDescriptor, CapabilitySet, EffectKind, GrantConstraints, PermissionMode,
+    },
+    decision::{Decision, DenyReason},
+    ids::{
+        ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ProjectId,
+        SecretHandle, TenantId, UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::{ResourceCeiling, ResourceEstimate, ResourceScope},
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
+};
 
 fn in_memory_backed_approval_request_store() -> ApprovalRequestStore<InMemoryBackend> {
     let mounts = MountView::new(vec![

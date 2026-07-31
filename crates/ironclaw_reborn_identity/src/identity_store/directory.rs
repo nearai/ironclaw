@@ -13,7 +13,7 @@ use ironclaw_filesystem::{
     CasApply, CasExpectation, CasUpdateError, ContentType, Entry, FileType, FilesystemError,
     RootFilesystem, cas_update,
 };
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::ids::{TenantId, UserId};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 

@@ -17,7 +17,7 @@ use ironclaw_turns::{SanitizedFailure, runner::ClaimedTurnRun};
 use crate::failure_categories::{
     BUDGET_ACCOUNTING_FAILED_CATEGORY, CHECKPOINT_REJECTED_CATEGORY,
     MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
-    MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
+    MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY, TRANSCRIPT_WRITE_FAILED_CATEGORY,
 };
 
 /// Create a `SanitizedFailure` from a known-valid static category.
@@ -55,6 +55,7 @@ pub(crate) fn sanitized_driver_failure(
             | MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY
             | MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY
             | BUDGET_ACCOUNTING_FAILED_CATEGORY
+            | TRANSCRIPT_WRITE_FAILED_CATEGORY
             | CHECKPOINT_REJECTED_CATEGORY
             | "model_context_overflow"
             | "model_output_truncated"
@@ -74,8 +75,9 @@ pub(crate) fn sanitized_driver_failure(
     } else {
         sanitized_failure("driver_failed")
     };
-    // Carry the secret-scrubbed model-visible detail onto the failure record so
-    // it can reach `TurnLifecycleEvent.detail` and the failure explainer.
+    // Carry the bounded detail onto the durable failure record. Model-stage
+    // details may reach the explainer; transcript failures carry only their
+    // fixed host-authored cause and bypass model inference in projection.
     base.map(|failure| match detail {
         Some(detail) => failure.with_detail(detail),
         None => failure,
@@ -190,6 +192,21 @@ mod tests {
             failure.detail(),
             Some("configured model spend budget is exhausted")
         );
+    }
+
+    #[test]
+    fn sanitized_driver_failure_preserves_transcript_write_category_and_safe_cause() {
+        let failure = sanitized_driver_failure(
+            crate::failure_categories::TRANSCRIPT_WRITE_FAILED_CATEGORY,
+            Some("assistant transcript write failed"),
+        )
+        .expect("transcript write category is valid");
+
+        assert_eq!(
+            failure.category(),
+            crate::failure_categories::TRANSCRIPT_WRITE_FAILED_CATEGORY
+        );
+        assert_eq!(failure.detail(), Some("assistant transcript write failed"));
     }
 
     #[test]

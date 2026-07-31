@@ -2,8 +2,9 @@ use std::collections::BTreeSet;
 
 use ironclaw_auth::AuthProductScope;
 use ironclaw_host_api::{
-    ExtensionId, InstallationState, LifecyclePublicState, ProductSurfaceCaller,
-    ProductSurfaceError, ProductSurfaceValidationCode,
+    ids::ExtensionId,
+    product_surface::{ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode},
+    state::{InstallationState, LifecyclePublicState},
 };
 
 use crate::{
@@ -337,7 +338,10 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
     use ironclaw_host_api::{
-        CapabilitySurfaceKind, InstallationState, ProductSurfaceErrorCode, TenantId, UserId,
+        ids::{TenantId, UserId},
+        product_surface::ProductSurfaceErrorCode,
+        state::InstallationState,
+        surface::CapabilitySurfaceKind,
     };
     use std::sync::{
         Arc,

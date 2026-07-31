@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fmt, sync::Arc, sync::Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{
+use ironclaw_host_api::ids::{
     AgentId, ExtensionId, MissionId, ProjectId, SecretHandle, TenantId, ThreadId, UserId,
 };
 use serde::{Deserialize, Serialize};
@@ -1080,7 +1080,10 @@ mod tests {
         CredentialAccountStatus, ProviderScope, scope::AuthProductScope,
     };
     use chrono::Utc;
-    use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
+    use ironclaw_host_api::{
+        ids::{InvocationId, UserId},
+        resource::ResourceScope,
+    };
 
     /// Build a minimal CredentialAccount using the same idiom as domain.rs tests.
     fn make_account(scope: AuthProductScope) -> CredentialAccount {

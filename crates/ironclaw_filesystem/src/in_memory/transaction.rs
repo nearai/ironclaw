@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 use tokio::sync::OwnedMutexGuard;
 
 use super::{

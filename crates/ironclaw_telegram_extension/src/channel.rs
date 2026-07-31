@@ -14,7 +14,11 @@ use ironclaw_host_api::product_adapter::{
     InboundOutcome, OutboundEnvelope, OutboundPart, PartDeliveryOutcome, VerifiedInbound,
     render_channel_auth_prompt,
 };
-use ironclaw_host_api::{NetworkMethod, RestrictedEgress, RestrictedEgressRequest, SecretHandle};
+use ironclaw_host_api::{
+    action::NetworkMethod,
+    ids::SecretHandle,
+    tool_adapter::{RestrictedEgress, RestrictedEgressRequest},
+};
 
 use ironclaw_telegram_v2_adapter::{
     GroupTriggerPolicy, TELEGRAM_API_HOST, TelegramInboundEvent, normalize_telegram_update,
@@ -398,9 +402,9 @@ fn telegram_outcome_for_status(status: u16, reason: String) -> PartDeliveryOutco
 }
 
 fn telegram_outcome_for_egress_error(
-    error: &ironclaw_host_api::RestrictedEgressError,
+    error: &ironclaw_host_api::tool_adapter::RestrictedEgressError,
 ) -> PartDeliveryOutcome {
-    use ironclaw_host_api::RestrictedEgressError as EgressError;
+    use ironclaw_host_api::tool_adapter::RestrictedEgressError as EgressError;
     match error {
         EgressError::Transport { .. } => PartDeliveryOutcome::Retryable {
             reason: error.to_string(),
@@ -474,7 +478,7 @@ mod tests {
     use std::sync::Mutex;
 
     use ironclaw_host_api::product_adapter::ProductTriggerReason;
-    use ironclaw_host_api::{RestrictedEgressError, RestrictedEgressResponse};
+    use ironclaw_host_api::tool_adapter::{RestrictedEgressError, RestrictedEgressResponse};
 
     use super::*;
 
@@ -703,7 +707,7 @@ mod deliver_tests {
         ExternalConversationRef, OutboundEnvelope, OutboundPart, OutboundTarget,
         PartDeliveryOutcome,
     };
-    use ironclaw_host_api::{RestrictedEgressError, RestrictedEgressResponse};
+    use ironclaw_host_api::tool_adapter::{RestrictedEgressError, RestrictedEgressResponse};
 
     use super::*;
 

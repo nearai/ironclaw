@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
     DeliveredGateRouteStore, DeliveryDefaultScope, OutboundStateStore, OutboundStateStorePort,
@@ -242,7 +242,7 @@ impl ChannelAdapter for RecordingChannelAdapter {
     async fn deliver(
         &self,
         envelope: OutboundEnvelope,
-        _egress: &dyn ironclaw_host_api::RestrictedEgress,
+        _egress: &dyn ironclaw_host_api::tool_adapter::RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError> {
         self.envelopes
             .lock()
@@ -277,13 +277,15 @@ impl ChannelAdapter for RecordingChannelAdapter {
 struct DenyAllEgress;
 
 #[async_trait]
-impl ironclaw_host_api::RestrictedEgress for DenyAllEgress {
+impl ironclaw_host_api::tool_adapter::RestrictedEgress for DenyAllEgress {
     async fn send(
         &self,
-        _request: ironclaw_host_api::RestrictedEgressRequest,
-    ) -> Result<ironclaw_host_api::RestrictedEgressResponse, ironclaw_host_api::RestrictedEgressError>
-    {
-        Err(ironclaw_host_api::RestrictedEgressError::PolicyDenied)
+        _request: ironclaw_host_api::tool_adapter::RestrictedEgressRequest,
+    ) -> Result<
+        ironclaw_host_api::tool_adapter::RestrictedEgressResponse,
+        ironclaw_host_api::tool_adapter::RestrictedEgressError,
+    > {
+        Err(ironclaw_host_api::tool_adapter::RestrictedEgressError::PolicyDenied)
     }
 }
 
@@ -540,17 +542,19 @@ fn build_harness(
     auth_url: Option<&str>,
     max_wait: Duration,
 ) -> Harness {
-    build_harness_with_commands(states, bind_fails, auth_url, max_wait, &["status"])
+    build_harness_with_commands(states, bind_fails, auth_url, max_wait, &["status"], None)
 }
 
 /// Same as `build_harness`, but with an explicit declared-command set for the
-/// observer's static help text (`build_harness` always enables `["status"]`).
+/// observer's static help text (`build_harness` always enables `["status"]`
+/// with no display prefix).
 fn build_harness_with_commands(
     states: Vec<ScriptedRunState>,
     bind_fails: bool,
     auth_url: Option<&str>,
     max_wait: Duration,
     commands: &[&str],
+    prefix: Option<&str>,
 ) -> Harness {
     build_harness_with_settings(
         states,
@@ -563,6 +567,7 @@ fn build_harness_with_commands(
             max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
         },
         commands,
+        prefix,
     )
 }
 
@@ -573,6 +578,7 @@ fn build_harness_with_settings(
     auth_url: Option<&str>,
     settings: RunDeliverySettings,
     commands: &[&str],
+    prefix: Option<&str>,
 ) -> Harness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
@@ -619,7 +625,7 @@ fn build_harness_with_settings(
             settings,
             connection_notices.clone(),
         )
-        .with_enabled_commands(commands.iter().copied()),
+        .with_enabled_commands(commands.iter().copied(), prefix),
     );
     Harness {
         observer,
@@ -822,6 +828,7 @@ async fn static_command_help_excludes_admin_audience_commands() {
         None,
         Duration::from_secs(5),
         &["model", "status", "extension_configure"],
+        None,
     );
     let command = InboundCommandPayload::new("notacommand", "", ProductTriggerReason::DirectChat)
         .expect("command");
@@ -844,6 +851,40 @@ async fn static_command_help_excludes_admin_audience_commands() {
     assert_eq!(
         harness.adapter.texts(),
         vec!["Available commands:\n/model\n/status".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn static_command_help_renders_with_manifest_declared_prefix() {
+    let harness = build_harness_with_commands(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        false,
+        None,
+        Duration::from_secs(5),
+        &["model", "status"],
+        Some("/ironclaw "),
+    );
+    let command = InboundCommandPayload::new("notacommand", "", ProductTriggerReason::DirectChat)
+        .expect("command");
+    let command_envelope = envelope(
+        ProductInboundPayload::Command(command),
+        "evt-command-invalid-prefixed-help",
+    );
+
+    harness
+        .observer
+        .observe_ack(
+            command_envelope,
+            ProductInboundAck::Rejected(ProductRejection::permanent(
+                ProductRejectionKind::InvalidRequest,
+                "opaque parser or admission detail",
+            )),
+        )
+        .await;
+
+    assert_eq!(
+        harness.adapter.texts(),
+        vec!["Available commands:\n/ironclaw model\n/ironclaw status".to_string()]
     );
 }
 
@@ -974,7 +1015,7 @@ async fn observer_keeps_watching_a_healthy_run_past_the_previous_two_minute_cuto
     let mut states = vec![scripted_state(TurnStatus::Running, None)];
     states.extend(std::iter::repeat_with(|| scripted_state(TurnStatus::Running, None)).take(32));
     states.push(scripted_state(TurnStatus::Completed, None));
-    let harness = build_harness_with_settings(states, false, None, settings, &["status"]);
+    let harness = build_harness_with_settings(states, false, None, settings, &["status"], None);
     let run_id = TurnRunId::new();
     seed_final_message(&harness.threads, run_id, "slow run finished").await;
 

@@ -15,9 +15,16 @@ use ironclaw_event_projections::{
 };
 use ironclaw_events::{InMemoryDurableEventLog, RuntimeEvent};
 use ironclaw_host_api::{
-    Action, AgentId, ApprovalRequest, ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId,
-    InvocationId, NetworkMethod, NetworkScheme, NetworkTarget, Principal, ProcessId,
-    ResourceEstimate, ResourceScope, RuntimeKind, ScopedPath, TenantId, ThreadId, UserId,
+    action::{Action, NetworkMethod, NetworkScheme, NetworkTarget},
+    approval::ApprovalRequest,
+    ids::{
+        AgentId, ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, InvocationId,
+        ProcessId, TenantId, ThreadId, UserId,
+    },
+    path::ScopedPath,
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::RuntimeKind,
+    scope::Principal,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor as TurnEventCursor,

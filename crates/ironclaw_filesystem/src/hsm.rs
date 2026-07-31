@@ -30,7 +30,7 @@
 //! backends are sealed behind external infrastructure.
 
 use async_trait::async_trait;
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 
 use crate::in_memory::InMemoryBackend;
 use crate::{
@@ -131,7 +131,7 @@ impl RootFilesystem for HsmBackend {
 mod tests {
     use std::sync::Arc;
 
-    use ironclaw_host_api::VirtualPath;
+    use ironclaw_host_api::path::VirtualPath;
 
     use crate::{
         BackendCapabilities, BackendId, BackendKind, Capability, CasExpectation,

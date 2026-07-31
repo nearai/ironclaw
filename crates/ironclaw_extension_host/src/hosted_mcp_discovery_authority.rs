@@ -10,7 +10,7 @@ use ironclaw_auth::{
 use ironclaw_extensions::{
     ExtensionInstallationError, ExtensionManifestRecord, ExtensionPackage, ManifestHash,
 };
-use ironclaw_host_api::{SecretHandle, sha256_digest_token};
+use ironclaw_host_api::{approval::sha256_digest_token, ids::SecretHandle};
 
 /// The sealed, non-secret authority inputs for one hosted-MCP discovery pass.
 ///

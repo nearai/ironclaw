@@ -21,12 +21,19 @@ use ironclaw_events::{
     SecurityDecision,
 };
 use ironclaw_host_api::{
-    ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage,
-    CapabilityDispatchResult, CapabilityId, CredentialStageError, DecisionSummary, EffectKind,
-    ExtensionId, MountView, NetworkPolicy, Obligation, ProcessId, ResourceCeiling,
-    ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
-    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
-    SandboxQuota, SecretHandle, Timestamp, VendorId,
+    Timestamp,
+    action::NetworkPolicy,
+    audit::{ActionResultSummary, ActionSummary, AuditEnvelope, AuditStage, DecisionSummary},
+    capability::{EffectKind, RuntimeCredentialAccountSetup},
+    decision::{Obligation, RuntimeCredentialAuthRequirement},
+    dispatch::{CapabilityDispatchResult, CredentialStageError},
+    http::RuntimeHttpEgress,
+    ids::{AuditEventId, CapabilityId, ExtensionId, ProcessId, SecretHandle, VendorId},
+    mount::MountView,
+    resource::{
+        ResourceCeiling, ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
+        SandboxQuota,
+    },
 };
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{
@@ -2064,7 +2071,7 @@ fn network_policy_obligation(
 }
 
 fn scoped_mount_obligation(
-    context: &ironclaw_host_api::ExecutionContext,
+    context: &ironclaw_host_api::scope::ExecutionContext,
     obligations: &[Obligation],
 ) -> Result<Option<MountView>, CapabilityObligationError> {
     let mut mounts = None;
@@ -2479,9 +2486,15 @@ mod tests {
 
     use ironclaw_events::InMemoryAuditSink;
     use ironclaw_host_api::{
-        AgentId, CapabilityDisplayOutputPreview, CapabilitySet, CorrelationId, ExecutionContext,
-        ExtensionId, InvocationId, NetworkScheme, NetworkTargetPattern, ProjectId,
-        ResourceReservationId, RuntimeKind, TenantId, TrustClass, UserId,
+        action::{NetworkScheme, NetworkTargetPattern},
+        capability::CapabilitySet,
+        dispatch::CapabilityDisplayOutputPreview,
+        ids::{
+            AgentId, CorrelationId, ExtensionId, InvocationId, ProjectId, ResourceReservationId,
+            TenantId, UserId,
+        },
+        runtime::{RuntimeKind, TrustClass},
+        scope::ExecutionContext,
     };
     use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
     use ironclaw_secrets::SecretStore;
@@ -2743,7 +2756,10 @@ mod tests {
 
     #[tokio::test]
     async fn redact_output_clears_display_preview_side_channel() {
-        use ironclaw_host_api::{ReservationStatus, ResourceReceipt, ResourceUsage, RuntimeKind};
+        use ironclaw_host_api::{
+            resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
+            runtime::RuntimeKind,
+        };
 
         let services = BuiltinObligationServices::with_handoff_stores(
             Arc::new(InMemoryAuditSink::new()),
@@ -2798,7 +2814,10 @@ mod tests {
     #[tokio::test]
     async fn complete_dispatch_extracts_base64_document_into_text() {
         use base64::Engine as _;
-        use ironclaw_host_api::{ReservationStatus, ResourceReceipt, ResourceUsage, RuntimeKind};
+        use ironclaw_host_api::{
+            resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
+            runtime::RuntimeKind,
+        };
 
         // Drive the *caller* (`complete_dispatch`), not the helper: a dispatch
         // result carrying `content_base64` + `mime_type` must come back with the
@@ -2867,7 +2886,10 @@ mod tests {
         use ironclaw_events::{
             InMemorySecurityAuditSink, SecurityAuditSink, SecurityBoundary, SecurityDecision,
         };
-        use ironclaw_host_api::{ReservationStatus, ResourceReceipt, ResourceUsage, RuntimeKind};
+        use ironclaw_host_api::{
+            resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
+            runtime::RuntimeKind,
+        };
 
         // Build a handler with both an audit sink (unused here — we hit the
         // redact branch, not the AuditAfter branch) and a recording
@@ -2974,7 +2996,10 @@ mod tests {
 
     #[tokio::test]
     async fn leak_detector_block_without_security_sink_does_not_panic() {
-        use ironclaw_host_api::{ReservationStatus, ResourceReceipt, ResourceUsage, RuntimeKind};
+        use ironclaw_host_api::{
+            resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
+            runtime::RuntimeKind,
+        };
 
         let services = BuiltinObligationServices::with_handoff_stores(
             Arc::new(InMemoryAuditSink::new()),

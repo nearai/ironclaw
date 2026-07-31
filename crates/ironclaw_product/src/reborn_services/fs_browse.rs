@@ -25,7 +25,7 @@
 //!   sole mutation path.
 
 use async_trait::async_trait;
-use ironclaw_host_api::{ProjectId, ResourceScope};
+use ironclaw_host_api::{ids::ProjectId, resource::ResourceScope};
 use serde::{Deserialize, Serialize};
 
 use super::project_fs::{ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat};

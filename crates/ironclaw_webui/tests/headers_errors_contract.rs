@@ -34,7 +34,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_webui::EnvBearerAuthenticator;
 use ironclaw_webui::{WebuiServeConfig, webui_v2_app};
 use secrecy::SecretString;

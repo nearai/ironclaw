@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use async_trait::async_trait;
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_turns::run_profile::LoopRunContext;
 use thiserror::Error;
 

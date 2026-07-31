@@ -6,8 +6,9 @@
 
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_host_api::{
-    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode, ThreadId, TurnActor,
-    TurnScope,
+    ids::ThreadId,
+    product_surface::{ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode},
+    turn::{TurnActor, TurnScope},
 };
 use ironclaw_turns::{CancelRunRequest, GateRef, IdempotencyKey, SanitizedCancelReason, TurnRunId};
 use serde::{Deserialize, Serialize};

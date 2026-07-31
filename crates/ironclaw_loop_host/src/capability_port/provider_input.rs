@@ -1,4 +1,4 @@
-use ironclaw_host_api::DispatchInputIssueCode;
+use ironclaw_host_api::dispatch::DispatchInputIssueCode;
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputIssue,
 };

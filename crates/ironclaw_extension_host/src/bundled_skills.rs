@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use ironclaw_filesystem::{
     CasExpectation, DiskFilesystem, Entry, FileType, FilesystemError, RootFilesystem,
 };
-use ironclaw_host_api::{HostPath, VirtualPath};
+use ironclaw_host_api::path::{HostPath, VirtualPath};
 use ironclaw_loop_host::SkillFilePath;
 use ironclaw_skills::{ManagedSkillSource, SkillSummary};
 use serde::{Deserialize, Serialize};

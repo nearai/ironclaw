@@ -27,7 +27,7 @@ use ironclaw_extension_host::{
     InstallationRecord, InstallationRecordStore, InstallationState, LifecycleError, LoadContext,
     LoadedExtension, RehydratedInstallationRecordStore, SnapshotConflict,
 };
-use ironclaw_host_api::SecretHandle;
+use ironclaw_host_api::ids::SecretHandle;
 use ironclaw_product::{
     ChannelAdapter, ChannelError, DeliveryReport, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, ImmediateResponse, InboundOutcome, NormalizedInboundMessage, OutboundEnvelope,
@@ -181,7 +181,7 @@ impl ChannelAdapter for ScriptedChannelAdapter {
     async fn deliver(
         &self,
         _envelope: OutboundEnvelope,
-        _egress: &dyn ironclaw_host_api::RestrictedEgress,
+        _egress: &dyn ironclaw_host_api::tool_adapter::RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError> {
         Err(ChannelError::Unsupported)
     }

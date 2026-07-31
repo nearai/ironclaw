@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 
 use std::time::Duration;
 
-use ironclaw_host_api::{ProcessId, ResourceScope, SanitizedFailure};
+use ironclaw_host_api::{ids::ProcessId, resource::ResourceScope, turn::SanitizedFailure};
 use serde::{Deserialize, Serialize};
 
 use super::{

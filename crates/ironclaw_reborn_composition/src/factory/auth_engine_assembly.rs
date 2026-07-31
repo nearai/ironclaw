@@ -180,7 +180,7 @@ fn register_vendor_client_config(
         );
         return;
     };
-    let ironclaw_host_api::VendorAuthRecipe::Oauth2Code(recipe) = &resolved.recipe else {
+    let ironclaw_host_api::recipe::VendorAuthRecipe::Oauth2Code(recipe) = &resolved.recipe else {
         tracing::warn!(
             vendor = config.vendor,
             "configured OAuth vendor's recipe is not oauth2_code; client material not wired"
@@ -335,7 +335,7 @@ impl RuntimeHttpEgress for ObligationStagedAuthEgress {
 async fn authorize_auth_egress(
     handler: Arc<dyn CapabilityObligationHandler>,
     scope: &ResourceScope,
-    capability_id: &ironclaw_host_api::CapabilityId,
+    capability_id: &ironclaw_host_api::ids::CapabilityId,
     policy: &NetworkPolicy,
 ) -> Result<(), AuthProductError> {
     let context = auth_execution_context(scope.clone())?;
@@ -367,7 +367,7 @@ async fn authorize_auth_egress(
 async fn discard_auth_egress_policy(
     handler: Arc<dyn CapabilityObligationHandler>,
     scope: &ResourceScope,
-    capability_id: &ironclaw_host_api::CapabilityId,
+    capability_id: &ironclaw_host_api::ids::CapabilityId,
     policy: &NetworkPolicy,
 ) {
     let context = match auth_execution_context(scope.clone()) {
@@ -407,8 +407,8 @@ async fn discard_auth_egress_policy(
 
 fn auth_execution_context(
     resource_scope: ResourceScope,
-) -> Result<ironclaw_host_api::ExecutionContext, AuthProductError> {
-    let context = ironclaw_host_api::ExecutionContext {
+) -> Result<ironclaw_host_api::scope::ExecutionContext, AuthProductError> {
+    let context = ironclaw_host_api::scope::ExecutionContext {
         run_id: None,
         invocation_id: resource_scope.invocation_id,
         correlation_id: CorrelationId::new(),

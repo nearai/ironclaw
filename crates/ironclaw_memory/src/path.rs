@@ -1,6 +1,6 @@
 //! Memory path grammar, scope, and validation.
 
-use ironclaw_host_api::{HostApiError, VirtualPath};
+use ironclaw_host_api::{error::HostApiError, path::VirtualPath};
 
 /// Tenant/user/agent/project scope for DB-backed memory documents exposed as virtual files.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

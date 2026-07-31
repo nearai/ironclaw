@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use ironclaw_host_api::{CapabilityId, ResourceScope};
+use ironclaw_host_api::{ids::CapabilityId, resource::ResourceScope};
 use ironclaw_observability::json_value_bytes;
 
 pub(crate) struct RuntimeLatencyFields {

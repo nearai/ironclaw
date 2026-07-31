@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_host_api::{CredentialStageError, SecretHandle};
+use ironclaw_host_api::{dispatch::CredentialStageError, ids::SecretHandle};
 use ironclaw_host_runtime::{
     RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
     RuntimeCredentialAccountResolver,

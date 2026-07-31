@@ -22,8 +22,10 @@ use ironclaw_host_api::product_adapter::{
     ProductAdapterId, ProductCapabilityFlag, ProductSurfaceKind,
 };
 use ironclaw_host_api::{
-    CapabilitySurfaceKind, ExtensionId, HostPortCatalog, IngressAuthPolicy, IngressRouteDescriptor,
-    IngressRouteId,
+    host_port::HostPortCatalog,
+    ids::ExtensionId,
+    ingress::{IngressAuthPolicy, IngressRouteDescriptor, IngressRouteId},
+    surface::CapabilitySurfaceKind,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -753,9 +755,12 @@ mod tests {
     //! in `tests/manifest_ingestion.rs`.
     use super::*;
     use ironclaw_host_api::{
-        AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthScheme,
-        IngressJustification, IngressPolicy, IngressPolicyParts, IngressScopeSource, ListenerClass,
-        NetworkMethod, RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
+        action::NetworkMethod,
+        ingress::{
+            AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthScheme,
+            IngressJustification, IngressPolicy, IngressPolicyParts, IngressScopeSource,
+            ListenerClass, RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
+        },
     };
     use serde::Serialize;
     use std::num::{NonZeroU32, NonZeroU64};

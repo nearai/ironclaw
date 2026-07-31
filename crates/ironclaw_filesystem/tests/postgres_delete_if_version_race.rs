@@ -3,7 +3,7 @@ use std::sync::Arc;
 use ironclaw_filesystem::{
     CasExpectation, Entry, FilesystemError, PostgresRootFilesystem, RootFilesystem,
 };
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 
 async fn postgres_pool(application_name: Option<&str>) -> Option<deadpool_postgres::Pool> {
     if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {

@@ -1,3 +1,4 @@
+use ironclaw_agent_loop::executor::HostStage;
 use ironclaw_turns::run_profile::{AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind};
 
 use crate::failure_categories::{
@@ -5,14 +6,18 @@ use crate::failure_categories::{
     MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_CREDITS_EXHAUSTED_REASON_KIND,
     MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY, MODEL_STAGE_POLICY_DENIED_CATEGORY,
     MODEL_STAGE_REQUEST_INVALID_CATEGORY, MODEL_STAGE_SCOPE_MISMATCH_CATEGORY,
+    TRANSCRIPT_WRITE_FAILED_CATEGORY,
 };
 
-pub(crate) fn model_stage_failure_category(
-    is_model_stage: bool,
+pub(crate) fn host_stage_failure_category(
+    stage: HostStage,
     kind: AgentLoopHostErrorKind,
     reason_kind: Option<AgentLoopHostErrorReasonKind>,
 ) -> Option<&'static str> {
-    if !is_model_stage {
+    if stage == HostStage::Transcript && kind == AgentLoopHostErrorKind::TranscriptWriteFailed {
+        return Some(TRANSCRIPT_WRITE_FAILED_CATEGORY);
+    }
+    if stage != HostStage::Model {
         return None;
     }
 
@@ -72,12 +77,13 @@ mod tests {
             K::ScopeMismatch,
             K::PolicyDenied,
         ] {
-            let category = model_stage_failure_category(true, kind, None).unwrap_or_else(|| {
-                panic!(
-                    "{kind:?} has no model-stage category, so it falls through to the generic \
+            let category = host_stage_failure_category(HostStage::Model, kind, None)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{kind:?} has no model-stage category, so it falls through to the generic \
                      host-stage outage and is silently auto-retried"
-                )
-            });
+                    )
+                });
             assert!(
                 !is_auto_retriable_category(category),
                 "{kind:?} -> {category:?} is auto-retriable, but an identical retry cannot succeed"
@@ -146,12 +152,12 @@ mod tests {
             K::Internal,
         ] {
             assert_eq!(
-                model_stage_failure_category(true, kind, None),
+                host_stage_failure_category(HostStage::Model, kind, None),
                 expected_without_reason(kind),
                 "model-stage category for {kind:?} changed"
             );
             assert_eq!(
-                model_stage_failure_category(false, kind, None),
+                host_stage_failure_category(HostStage::Prompt, kind, None),
                 None,
                 "non-model stage must not produce model-specific category for {kind:?}"
             );
@@ -163,22 +169,42 @@ mod tests {
         let reason = Some(AgentLoopHostErrorReasonKind::ModelCreditsExhausted);
 
         assert_eq!(
-            model_stage_failure_category(
-                true,
+            host_stage_failure_category(
+                HostStage::Model,
                 AgentLoopHostErrorKind::CredentialUnavailable,
                 reason
             ),
             Some(MODEL_CREDITS_EXHAUSTED_CATEGORY)
         );
         assert_eq!(
-            model_stage_failure_category(true, AgentLoopHostErrorKind::Internal, reason),
+            host_stage_failure_category(HostStage::Model, AgentLoopHostErrorKind::Internal, reason),
             Some(MODEL_CREDITS_EXHAUSTED_CATEGORY)
         );
         assert_eq!(
-            model_stage_failure_category(
-                false,
+            host_stage_failure_category(
+                HostStage::Prompt,
                 AgentLoopHostErrorKind::CredentialUnavailable,
                 reason
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn transcript_write_failure_has_a_typed_terminal_category() {
+        assert_eq!(
+            host_stage_failure_category(
+                HostStage::Transcript,
+                AgentLoopHostErrorKind::TranscriptWriteFailed,
+                None,
+            ),
+            Some(TRANSCRIPT_WRITE_FAILED_CATEGORY)
+        );
+        assert_eq!(
+            host_stage_failure_category(
+                HostStage::Prompt,
+                AgentLoopHostErrorKind::TranscriptWriteFailed,
+                None,
             ),
             None
         );

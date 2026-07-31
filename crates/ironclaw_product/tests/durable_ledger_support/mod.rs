@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use chrono::{Duration, Utc};
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 use ironclaw_product::{
     ActionFingerprintKey, IdempotencyDecision, IdempotencyLedger, ProductInboundAction,
     ProductSurfaceFailure, SourceBindingKey,

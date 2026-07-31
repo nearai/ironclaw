@@ -4,8 +4,8 @@ use std::{
 };
 
 use async_trait::async_trait;
-pub use ironclaw_host_api::OutboundDeliveryTargetId;
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::ids::{TenantId, UserId};
+pub use ironclaw_host_api::outbound::OutboundDeliveryTargetId;
 use ironclaw_turns::ReplyTargetBindingRef;
 use serde::{Deserialize, Serialize};
 

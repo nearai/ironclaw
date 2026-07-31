@@ -279,8 +279,8 @@ where
 
     async fn store_manual_secret(
         &self,
-        resource: &ironclaw_host_api::ResourceScope,
-        access_secret: ironclaw_host_api::SecretHandle,
+        resource: &ironclaw_host_api::resource::ResourceScope,
+        access_secret: ironclaw_host_api::ids::SecretHandle,
         secret: SecretString,
     ) -> Result<(), AuthProductError> {
         self.secret_store
@@ -292,8 +292,8 @@ where
 
     async fn cleanup_manual_secret(
         &self,
-        scope: &ironclaw_host_api::ResourceScope,
-        access_secret: &Option<ironclaw_host_api::SecretHandle>,
+        scope: &ironclaw_host_api::resource::ResourceScope,
+        access_secret: &Option<ironclaw_host_api::ids::SecretHandle>,
     ) {
         // Best-effort: called on error paths where the account write failed, or
         // after successful secret rotation.  The secret is already unreachable

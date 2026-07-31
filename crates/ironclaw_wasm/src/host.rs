@@ -5,10 +5,15 @@ use std::{
 };
 
 use ironclaw_host_api::{
-    CapabilityId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeCredentialInjection,
-    RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, SecretHandle,
-    is_sensitive_runtime_response_header,
+    action::{NetworkMethod, NetworkPolicy},
+    http::{
+        RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse, is_sensitive_runtime_response_header,
+    },
+    ids::{CapabilityId, SecretHandle},
+    resource::ResourceScope,
+    runtime::RuntimeKind,
 };
 use serde_json::{Map, Value};
 use tokio::runtime::Handle;

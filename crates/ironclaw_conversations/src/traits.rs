@@ -29,9 +29,9 @@ pub trait ConversationBindingService: Send + Sync {
     async fn resolve_or_create_binding_with_trusted_scope(
         &self,
         request: ResolveConversationRequest,
-        trusted_agent_id: Option<ironclaw_host_api::AgentId>,
-        trusted_project_id: Option<ironclaw_host_api::ProjectId>,
-        trusted_owner_user_id: Option<ironclaw_host_api::UserId>,
+        trusted_agent_id: Option<ironclaw_host_api::ids::AgentId>,
+        trusted_project_id: Option<ironclaw_host_api::ids::ProjectId>,
+        trusted_owner_user_id: Option<ironclaw_host_api::ids::UserId>,
     ) -> Result<ConversationBindingResolution, InboundTurnError>;
 
     /// Look up an existing binding without creating or widening binding state.
@@ -73,11 +73,11 @@ pub trait ConversationActorPairingService: Send + Sync {
     /// subsequent binding resolution.
     async fn pair_external_actor(
         &self,
-        tenant_id: ironclaw_host_api::TenantId,
+        tenant_id: ironclaw_host_api::ids::TenantId,
         adapter_kind: AdapterKind,
         adapter_installation_id: AdapterInstallationId,
         external_actor_ref: ExternalActorRef,
-        user_id: ironclaw_host_api::UserId,
+        user_id: ironclaw_host_api::ids::UserId,
     ) -> Result<(), InboundTurnError>;
 
     /// Pair an external actor while recording an opaque binding generation.
@@ -86,11 +86,11 @@ pub trait ConversationActorPairingService: Send + Sync {
     /// compares it; product adapters own its meaning.
     async fn pair_external_actor_with_epoch(
         &self,
-        tenant_id: ironclaw_host_api::TenantId,
+        tenant_id: ironclaw_host_api::ids::TenantId,
         adapter_kind: AdapterKind,
         adapter_installation_id: AdapterInstallationId,
         external_actor_ref: ExternalActorRef,
-        user_id: ironclaw_host_api::UserId,
+        user_id: ironclaw_host_api::ids::UserId,
         binding_epoch: ExternalActorBindingEpoch,
     ) -> Result<(), InboundTurnError>;
 
@@ -98,7 +98,7 @@ pub trait ConversationActorPairingService: Send + Sync {
     /// conversation routes owned by that actor.
     async fn unpair_external_actor(
         &self,
-        tenant_id: ironclaw_host_api::TenantId,
+        tenant_id: ironclaw_host_api::ids::TenantId,
         adapter_kind: AdapterKind,
         adapter_installation_id: AdapterInstallationId,
         external_actor_ref: ExternalActorRef,
@@ -108,7 +108,7 @@ pub trait ConversationActorPairingService: Send + Sync {
     /// epoch still match the caller's expected owner.
     async fn unpair_external_actor_if_owned_by(
         &self,
-        tenant_id: &ironclaw_host_api::TenantId,
+        tenant_id: &ironclaw_host_api::ids::TenantId,
         adapter_kind: &AdapterKind,
         adapter_installation_id: &AdapterInstallationId,
         external_actor_ref: &ExternalActorRef,

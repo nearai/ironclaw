@@ -11,8 +11,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ApprovalRequest, CapabilityId, EffectKind, ExtensionId, ResourceEstimate, ScopedPath,
-    SecretHandle,
+    approval::ApprovalRequest,
+    capability::EffectKind,
+    ids::{CapabilityId, ExtensionId, SecretHandle},
+    path::ScopedPath,
+    resource::ResourceEstimate,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,15 +98,15 @@ impl NetworkTargetPattern {
     /// wildcard host at parse time — `ManifestV3Error::WildcardAudienceHost`
     /// in `crates/ironclaw_extensions/src/v3.rs` — so they are not an example
     /// of something this permissiveness exists for.)
-    pub fn validate_declaration(&self) -> Result<(), crate::HostApiError> {
+    pub fn validate_declaration(&self) -> Result<(), crate::error::HostApiError> {
         validate_network_host_pattern(&self.host_pattern)?;
         Ok(())
     }
 }
 
-fn validate_network_host_pattern(pattern: &str) -> Result<(), crate::HostApiError> {
+fn validate_network_host_pattern(pattern: &str) -> Result<(), crate::error::HostApiError> {
     if pattern.is_empty() || pattern.len() > 253 {
-        return Err(crate::HostApiError::invalid_network_target(
+        return Err(crate::error::HostApiError::invalid_network_target(
             pattern,
             "host pattern must be non-empty and at most 253 bytes",
         ));
@@ -112,7 +115,7 @@ fn validate_network_host_pattern(pattern: &str) -> Result<(), crate::HostApiErro
         return Ok(());
     }
     if pattern.contains('\0') || pattern.chars().any(char::is_control) {
-        return Err(crate::HostApiError::invalid_network_target(
+        return Err(crate::error::HostApiError::invalid_network_target(
             pattern,
             "host pattern must not contain NUL/control characters",
         ));
@@ -126,7 +129,7 @@ fn validate_network_host_pattern(pattern: &str) -> Result<(), crate::HostApiErro
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
     {
-        return Err(crate::HostApiError::invalid_network_target(
+        return Err(crate::error::HostApiError::invalid_network_target(
             pattern,
             "host pattern must contain only ASCII host-label characters",
         ));

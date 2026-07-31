@@ -1,5 +1,8 @@
 use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp};
+use ironclaw_host_api::{
+    Timestamp,
+    ids::{AgentId, ProjectId, TenantId, ThreadId},
+};
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
 

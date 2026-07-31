@@ -33,8 +33,8 @@ use ironclaw_host_api::runtime_policy::{
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, ProviderToolName, ResourceScope, SecretHandle, TenantId,
-    UserId,
+    ids::{AgentId, CapabilityId, InvocationId, ProviderToolName, SecretHandle, TenantId, UserId},
+    resource::ResourceScope,
 };
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
@@ -719,7 +719,7 @@ async fn build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
         .standalone_auto_approve_settings_for_test()
         .expect("standalone exposes auto-approve settings for test")
         .set(ironclaw_approvals::AutoApproveSettingInput {
-            updated_by: ironclaw_host_api::Principal::User(UserId::new(USER).expect("user")),
+            updated_by: ironclaw_host_api::scope::Principal::User(UserId::new(USER).expect("user")),
             scope: ResourceScope {
                 tenant_id: TenantId::new(TENANT).expect("tenant"),
                 user_id: UserId::new(USER).expect("user"),
@@ -782,7 +782,7 @@ async fn build_two_user_harness(
         .standalone_auto_approve_settings_for_test()
         .expect("standalone exposes auto-approve settings for test")
         .set(ironclaw_approvals::AutoApproveSettingInput {
-            updated_by: ironclaw_host_api::Principal::User(UserId::new(USER).expect("user")),
+            updated_by: ironclaw_host_api::scope::Principal::User(UserId::new(USER).expect("user")),
             scope: ResourceScope {
                 tenant_id: TenantId::new(TENANT).expect("tenant"),
                 user_id: UserId::new(USER).expect("user"),

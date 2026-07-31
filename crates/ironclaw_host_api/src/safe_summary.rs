@@ -22,7 +22,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::HostApiError;
+use crate::error::HostApiError;
 
 /// Maximum length of a safe summary, in bytes. Matches the loop contract.
 const MAX_SAFE_SUMMARY_BYTES: usize = 512;

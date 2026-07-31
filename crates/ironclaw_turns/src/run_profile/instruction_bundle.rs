@@ -952,7 +952,7 @@ fn feed_field(digest: &mut Sha256, label: &[u8], value: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
 
     use super::*;
     use crate::{

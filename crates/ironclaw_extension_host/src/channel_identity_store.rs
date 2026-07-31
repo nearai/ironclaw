@@ -24,11 +24,16 @@ use ironclaw_filesystem::{
     RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    HostApiError, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
-    RebornUserIdentityBindingError, RebornUserIdentityBindingStore, RebornUserIdentityLookup,
-    RebornUserIdentityLookupError, ResourceScope, ScopedPath, TenantId, UserId, VirtualPath,
-    resource_scope_path_segment,
+    error::HostApiError,
+    ids::{InvocationId, TenantId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, ScopedPath, VirtualPath},
+    resource::{ResourceScope, resource_scope_path_segment},
+    user_identity::{
+        RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
+        RebornUserIdentityBindingError, RebornUserIdentityBindingStore, RebornUserIdentityLookup,
+        RebornUserIdentityLookupError,
+    },
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -577,7 +582,9 @@ fn map_binding_fs_error(error: FilesystemError) -> RebornUserIdentityBindingErro
 mod tests {
     use ironclaw_filesystem::InMemoryBackend;
 
-    use ironclaw_host_api::{RebornIdentityProviderId, RebornIdentityProviderUserId};
+    use ironclaw_host_api::user_identity::{
+        RebornIdentityProviderId, RebornIdentityProviderUserId,
+    };
 
     use super::*;
 

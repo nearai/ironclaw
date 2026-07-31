@@ -15,9 +15,25 @@ use ironclaw_approvals::{
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
-use ironclaw_host_api::*;
+use ironclaw_host_api::result_meta::FailureKind;
+use ironclaw_host_api::{
+    action::NetworkPolicy,
+    capability::{CapabilitySet, EffectKind, GrantConstraints},
+    dispatch::CapabilityDispatchResult,
+    host_port::HostPortCatalog,
+    ids::{
+        ApprovalRequestId, CapabilityId, ExtensionId, PackageId, ResourceReservationId, RunId,
+        ThreadId, UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::{
+        ReservationStatus, ResourceEstimate, ResourceReceipt, ResourceScope, ResourceUsage,
+    },
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime};
 use ironclaw_processes::{
     ProcessError, ProcessManager, ProcessRecord, ProcessStart, ProcessStatus,

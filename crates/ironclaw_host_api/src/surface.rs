@@ -6,7 +6,7 @@
 //! exchange. The surface kind answers "which faces of this extension can be
 //! configured and enabled?" — it is product taxonomy.
 //!
-//! [`crate::RuntimeKind`] is deliberately *not* part of this vocabulary: how
+//! [`crate::runtime::RuntimeKind`] is deliberately *not* part of this vocabulary: how
 //! an adapter is loaded (`wasm`, `mcp`, `first_party`, ...) never decides
 //! whether something is a tool, a channel, or an extension.
 

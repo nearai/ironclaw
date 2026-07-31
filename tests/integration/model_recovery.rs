@@ -10,10 +10,27 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
-use ironclaw_turns::TurnEventKind;
+use ironclaw_threads::SessionThreadError;
+use ironclaw_turns::{TurnEventKind, TurnStatus};
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
+use reborn_support::http_matcher::ScriptedHttpResponse;
 use reborn_support::reply::RebornScriptedReply;
 use reborn_support::scripted_provider::CONTEXT_OVERFLOW_USED_TOKENS;
+use serde_json::json;
+
+const UNPERSISTED_ASSISTANT_REPLY: &str =
+    "raw assistant transcript that must never be reported as a reply";
+const UNPERSISTED_TOOL_RESULT: &str =
+    "raw tool result that must never enter the transcript failure";
+const TRANSCRIPT_FAILURE_TOOL_URL: &str = "https://transcript-failure.example.test/result";
+
+#[test]
+fn transcript_backend_error_classification_is_detail_free() {
+    let error = SessionThreadError::Backend("storage credential sk-secret".to_string());
+
+    assert_eq!(error.kind_name(), "backend");
+    assert!(!error.kind_name().contains("sk-secret"));
+}
 
 #[tokio::test]
 async fn provider_outage_advances_real_fallback_chain_and_persists_reply() {
@@ -239,4 +256,74 @@ async fn output_truncation_recovers_without_shrinking_input_context() {
         .assert_budget_spent_tokens(11, 7)
         .await
         .expect("truncated provider usage must still be durably charged");
+}
+
+#[tokio::test]
+async fn transcript_write_failure_stops_without_another_model_or_tool_side_effect() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_keyed_http_responses([ScriptedHttpResponse::for_url(
+            TRANSCRIPT_FAILURE_TOOL_URL,
+            UNPERSISTED_TOOL_RESULT,
+        )])
+        .record_model_calls_for_test()
+        .fail_append_finalized_assistant_message_for_test()
+        .with_turn_event_sink()
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.http",
+                json!({"url": TRANSCRIPT_FAILURE_TOOL_URL}),
+            ),
+            RebornScriptedReply::text(UNPERSISTED_ASSISTANT_REPLY),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    let run_id = harness
+        .submit_turn_async("produce one reply")
+        .await
+        .expect("turn submitted");
+    let state = harness
+        .wait_for_status(run_id, TurnStatus::Failed)
+        .await
+        .expect("transcript persistence failure reaches a terminal failed state");
+    harness
+        .assert_transcript_failure_terminal(&state, UNPERSISTED_ASSISTANT_REPLY, 2)
+        .await
+        .expect("assistant transcript failure stays terminal, redacted, and single-shot");
+}
+
+#[tokio::test]
+async fn tool_result_transcript_failure_stops_without_duplicate_model_or_tool_side_effect() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_keyed_http_responses([ScriptedHttpResponse::for_url(
+            TRANSCRIPT_FAILURE_TOOL_URL,
+            UNPERSISTED_TOOL_RESULT,
+        )])
+        .record_model_calls_for_test()
+        .fail_append_tool_result_reference_for_test()
+        .with_turn_event_sink()
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.http",
+                json!({"url": TRANSCRIPT_FAILURE_TOOL_URL}),
+            ),
+            RebornScriptedReply::text("must not be called after transcript persistence fails"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    let run_id = harness
+        .submit_turn_async("use the echo tool once")
+        .await
+        .expect("turn submitted");
+    let state = harness
+        .wait_for_status(run_id, TurnStatus::Failed)
+        .await
+        .expect("tool-result transcript persistence failure reaches a terminal failed state");
+    harness
+        .assert_transcript_failure_terminal(&state, UNPERSISTED_TOOL_RESULT, 1)
+        .await
+        .expect("tool-result transcript failure stays terminal, redacted, and single-shot");
 }

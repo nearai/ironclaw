@@ -1,6 +1,6 @@
 use tokio::sync::Mutex;
 
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::ids::ThreadId;
 use ironclaw_threads::{ContextWindow, ThreadScope};
 
 /// One-shot cache shared by prompt and model ports within a single host-built

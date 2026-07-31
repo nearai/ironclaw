@@ -5,12 +5,12 @@
 //! adapter's egress credential handle (the host resolves it to the bot
 //! token at request time).
 
-use ironclaw_host_api::ReplyTargetBindingRef;
 use ironclaw_host_api::product_adapter::{
     AuthPromptView, DeclaredEgressHost, EgressCredentialHandle, EgressHeader, EgressMethod,
     EgressPath, EgressRequest, ExternalConversationRef, FinalReplyView, GatePromptView,
     ProductOutboundTarget, ProgressKind, ProgressUpdateView,
 };
+use ironclaw_host_api::turn::ReplyTargetBindingRef;
 use thiserror::Error;
 
 use crate::payload::TELEGRAM_API_HOST;
@@ -348,7 +348,7 @@ fn build_egress_request(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use ironclaw_host_api::TurnRunId;
+    use ironclaw_host_api::turn::TurnRunId;
 
     fn handle() -> EgressCredentialHandle {
         EgressCredentialHandle::new("telegram_bot_token").expect("valid")

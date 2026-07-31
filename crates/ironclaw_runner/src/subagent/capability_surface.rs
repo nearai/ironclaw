@@ -72,7 +72,7 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_agent_loop::test_support::test_run_context;
-    use ironclaw_host_api::CapabilityId;
+    use ironclaw_host_api::ids::CapabilityId;
     use ironclaw_loop_host::CapabilitySurfaceProfileResolver;
     use ironclaw_loop_host::{
         CapabilityAllowSet, CapabilityResolveError, SubagentPromptMaterial,

@@ -3,7 +3,11 @@ use std::sync::Arc;
 
 use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_filesystem::{CompositeRootFilesystem, RootFilesystem};
-use ironclaw_host_api::{CapabilityId, ExtensionHostAssemblyConfig, ResourceScope, UserId};
+use ironclaw_host_api::{
+    extension::ExtensionHostAssemblyConfig,
+    ids::{CapabilityId, UserId},
+    resource::ResourceScope,
+};
 use ironclaw_host_runtime::{ExtensionLaneToolBinder, HostRuntimeHttpEgressPort};
 use ironclaw_product::{
     ApprovalInteractionService, ApprovalPromptContextSource, AuthChallengeProvider,
@@ -254,7 +258,7 @@ pub(crate) async fn build_backend_channel_pairing(
             })?;
         let agent_id = match scope.agent_id.clone() {
             Some(agent_id) => agent_id,
-            None => ironclaw_host_api::AgentId::new("reborn").map_err(|error| {
+            None => ironclaw_host_api::ids::AgentId::new("reborn").map_err(|error| {
                 RebornBuildError::InvalidConfig {
                     reason: format!("fallback channel pairing agent id is invalid: {error}"),
                 }
@@ -273,11 +277,11 @@ pub(crate) async fn build_backend_channel_pairing(
             installation,
             template_values,
             identity_bind: Arc::clone(&identity_store)
-                as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingStore>,
+                as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingStore>,
             identity_lookup: Arc::clone(&identity_store)
-                as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>,
+                as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
             identity_delete: Arc::clone(&identity_store)
-                as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingDeleteStore>,
+                as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingDeleteStore>,
             continuation: Arc::clone(&continuation),
             conversation_actor_pairings: Arc::clone(&workflow_state.conversations)
                 as Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
@@ -302,8 +306,10 @@ pub(crate) async fn build_backend_channel_pairing(
             scope.tenant_id,
             Vec::new(),
             Some(installation_store),
-            Arc::clone(&identity_store) as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>,
-            identity_store as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingDeleteStore>,
+            Arc::clone(&identity_store)
+                as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
+            identity_store
+                as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingDeleteStore>,
             Some(credential_cleanup),
             Some(account_status_reader),
             Some(dm_targets),
@@ -348,7 +354,7 @@ pub(crate) struct ChannelHostAssemblySource {
     pub(crate) outbound_state: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
     pub(crate) delivered_gate_routes: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
     pub(crate) outbound_preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository>,
-    pub(crate) identity_lookup: Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>,
+    pub(crate) identity_lookup: Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
     pub(crate) channel_config: Arc<ironclaw_extension_host::ChannelConfigService>,
     pub(crate) channel_pairing:
@@ -365,7 +371,7 @@ fn channel_host_source(services: &RebornRuntimeStores) -> Option<ChannelHostAsse
         delivered_gate_routes: Arc::clone(&services.delivered_gate_routes),
         outbound_preferences: Arc::clone(&services.outbound_preferences),
         identity_lookup: Arc::clone(&services.channel_identity_store)
-            as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>,
+            as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
         deployment_channels: Arc::clone(&services.deployment_channels),
         channel_config: Arc::clone(&services.channel_config_service),
         channel_pairing: services.channel_pairing.clone(),

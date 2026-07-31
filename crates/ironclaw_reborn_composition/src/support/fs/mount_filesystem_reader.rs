@@ -19,7 +19,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_attachments::DEFAULT_MAX_ATTACHMENT_BYTES;
 use ironclaw_filesystem::{DirEntry, FilesystemError, RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{ResourceScope, ScopedPath};
+use ironclaw_host_api::{path::ScopedPath, resource::ResourceScope};
 use ironclaw_product::{
     FilesystemBrowseReader, FsMount, ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat,
 };
@@ -248,8 +248,10 @@ mod tests {
 
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        AgentId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-        ScopedPath, TenantId, UserId, VirtualPath,
+        ids::{AgentId, InvocationId, TenantId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, ScopedPath, VirtualPath},
+        resource::ResourceScope,
     };
 
     fn browse_fs() -> Arc<ScopedFilesystem<InMemoryBackend>> {
@@ -418,7 +420,7 @@ mod tests {
     #[test]
     fn empty_mount_root_lists_as_empty_not_404() {
         use ironclaw_filesystem::FilesystemOperation;
-        use ironclaw_host_api::VirtualPath;
+        use ironclaw_host_api::path::VirtualPath;
 
         let not_found = || FilesystemError::NotFound {
             path: VirtualPath::new("/memory").unwrap(),

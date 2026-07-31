@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{
+use ironclaw_host_api::ids::{
     AgentId, CapabilityId, InvocationId, ProjectId, TenantId, ThreadId, UserId,
 };
 use ironclaw_loop_host::{

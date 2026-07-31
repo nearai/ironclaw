@@ -1,6 +1,9 @@
 use ironclaw_host_api::{
-    CapabilityDescriptor, ExtensionId, PackageId, PackageIdentity, PackageSource, VirtualPath,
-    sha256_digest_token,
+    approval::sha256_digest_token,
+    capability::CapabilityDescriptor,
+    ids::{ExtensionId, PackageId},
+    path::VirtualPath,
+    trust::{PackageIdentity, PackageSource},
 };
 use ironclaw_trust::TrustPolicyInput;
 use std::collections::{BTreeSet, HashSet};
@@ -220,7 +223,8 @@ fn capability_descriptors_from_manifest(
     // enforcement is the v3 parser (`[memory]` requires a first_party runtime,
     // which requires a host-bundled source); this check keeps the namespace
     // closed to every non-host-bundled package as defense in depth.
-    let reserved_memory_prefix = format!("{}.", ironclaw_host_api::MEMORY_TOOL_ID_NAMESPACE);
+    let reserved_memory_prefix =
+        format!("{}.", ironclaw_host_api::memory::MEMORY_TOOL_ID_NAMESPACE);
     let mut seen_capabilities = HashSet::new();
     manifest
         .capabilities

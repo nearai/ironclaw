@@ -18,7 +18,7 @@ use ironclaw_filesystem::{
     DirEntry, Entry, FileStat, FileType, FilesystemError, FilesystemOperation, InMemoryBackend,
     RootFilesystem, VersionedEntry,
 };
-use ironclaw_host_api::{HostPortCatalog, VirtualPath};
+use ironclaw_host_api::{host_port::HostPortCatalog, path::VirtualPath};
 
 /// Reports one extension dir with a manifest that `stat`s as far larger than
 /// `MAX_MANIFEST_BYTES`, and PANICS if anything attempts to read the body.

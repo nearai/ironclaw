@@ -509,7 +509,7 @@ pub(crate) fn spawn_trace_queue_flush_worker(
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{CapabilityId, UserId};
+    use ironclaw_host_api::ids::{CapabilityId, UserId};
     use ironclaw_threads::{ProviderToolCallReferenceEnvelope, ThreadMessageId};
     use ironclaw_turns::{EventCursor, TurnRunId, TurnScope, TurnStatus};
     use uuid::Uuid;
@@ -566,8 +566,8 @@ mod tests {
         }
     }
 
-    fn test_thread_id() -> ironclaw_host_api::ThreadId {
-        ironclaw_host_api::ThreadId::new("trace-capture-test-thread").expect("thread id")
+    fn test_thread_id() -> ironclaw_host_api::ids::ThreadId {
+        ironclaw_host_api::ids::ThreadId::new("trace-capture-test-thread").expect("thread id")
     }
 
     fn terminal_event(kind: TurnEventKind, owner: Option<&str>) -> TurnLifecycleEvent {
@@ -576,8 +576,11 @@ mod tests {
         TurnLifecycleEvent {
             cursor: EventCursor::default(),
             scope: TurnScope::new_with_owner(
-                ironclaw_host_api::TenantId::new("trace-capture-test-tenant").expect("tenant"),
-                Some(ironclaw_host_api::AgentId::new("trace-capture-test-agent").expect("agent")),
+                ironclaw_host_api::ids::TenantId::new("trace-capture-test-tenant").expect("tenant"),
+                Some(
+                    ironclaw_host_api::ids::AgentId::new("trace-capture-test-agent")
+                        .expect("agent"),
+                ),
                 None,
                 test_thread_id(),
                 owner_user_id.clone(),
@@ -682,7 +685,7 @@ mod tests {
             provider_model_id: "gpt".to_string(),
             provider_turn_id: "turn-1".to_string(),
             provider_call_id: "call-1".to_string(),
-            provider_tool_name: ironclaw_host_api::ProviderToolName::new(tool_name)
+            provider_tool_name: ironclaw_host_api::ids::ProviderToolName::new(tool_name)
                 .expect("provider tool name"),
             capability_id: CapabilityId::new(format!("builtin.{tool_name}"))
                 .expect("capability id"),
@@ -729,8 +732,9 @@ mod tests {
         let service: Arc<dyn SessionThreadService> =
             Arc::new(InMemorySessionThreadService::default());
         let scope = ThreadScope {
-            tenant_id: ironclaw_host_api::TenantId::new("trace-cap-src-tenant").expect("tenant"),
-            agent_id: ironclaw_host_api::AgentId::new("trace-cap-src-agent").expect("agent"),
+            tenant_id: ironclaw_host_api::ids::TenantId::new("trace-cap-src-tenant")
+                .expect("tenant"),
+            agent_id: ironclaw_host_api::ids::AgentId::new("trace-cap-src-agent").expect("agent"),
             project_id: None,
             owner_user_id: Some(UserId::new("trace-cap-src-user").expect("user")),
             mission_id: None,
@@ -739,7 +743,7 @@ mod tests {
             .ensure_thread(EnsureThreadRequest {
                 scope: scope.clone(),
                 thread_id: Some(
-                    ironclaw_host_api::ThreadId::new("trace-cap-src-thread").expect("thread"),
+                    ironclaw_host_api::ids::ThreadId::new("trace-cap-src-thread").expect("thread"),
                 ),
                 created_by_actor_id: "actor".into(),
                 title: None,

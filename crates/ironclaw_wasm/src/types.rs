@@ -1,4 +1,4 @@
-use ironclaw_host_api::ResourceUsage;
+use ironclaw_host_api::resource::ResourceUsage;
 
 use crate::wasm_sandbox_core::SandboxLimits;
 

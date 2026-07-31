@@ -83,7 +83,10 @@ pub fn build_default_budget_accountant(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{InvocationId, ResourceEstimate, ResourceScope, TenantId, UserId};
+    use ironclaw_host_api::{
+        ids::{InvocationId, TenantId, UserId},
+        resource::{ResourceEstimate, ResourceScope},
+    };
     use ironclaw_loop_host::ZeroCostTable;
     use ironclaw_resources::test_support::in_memory_backed_budget_gate_store;
     use ironclaw_resources::{InMemoryBudgetEventSink, InMemoryResourceGovernor, ResourceAccount};
@@ -157,7 +160,7 @@ mod tests {
     }
 
     fn test_run_context(tenant: &str, user: &str) -> ironclaw_turns::run_profile::LoopRunContext {
-        use ironclaw_host_api::ThreadId;
+        use ironclaw_host_api::ids::ThreadId;
         use ironclaw_turns::{
             AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnActor, TurnId,
             TurnRunId, TurnScope,

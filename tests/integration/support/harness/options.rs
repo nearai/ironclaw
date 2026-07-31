@@ -3,8 +3,10 @@ use std::sync::Arc;
 
 use ironclaw_extensions::ExtensionPackage;
 use ironclaw_host_api::{
-    AgentId, CapabilityId, EffectKind, ExtensionId, MountView, NetworkPolicy, SecretHandle,
-    TenantId, UserId,
+    action::NetworkPolicy,
+    capability::EffectKind,
+    ids::{AgentId, CapabilityId, ExtensionId, SecretHandle, TenantId, UserId},
+    mount::MountView,
 };
 use ironclaw_host_runtime::BUILTIN_FIRST_PARTY_PROVIDER;
 use ironclaw_network::NetworkHttpEgress;

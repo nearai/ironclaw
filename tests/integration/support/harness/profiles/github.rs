@@ -4,7 +4,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use ironclaw_host_api::{
-    CapabilityId, CredentialStageError, MountPermissions, RuntimeKind, SecretHandle, UserId,
+    dispatch::CredentialStageError,
+    ids::{CapabilityId, SecretHandle, UserId},
+    mount::MountPermissions,
+    runtime::RuntimeKind,
 };
 use ironclaw_host_runtime::{READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID};
 

@@ -5,7 +5,19 @@ use ironclaw_approvals::*;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    action::{Action, NetworkPolicy},
+    approval::{ApprovalRequest, InvocationFingerprint},
+    capability::{CapabilityDescriptor, CapabilitySet, EffectKind, GrantConstraints},
+    decision::{Decision, DenyReason, Obligations},
+    host_port::HostPortCatalog,
+    ids::{ApprovalRequestId, CapabilityId, ExtensionId, InvocationId, UserId},
+    mount::MountView,
+    path::VirtualPath,
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::RuntimeKind,
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_processes::*;
 use serde_json::json;
 

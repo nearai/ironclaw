@@ -11,8 +11,10 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{
-    CapabilityId, FailureKind, InvocationId, LoopRef, ProviderToolName, Resolution,
-    ResolutionBatch, RuntimeKind, Suspension, ThreadId,
+    ids::{CapabilityId, InvocationId, ProviderToolName, ThreadId},
+    resolution::{Resolution, ResolutionBatch, Suspension},
+    result_meta::{FailureKind, LoopRef},
+    runtime::RuntimeKind,
 };
 use ironclaw_processes::{ProcessInputPayload, ProcessInputRef, ProcessInputSubmission};
 use ironclaw_threads::{
@@ -1039,10 +1041,12 @@ impl SubagentSpawnCapabilityPort {
                 requested_run_id: Some(child_run_id),
                 spawn_tree_descendant_cap: self.limits.max_tree_descendants,
                 process_dependency: Some(ironclaw_processes::ProcessDependencySubmission {
-                    dependent_process_id: ironclaw_host_api::ProcessId::from_uuid(
+                    dependent_process_id: ironclaw_host_api::ids::ProcessId::from_uuid(
                         self.run_context.run_id.as_uuid(),
                     ),
-                    root_process_id: ironclaw_host_api::ProcessId::from_uuid(tree_root.as_uuid()),
+                    root_process_id: ironclaw_host_api::ids::ProcessId::from_uuid(
+                        tree_root.as_uuid(),
+                    ),
                     group_ref: Some(gate_ref.as_str().to_string()),
                     metadata: dependency_metadata,
                 }),

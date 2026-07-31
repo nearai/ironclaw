@@ -26,8 +26,13 @@ use async_trait::async_trait;
 
 use crate::dispatch::{CapabilityDispatchResult, CapabilityDispatcher, DispatchError};
 use crate::{
-    Actor, Authorized, Invocation, InvocationOrigin, MountView, ResourceReservation, RunId,
-    RuntimeLane, Timestamp, UserId,
+    Timestamp,
+    authorized::Authorized,
+    ids::{RunId, UserId},
+    invocation::{Actor, Invocation, InvocationOrigin},
+    lane::RuntimeLane,
+    mount::MountView,
+    resource::ResourceReservation,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -188,8 +193,9 @@ impl CapabilityDispatcher for TestDispatcher {
 mod tests {
     use super::*;
     use crate::{
-        ActivityId, Actor, CapabilityId, CorrelationId, InvocationOrigin, ProductKind,
-        ResourceEstimate, ResourceScope,
+        ids::{ActivityId, CapabilityId, CorrelationId, ProductKind},
+        invocation::{Actor, InvocationOrigin},
+        resource::{ResourceEstimate, ResourceScope},
     };
     use serde_json::json;
 

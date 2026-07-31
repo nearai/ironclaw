@@ -33,10 +33,17 @@ use ironclaw_first_party_extensions::coding::{
     CodingCapabilityError, CodingCapabilityKind, CodingCapabilityRequest, CodingCapabilityState,
 };
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId, HostApiError,
-    OriginGateMatrix, OriginGatePolicy, PermissionMode, ProcessBackendKind, RequestedTrustClass,
-    ResourceCeiling, ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
-    RuntimeHttpEgressError, RuntimeHttpEgressResponse, TrustClass, VirtualPath,
+    capability::{EffectKind, OriginGateMatrix, OriginGatePolicy, PermissionMode},
+    capability_profile::CapabilityProfileSchemaRef,
+    dispatch::RuntimeDispatchErrorKind,
+    error::HostApiError,
+    http::{RuntimeHttpEgressError, RuntimeHttpEgressResponse},
+    ids::{CapabilityId, ExtensionId},
+    path::VirtualPath,
+    resource::{ResourceCeiling, ResourceEstimate, ResourceProfile, ResourceUsage},
+    runtime::TrustClass,
+    runtime_policy::ProcessBackendKind,
+    trust::RequestedTrustClass,
 };
 
 use crate::{

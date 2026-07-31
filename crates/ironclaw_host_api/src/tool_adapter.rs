@@ -15,9 +15,13 @@
 use async_trait::async_trait;
 
 use crate::{
-    CapabilityDisplayOutputPreview, CapabilityId, MountView, NetworkMethod, ResourceEstimate,
-    ResourceReservation, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind,
-    SecretHandle, Timestamp,
+    Timestamp,
+    action::NetworkMethod,
+    decision::RuntimeCredentialAuthRequirement,
+    dispatch::{CapabilityDisplayOutputPreview, RuntimeDispatchErrorKind},
+    ids::{CapabilityId, SecretHandle},
+    mount::MountView,
+    resource::{ResourceEstimate, ResourceReservation, ResourceScope},
 };
 
 /// One invocation of one declared capability.

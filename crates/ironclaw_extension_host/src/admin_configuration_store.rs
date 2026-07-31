@@ -22,7 +22,11 @@ use ironclaw_filesystem::{
     CasApply, CasExpectation, CasUpdateError, ContentType, Entry, FilesystemError, RecordKind,
     RootFilesystem, ScopedFilesystem, cas_update,
 };
-use ironclaw_host_api::{ResourceScope, ScopedPath, SecretHandle, TenantId};
+use ironclaw_host_api::{
+    ids::{SecretHandle, TenantId},
+    path::ScopedPath,
+    resource::ResourceScope,
+};
 use serde::{Deserialize, Serialize};
 
 const ADMIN_CONFIGURATION_RECORD_KIND: &str = "extension_admin_configuration";
@@ -875,8 +879,10 @@ mod tests {
     use chrono::{Duration, TimeZone, Utc};
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
-        InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-        SecretHandle, TenantId, UserId, VirtualPath,
+        ids::{InvocationId, SecretHandle, TenantId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+        resource::ResourceScope,
     };
 
     use super::*;

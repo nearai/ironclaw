@@ -3,7 +3,10 @@
 use std::{collections::HashSet, path::Path};
 
 use ironclaw_host_api::{
-    HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
+    error::HostApiError,
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_memory::MemoryDocumentScope;
 

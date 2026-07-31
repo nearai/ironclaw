@@ -1,7 +1,7 @@
 //! Process domain tools profile (`process_tools`) — see `harness/options.rs`
 //! for the `ToolsProfile` pattern.
 
-use ironclaw_host_api::{CapabilityId, EffectKind, MountView};
+use ironclaw_host_api::{capability::EffectKind, ids::CapabilityId, mount::MountView};
 use ironclaw_host_runtime::{
     ECHO_CAPABILITY_ID, SHELL_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
 };

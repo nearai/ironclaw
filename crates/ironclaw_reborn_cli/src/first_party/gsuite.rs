@@ -25,10 +25,16 @@ use ironclaw_first_party_extensions::{
     find_gsuite_capability, gsuite_google_account_visible_to_requester, gsuite_package_specs,
 };
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, HostApiError, NetworkScheme, NetworkTargetPattern,
-    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
-    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind,
-    SecretHandle, VendorId,
+    action::{NetworkScheme, NetworkTargetPattern},
+    capability::{
+        RuntimeCredentialAccountSetup, RuntimeCredentialRequirement,
+        RuntimeCredentialRequirementSource,
+    },
+    decision::RuntimeCredentialAuthRequirement,
+    dispatch::RuntimeDispatchErrorKind,
+    error::HostApiError,
+    http::RuntimeCredentialTarget,
+    ids::{CapabilityId, ExtensionId, SecretHandle, VendorId},
 };
 
 /// Installs the GSuite first-party capability handlers into the shared registry.

@@ -1,6 +1,6 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ironclaw_host_api::{HostApiError, VirtualPath};
+use ironclaw_host_api::{error::HostApiError, path::VirtualPath};
 
 use crate::{DirEntry, FileType, FilesystemError, FilesystemOperation};
 pub(crate) fn directory_write_error(path: VirtualPath) -> FilesystemError {

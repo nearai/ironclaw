@@ -5,6 +5,12 @@ import { useT } from "../../../lib/i18n";
 import { authScope } from "../../../lib/auth-scope";
 import { stageFiles } from "../lib/attachments";
 import { ATTACHMENTS_ONLY_CONTENT } from "../lib/attachment-sentinel";
+import {
+  INITIAL_COMMAND_MENU_SELECTION,
+  commandMenuMatches,
+  commandMenuSelectionReducer,
+  commandMenuToken,
+} from "../lib/chat-commands";
 import { useAttachmentConfig } from "../hooks/useAttachmentConfig";
 import {
   NEW_DRAFT_KEY,
@@ -18,6 +24,7 @@ import {
 
 export function ChatInput({
   onSend,
+  commands = [],
   onCancel,
   disabled,
   sendDisabled = disabled,
@@ -105,21 +112,6 @@ export function ChatInput({
     autoResize();
   }, [text, autoResize]);
 
-  // Restore the persisted draft when the active conversation changes
-  // (draftKey switches). The initialText effect below runs after this
-  // and overrides when a location.state draft was passed in, so an
-  // explicit hand-off draft still wins over the stored one.
-  React.useEffect(() => {
-    const restored = getDraft(draftKey);
-    textRef.current = restored;
-    setText(restored);
-    // Flush any queued write (for the previous key) before this key changes
-    // or the composer unmounts, so a debounced draft is never lost. The
-    // authenticated scope is part of the dependency list because the same
-    // composer can stay mounted across a token/session switch.
-    return () => flushDraft();
-  }, [draftKey, storageScope, flushDraft]);
-
   // Keep the in-memory staged-attachment store in sync so files survive
   // navigating away from (and back to) this composer, the same way the text
   // draft does. On a conversation switch, *re-read* the new key's files and
@@ -128,6 +120,69 @@ export function ChatInput({
   // into the new one.
   const stagedDraftKeyRef = React.useRef(draftKey);
   const stagedDraftScopeRef = React.useRef(storageScope);
+
+  // Command menu: `commandToken`/`menuCommands` are pure per-render
+  // derivations of `text`/`commands` (see chat-commands.ts). `menuSelection`
+  // (active row + Esc-dismissed flag) is that file's small pure reducer
+  // contract — this component only dispatches actions and stores the result.
+  // Both the state and the derived matches are mirrored into refs for the
+  // same reason `textRef` exists above: the keydown handler must read the
+  // live value instead of the one captured at the last render.
+  const commandToken = commandMenuToken(text);
+  const menuCommands = commandMenuMatches(text, commands);
+  const [menuSelection, setMenuSelection] = React.useState(
+    INITIAL_COMMAND_MENU_SELECTION
+  );
+  const menuSelectionRef = React.useRef(menuSelection);
+  menuSelectionRef.current = menuSelection;
+  const menuCommandsRef = React.useRef(menuCommands);
+  menuCommandsRef.current = menuCommands;
+  // Tracks the token as of the last `handleChange` (or mount), so typing that
+  // changes the filtered set can reset the selection — see `handleChange`.
+  const commandTokenRef = React.useRef(commandToken);
+  const hasMenuMatches = menuCommands.length > 0;
+  // Broader than "has matches": the popover renders (with an intentional
+  // empty state — see the JSX below) for any bare command prefix, not only
+  // once something matches it. Keyboard interception (arrows/Tab/Enter)
+  // stays gated on `hasMenuMatches` alone (recomputed fresh from refs inside
+  // onKeyDown) so an empty result list never hijacks a key that would
+  // otherwise edit the textarea.
+  const menuVisible = commandToken !== null && !menuSelection.dismissed;
+  const activeMenuIndex = Math.max(
+    0,
+    Math.min(menuSelection.index, menuCommands.length - 1)
+  );
+  const activeMenuCommand =
+    menuVisible && hasMenuMatches ? menuCommands[activeMenuIndex] : null;
+
+  // Shared by every place `text` is set PROGRAMMATICALLY rather than via
+  // `handleChange` (draft restore on a thread switch, an explicit
+  // `initialText` hand-off) so the command menu's selection/dismissed state
+  // never survives across a swap it wasn't dismissed for. Without this, an
+  // Esc-dismissal on one draft key hides the menu on the next one until the
+  // first keystroke there re-triggers `handleChange`'s own reset.
+  const resetCommandMenuSelection = React.useCallback((forText) => {
+    commandTokenRef.current = commandMenuToken(forText);
+    menuSelectionRef.current = INITIAL_COMMAND_MENU_SELECTION;
+    setMenuSelection(INITIAL_COMMAND_MENU_SELECTION);
+  }, []);
+
+  // Restore the persisted draft when the active conversation changes
+  // (draftKey switches). The initialText effect below runs after this
+  // and overrides when a location.state draft was passed in, so an
+  // explicit hand-off draft still wins over the stored one.
+  React.useEffect(() => {
+    const restored = getDraft(draftKey);
+    textRef.current = restored;
+    setText(restored);
+    resetCommandMenuSelection(restored);
+    // Flush any queued write (for the previous key) before this key changes
+    // or the composer unmounts, so a debounced draft is never lost. The
+    // authenticated scope is part of the dependency list because the same
+    // composer can stay mounted across a token/session switch.
+    return () => flushDraft();
+  }, [draftKey, storageScope, flushDraft, resetCommandMenuSelection]);
+
   React.useEffect(() => {
     if (
       stagedDraftKeyRef.current !== draftKey ||
@@ -148,6 +203,7 @@ export function ChatInput({
     if (!initialText) return;
     textRef.current = initialText;
     setText(initialText);
+    resetCommandMenuSelection(initialText);
     window.requestAnimationFrame(() => {
       if (textareaRef.current) {
         textareaRef.current.focus();
@@ -157,7 +213,7 @@ export function ChatInput({
         );
       }
     });
-  }, [initialText, resetKey]);
+  }, [initialText, resetKey, resetCommandMenuSelection]);
 
   // Stage dropped/picked/pasted files: validate against the server contract,
   // append the accepted ones, and surface any rejection reasons as a single
@@ -321,6 +377,19 @@ export function ChatInput({
       const next = e.currentTarget.value;
       textRef.current = next;
       setText(next);
+      // Re-filtering (the command token changed) drops any stale row
+      // selection and un-suppresses a menu the user Esc-dismissed for a
+      // different prefix — see the "reset" case in chat-commands.ts.
+      const nextCommandToken = commandMenuToken(next);
+      if (nextCommandToken !== commandTokenRef.current) {
+        commandTokenRef.current = nextCommandToken;
+        const resetSelection = commandMenuSelectionReducer(
+          menuSelectionRef.current,
+          { type: "reset" }
+        );
+        menuSelectionRef.current = resetSelection;
+        setMenuSelection(resetSelection);
+      }
       // Queue a debounced persist instead of writing on every keystroke.
       // Capture the scope so a flush after an identity change is dropped.
       pendingDraftRef.current = { key: draftKey, text: next, scope: authScope() };
@@ -340,8 +409,117 @@ export function ChatInput({
     }
   }, [canCancel, isCancelling, onCancel]);
 
+  // Complete the draft to the full command word — shared by keyboard
+  // (Enter/Tab) and mouse (click) completion so both paths stay in lockstep.
+  const completeMenuCommand = React.useCallback((command) => {
+    if (!command) return;
+    const next = `/${command.name} `;
+    textRef.current = next;
+    setText(next);
+    // Queue the same debounced persist handleChange uses — without this a
+    // thread switch right after Enter/Tab/click restores the stale
+    // pre-completion prefix instead of the completed command text.
+    pendingDraftRef.current = { key: draftKey, text: next, scope: authScope() };
+    if (draftTimerRef.current) window.clearTimeout(draftTimerRef.current);
+    draftTimerRef.current = window.setTimeout(flushDraft, 300);
+    textareaRef.current?.focus();
+  }, [draftKey, flushDraft]);
+
+  // Hover selects a row without completing it (click still completes).
+  const selectMenuIndex = React.useCallback((index) => {
+    const next = commandMenuSelectionReducer(menuSelectionRef.current, {
+      type: "select",
+      index,
+    });
+    menuSelectionRef.current = next;
+    setMenuSelection(next);
+  }, []);
+
   const onKeyDown = React.useCallback(
     (e) => {
+      // Layer the command-menu's own keyboard handling before the
+      // Enter-to-send path below, but only while the menu actually has
+      // matches to navigate — read live refs (not the `menuVisible`/
+      // `menuCommands` closed over at the last render) so a keystroke right
+      // after typing still sees the current matches.
+      const openMenuCommands = menuCommandsRef.current;
+      const menuHasMatches =
+        openMenuCommands.length > 0 && !menuSelectionRef.current.dismissed;
+      if (menuHasMatches) {
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          e.preventDefault();
+          const delta = e.key === "ArrowDown" ? 1 : -1;
+          const next = commandMenuSelectionReducer(menuSelectionRef.current, {
+            type: "move",
+            delta,
+            count: openMenuCommands.length,
+          });
+          menuSelectionRef.current = next;
+          setMenuSelection(next);
+          return;
+        }
+        if (e.key === "Tab" && !e.shiftKey) {
+          e.preventDefault();
+          const boundedIndex = Math.max(
+            0,
+            Math.min(menuSelectionRef.current.index, openMenuCommands.length - 1)
+          );
+          completeMenuCommand(openMenuCommands[boundedIndex]);
+          return;
+        }
+        if (e.key === "Enter" && !e.shiftKey) {
+          const boundedIndex = Math.max(
+            0,
+            Math.min(menuSelectionRef.current.index, openMenuCommands.length - 1)
+          );
+          const activeCommand = openMenuCommands[boundedIndex];
+          // Read the live text (not the render-scope `commandToken`, which
+          // this stable-identity callback would otherwise close over stale)
+          // to decide whether the draft is already an exact match for the
+          // menu's only row.
+          const liveToken = commandMenuToken(textRef.current);
+          const isExactSingleMatch =
+            openMenuCommands.length === 1 && activeCommand?.name === liveToken;
+          if (!isExactSingleMatch) {
+            e.preventDefault();
+            completeMenuCommand(activeCommand);
+            return;
+          }
+          // Exact match on the menu's only row: fall through to the normal
+          // Enter-to-send handling below instead of completing (rewriting
+          // the draft to itself) a second time.
+        }
+        // Shift+Enter/Shift+Tab fall through unhandled here — identical to
+        // the menu-closed case (native newline / focus-shift), not a
+        // completion and not a send.
+        if (e.key === "Escape") {
+          e.preventDefault();
+          const next = commandMenuSelectionReducer(menuSelectionRef.current, {
+            type: "dismiss",
+          });
+          menuSelectionRef.current = next;
+          setMenuSelection(next);
+          return;
+        }
+      }
+      // A bare command prefix with zero matches still renders the popover
+      // (an intentional "no matches" state — see the JSX below), so Escape
+      // must still be able to dismiss it even though there's nothing to
+      // navigate/complete above.
+      if (
+        !menuHasMatches &&
+        e.key === "Escape" &&
+        !menuSelectionRef.current.dismissed &&
+        commandMenuToken(textRef.current) !== null
+      ) {
+        e.preventDefault();
+        const next = commandMenuSelectionReducer(menuSelectionRef.current, {
+          type: "dismiss",
+        });
+        menuSelectionRef.current = next;
+        setMenuSelection(next);
+        return;
+      }
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         const domSendDisabled =
@@ -351,7 +529,7 @@ export function ChatInput({
         handleSend();
       }
     },
-    [handleSend]
+    [handleSend, completeMenuCommand]
   );
 
   const onPaste = React.useCallback(
@@ -430,6 +608,129 @@ export function ChatInput({
             {t("chat.attachmentDropHint")}
           </div>
         )}
+        {menuVisible &&
+        (
+          // Anchored above the composer (not in normal flow) so the menu
+          // floats over the canvas instead of shoving the send button down
+          // as rows come and go while typing. Header/footer chrome is
+          // `shrink-0`; only the option list scrolls, so both stay pinned
+          // while the admin's full ~12-entry inventory scrolls between them.
+          <div className="absolute bottom-full left-0 right-0 z-20 mb-2 flex max-h-80 flex-col overflow-hidden rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] text-xs shadow-[0_30px_60px_-20px_rgba(0,0,0,0.8)]">
+            <div className="flex shrink-0 items-center gap-2 border-b border-[var(--v2-panel-border)] px-3 py-2">
+              <Icon name="terminal" className="h-3.5 w-3.5 shrink-0 text-[var(--v2-text-faint)]" />
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--v2-text-faint)]">
+                {t("chat.commandMenu")}
+              </span>
+              <span
+                data-testid="chat-command-menu-count"
+                aria-hidden="true"
+                className="ml-auto shrink-0 rounded-full bg-[var(--v2-surface-soft)] px-2 py-0.5 font-mono text-[10px] text-[var(--v2-text-faint)]"
+              >
+                {menuCommands.length}/{commands.length}
+              </span>
+            </div>
+
+            <div
+              id="chat-command-menu-listbox"
+              role="listbox"
+              aria-label={t("chat.commandMenu")}
+              className="min-h-0 flex-1 overflow-y-auto p-1.5"
+            >
+              {!hasMenuMatches &&
+              (
+                <div
+                  data-testid="chat-command-menu-empty"
+                  className="px-3 py-6 text-center text-[var(--v2-text-faint)]"
+                >
+                  {t("command.noMatches")}
+                </div>
+              )}
+              {menuCommands.map(
+                (command, index) => {
+                  const isActive = index === activeMenuIndex;
+                  const prefixLength = Math.min(commandToken.length, command.name.length);
+                  const matchedPrefix = command.name.slice(0, prefixLength);
+                  const restOfName = command.name.slice(prefixLength);
+                  return (
+                    // A non-focusable row: the textarea drives selection via
+                    // `aria-activedescendant`, so a row must not be its own
+                    // tab stop (a focusable <button> here would be a second,
+                    // competing stop inside role="listbox"). Mouse handlers
+                    // (click-to-complete, hover-to-select, focus-steal
+                    // prevention) still work on a plain element.
+                    <div
+                      key={command.name}
+                      id={`chat-command-option-${command.name}`}
+                      role="option"
+                      aria-selected={isActive}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onMouseEnter={() => selectMenuIndex(index)}
+                      onClick={() => completeMenuCommand(command)}
+                      className={[
+                        "flex w-full items-start gap-2.5 rounded-lg border-l-2 px-2.5 py-2 text-left",
+                        isActive
+                          ? "border-[var(--v2-accent)] bg-[var(--v2-accent-soft)]"
+                          : "border-transparent hover:bg-[var(--v2-surface-soft)]",
+                      ].join(" ")}
+                    >
+                      <span
+                        className={[
+                          "shrink-0 rounded-md border px-1.5 py-0.5 font-mono leading-4 text-[var(--v2-text-strong)]",
+                          isActive
+                            ? "border-[color-mix(in_srgb,var(--v2-accent)_40%,var(--v2-panel-border))] bg-[var(--v2-surface)]"
+                            : "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]",
+                        ].join(" ")}
+                      >
+                        /<span className="text-signal">{matchedPrefix}</span>{restOfName}
+                      </span>
+                      <span className="flex min-w-0 flex-1 flex-col">
+                        <span
+                          className={[
+                            "truncate text-sm font-medium",
+                            isActive ? "text-[var(--v2-accent-text)]" : "text-[var(--v2-text-strong)]",
+                          ].join(" ")}
+                        >
+                          {command.title}
+                        </span>
+                        <span className="truncate text-[var(--v2-text-muted)]">{command.description}</span>
+                      </span>
+                    </div>
+                  );
+                }
+              )}
+            </div>
+
+            <div className="flex shrink-0 flex-wrap items-center gap-3 border-t border-[var(--v2-panel-border)] px-3 py-1.5">
+              {activeMenuCommand &&
+              (
+                <span
+                  data-testid="chat-command-menu-usage"
+                  className="min-w-0 flex-1 truncate font-mono text-[var(--v2-text-muted)]"
+                >
+                  {activeMenuCommand.usage}
+                </span>
+              )}
+              <span className="ml-auto hidden shrink-0 items-center gap-3 text-[var(--v2-text-faint)] sm:flex">
+                <span className="inline-flex items-center gap-1">
+                  <kbd className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--v2-text-faint)]">↑↓</kbd>
+                  {t("command.group.navigate")}
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <kbd className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--v2-text-faint)]">↵</kbd>
+                  {t("chat.commandMenuHintRun")}
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <kbd className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--v2-text-faint)]">Tab</kbd>
+                  {t("chat.commandMenuHintComplete")}
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <kbd className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--v2-text-faint)]">Esc</kbd>
+                  {t("common.dismiss")}
+                </span>
+              </span>
+            </div>
+          </div>
+        )}
         {attachmentError &&
         (
           <div
@@ -501,6 +802,21 @@ export function ChatInput({
           placeholder={placeholder}
           rows={1}
           disabled={disabled}
+          // Combobox semantics (role + aria-autocomplete) are guarded on
+          // `menuVisible` exactly like `aria-controls`/`aria-activedescendant`
+          // below: the plain textarea must not announce itself as a combobox
+          // (and dangle a reference to a listbox that doesn't exist in the
+          // DOM) except while the command menu is actually in play. See the
+          // WAI-ARIA "Editable Combobox With List Autocomplete" pattern.
+          role={menuVisible ? "combobox" : undefined}
+          aria-autocomplete={menuVisible ? "list" : undefined}
+          aria-expanded={menuVisible}
+          aria-controls={menuVisible ? "chat-command-menu-listbox" : undefined}
+          aria-activedescendant={
+            activeMenuCommand
+              ? `chat-command-option-${activeMenuCommand.name}`
+              : undefined
+          }
           className={textClass}
         />
 

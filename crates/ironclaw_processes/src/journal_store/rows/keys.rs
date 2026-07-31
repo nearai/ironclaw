@@ -1,5 +1,5 @@
 use ironclaw_filesystem::{IndexKey, IndexKind, IndexName, IndexSpec};
-use ironclaw_host_api::{ResourceScope, ScopedPath};
+use ironclaw_host_api::{path::ScopedPath, resource::ResourceScope};
 
 use super::super::ProcessJournalStoreError;
 use crate::{ProcessKind, ProcessLifecycleStatus};

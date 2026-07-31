@@ -30,9 +30,13 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ActivityId, Actor, Blocked, CapabilityId, CorrelationId, DenyRef, Invocation, InvocationOrigin,
-    MountView, ProcessId, ResourceEstimate, ResourceReservation, ResourceScope, RuntimeLane,
     Timestamp,
+    ids::{ActivityId, CapabilityId, CorrelationId, DenyRef, ProcessId},
+    invocation::{Actor, Invocation, InvocationOrigin},
+    lane::RuntimeLane,
+    mount::MountView,
+    resolution::Blocked,
+    resource::{ResourceEstimate, ResourceReservation, ResourceScope},
 };
 
 /// Proof of authority to mint an [`Authorized`]. The kernel authorizer implements
@@ -317,7 +321,7 @@ impl ProcessAuthorizedContinuation {
 }
 
 /// The success/deny/block trichotomy `authorize()` returns (§3). `Denied` and
-/// `Blocked` fold into [`crate::Resolution::Denied`]/[`crate::Resolution::Blocked`]
+/// `Blocked` fold into [`crate::resolution::Resolution::Denied`]/[`crate::resolution::Resolution::Blocked`]
 /// at the call site; `Authorized` proceeds to `dispatch()`.
 ///
 /// Not serializable: an `Authorized` may hold a live reservation and is a

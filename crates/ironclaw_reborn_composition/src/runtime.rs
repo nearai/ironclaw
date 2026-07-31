@@ -40,10 +40,17 @@ use ironclaw_first_party_extension_ports::{
     SkillActivationSelectorConfig, SkillExecutionAdapter, SkillInjectionMode,
 };
 use ironclaw_host_api::{
-    ActionResultSummary, ActionSummary, AgentId, ApprovalRequestId, AuditEnvelope, AuditEventId,
-    AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, ExtensionId,
-    InvocationId, MountView, Principal, ProductSurface, ResourceScope, RuntimeHttpEgress, TenantId,
-    ThreadId, UserId,
+    audit::{ActionResultSummary, ActionSummary, AuditEnvelope, AuditStage, DecisionSummary},
+    capability::EffectKind,
+    http::RuntimeHttpEgress,
+    ids::{
+        AgentId, ApprovalRequestId, AuditEventId, CapabilityId, CorrelationId, ExtensionId,
+        InvocationId, TenantId, ThreadId, UserId,
+    },
+    mount::MountView,
+    product_surface::ProductSurface,
+    resource::ResourceScope,
+    scope::Principal,
 };
 use ironclaw_loop_host::{
     AwaitEdgeSettler, AwaitEdgeWriter, CapabilityAllowSet, CapabilityResolveError,
@@ -718,7 +725,7 @@ pub(crate) struct InteractionServiceTestParts {
 pub(crate) fn wrap_result_read_capability_for_test(
     inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
     thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
-    fallback_user_id: ironclaw_host_api::UserId,
+    fallback_user_id: ironclaw_host_api::ids::UserId,
     run_context: ironclaw_turns::run_profile::LoopRunContext,
     input_resolver: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
     result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
@@ -762,7 +769,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
 #[cfg(feature = "test-support")]
 pub(crate) fn staged_capability_io_for_test(
     thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
-    fallback_user_id: ironclaw_host_api::UserId,
+    fallback_user_id: ironclaw_host_api::ids::UserId,
 ) -> (
     std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
     std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
@@ -773,7 +780,7 @@ pub(crate) fn staged_capability_io_for_test(
 #[cfg(feature = "test-support")]
 pub(crate) fn staged_capability_io_with_observer_for_test(
     thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
-    fallback_user_id: ironclaw_host_api::UserId,
+    fallback_user_id: ironclaw_host_api::ids::UserId,
     observer: Option<std::sync::Arc<dyn crate::RebornTrajectoryObserver>>,
 ) -> (
     std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
@@ -1025,7 +1032,7 @@ impl RebornRuntime {
             delivered_gate_routes: Arc::clone(&self.delivered_gate_routes),
             outbound_preferences: Arc::clone(&self.outbound_preferences),
             identity_lookup: Arc::clone(&self.channel_identity_store)
-                as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>,
+                as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
             deployment_channels: Arc::clone(&self.deployment_channels),
             channel_config: Arc::clone(&self.channel_config_service),
             channel_pairing: self.channel_pairing.clone(),
@@ -1057,7 +1064,7 @@ impl RebornRuntime {
     pub async fn pairing_mint_for_test(
         &self,
         extension_id: &str,
-        user_id: &ironclaw_host_api::UserId,
+        user_id: &ironclaw_host_api::ids::UserId,
     ) -> Option<String> {
         let service = self.channel_pairing.as_ref()?.get(extension_id)?;
         service
@@ -1071,7 +1078,7 @@ impl RebornRuntime {
     pub async fn pairing_issue_for_test(
         &self,
         extension_id: &str,
-        user_id: &ironclaw_host_api::UserId,
+        user_id: &ironclaw_host_api::ids::UserId,
     ) -> Option<(String, Option<String>, chrono::DateTime<chrono::Utc>)> {
         let service = self.channel_pairing.as_ref()?.get(extension_id)?;
         service.issue_or_rotate(user_id).await.ok().map(|issue| {
@@ -1093,9 +1100,9 @@ impl RebornRuntime {
         turn_world: (
             Arc<dyn ironclaw_turns::TurnCoordinator>,
             Arc<dyn ProcessGateQuerySource<Error = TurnError>>,
-            ironclaw_host_api::TenantId,
+            ironclaw_host_api::ids::TenantId,
         ),
-    ) -> Result<Option<ironclaw_host_api::UserId>, String> {
+    ) -> Result<Option<ironclaw_host_api::ids::UserId>, String> {
         let (actor_kind, external_actor_id, conversation_space_id, conversation_id) = actor;
         let Some(service) = self
             .channel_pairing
@@ -1140,7 +1147,7 @@ impl RebornRuntime {
     pub async fn pairing_connected_for_test(
         &self,
         extension_id: &str,
-        user_id: &ironclaw_host_api::UserId,
+        user_id: &ironclaw_host_api::ids::UserId,
     ) -> Option<bool> {
         let service = self.channel_pairing.as_ref()?.get(extension_id)?;
         service
@@ -1319,7 +1326,7 @@ impl RebornRuntime {
     pub async fn seed_standalone_secret(
         &self,
         owner: ResourceScope,
-        handle: ironclaw_host_api::SecretHandle,
+        handle: ironclaw_host_api::ids::SecretHandle,
         secret_value: String,
     ) -> Result<(), ironclaw_secrets::SecretStoreError> {
         self.secret_store
@@ -1596,7 +1603,7 @@ impl RebornRuntime {
                     snapshot_updates,
                 ),
             )
-                as Arc<dyn ironclaw_host_api::ChannelIdentityPostBindFactory>),
+                as Arc<dyn ironclaw_host_api::channel_identity::ChannelIdentityPostBindFactory>),
             _ => None,
         };
         Some(
@@ -1605,9 +1612,11 @@ impl RebornRuntime {
                 installation_store,
                 channel_config: Some(self.channel_config_service.clone()),
                 binding_store: Arc::clone(&identity_store)
-                    as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingStore>,
+                    as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingStore>,
                 rollback_store: identity_store
-                    as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingDeleteStore>,
+                    as Arc<
+                        dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingDeleteStore,
+                    >,
                 post_bind_factory,
                 overrides: Vec::new(),
             },
@@ -1634,8 +1643,12 @@ impl RebornRuntime {
                 self.thread_scope.tenant_id.clone(),
                 Vec::new(),
                 installation_store,
-                Arc::clone(&identity_store) as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>,
-                identity_store as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingDeleteStore>,
+                Arc::clone(&identity_store)
+                    as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>,
+                identity_store
+                    as Arc<
+                        dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingDeleteStore,
+                    >,
                 credential_cleanup,
                 account_status_reader,
                 Some(self.channel_dm_target_store.clone()),
@@ -1804,7 +1817,7 @@ impl RebornRuntime {
         let scope = self.turn_scope_for(&conversation.0).to_resource_scope();
         store
             .set(ironclaw_approvals::AutoApproveSettingInput {
-                updated_by: ironclaw_host_api::Principal::User(scope.user_id.clone()),
+                updated_by: ironclaw_host_api::scope::Principal::User(scope.user_id.clone()),
                 scope,
                 enabled: true,
             })

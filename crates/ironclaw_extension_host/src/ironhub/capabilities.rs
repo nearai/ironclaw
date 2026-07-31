@@ -6,9 +6,12 @@ use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
 };
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileSchemaRef, EffectKind, HostApiError, OriginGateMatrix,
-    OriginGatePolicy, PermissionMode, ResourceEstimate, ResourceProfile, ResourceUsage,
-    RuntimeDispatchErrorKind,
+    capability::{EffectKind, OriginGateMatrix, OriginGatePolicy, PermissionMode},
+    capability_profile::CapabilityProfileSchemaRef,
+    dispatch::RuntimeDispatchErrorKind,
+    error::HostApiError,
+    ids::CapabilityId,
+    resource::{ResourceEstimate, ResourceProfile, ResourceUsage},
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,

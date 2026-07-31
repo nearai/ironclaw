@@ -1,7 +1,7 @@
 use ironclaw_extensions::{
     CapabilitySurfaceDeclV2, ExtensionManifestRecord, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
-use ironclaw_host_api::{CapabilitySurfaceKind, HostPortCatalog};
+use ironclaw_host_api::{host_port::HostPortCatalog, surface::CapabilitySurfaceKind};
 use ironclaw_product::adapter_registry::{
     ManifestHash, RegistryError, parse_product_adapter_manifest_record, product_adapter_sections,
 };

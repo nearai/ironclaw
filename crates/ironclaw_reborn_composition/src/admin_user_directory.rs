@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{SecretHandle, TenantId, UserId};
+use ironclaw_host_api::ids::{SecretHandle, TenantId, UserId};
 use ironclaw_product::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
     AdminUserSecretMeta, AdminUserService, AdminUserStatus,

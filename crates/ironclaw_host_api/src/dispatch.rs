@@ -12,9 +12,16 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
-    Authorized, CapabilityId, ExtensionId, HostRemediation, InvocationOrigin, MountView,
-    ResourceEstimate, ResourceReceipt, ResourceReservation, ResourceScope, ResourceUsage, RunId,
-    RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle, UserId,
+    authorized::Authorized,
+    decision::RuntimeCredentialAuthRequirement,
+    host_remediation::HostRemediation,
+    ids::{CapabilityId, ExtensionId, RunId, SecretHandle, UserId},
+    invocation::InvocationOrigin,
+    mount::MountView,
+    resource::{
+        ResourceEstimate, ResourceReceipt, ResourceReservation, ResourceScope, ResourceUsage,
+    },
+    runtime::RuntimeKind,
 };
 
 /// Internal adapter request produced after a sealed [`Authorized`] witness is
@@ -207,7 +214,7 @@ pub enum RuntimeDispatchErrorKind {
 /// they reject arbitrary summaries mentioning raw tool input.
 pub const INPUT_ENCODE_HUMAN_SUMMARY: &str = "the tool input could not be encoded";
 
-/// Lossless injection into the unified [`FailureKind`](crate::FailureKind):
+/// Lossless injection into the unified [`FailureKind`](crate::result_meta::FailureKind):
 /// every precise mechanism name survives 1:1 — this replaces the retired
 /// 22→12 coarsening fold that destroyed 17 names (and with them, every
 /// remediation hint) on the way to the loop. The single non-identity edge is
@@ -217,7 +224,7 @@ pub const INPUT_ENCODE_HUMAN_SUMMARY: &str = "the tool input could not be encode
 /// an unclassifiable failure may be permanent, so routing it to the retryable
 /// `Internal` bucket (the retired fold's mapping) burned retry budget on
 /// calls that could never succeed.
-impl From<RuntimeDispatchErrorKind> for crate::FailureKind {
+impl From<RuntimeDispatchErrorKind> for crate::result_meta::FailureKind {
     fn from(kind: RuntimeDispatchErrorKind) -> Self {
         match kind {
             RuntimeDispatchErrorKind::Backend => Self::Backend,
@@ -250,7 +257,7 @@ impl From<RuntimeDispatchErrorKind> for crate::FailureKind {
 /// Lossless injection for the dispatch-control-plane siblings — each has its
 /// own named variant in the unified vocabulary (they were previously coarsened
 /// into `InvalidOutput`/`MissingRuntime`/`Authorization`/`Backend`).
-impl From<DispatchFailureKind> for crate::FailureKind {
+impl From<DispatchFailureKind> for crate::result_meta::FailureKind {
     fn from(kind: DispatchFailureKind) -> Self {
         match kind {
             DispatchFailureKind::UnknownCapability => Self::UnknownCapability,

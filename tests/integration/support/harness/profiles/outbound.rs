@@ -1,6 +1,6 @@
 //! Outbound domain tools profile (`outbound_target_tools`).
 
-use ironclaw_host_api::{CapabilityId, EffectKind, MountView};
+use ironclaw_host_api::{capability::EffectKind, ids::CapabilityId, mount::MountView};
 
 use super::super::super::outbound_preferences::FakeOutboundPreferencesService;
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};

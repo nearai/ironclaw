@@ -26,9 +26,11 @@ use ironclaw_events::AuditSink;
 use ironclaw_extensions::ExtensionPackage;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage, CapabilityId,
-    CorrelationId, DecisionSummary, EffectKind, ExtensionId, ResourceUsage,
-    RuntimeDispatchErrorKind,
+    audit::{ActionResultSummary, ActionSummary, AuditEnvelope, AuditStage, DecisionSummary},
+    capability::EffectKind,
+    dispatch::RuntimeDispatchErrorKind,
+    ids::{AuditEventId, CapabilityId, CorrelationId, ExtensionId},
+    resource::ResourceUsage,
 };
 use ironclaw_memory::{
     MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
@@ -526,8 +528,10 @@ mod tests {
 
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-        ResourceScope, TenantId, ThreadId, UserId, VirtualPath,
+        ids::{CapabilityId, InvocationId, TenantId, ThreadId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+        resource::ResourceScope,
     };
     use serde_json::{Value, json};
 
@@ -586,7 +590,7 @@ mod tests {
             capability_id: CapabilityId::new(capability_id).unwrap(),
             scope: sample_scope(),
             authenticated_actor_user_id: None,
-            estimate: ironclaw_host_api::ResourceEstimate::default(),
+            estimate: ironclaw_host_api::resource::ResourceEstimate::default(),
             mounts: Some(memory_mount()),
             services: InvocationServices {
                 filesystem,

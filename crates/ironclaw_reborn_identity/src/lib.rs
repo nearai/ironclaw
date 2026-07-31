@@ -36,7 +36,7 @@ pub use user_directory::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::ids::{TenantId, UserId};
 use serde::{Deserialize, Serialize};
 
 /// Which surface an external identity arrived through. The typed axis that

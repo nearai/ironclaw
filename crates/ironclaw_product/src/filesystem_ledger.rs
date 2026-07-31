@@ -17,9 +17,12 @@ use ironclaw_filesystem::{
     CasExpectation, Entry, FilesystemError, Filter, IndexKey, IndexValue, Page, RecordKind,
     RecordVersion, RootFilesystem, ScopedFilesystem,
 };
-use ironclaw_host_api::{AgentId, InvocationId, ProjectId, TenantId, UserId};
-use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
-use ironclaw_host_api::{ResourceScope, ScopedPath};
+use ironclaw_host_api::ids::{AgentId, InvocationId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::{
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+};
+use ironclaw_host_api::{path::ScopedPath, resource::ResourceScope};
 
 mod path;
 

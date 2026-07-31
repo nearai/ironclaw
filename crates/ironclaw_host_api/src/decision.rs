@@ -10,10 +10,14 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::ApprovalRequest;
+use crate::approval::ApprovalRequest;
 use crate::{
-    CapabilityId, ExtensionId, HostApiError, MountView, NetworkPolicy, ResourceCeiling,
-    ResourceReservationId, RuntimeCredentialAccountSetup, SecretHandle, VendorId,
+    action::NetworkPolicy,
+    capability::RuntimeCredentialAccountSetup,
+    error::HostApiError,
+    ids::{CapabilityId, ExtensionId, ResourceReservationId, SecretHandle, VendorId},
+    mount::MountView,
+    resource::ResourceCeiling,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
