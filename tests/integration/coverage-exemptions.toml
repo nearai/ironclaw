@@ -18,8 +18,10 @@
 #   reason = "why this whole crate is out of scope for this report"
 #   issue  = "https://github.com/nearai/ironclaw/issues/5657"   # required: tracking issue
 
-# Three crates below are v1-only (consumed exclusively by root `ironclaw`, no
+# The two crates below are v1-only (consumed exclusively by root `ironclaw`, no
 # crates/*/Cargo.toml dependents); already covered by .github/workflows/test.yml ("Tests (Legacy)"). Tracked by #5657.
+# (`ironclaw_embeddings` was the third; its crate was deleted in WS8, so its
+# exemption went with it.)
 
 # These public facade modules contain declarations and re-exports only. Rust
 # coverage therefore emits no LCOV source record for them; executable behavior
@@ -39,11 +41,6 @@ issue  = "https://github.com/nearai/ironclaw/issues/6524"
 module = "crates/ironclaw_webui/src/webui_v2/mod.rs"
 reason = "Declaration-only WebUI v2 facade with no executable Rust statements; rustc emits no LCOV source record. Executable route behavior remains covered in the owned implementation modules."
 issue  = "https://github.com/nearai/ironclaw/issues/6524"
-
-[[exemption]]
-crate  = "ironclaw_embeddings"
-reason = "v1-only: consumed only by root `ironclaw` (src/app.rs, src/tools/builtin/memory.rs, src/workspace/mod.rs, src/config/{mod,embeddings}.rs); no crates/* dependents. Covered by \"Tests (Legacy)\"."
-issue  = "https://github.com/nearai/ironclaw/issues/5657"
 
 [[exemption]]
 module = "crates/ironclaw_llm/src/rig_adapter/tests/finish_reason_tests.rs"

@@ -10,7 +10,6 @@ fn capabilities_crate_does_not_depend_on_concrete_runtime_or_dispatcher_crates()
         .next()
         .unwrap_or(&manifest);
     for forbidden in [
-        "ironclaw_dispatcher",
         "ironclaw_host_runtime",
         "ironclaw_mcp",
         "ironclaw_scripts",

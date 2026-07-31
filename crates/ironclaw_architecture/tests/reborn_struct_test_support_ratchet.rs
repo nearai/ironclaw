@@ -34,10 +34,11 @@ struct FrozenPathCount {
 /// Measured 2026-07-30 against `origin/main` @ `ae0989c37` from
 /// `FROZEN_PATH_COUNTS` below — 82 frozen `(category, kind, path)` entries
 /// totalling 283 suppressed members (both printed by the assertion at the end
-/// of the gate below on failure). Lowered to 81/282 by the WS0 dead-module
-/// deletion, which removed
+/// of the gate below on failure). Lowered to 81/282 by the **WS8** dead-module
+/// deletion (#6943), which removed
 /// `event_projections/src/pending_gate_projection.rs` and its one
-/// test-support method.
+/// test-support method. (The `WS0_` prefix records when the baseline was
+/// *captured*, by #6936; deletions that lower it come from WS8.)
 ///
 /// The per-path checks already refuse growth *within* a listed file and refuse
 /// staleness. These two totals close the remaining door: adding a **new** path

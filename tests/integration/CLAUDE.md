@@ -397,7 +397,7 @@ On a harness built from a `live_approvals` group:
 
 `ironclaw_reborn_composition::test_support` exposes:
 
-- `build_secret_store_for_test(root, scoped)` — constructs the `StandaloneSecretStore` used by production local-dev composition; for store read-back in secrets tests.
+- `build_secret_store_for_test(root, scoped)` — returns the `Arc<ironclaw_secrets::SecretStore<F>>` that production standalone composition builds (via `factory::build_secret_store`); for store read-back in secrets tests.
 - `build_runtime_with_resource_governor_for_test(input)` — builds the ordinary production-composed runtime and returns the exact `ResourceGovernor` wired into its capability path. Use only for reservation read-back; resource policy remains owned by `ironclaw_resources`.
 
 `RebornRuntime` (returned by `build_runtime`, test-only methods defined in
@@ -540,7 +540,7 @@ On a `live_auth_and_approval()` group thread:
   (`request_manual_token_setup` -> `submit_manual_token`), then resumes with
   `ResumeTurnPrecondition::BlockedAuthGate`; the parked `github.*` capability
   re-dispatches and completes. Only valid on this group (needs the
-  `build_reborn_services` product-auth wiring; `live_auth_gate()`'s
+  `build_reborn_runtime` product-auth wiring; `live_auth_gate()`'s
   lower-level fixture cannot complete an auth resume).
 - `deny_auth_gate(run_id, &gate_ref)` — works on both auth-gate groups.
 
