@@ -37,6 +37,7 @@ ironclaw_auth = { path = "../ironclaw_auth" }
 ironclaw_approvals = { path = "../ironclaw_approvals" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
+ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
