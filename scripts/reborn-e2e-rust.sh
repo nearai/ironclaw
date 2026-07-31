@@ -110,10 +110,8 @@ run_architecture() {
 }
 
 run_runtimes() {
-  # The `ironclaw_dispatcher` re-export shim was deleted in WS8; these two
-  # suites moved to the crate that owns `RuntimeDispatcher` unchanged. Its
-  # third suite (boundary_contract) only pinned the shim's own shape and went
-  # with it.
+  # These two suites pin `RuntimeDispatcher` and live with it in
+  # `ironclaw_capabilities`.
   run_test ironclaw_capabilities runtime_dispatch_contract
   run_test ironclaw_capabilities runtime_dispatch_event_contract
   # main's runtime_dispatcher_integration / vertical_slice_contract test the

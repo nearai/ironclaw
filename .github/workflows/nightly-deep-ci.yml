@@ -113,10 +113,9 @@ jobs:
           MUT_JOBS: "3"
           MUT_OUT: target/nightly-mutation
           MUT_TIMEOUT: "300"
-        # Re-pointed in WS8: this used to target `ironclaw_dispatcher/src/lib.rs`,
-        # which had been reduced to a pure `pub use` re-export shim (zero
-        # mutable statements, so zero mutants) before being deleted outright.
-        # The dispatch routing logic it was meant to audit lives here.
+        # Targets the dispatch routing logic itself. Keep this pointed at a file
+        # with real mutable statements — a pure `pub use` re-export file yields
+        # zero mutants and makes this step silently vacuous.
         run: >-
           scripts/mutation-audit.sh
           -p ironclaw_capabilities
