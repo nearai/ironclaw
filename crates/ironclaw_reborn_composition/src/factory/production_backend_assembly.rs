@@ -612,12 +612,16 @@ pub(super) async fn build_backend_production(
     .with_production_reborn_event_stores(event_stores)
     .with_turn_run_wake_notifier_dyn(production_wiring.turn_run_wake_notifier);
     #[cfg(any(test, feature = "test-support"))]
-    let services = match network_http_egress_for_test {
-        Some(test_egress) => services.try_with_host_http_egress(test_egress)?,
-        None => services.try_with_host_http_egress(default_host_http_egress()?)?,
+    let network_http_egress = match network_http_egress_for_test {
+        Some(test_egress) => test_egress,
+        None => Arc::new(default_host_http_egress()?),
     };
     #[cfg(not(any(test, feature = "test-support")))]
-    let services = services.try_with_host_http_egress(default_host_http_egress()?)?;
+    let network_http_egress: Arc<dyn ironclaw_network::NetworkHttpEgress> =
+        Arc::new(default_host_http_egress()?);
+    let http_body_store = Arc::clone(&stores.scoped_filesystem);
+    let services =
+        services.try_with_host_http_egress_with_body_store(network_http_egress, http_body_store)?;
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let services = attach_hosted_mcp_runtime(services)?;
     let admin_configuration_credential_slot = AdminConfigurationCredentialSlot::default();

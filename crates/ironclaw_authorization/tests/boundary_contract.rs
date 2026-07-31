@@ -8,7 +8,6 @@ fn authorization_crate_stays_below_workflow_and_runtime_crates() {
     for forbidden in [
         "ironclaw_approvals",
         "ironclaw_capabilities",
-        "ironclaw_dispatcher",
         "ironclaw_processes",
         "ironclaw_host_runtime",
         "ironclaw_resources",

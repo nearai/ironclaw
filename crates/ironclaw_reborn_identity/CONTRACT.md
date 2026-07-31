@@ -10,8 +10,11 @@ provisioning lives here, not in WebUI ingress and not in `ironclaw_conversations
 This crate is **also the durable home of the minimal user profile** (email,
 display name, timestamps), not only an identity→`UserId` map. Resolving an
 identity persists a `StoredUser` record keyed by `UserId`, so "what do we know
-about this user, and where is it stored" is answered *here* — there is no
-separate users table elsewhere in the Reborn stack. Any future enumeration or
+about this user, and where is it stored" is answered *here* — this is the only
+user *profile* store in the Reborn stack. (It is not the only external-identity
+*binding* store: `ironclaw_extension_host`'s `FilesystemChannelIdentityStore`
+implements `ironclaw_host_api::RebornUserIdentityBindingStore` for channel
+actors. That one binds; it does not own profiles.) Any future enumeration or
 admin surface extends this store; it does not stand up a new one. See
 [Persisted records](#persisted-records) for the exact shapes.
 

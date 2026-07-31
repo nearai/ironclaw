@@ -5,7 +5,32 @@ argument-hint: <event_name> [description]
 model: opus
 ---
 
-> **v1-maintenance only.** This scaffolds into the legacy `src/` gateway. Per the repo's reborn-first rule, use it only to maintain existing v1 behavior — new user-visible events belong Reborn-side (projection/SSE frame via `ironclaw_webui` + the event-stream substrate; start from the `reborn-feature` skill).
+> # ⚠ DO NOT FOLLOW THIS COMMAND — IT TARGETS A DELETED CODEBASE
+>
+> **Every file path in the steps below is gone.** This procedure scaffolds into
+> the retired v1 gateway SSE path: `src/channels/` (Steps 1–3),
+> `crates/ironclaw_gateway/static/` (Steps 4–5), and `src/agent/` / `src/worker/`
+> (Step 6) — the final checklist names the same dead files. The
+> `ironclaw_gateway` crate and the entire root `src/` monolith were deleted from
+> the tree; none of these files exist and none should be created. Only Step 7
+> (`cargo fmt` / `clippy`) still means anything. Following this command produces
+> new files in a directory layout the build does not know about.
+>
+> **This command needs rewriting onto the `ironclaw_webui` streaming path** —
+> the Reborn projection/SSE frame served by `crates/ironclaw_webui`, with the
+> client side in `crates/ironclaw_webui/frontend/`, over the event-stream
+> substrate (`ironclaw_events` → `ironclaw_event_projections` →
+> `ironclaw_event_streams`). That rewrite has not been done: the correct
+> Reborn procedure is **not** written down here, and this banner deliberately
+> does not guess at it.
+>
+> Until then, for a new user-visible event start from the `reborn-feature`
+> skill and `.claude/rules/gateway-events.md` (the live Reborn events and
+> transport-projection rules), not from the steps below.
+>
+> *Identified in PR #6944 (WS11.3 guidance drift hotfixes), which found the
+> paths dead but scoped the rewrite out — replacing a scaffold procedure is new
+> guidance, not a drift fix.*
 
 Add a new SSE event called `$ARGUMENTS` to the IronClaw web gateway. This involves changes across 5 files in a specific order. Follow each step exactly.
 
@@ -47,7 +72,7 @@ If the event carries structured data beyond a simple string, add a serializable 
 
 ## Step 4: Add frontend handler
 
-**File**: `crates/ironclaw_gateway/static/js/core/sse.js`
+**File**: ~~`crates/ironclaw_gateway/static/js/core/sse.js`~~ — **deleted; do not create.** The Reborn client lives in `crates/ironclaw_webui/frontend/`.
 
 In the `connectSSE()` function, add a new `eventSource.addEventListener()` for the snake_case event name. Parse the JSON data and call a handler function.
 
@@ -58,7 +83,7 @@ Create the handler function that updates the DOM. Put it in the split file that 
 
 ## Step 5: Add CSS if needed
 
-**File**: pick the matching surface under `crates/ironclaw_gateway/static/styles/surfaces/` (e.g. `chat.css` for chat UI, `jobs.css` for sandbox job cards) or `styles/components/` for cross-surface reusable pieces.
+**File**: ~~`crates/ironclaw_gateway/static/styles/`~~ — **deleted; do not create.** Reborn styling lives with the SPA under `crates/ironclaw_webui/frontend/`.
 
 If the event needs custom UI (cards, badges, etc.), add styles. Follow the existing naming conventions (`.approval-card`, `.log-entry`, etc.).
 

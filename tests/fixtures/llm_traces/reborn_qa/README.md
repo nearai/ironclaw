@@ -73,12 +73,12 @@ fixture schema, journey ownership, last successful replay, and the retained
 representative drift set. `scripts/ci/check-regression-promotions.py` fails on
 missing metadata, stale replay, too few drift cases, or a retirement without an
 existing deterministic fixture, exact replay command, reviewed reason, and
-date. Every replayable harvested case must be accounted for as either retained
-drift or retired; no-model and quarantined cases remain explicitly excluded
-until active deterministic replay evidence exists.
+date. Every replayable harvested case must be accounted for as either scheduled
+or retired. No-model and quarantined cases must remain scheduled until active
+deterministic replay evidence exists.
 
-During the 30-day review, retire a scheduled live case once its permanent
-purpose is covered deterministically. Keep only the manifest's representative
-model/provider/drift cases on the recurring lane; retired cases remain
-available for explicit attended runs and historical diagnosis. A case cannot
-be both retired and representative drift.
+During the 30-day review, a scheduled live case may be retired once its
+permanent purpose is covered deterministically. Retired cases remain available
+for explicit attended runs and historical diagnosis. The recurring lane may
+retain more than the minimum representative drift set, but a case cannot be
+both scheduled and retired.

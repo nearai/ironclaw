@@ -6,12 +6,8 @@
 //! re-exported below. The `pub(crate)` host-composed logging helper stays here
 //! because it depends on `tracing`.
 
+use ironclaw_memory::{MemorySignificantEvent, MemorySignificantEventSink};
 use std::sync::Arc;
-
-pub use ironclaw_memory::{
-    MemoryAuditContext, MemoryEventSinkError, MemorySignificantEvent, MemorySignificantEventKind,
-    MemorySignificantEventSink, MemorySignificantEventSource, MemorySignificantEventStatus,
-};
 
 pub(crate) async fn record_memory_significant_event(
     sink: Option<&Arc<dyn MemorySignificantEventSink>>,
