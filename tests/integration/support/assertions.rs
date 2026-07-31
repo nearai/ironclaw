@@ -22,7 +22,10 @@ use ironclaw_host_api::ids::ProcessId;
 use ironclaw_processes::ProcessKind;
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::{ResourceAccount, ResourceGovernor, ResourceTally};
-use ironclaw_turns::{TurnEventKind, TurnRunId, TurnRunState, run_profile::LoopHostMilestoneKind};
+use ironclaw_turns::{
+    TurnEventKind, TurnRunId, TurnRunState,
+    run_profile::{LoopHostMilestoneKind, LoopRecoveryClass},
+};
 use rust_decimal::Decimal;
 
 use super::builder::RebornIntegrationHarness;
@@ -983,6 +986,57 @@ impl RebornIntegrationHarness {
         }
         let seen: Vec<_> = events.iter().map(|event| &event.kind).collect();
         Err(format!("unexpected recorded turn event of kind {kind:?}; saw {seen:?}").into())
+    }
+
+    /// Assert the durable failed lifecycle event carries the expected stable
+    /// category and scrubbed provider-cause detail.
+    pub async fn assert_failed_turn_event(
+        &self,
+        expected_reason: &str,
+        expected_detail: &str,
+    ) -> HarnessResult<()> {
+        for _ in 0..100 {
+            if self.recorded_turn_events().iter().any(|event| {
+                event.kind == ironclaw_turns::TurnEventKind::Failed
+                    && event.sanitized_reason.as_deref() == Some(expected_reason)
+                    && event
+                        .detail
+                        .as_deref()
+                        .is_some_and(|detail| detail.contains(expected_detail))
+            }) {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let events = self.recorded_turn_events();
+        Err(format!(
+            "no failed turn event with reason {expected_reason:?} and detail containing \
+             {expected_detail:?}; saw {events:?}"
+        )
+        .into())
+    }
+
+    /// Assert model recovery used `expected` and never entered `forbidden`.
+    pub async fn assert_model_recovery_class(
+        &self,
+        expected: LoopRecoveryClass,
+        forbidden: LoopRecoveryClass,
+    ) -> HarnessResult<()> {
+        let classes = self
+            .loop_milestones()
+            .into_iter()
+            .filter_map(|milestone| match milestone.kind {
+                LoopHostMilestoneKind::FailureRecovered { class, .. } => Some(class),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if classes.contains(&expected) && !classes.contains(&forbidden) {
+            return Ok(());
+        }
+        Err(format!(
+            "expected model recovery class {expected:?} and no {forbidden:?}; saw {classes:?}"
+        )
+        .into())
     }
 
     /// Assert the always-wired security-audit recorder captured an event with

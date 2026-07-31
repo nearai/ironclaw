@@ -1,78 +1,117 @@
 #!/usr/bin/env bash
-# Caller-level sabotage tests for the recorded-fixture checker.
-
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-checker="${repo_root}/scripts/ci/check-reborn-qa-fixtures.sh"
-work="$(mktemp -d "${TMPDIR:-/tmp}/ironclaw-qa-fixtures.XXXXXX")"
-trap 'rm -rf "${work}"' EXIT
+repo_root=$(git rev-parse --show-toplevel)
+checker="$repo_root/scripts/ci/check-reborn-qa-fixtures.sh"
+tmp_dir=$(mktemp -d)
+trap 'rm -rf "$tmp_dir"' EXIT
 
-passes=0
-failures=0
-capture() {
-  set +e
-  CAP_OUT="$("$@" 2>&1)"
-  CAP_RC=$?
-  set -e
-}
-check_rc() {
-  local label="$1" expected="$2"
-  if [ "${CAP_RC}" -eq "${expected}" ]; then
-    echo "  ok   ${label}"
-    passes=$((passes + 1))
-  else
-    echo "  FAIL ${label}: expected ${expected}, got ${CAP_RC}" >&2
-    printf '%s\n' "${CAP_OUT}" >&2
-    failures=$((failures + 1))
-  fi
-}
-check_text() {
-  local label="$1" needle="$2"
-  if grep -Fq "${needle}" <<<"${CAP_OUT}"; then
-    echo "  ok   ${label}"
-    passes=$((passes + 1))
-  else
-    echo "  FAIL ${label}: missing ${needle}" >&2
-    printf '%s\n' "${CAP_OUT}" >&2
-    failures=$((failures + 1))
-  fi
+write_fixture() {
+  local directory=$1
+  local expects=$2
+  mkdir -p "$directory"
+  mkdir -p "$directory/live_canary"
+  cp \
+    "$repo_root/tests/fixtures/llm_traces/reborn_qa/live_canary/case-manifest.json" \
+    "$directory/live_canary/case-manifest.json"
+  printf '%s\n' \
+    '{"model_name":"test","turns":[{"user_input":"hello","steps":[{"response":{"type":"text","content":"done","input_tokens":0,"output_tokens":0}}],"expects":'"$expects"'}]}' \
+    > "$directory/case.json"
 }
 
-fixtures="${work}/fixtures"
-mkdir -p "${fixtures}"
+write_fixture "$tmp_dir/valid" '{"final_response":{"contains":["done"]}}'
+"$checker" "$tmp_dir/valid" >/dev/null
 
-echo "▶ valid fixture"
-cat >"${fixtures}/valid.json" <<'JSON'
-{
-  "schema_version": 1,
-  "turns": []
-}
-JSON
-capture "${checker}" "${fixtures}"
-check_rc "a valid multiline object fixture passes" 0
-
-echo "▶ malformed fixture sabotage"
-printf '%s\n' '{"schema_version": 1,' >"${fixtures}/malformed.json"
-capture "${checker}" "${fixtures}"
-check_rc "invalid JSON fails" 1
-check_text "malformed file is named" "malformed.json:2"
-check_text "parse failure is classified" "malformed JSON fixture"
-
-printf '%s\n' '[]' >"${fixtures}/malformed.json"
-capture "${checker}" "${fixtures}"
-check_rc "a non-object fixture root fails" 1
-check_text "root shape failure is actionable" "root must be an object"
-
-echo "▶ empty discovery sabotage"
-rm "${fixtures}/malformed.json" "${fixtures}/valid.json"
-capture "${checker}" "${fixtures}"
-check_rc "zero fixture discovery fails" 1
-check_text "empty discovery names the fixture directory" "no Reborn QA fixture JSON files found"
-
-echo
-if [ "${failures}" -ne 0 ]; then
-  echo "${failures} QA fixture checker self-test(s) failed" >&2
+write_fixture "$tmp_dir/missing-manifest" '{"final_response":{"contains":["done"]}}'
+rm "$tmp_dir/missing-manifest/live_canary/case-manifest.json"
+if "$checker" "$tmp_dir/missing-manifest" >/dev/null 2>&1; then
+  echo "checker accepted fixtures without promotion metadata manifest" >&2
   exit 1
 fi
-echo "all ${passes} QA fixture checker self-tests passed"
+
+write_fixture "$tmp_dir/empty-expects" '{}'
+if "$checker" "$tmp_dir/empty-expects" >/dev/null 2>&1; then
+  echo "checker accepted a fixture with meaningless empty assertions" >&2
+  exit 1
+fi
+
+write_fixture "$tmp_dir/meaningless-expects" '{"tools_used":[]}'
+if "$checker" "$tmp_dir/meaningless-expects" >/dev/null 2>&1; then
+  echo "checker accepted a fixture with only empty assertion values" >&2
+  exit 1
+fi
+
+write_fixture "$tmp_dir/candidate" '{"final_response":{"contains":["done"]}}'
+python3 - "$tmp_dir/candidate/case.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+fixture = json.loads(path.read_text(encoding="utf-8"))
+fixture["_review"] = {"status": "candidate"}
+path.write_text(json.dumps(fixture), encoding="utf-8")
+PY
+if "$checker" "$tmp_dir/candidate" >/dev/null 2>&1; then
+  echo "checker accepted an unpromoted review-required candidate" >&2
+  exit 1
+fi
+
+unsafe_token='sk-proj-THIS_MUST_NEVER_APPEAR_IN_DIAGNOSTICS_123456789'
+write_fixture "$tmp_dir/unsafe" '{"final_response":{"contains":["done"]}}'
+python3 - "$tmp_dir/unsafe/case.json" "$unsafe_token" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+fixture = json.loads(path.read_text(encoding="utf-8"))
+fixture["turns"][0]["user_input"] = sys.argv[2]
+path.write_text(json.dumps(fixture), encoding="utf-8")
+PY
+unsafe_output="$tmp_dir/unsafe-output"
+if "$checker" "$tmp_dir/unsafe" >"$unsafe_output" 2>&1; then
+  echo "checker accepted an unsafe secret-shaped fixture" >&2
+  exit 1
+fi
+if grep -qF "$unsafe_token" "$unsafe_output"; then
+  echo "checker leaked the raw secret match in diagnostics" >&2
+  exit 1
+fi
+
+write_fixture "$tmp_dir/malformed" '{"final_response":{"contains":["done"]}}'
+printf '%s\n' '{"schema_version": 1,' > "$tmp_dir/malformed/case.json"
+malformed_output="$tmp_dir/malformed-output"
+if "$checker" "$tmp_dir/malformed" >"$malformed_output" 2>&1; then
+  echo "checker accepted malformed JSON" >&2
+  exit 1
+fi
+if ! grep -Fq "case.json:2: malformed JSON fixture" "$malformed_output"; then
+  echo "checker did not report the malformed fixture and line" >&2
+  exit 1
+fi
+
+write_fixture "$tmp_dir/non-object" '{"final_response":{"contains":["done"]}}'
+printf '%s\n' '[]' > "$tmp_dir/non-object/case.json"
+non_object_output="$tmp_dir/non-object-output"
+if "$checker" "$tmp_dir/non-object" >"$non_object_output" 2>&1; then
+  echo "checker accepted a non-object fixture root" >&2
+  exit 1
+fi
+if ! grep -Fq "root must be an object" "$non_object_output"; then
+  echo "checker accepted or did not explain a non-object fixture root" >&2
+  exit 1
+fi
+
+mkdir -p "$tmp_dir/empty"
+empty_output="$tmp_dir/empty-output"
+if "$checker" "$tmp_dir/empty" >"$empty_output" 2>&1; then
+  echo "checker accepted empty fixture discovery" >&2
+  exit 1
+fi
+if ! grep -Fq "no Reborn QA fixture JSON files found" "$empty_output"; then
+  echo "checker accepted or did not explain empty fixture discovery" >&2
+  exit 1
+fi
+
+echo "Reborn QA fixture checker self-tests passed"

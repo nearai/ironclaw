@@ -455,6 +455,9 @@ pub enum RecoverableModelFailure {
     ContentFiltered,
     InvalidOutput,
     OutputTruncated,
+    ProviderJson,
+    ProviderInvalidResponse,
+    ProviderEmptyResponse,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -820,6 +823,18 @@ impl RecoverableFailureLlm {
                 cache_creation_input_tokens: 0,
                 reasoning: None,
                 reasoning_details: None,
+            }),
+            RecoverableModelFailure::ProviderJson => {
+                let error = serde_json::from_str::<serde_json::Value>("{")
+                    .expect_err("provider fixture JSON must be malformed");
+                Err(LlmError::Json(error))
+            }
+            RecoverableModelFailure::ProviderInvalidResponse => Err(LlmError::InvalidResponse {
+                provider: "scripted".to_string(),
+                reason: "malformed response envelope".to_string(),
+            }),
+            RecoverableModelFailure::ProviderEmptyResponse => Err(LlmError::EmptyResponse {
+                provider: "scripted".to_string(),
             }),
         })
     }

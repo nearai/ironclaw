@@ -169,7 +169,11 @@ Those blocked states are host-managed transitions driven by approval or auth ser
   active loop contract surface as `invalid_output`, not `unavailable`. The
   agent loop owns recovery: it retries the model call with a model-visible
   repair hint in the prompt bundle, and exhausted retries fail the run as
-  `invalid_model_output`.
+  `invalid_model_output`. Provider `Json`, `InvalidResponse`, and
+  `EmptyResponse` failures normalize at this boundary. A stream that ended
+  before its provider terminal frame is instead `StreamInterrupted` and may
+  use availability recovery; opaque `Http` or `Io` errors may do so only when
+  their concrete status or error kind carries transient connection evidence.
 - Recoverable `context_overflow`, `content_filtered`, and `invalid_output`
   failures may receive one additional observation-assisted model attempt after
   their ordinary retry budget. The observation is loop-owned, typed, and

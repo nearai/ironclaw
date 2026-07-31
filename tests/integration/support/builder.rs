@@ -335,6 +335,18 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Return a typed provider decode/response error `failures` times through
+    /// the real vendor-provider seam.
+    pub fn provider_response_error_model_times(
+        mut self,
+        failure: RecoverableModelFailure,
+        failures: usize,
+    ) -> Self {
+        self.model_mode =
+            ThreadModelMode::Recoverable(RecoverableModelFailureScript::new(failure, failures));
+        self
+    }
+
     /// Report output truncation `failures` times, then resume scripted
     /// playback through the real provider gateway and recovery path.
     pub fn output_truncated_model_times(mut self, failures: usize) -> Self {

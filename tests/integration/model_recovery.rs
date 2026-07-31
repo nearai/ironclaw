@@ -11,11 +11,13 @@ mod reborn_support;
 mod support;
 
 use ironclaw_threads::SessionThreadError;
-use ironclaw_turns::{TurnEventKind, TurnStatus};
+use ironclaw_turns::{TurnEventKind, TurnStatus, run_profile::LoopRecoveryClass};
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
 use reborn_support::http_matcher::ScriptedHttpResponse;
 use reborn_support::reply::RebornScriptedReply;
-use reborn_support::scripted_provider::{CONTEXT_OVERFLOW_USED_TOKENS, ModelProviderCallProbe};
+use reborn_support::scripted_provider::{
+    CONTEXT_OVERFLOW_USED_TOKENS, ModelProviderCallProbe, RecoverableModelFailure,
+};
 use serde_json::json;
 
 const UNPERSISTED_ASSISTANT_REPLY: &str =
@@ -312,6 +314,78 @@ async fn invalid_output_recovers_with_model_visible_observation() {
         .assert_model_message_content_not_contains("model returned an empty assistant response")
         .await
         .expect("gateway summaries do not enter the recovery prompt");
+}
+
+/// Regression for #6897: malformed, JSON-invalid, and empty completed provider
+/// responses use the bounded invalid-output lane, then persist a durable
+/// user-visible failure category and scrubbed provider cause.
+#[tokio::test]
+async fn deterministic_provider_response_errors_use_bounded_invalid_output_recovery() {
+    let cases = [
+        (RecoverableModelFailure::ProviderJson, "JSON error:", "json"),
+        (
+            RecoverableModelFailure::ProviderInvalidResponse,
+            "malformed response envelope",
+            "invalid_response",
+        ),
+        (
+            RecoverableModelFailure::ProviderEmptyResponse,
+            "Empty response",
+            "empty_response",
+        ),
+    ];
+
+    for (provider_failure, expected_detail, label) in cases {
+        let harness = RebornIntegrationHarness::test_default()
+            .with_turn_event_sink()
+            .provider_response_error_model_times(provider_failure, usize::MAX)
+            .build()
+            .await
+            .expect("harness builds");
+        let run_id = harness
+            .submit_turn_async("return a usable response")
+            .await
+            .expect("turn submitted");
+        let state = harness
+            .wait_for_status(run_id, TurnStatus::Failed)
+            .await
+            .expect("deterministic provider failure reaches Failed");
+        let failure = state
+            .failure
+            .as_ref()
+            .expect("failed run carries a durable failure");
+
+        assert_eq!(
+            failure.category(),
+            "model_invalid_output",
+            "{label} must not use the provider-unavailable category"
+        );
+        assert!(
+            failure
+                .detail()
+                .is_some_and(|detail| detail.contains(expected_detail)),
+            "{label} must retain its scrubbed provider cause: {failure:?}"
+        );
+        harness
+            .assert_interactive_model_provider_call_count(4)
+            .await
+            .expect("invalid output uses two retries, one observation, then aborts");
+        harness
+            .assert_model_recovery_class(
+                LoopRecoveryClass::ModelInvalidOutput,
+                LoopRecoveryClass::ModelUnavailable,
+            )
+            .await
+            .expect("recovery remains in the bounded invalid-output lane");
+        harness
+            .assert_failed_turn_event("model_invalid_output", expected_detail)
+            .await
+            .expect("durable failed event carries user-visible category and safe detail");
+        harness
+            .assert_no_turn_event_recorded(TurnEventKind::Completed)
+            .await
+            .expect("terminal invalid output emits no false completion");
+    }
 }
 
 /// Regression for #6700: a provider's output-token ceiling is not an input

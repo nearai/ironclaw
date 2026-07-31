@@ -127,6 +127,7 @@ export function MessageList({
   onRetryMessage,
   threadId,
   activeRunId,
+  regressionArtifactExportEnabled = false,
   logsPath,
   pending = false,
   commands,
@@ -401,6 +402,9 @@ export function MessageList({
                 onRetry={onRetryMessage}
                 threadId={threadId}
                 activeRunId={activeRunId}
+                regressionArtifactExportEnabled={
+                  regressionArtifactExportEnabled
+                }
                 commands={commands}
               />)
         )}

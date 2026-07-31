@@ -2094,6 +2094,7 @@ fn provider_latency_failure(error: LlmError) -> OperationFailure {
         LlmError::QuotaExceeded { .. } => "model_provider_quota_exceeded",
         LlmError::BadGateway { .. }
         | LlmError::RequestFailed { .. }
+        | LlmError::StreamInterrupted { .. }
         | LlmError::InvalidResponse { .. }
         | LlmError::EmptyResponse { .. }
         | LlmError::Http(_)
