@@ -13,7 +13,9 @@ A type is admitted iff all four hold (the contracts-family test, §6.1):
 3. two or more consumers need it without importing an owner;
 4. it carries no execution, persistence, policy engine, or workflow.
 
-Today that is thirteen modules:
+Today that is seventeen modules (the count read "thirteen" before WS1.5 while
+the table already listed sixteen rows — a stale number carried over from WS1.3,
+corrected here against `src/lib.rs`):
 
 | Module | Owns |
 | --- | --- |
@@ -32,6 +34,7 @@ Today that is thirteen modules:
 | `state` | The installation state machine: `InstallationState`, `LifecyclePublicState`. |
 | `surface` | `CapabilitySurfaceKind` — the manifest surface kinds an extension may declare. |
 | `tool_adapter` | `ToolAdapter` + `RestrictedEgress` and their call/result/error vocabulary — arrived with WS1.4. |
+| `verified_inbound` | The **sealed** channel/webhook mint family: `mark_request_signature_verified`/`mark_shared_secret_header_verified` and their `_for_tenant` variants — arrived with WS1.5. Every entry point consumes a `VerifiedInboundGrant`, so only the generic ingress verifier can call them. |
 | `test_support` | Feature-gated: the exported channel-adapter conformance suite (§11.2.10) and the in-memory egress/delivery fakes. |
 
 ## What must never be here
@@ -56,6 +59,17 @@ their hosts. Sealing them would forbid exactly the extensibility the unified
 extension model is built on, so it is not an omission: a trait added here is
 open by default, and one that genuinely needs a closed impl set is a sign it
 belongs in an owner crate instead.
+
+**The one closed thing here is not a trait — it is a constructor.**
+`verified_inbound`'s mint family is sealed by a *witness*, not by a sealed
+supertrait: each function consumes a
+`ironclaw_host_api::product_adapter::auth::VerifiedInboundGrant`, whose only
+source is `ChannelIngressVerifier::verified_inbound_grant`, which only
+`ironclaw_extension_host` may implement (pinned by
+`reborn_sealed_evidence_mint_ratchet`). That is deliberately the *opposite*
+shape from the traits above: this crate declares what an extension may
+implement, and separately declares the one thing an extension may never do —
+attest that a request was verified. See PROPOSAL §6.1.2/§12.1a.
 
 ## Dependencies
 

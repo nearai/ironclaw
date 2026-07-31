@@ -18,11 +18,13 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
+use ironclaw_extension_contracts::verified_inbound;
 use ironclaw_extension_host::ingress::{
     ExtensionIngressRouter, InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError,
     IngressConfigurationPort, IngressPortError, IngressSecretsPort, VerificationCandidate,
 };
 use ironclaw_host_api::ids::SecretHandle;
+use ironclaw_host_api::product_adapter::auth::ChannelIngressVerifier;
 use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, ExternalEventId, ProductAdapterId,
     ProductInboundAck, ProductInboundEnvelope, ProductSourceChannel, ProtocolAuthEvidence,
@@ -81,19 +83,36 @@ pub enum VerifiedEvidenceMint {
     },
 }
 
+/// This crate is the generic ingress verifier — trust stage T2 — so it holds the
+/// one production `ChannelIngressVerifier` implementation in the workspace, and
+/// `reborn_sealed_evidence_mint_ratchet` keeps it that way. The impl sits on
+/// `VerifiedEvidenceMint` because that value *is* the recipe the router
+/// executed: the grant and the claim it authorizes are derived from the same
+/// verification, not from two independently-trusted facts.
+///
+/// A channel package never reaches this: it holds no grant, so
+/// `ironclaw_extension_contracts::verified_inbound` is uncallable from a
+/// package (PROPOSAL §12.1a).
+impl ChannelIngressVerifier for VerifiedEvidenceMint {}
+
 impl VerifiedEvidenceMint {
     fn mint(&self, subject: &str) -> ProtocolAuthEvidence {
         match self {
             Self::RequestSignature {
                 signature_header,
                 timestamp_header,
-            } => ironclaw_product::auth::mark_request_signature_verified(
+            } => verified_inbound::mark_request_signature_verified(
+                self.verified_inbound_grant(),
                 signature_header.clone(),
                 timestamp_header.clone(),
                 subject,
             ),
             Self::SharedSecretHeader { header } => {
-                ironclaw_product::auth::mark_shared_secret_header_verified(header.clone(), subject)
+                verified_inbound::mark_shared_secret_header_verified(
+                    self.verified_inbound_grant(),
+                    header.clone(),
+                    subject,
+                )
             }
         }
     }

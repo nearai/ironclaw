@@ -197,13 +197,15 @@ pub use ironclaw_host_api::product_adapter::{
     ProtocolAuthEvidence, ProtocolAuthFailure, ProtocolHttpEgressError, REDACTED_PLACEHOLDER,
     RedactedDebug, RedactedString, VerifiedAuthClaim,
 };
-#[cfg(feature = "host-auth-mint")]
-pub use ironclaw_host_api::product_adapter::{
-    mark_bearer_token_verified, mark_bearer_token_verified_for_tenant,
-    mark_request_signature_verified, mark_request_signature_verified_for_tenant,
-    mark_session_verified, mark_session_verified_for_tenant, mark_shared_secret_header_verified,
-    mark_shared_secret_header_verified_for_tenant,
-};
+// WS1.5 deleted this crate's two re-export paths to the protocol-auth mint
+// family. Product is not a minter: bearer/session evidence comes from
+// `ironclaw_host_api::product_adapter::auth` (host transport only) and
+// channel/webhook evidence from
+// `ironclaw_extension_contracts::verified_inbound` (generic ingress verifier
+// only), both witness-gated. Re-exporting them here is what gave
+// `ironclaw_extension_host` and `ironclaw_webui` a product-shaped path to a
+// security seam neither should reach through product;
+// `reborn_sealed_evidence_mint_ratchet` pins that it stays deleted.
 pub use ironclaw_product_contracts::inbound::{
     ApprovalDecision, ApprovalResolutionPayload, AuthResolutionPayload, AuthResolutionResult,
     ChannelInboundClassification, InboundCommandPayload, InboundRetryDisposition,
@@ -238,18 +240,14 @@ pub use ironclaw_product_contracts::projection::{
 pub use ironclaw_product_contracts::test_support::fakes::FakeProjectionStream;
 
 pub mod auth {
+    //! Protocol-auth *vocabulary* for product consumers. Deliberately not the
+    //! mint family: WS1.5 sealed minting behind witness grants held only by the
+    //! host transport and the generic ingress verifier, and this module used to
+    //! be the second of two paths product offered to it.
     pub use ironclaw_host_api::product_adapter::auth::{
         AuthRequirement, ProtocolAuthEvidence, VerifiedAuthClaim,
     };
     pub use ironclaw_host_api::product_adapter_error::ProtocolAuthFailure;
-
-    #[cfg(feature = "host-auth-mint")]
-    pub use ironclaw_host_api::product_adapter::auth::{
-        mark_bearer_token_verified, mark_bearer_token_verified_for_tenant,
-        mark_request_signature_verified, mark_request_signature_verified_for_tenant,
-        mark_session_verified, mark_session_verified_for_tenant,
-        mark_shared_secret_header_verified, mark_shared_secret_header_verified_for_tenant,
-    };
 }
 
 #[cfg(any(test, feature = "test-support"))]

@@ -81,7 +81,6 @@ pub use ironclaw_host_api::user_identity::{
     RebornUserIdentityBindingStore, RebornUserIdentityLookup, RebornUserIdentityLookupError,
     installation_scoped_provider_user_id,
 };
-pub use ironclaw_product::mark_bearer_token_verified_for_tenant;
 pub use observability::budget::build_default_budget_accountant;
 pub use observability::budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
 pub use observability::hooks::{

@@ -23,7 +23,6 @@ test-support = [
     "ironclaw_extension_contracts/test-support",
     "ironclaw_product_contracts/test-support",
 ]
-host-auth-mint = ["ironclaw_host_api/host-auth-mint", "ironclaw_turns/host-auth-mint"]
 
 [dependencies]
 async-trait = "0.1"

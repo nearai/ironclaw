@@ -90,9 +90,13 @@ and `ProtocolAuthEvidence`. `host_api` may hold no internal dependency, and each
 is named by something that stays there — `host_api::user_identity` names
 `AdapterInstallationId`, `host_api::product_adapter::auth` names
 `ProductAdapterError`. Both contracts tiers reach them downward, which is the
-only placement that serves both. `ProtocolAuthEvidence` additionally waits on
-WS1's sealed-evidence-minting row, which owns its move and the `host-auth-mint`
-feature deletion.
+only placement that serves both. `ProtocolAuthEvidence` **stayed** when WS1's
+sealed-evidence-minting row landed: that row split the *mint family* by trust
+role (channel/webhook to `ironclaw_extension_contracts::verified_inbound`,
+bearer/session kept in `ironclaw_host_api`) and replaced the `host-auth-mint`
+feature with witness grants, but §6.1.1 owns the evidence type itself and it did
+not move. Product is not a minter, and WS1.5 deleted both of `ironclaw_product`'s
+re-export paths to the family.
 
 **The auth-prompt view family went to the extension tier, not here.** §6.1.3
 lists "auth/approval prompt-view DTOs" together, but at this base only the

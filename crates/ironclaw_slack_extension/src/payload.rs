@@ -896,7 +896,7 @@ struct SlackSlashCommandForm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::product_adapter::auth::mark_request_signature_verified;
+    use ironclaw_host_api::product_adapter::auth::AuthRequirement;
     use ironclaw_product_contracts::inbound::ProductInboundPayload;
 
     fn installation_id() -> AdapterInstallationId {
@@ -904,9 +904,15 @@ mod tests {
     }
 
     fn verified() -> ProtocolAuthEvidence {
-        mark_request_signature_verified(
-            "X-Slack-Signature",
-            Some("X-Slack-Request-Timestamp".to_string()),
+        // `test_verified` is the `test-support` seam standing in for the host:
+        // an adapter crate holds no `VerifiedInboundGrant` and must not be able
+        // to mint in production (PROPOSAL §12.1a). Value-identical to the
+        // pre-WS1.5 `mark_request_signature_verified` call this replaced.
+        ProtocolAuthEvidence::test_verified(
+            AuthRequirement::RequestSignature {
+                header_name: "X-Slack-Signature".to_string(),
+                timestamp_header_name: Some("X-Slack-Request-Timestamp".to_string()),
+            },
             "T123",
         )
     }
@@ -1603,13 +1609,19 @@ mod tests {
 #[cfg(test)]
 mod ingress_properties {
     use super::*;
-    use ironclaw_host_api::product_adapter::auth::mark_request_signature_verified;
+    use ironclaw_host_api::product_adapter::auth::AuthRequirement;
     use proptest::prelude::*;
 
     fn verified_evidence() -> ProtocolAuthEvidence {
-        mark_request_signature_verified(
-            "X-Slack-Signature",
-            Some("X-Slack-Request-Timestamp".to_string()),
+        // `test_verified` is the `test-support` seam standing in for the host:
+        // an adapter crate holds no `VerifiedInboundGrant` and must not be able
+        // to mint in production (PROPOSAL §12.1a). Value-identical to the
+        // pre-WS1.5 `mark_request_signature_verified` call this replaced.
+        ProtocolAuthEvidence::test_verified(
+            AuthRequirement::RequestSignature {
+                header_name: "X-Slack-Signature".to_string(),
+                timestamp_header_name: Some("X-Slack-Request-Timestamp".to_string()),
+            },
             "T123",
         )
     }

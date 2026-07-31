@@ -1027,11 +1027,17 @@ fn _suppress_unused_field_warnings(update: &TelegramUpdate) {
 mod tests {
     use super::*;
     use ironclaw_host_api::product_adapter::ProductAdapterId;
-    use ironclaw_host_api::product_adapter::auth::mark_shared_secret_header_verified;
+    use ironclaw_host_api::product_adapter::auth::AuthRequirement;
 
     fn evidence() -> ProtocolAuthEvidence {
-        mark_shared_secret_header_verified(
-            "X-Telegram-Bot-Api-Secret-Token",
+        // `test_verified` is the `test-support` seam standing in for the host:
+        // an adapter crate holds no `VerifiedInboundGrant` and must not be able
+        // to mint in production (PROPOSAL §12.1a). Value-identical to the
+        // pre-WS1.5 `mark_shared_secret_header_verified` call this replaced.
+        ProtocolAuthEvidence::test_verified(
+            AuthRequirement::SharedSecretHeader {
+                header_name: "X-Telegram-Bot-Api-Secret-Token".to_string(),
+            },
             "telegram_install_alpha",
         )
     }
@@ -2017,12 +2023,18 @@ mod tests {
 #[cfg(test)]
 mod ingress_properties {
     use super::*;
-    use ironclaw_host_api::product_adapter::auth::mark_shared_secret_header_verified;
+    use ironclaw_host_api::product_adapter::auth::AuthRequirement;
     use proptest::prelude::*;
 
     fn verified_evidence() -> ProtocolAuthEvidence {
-        mark_shared_secret_header_verified(
-            "X-Telegram-Bot-Api-Secret-Token",
+        // `test_verified` is the `test-support` seam standing in for the host:
+        // an adapter crate holds no `VerifiedInboundGrant` and must not be able
+        // to mint in production (PROPOSAL §12.1a). Value-identical to the
+        // pre-WS1.5 `mark_shared_secret_header_verified` call this replaced.
+        ProtocolAuthEvidence::test_verified(
+            AuthRequirement::SharedSecretHeader {
+                header_name: "X-Telegram-Bot-Api-Secret-Token".to_string(),
+            },
             "telegram_install_property",
         )
     }

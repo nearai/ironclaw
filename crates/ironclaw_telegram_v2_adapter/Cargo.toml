@@ -33,13 +33,13 @@ thiserror = "2"
 # Property testing for the ingress boundary (#6524 workstream 9).
 proptest = "1"
 # `test-support` exposes `FakeProtocolHttpEgress` / `FakeOutboundDeliverySink`
-# used by the `adapter::tests` mod. `host-auth-mint` exposes
-# `mark_shared_secret_header_verified` used by `payload::tests` to mint
-# verified evidence (sealed in production code; tests stand in for the
-# host). The integration contract suite that previously pulled in
-# `http`, `ironclaw_host_api`, and `ironclaw_wasm_product_adapters` has
-# been removed pending the post-#3352 fixture port — re-add those when
-# the contract suite returns.
-ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0", features = ["test-support", "host-auth-mint"] }
+# used by the `adapter::tests` mod, and `ProtocolAuthEvidence::test_verified`,
+# which `payload::tests` uses to stand in for the host. WS1.5 removed the
+# `host-auth-mint` opt-in: minting is now witness-gated and an adapter crate
+# holds no grant, in tests or in production. The integration contract suite
+# that previously pulled in `http`, `ironclaw_host_api`, and
+# `ironclaw_wasm_product_adapters` has been removed pending the post-#3352
+# fixture port — re-add those when the contract suite returns.
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0", features = ["test-support"] }
 tokio = { version = "1", features = ["macros", "rt", "sync"] }
 uuid = { version = "1", features = ["v4", "serde"] }
