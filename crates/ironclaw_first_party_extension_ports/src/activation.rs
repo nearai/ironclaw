@@ -1202,6 +1202,31 @@ fn skill_listing_candidate(entries: &[SkillListingEntry]) -> Option<HostSkillCon
         listing.push_str(": ");
         listing.push_str(&entry.description);
     }
+    // Say so when the listing is truncated, and WARN. Silence here is a correctness bug, not a
+    // cosmetic one: the listing is source-then-name ordered, so past this cap whole alphabetical
+    // tails vanish with no signal to the model or the operator.
+    //
+    // Measured on a 227-skill catalog: `pdf`, `pptx`, `xlsx` and `timeseries-detrending` all
+    // sorted past position 100, so three of the first four benchmark tasks could not reach their
+    // own skill and the run was measuring nothing. The model had no way to know, and neither did
+    // I until I diffed the listing against each task's expected set.
+    //
+    // This does not make a large catalog usable -- that needs `skill_search` (#4428) -- but it
+    // converts a silent, invisible failure into a stated one.
+    let hidden = entries.len().saturating_sub(MAX_LISTED_SKILLS);
+    if hidden > 0 {
+        listing.push_str(&format!(
+            "\n\n({hidden} further skill(s) are installed but not listed here, because the \
+             listing is capped at {MAX_LISTED_SKILLS}. Activating one by exact name still works \
+             if you already know it.)"
+        ));
+        tracing::warn!(
+            listed = MAX_LISTED_SKILLS,
+            hidden,
+            total = entries.len(),
+            "skill listing truncated; skills past the cap are invisible to the model"
+        );
+    }
     Some(
         HostSkillContextCandidate::discoverable(
             SKILL_LISTING_CANDIDATE_NAME,
@@ -2057,6 +2082,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A truncated listing must SAY it is truncated.
+    ///
+    /// The cap is 100 and the listing is source-then-name ordered, so past it whole alphabetical
+    /// tails disappear. Measured on a 227-skill catalog, `pdf`, `pptx`, `xlsx` and
+    /// `timeseries-detrending` all sorted past position 100 -- three of the first four benchmark
+    /// tasks could not reach their own skill, and nothing anywhere said so. That is a silent
+    /// correctness failure, and this test is what stops it recurring.
+    #[tokio::test]
+    async fn a_truncated_listing_states_how_many_skills_are_hidden() {
+        let owned: Vec<(SkillSourceKind, String, String)> = (0..MAX_LISTED_SKILLS + 25)
+            .map(|i| {
+                let name = format!("probe-{i:03}");
+                let md = skill_md(&name, "A probe skill.", &[&name], "PROBE_SENTINEL");
+                (SkillSourceKind::User, name, md)
+            })
+            .collect();
+        let specs: Vec<(SkillSourceKind, &str, &str)> = owned
+            .iter()
+            .map(|(kind, name, md)| (*kind, name.as_str(), md.as_str()))
+            .collect();
+        let source = Arc::new(StaticSkillBundleSource::new(specs));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let context = run_context().await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "do something",
+            )
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("selection succeeds");
+        let listing = selected
+            .iter()
+            .filter_map(|candidate| candidate.discoverable_metadata())
+            .map(|(_, text)| text.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            listing.contains("25 further skill(s) are installed but not listed"),
+            "a truncated listing must state how many are hidden; got:\n{listing}"
+        );
     }
 
     fn criteria_config() -> SkillActivationSelectorConfig {
