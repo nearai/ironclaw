@@ -7,7 +7,7 @@
 //! trusted context outside this crate after verifying Slack request signatures.
 
 use ironclaw_host_api::product_adapter::{
-    AdapterInstallationId, AttachmentRef, ChannelInboundClassification, ExternalActorRef,
+    AdapterInstallationId, ChannelAttachmentRef, ChannelInboundClassification, ExternalActorRef,
     ExternalConversationRef, ExternalEventId, NormalizedInboundMessage, ParsedProductInbound,
     ProductAdapterError, ProductAttachmentDescriptor, ProductAttachmentKind, ProductInboundPayload,
     ProductTriggerReason, ProtocolAuthEvidence, UserMessagePayload,
@@ -198,9 +198,8 @@ pub fn normalize_slack_event(
             let attachments = message
                 .attachments
                 .into_iter()
-                .map(|descriptor| AttachmentRef {
+                .map(|descriptor| ChannelAttachmentRef {
                     vendor_ref: descriptor.external_file_id.clone(),
-                    mime_hint: Some(descriptor.mime_type.clone()),
                     descriptor,
                 })
                 .collect();

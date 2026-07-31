@@ -23,8 +23,8 @@ use ironclaw_hooks::{
     sink::{RestrictedBeforeCapabilityHook, RestrictedGateSink},
 };
 
-fn tenant() -> ironclaw_host_api::TenantId {
-    ironclaw_host_api::TenantId::new("alpha").expect("valid tenant")
+fn tenant() -> ironclaw_host_api::ids::TenantId {
+    ironclaw_host_api::ids::TenantId::new("alpha").expect("valid tenant")
 }
 
 /// Stand-in for the host's eventual predicate evaluator. In production the
@@ -85,7 +85,7 @@ async fn manifest_to_dispatch_pipeline() {
         .install_installed_before_capability(
             hook_id,
             manifest_entry.phase,
-            ironclaw_host_api::ExtensionId::new("polymarket-trader").expect("valid ext id"),
+            ironclaw_host_api::ids::ExtensionId::new("polymarket-trader").expect("valid ext id"),
             // Use Global so the dispatcher fires the hook regardless of the
             // ctx's `provider` field (the dispatch ctx in this test has no
             // provider configured). Scope filtering itself is covered by
@@ -166,7 +166,8 @@ async fn self_authored_deny_flows_through_dispatcher() {
         .install_installed_before_capability(
             hook_id,
             ironclaw_hooks::HookPhase::Policy,
-            ironclaw_host_api::ExtensionId::new("self-authored").expect("valid host extension id"),
+            ironclaw_host_api::ids::ExtensionId::new("self-authored")
+                .expect("valid host extension id"),
             HookBindingScope::Global,
             Box::new(SelfAuthoredDispatcherAdapter(hook)),
         )

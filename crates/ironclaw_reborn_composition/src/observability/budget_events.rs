@@ -118,7 +118,7 @@ async fn run_projection(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use ironclaw_host_api::{TenantId, UserId};
+    use ironclaw_host_api::ids::{TenantId, UserId};
     use ironclaw_resources::{
         BudgetEventSink, BudgetWarning, ResourceAccount, ResourceDimension, ResourceValue,
     };

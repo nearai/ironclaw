@@ -21,7 +21,6 @@ use crate::{
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::future::try_join_all;
-use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{
     AuthFlowStatus, AuthProductScope, AuthProviderId, CredentialAccountId,
     CredentialAccountProjection, CredentialAccountStatus, CredentialAccountUpdateBinding,
@@ -29,12 +28,21 @@ use ironclaw_auth::{
 };
 use ironclaw_common::{AutomationName, AutomationNameError};
 use ironclaw_host_api::{
-    ActivityId, AgentId, CapabilityId, EffectKind, ExtensionId, FailureKind, GrantConstraints,
-    InvocationId, Outcome, OutcomeRefs, PermissionMode, Principal, ProductSurfaceCaller,
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    ProductSurfaceValidationCode, ProjectId, Resolution, ResourceScope, ResultPreviewMeta,
-    ResultProgress, ResultRef, SafeSummary, SecretHandle, TenantId, TerminateHint, ThreadId,
-    ToolVerdict, UserId,
+    attachment::InboundAttachment,
+    capability::{EffectKind, GrantConstraints, PermissionMode},
+    ids::{
+        ActivityId, AgentId, CapabilityId, ExtensionId, InvocationId, ProjectId, ResultRef,
+        SecretHandle, TenantId, ThreadId, UserId,
+    },
+    product_surface::{
+        ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+        ProductSurfaceErrorKind, ProductSurfaceValidationCode,
+    },
+    resolution::{Outcome, OutcomeRefs, Resolution, ResultPreviewMeta, ToolVerdict},
+    resource::ResourceScope,
+    result_meta::{FailureKind, ResultProgress, TerminateHint},
+    safe_summary::SafeSummary,
+    scope::Principal,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, AttachmentRef, EnsureThreadRequest,
@@ -124,7 +132,7 @@ pub use admin_users::{
     RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
     RebornAdminUserSecretsListResponse,
 };
-pub use ironclaw_host_api::{
+pub use ironclaw_host_api::product_surface::{
     ChannelInboundProductSurface, ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
     ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
 };
@@ -147,7 +155,7 @@ pub use fs_browse::{
     RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
     RebornFsStatResponse,
 };
-pub use ironclaw_host_api::ChannelConnectStrategy as RebornChannelConnectStrategy;
+pub use ironclaw_host_api::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
 pub use lifecycle_setup::EXTENSION_SETUP_VIEW;
 pub use llm_config::{
     ActiveModelReader, CodexLoginStart, LLM_CONFIG_VIEW, LlmActiveSelection, LlmConfigService,
@@ -720,7 +728,7 @@ impl ChannelConnectionService for StaticChannelConnectionService {
     }
 }
 
-pub use ironclaw_host_api::ChannelConfigField as RebornChannelConfigField;
+pub use ironclaw_host_api::package_lifecycle::ChannelConfigField as RebornChannelConfigField;
 
 /// The generic channel-config configure port: per-extension operator config
 /// declared by the extension manifest's channel-config fields. Host
@@ -2233,17 +2241,19 @@ where
 {
     pub async fn invoke_on(
         &self,
-        surface: &ironclaw_host_api::BoundProductSurface,
+        surface: &ironclaw_host_api::product_surface::BoundProductSurface,
         input: Input,
         activity_id: ActivityId,
     ) -> Result<Output, ProductSurfaceError> {
         let input = serde_json::to_value(input).map_err(ProductSurfaceError::internal_from)?;
         let response = surface
-            .invoke(ironclaw_host_api::ProductSurfaceInvokeRequest {
-                operation_id: self.capability_id()?,
-                input,
-                activity_id,
-            })
+            .invoke(
+                ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+                    operation_id: self.capability_id()?,
+                    input,
+                    activity_id,
+                },
+            )
             .await?;
         serde_json::from_value(response.output).map_err(ProductSurfaceError::internal_from)
     }
@@ -2275,7 +2285,7 @@ impl ProductCapabilityDescriptor {
 
     pub async fn invoke_on<T>(
         &self,
-        surface: &ironclaw_host_api::BoundProductSurface,
+        surface: &ironclaw_host_api::product_surface::BoundProductSurface,
         input: T,
         activity_id: ActivityId,
     ) -> Result<Resolution, ProductSurfaceError>
@@ -2284,11 +2294,13 @@ impl ProductCapabilityDescriptor {
     {
         let input = serde_json::to_value(input).map_err(ProductSurfaceError::internal_from)?;
         let response = surface
-            .invoke(ironclaw_host_api::ProductSurfaceInvokeRequest {
-                operation_id: self.capability_id()?,
-                input,
-                activity_id,
-            })
+            .invoke(
+                ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+                    operation_id: self.capability_id()?,
+                    input,
+                    activity_id,
+                },
+            )
             .await?;
         serde_json::from_value(response.output).map_err(ProductSurfaceError::internal_from)
     }
@@ -2302,6 +2314,12 @@ impl ProductCapabilityDescriptor {
 /// used only to disambiguate the storage path; the implementation writes
 /// through the same `MountView` the agent's file tools resolve through, so
 /// landed bytes are readable by `file_read`/`list_dir` in later turns.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AttachmentCleanupReport {
+    pub scanned_batches: usize,
+    pub deleted_batches: usize,
+}
+
 #[async_trait]
 pub trait InboundAttachmentLander: Send + Sync {
     async fn land(
@@ -2310,6 +2328,34 @@ pub trait InboundAttachmentLander: Send + Sync {
         message_id: &str,
         attachments: Vec<InboundAttachment>,
     ) -> Result<Vec<AttachmentRef>, ProductSurfaceError>;
+
+    /// Remove one complete batch previously returned by [`Self::land`].
+    ///
+    /// The inbound workflow calls this only when durable message acceptance
+    /// fails after landing. Implementations must constrain deletion to the
+    /// batch represented by `attachments`; they must never sweep unrelated
+    /// workspace paths.
+    async fn rollback(
+        &self,
+        thread_scope: &ThreadScope,
+        attachments: &[AttachmentRef],
+    ) -> Result<(), ProductSurfaceError>;
+
+    /// Reconcile old committed batches against an exhaustive set of durable
+    /// attachment storage keys for this exact thread scope.
+    ///
+    /// Callers must skip this operation when their reference scan was
+    /// truncated. The complete snapshot may include attachment domains the
+    /// implementation does not own, such as agent-created outbound workspace
+    /// files; implementations ignore those references and fail closed when no
+    /// owned reference proves the snapshot usable. Implementations keep a
+    /// reconciliation window and bounded filesystem scan so recent in-flight
+    /// work and unrelated workspace paths are never removed.
+    async fn cleanup_stale(
+        &self,
+        thread_scope: &ThreadScope,
+        referenced_storage_keys: &[String],
+    ) -> Result<AttachmentCleanupReport, ProductSurfaceError>;
 }
 
 /// Reads a landed attachment's bytes back for the WebUI bytes endpoint. The
@@ -4115,10 +4161,17 @@ where
             .await?;
         // dispatch-exempt: read-only, already-authorized workspace file download
         // through the service's own port — not an in-turn mutating tool call.
-        reader
+        let file = reader
             .read_file(&thread_scope, &request.path)
             .await
-            .map_err(map_project_fs_error)
+            .map_err(map_project_fs_error)?;
+        Ok(ProjectFsFile {
+            path: file.path.as_str().to_string(),
+            filename: file.filename,
+            mime_type: file.mime_type,
+            size_bytes: file.bytes.len() as u64,
+            bytes: file.bytes,
+        })
     }
 
     async fn list_fs_mounts(
@@ -4781,7 +4834,7 @@ where
 }
 
 #[async_trait]
-impl<I, V> ironclaw_host_api::ProductSurface for RebornServices<I, V>
+impl<I, V> ironclaw_host_api::product_surface::ProductSurface for RebornServices<I, V>
 where
     I: ProductCapabilityInvoker + Clone + 'static,
     V: RebornViewProvider + Clone + 'static,
@@ -4789,16 +4842,16 @@ where
     async fn invoke(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
     ) -> Result<
-        ironclaw_host_api::ProductSurfaceInvokeResponse,
-        ironclaw_host_api::ProductSurfaceError,
+        ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
     > {
         if let Some(command) =
             product_capability_handlers::ProductCommandHandler::parse(&request.operation_id)
         {
             let output = command.invoke(self, caller, request.input).await?;
-            return Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output });
+            return Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output });
         }
         let output = RebornServices::invoke(
             self,
@@ -4810,17 +4863,19 @@ where
         .await?;
         let output = serde_json::to_value(output).map_err(|error| {
             tracing::error!(%error, "failed to encode product surface invoke response");
-            ironclaw_host_api::ProductSurfaceError::internal()
+            ironclaw_host_api::product_surface::ProductSurfaceError::internal()
         })?;
-        Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
+        Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
     }
 
     async fn query(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ironclaw_host_api::ProductSurfaceError>
-    {
+        request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
+    ) -> Result<
+        ironclaw_host_api::product_surface::ProductSurfaceQueryPage,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
+    > {
         let page = RebornServices::query(
             self,
             caller,
@@ -4831,19 +4886,21 @@ where
             },
         )
         .await?;
-        Ok(ironclaw_host_api::ProductSurfaceQueryPage {
-            items: vec![page.payload],
-            next_cursor: page.next_cursor,
-        })
+        Ok(
+            ironclaw_host_api::product_surface::ProductSurfaceQueryPage {
+                items: vec![page.payload],
+                next_cursor: page.next_cursor,
+            },
+        )
     }
 
     async fn stream_events(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceStreamRequest,
+        request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
     ) -> Result<
-        ironclaw_host_api::ProductSurfaceStreamResponse,
-        ironclaw_host_api::ProductSurfaceError,
+        ironclaw_host_api::product_surface::ProductSurfaceStreamResponse,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
     > {
         let request = decode_product_surface_stream_request(request)?;
         if self
@@ -4861,11 +4918,13 @@ where
                     Ok(response)
                 }
                 Ok(Some(Err(error))) => Err(error),
-                Ok(None) | Err(_) => Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
-                    events: Vec::new(),
-                    next_cursor: None,
-                    subscription: None,
-                }),
+                Ok(None) | Err(_) => Ok(
+                    ironclaw_host_api::product_surface::ProductSurfaceStreamResponse {
+                        events: Vec::new(),
+                        next_cursor: None,
+                        subscription: None,
+                    },
+                ),
             };
         }
         let response = RebornServices::stream_events(self, caller, request).await?;
@@ -4877,7 +4936,7 @@ async fn open_product_surface_event_subscription<I, V>(
     services: &RebornServices<I, V>,
     caller: ProductSurfaceCaller,
     request: RebornStreamEventsRequest,
-) -> Result<ironclaw_host_api::ProductSurfaceEventSubscription, ProductSurfaceError>
+) -> Result<ironclaw_host_api::product_surface::ProductSurfaceEventSubscription, ProductSurfaceError>
 where
     I: ProductCapabilityInvoker + Clone + 'static,
     V: RebornViewProvider + Clone + 'static,
@@ -4982,13 +5041,11 @@ where
             }
         }
     });
-    Ok(ironclaw_host_api::ProductSurfaceEventSubscription::new(
-        receiver,
-    ))
+    Ok(ironclaw_host_api::product_surface::ProductSurfaceEventSubscription::new(receiver))
 }
 
 fn decode_product_surface_stream_request(
-    request: ironclaw_host_api::ProductSurfaceStreamRequest,
+    request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
 ) -> Result<RebornStreamEventsRequest, ProductSurfaceError> {
     let thread_id = request.stream_id.ok_or_else(|| {
         ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
@@ -5007,7 +5064,7 @@ fn decode_product_surface_stream_request(
 
 fn encode_product_surface_stream_response(
     response: RebornStreamEventsResponse,
-) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+) -> Result<ironclaw_host_api::product_surface::ProductSurfaceStreamResponse, ProductSurfaceError> {
     let events = response
         .events
         .into_iter()
@@ -5017,11 +5074,13 @@ fn encode_product_surface_stream_response(
             tracing::error!(%error, "failed to encode product surface stream response");
             ProductSurfaceError::internal()
         })?;
-    Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
-        events,
-        next_cursor: None,
-        subscription: None,
-    })
+    Ok(
+        ironclaw_host_api::product_surface::ProductSurfaceStreamResponse {
+            events,
+            next_cursor: None,
+            subscription: None,
+        },
+    )
 }
 
 impl<I, V> RebornServices<I, V>
@@ -6414,7 +6473,7 @@ fn parse_credential_account_id(value: &str) -> Result<CredentialAccountId, Produ
 
 fn thread_scope_from_turn_scope(
     scope: &TurnScope,
-    owner_user_id: Option<ironclaw_host_api::UserId>,
+    owner_user_id: Option<ironclaw_host_api::ids::UserId>,
 ) -> Result<ThreadScope, ProductSurfaceError> {
     let Some(agent_id) = scope.agent_id.clone() else {
         return Err(ProductSurfaceError::from_status(
@@ -7165,7 +7224,7 @@ fn generated_thread_id(
             caller
                 .project_id
                 .as_ref()
-                .map(ironclaw_host_api::ProjectId::as_str)
+                .map(ironclaw_host_api::ids::ProjectId::as_str)
                 .unwrap_or("")
         ),
         segment("action", client_action_id.as_str())

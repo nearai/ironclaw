@@ -8,13 +8,18 @@ use async_trait::async_trait;
 #[cfg(test)]
 use ironclaw_extensions::SharedExtensionRegistry;
 use ironclaw_host_api::{
-    InvocationId, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
-    ProductSurfaceErrorCode, ProductSurfaceErrorKind, ResourceScope,
+    ids::InvocationId,
+    product_surface::{
+        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+        ProductSurfaceErrorKind,
+    },
+    resource::ResourceScope,
 };
 use ironclaw_operator::OperatorServiceLifecycle;
 use ironclaw_product::ProjectionStream;
 use ironclaw_product::{
-    ChannelConnectionService, OperatorStatusService, RebornAutomationProductService,
+    ChannelConnectionService, OperatorStatusService, ProjectScopedAttachmentLander,
+    ProjectScopedAttachmentReader, ProjectScopedFilesystemReader, RebornAutomationProductService,
     RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
     RebornOperatorStatusState, RebornServices as ProductRebornServices, RebornSkillContentResponse,
     RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
@@ -33,10 +38,7 @@ use crate::{
         RebornOutboundPreferencesService, outbound_delivery_synthetic_provider,
         outbound_delivery_target_set_operator_tool_info,
     },
-    support::fs::{
-        MountScopedFilesystemReader, ProjectScopedAttachmentLander, ProjectScopedAttachmentReader,
-        ProjectScopedFilesystemReader,
-    },
+    support::fs::MountScopedFilesystemReader,
 };
 use ironclaw_extension_host::ExtensionHostLifecycleProductService;
 use ironclaw_extension_host::admin_configuration::AdminConfigurationViewProvider;

@@ -6,7 +6,7 @@ use ironclaw_filesystem::{
     IndexSpec, IndexValue, OrderedPage, OrderedQueryCursor, Page, RecordKind, RootFilesystem,
     SortDirection, cas_update,
 };
-use ironclaw_host_api::{ScopedPath, ThreadId};
+use ironclaw_host_api::{ids::ThreadId, path::ScopedPath};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -564,7 +564,14 @@ where
                             &scoped_path(crate::filesystem_service::THREADS_PREFIX)?,
                         )
                         .await?;
-                    for row in rows {
+                    for listed_row in rows {
+                        // The listing runs before BEGIN IMMEDIATE owns the
+                        // writer lock. Re-read inside the transaction so a
+                        // current-code message update in that window cannot
+                        // make this one-time migration fail with a stale CAS.
+                        let Some(row) = txn.get(&listed_row.path).await? else {
+                            continue;
+                        };
                         let expected_kind = if messages {
                             crate::filesystem_service::THREAD_MESSAGE_KIND
                         } else {
@@ -786,8 +793,9 @@ mod tests {
 
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
-        AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId,
-        ThreadId, UserId, VirtualPath,
+        ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
     };
 
     use crate::{

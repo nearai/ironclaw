@@ -38,8 +38,13 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    AgentId, ApprovalRequestId, ExtensionId, InvocationId, MountAlias, MountGrant,
-    MountPermissions, MountView, ProjectId, ResourceScope, TenantId, ThreadId, UserId, VirtualPath,
+    ids::{
+        AgentId, ApprovalRequestId, ExtensionId, InvocationId, ProjectId, TenantId, ThreadId,
+        UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
 use ironclaw_outbound::{
@@ -104,7 +109,7 @@ use ironclaw_extension_host::{
     FilesystemAdminConfigurationStore,
 };
 use ironclaw_extension_host::{IngressReplyContextSource, SnapshotChannelDeliveryResolver};
-use ironclaw_host_api::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
+use ironclaw_host_api::user_identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
 use ironclaw_host_ingress::PublicRouteMount;
 use ironclaw_product::AuthChallengeProvider;
 use ironclaw_product::BlockedAuthPromptSource;
@@ -112,6 +117,44 @@ use ironclaw_product::BlockedAuthPromptSource;
 #[path = "e2e_auth_challenge.rs"]
 mod e2e_auth_challenge;
 use e2e_auth_challenge::FakeAuthChallengeProvider;
+
+/// Lands nothing: these scenarios never carry attachment bytes, but the turn
+/// service still requires the port the production path wires.
+struct InertAttachmentLander;
+
+#[async_trait::async_trait]
+impl ironclaw_product::InboundAttachmentLander for InertAttachmentLander {
+    async fn land(
+        &self,
+        _thread_scope: &ironclaw_threads::ThreadScope,
+        _message_id: &str,
+        _attachments: Vec<ironclaw_host_api::attachment::InboundAttachment>,
+    ) -> Result<
+        Vec<ironclaw_threads::AttachmentRef>,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
+    > {
+        Ok(Vec::new())
+    }
+
+    async fn rollback(
+        &self,
+        _thread_scope: &ironclaw_threads::ThreadScope,
+        _attachments: &[ironclaw_threads::AttachmentRef],
+    ) -> Result<(), ironclaw_host_api::product_surface::ProductSurfaceError> {
+        Ok(())
+    }
+
+    async fn cleanup_stale(
+        &self,
+        _thread_scope: &ironclaw_threads::ThreadScope,
+        _referenced_storage_keys: &[String],
+    ) -> Result<
+        ironclaw_product::AttachmentCleanupReport,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
+    > {
+        Ok(ironclaw_product::AttachmentCleanupReport::default())
+    }
+}
 
 const TENANT: &str = "tenant:slack";
 const AGENT: &str = "agent:slack";
@@ -476,6 +519,15 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
             UserId::new(USER).expect("user"),       // safety: static test user id is valid.
         )),
+        Arc::new(
+            ironclaw_extension_host::FilesystemInboundBatchStore::new(
+                Arc::new(InMemoryBackend::new()),
+                TenantId::new(TENANT).expect("tenant"),
+                UserId::new(USER).expect("user"),
+            )
+            .expect("static inbound batch store configuration"),
+        ),
+        None,
     );
     let delivery_coordinator = Arc::new(DeliveryCoordinator::new(
         Arc::clone(&outbound_store),
@@ -499,6 +551,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
 
     let channel_config = configured_channel_config().await;
     let deps = GenericChannelHostDeps {
+        inbound_attachments: Arc::new(InertAttachmentLander),
         watch: host.snapshot_watch(),
         deployment_channels: Arc::new(ironclaw_extension_host::DeploymentChannelRegistry::default()),
         registry: Arc::clone(&ingress.registry),
@@ -516,10 +569,10 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             project_id: Some(ProjectId::new(PROJECT).expect("project")), // safety: static test project id is valid.
             operator_user_id: UserId::new(USER).expect("user"), // safety: static test user id is valid.
         },
-        identity_lookup: Some(
-            Arc::clone(&identity_lookup) as Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>
-        ),
+        identity_lookup: Some(Arc::clone(&identity_lookup)
+            as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>),
         delivery: Some(ChannelHostDeliveryDeps {
+            project_filesystem: Arc::new(ironclaw_product::NoProjectFilesystem),
             coordinator: delivery_coordinator,
             outbound_store,
             route_store: Arc::clone(&route_store),
@@ -542,9 +595,8 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     };
     let assembly = GenericChannelHostAssembly::start(deps);
     let command_executions = Arc::new(RecordingCommandExecutionSurface::default());
-    let command_surface_set = assembly.set_product_command_surface(
-        Arc::clone(&command_executions) as Arc<dyn ironclaw_host_api::ProductSurface>
-    );
+    let command_surface_set = assembly.set_product_command_surface(Arc::clone(&command_executions)
+        as Arc<dyn ironclaw_host_api::product_surface::ProductSurface>);
     assert!(command_surface_set); // safety: this file is included only by cfg(test).
     // Vendor extras exactly as the binary's channel-extension binding feeds
     // them: the preference-target codec — no storage-root override.
@@ -1358,6 +1410,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
     let fixture = triggered_delivery_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
+        project_filesystem: Arc::new(ironclaw_product::NoProjectFilesystem),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
         turn_coordinator: coordinator,
@@ -1647,6 +1700,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
     let fixture = triggered_delivery_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
+        project_filesystem: Arc::new(ironclaw_product::NoProjectFilesystem),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
         turn_coordinator: coordinator,
@@ -1779,6 +1833,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
     let fixture = triggered_delivery_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
+        project_filesystem: Arc::new(ironclaw_product::NoProjectFilesystem),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
         turn_coordinator: Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
@@ -3308,14 +3363,14 @@ impl RecordingCommandExecutionSurface {
 }
 
 #[async_trait]
-impl ironclaw_host_api::ProductSurface for RecordingCommandExecutionSurface {
+impl ironclaw_host_api::product_surface::ProductSurface for RecordingCommandExecutionSurface {
     async fn invoke(
         &self,
-        caller: ironclaw_host_api::ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+        caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
+        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
     ) -> Result<
-        ironclaw_host_api::ProductSurfaceInvokeResponse,
-        ironclaw_host_api::ProductSurfaceError,
+        ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
     > {
         let operation_id = request.operation_id.as_str().to_string();
         let title = if operation_id == "product.status.command" {
@@ -3331,32 +3386,36 @@ impl ironclaw_host_api::ProductSurface for RecordingCommandExecutionSurface {
                 caller.user_id.as_str().to_string(),
                 request.input,
             ));
-        Ok(ironclaw_host_api::ProductSurfaceInvokeResponse {
-            output: serde_json::json!({
-                "title": title,
-                "fields": [{"label": "Provider", "value": "stub-provider"}],
-            }),
-        })
+        Ok(
+            ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse {
+                output: serde_json::json!({
+                    "title": title,
+                    "fields": [{"label": "Provider", "value": "stub-provider"}],
+                }),
+            },
+        )
     }
 
     async fn query(
         &self,
-        _caller: ironclaw_host_api::ProductSurfaceCaller,
-        _request: ironclaw_host_api::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ironclaw_host_api::ProductSurfaceError>
-    {
-        Err(ironclaw_host_api::ProductSurfaceError::internal())
+        _caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
+        _request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
+    ) -> Result<
+        ironclaw_host_api::product_surface::ProductSurfaceQueryPage,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
+    > {
+        Err(ironclaw_host_api::product_surface::ProductSurfaceError::internal())
     }
 
     async fn stream_events(
         &self,
-        _caller: ironclaw_host_api::ProductSurfaceCaller,
-        _request: ironclaw_host_api::ProductSurfaceStreamRequest,
+        _caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
+        _request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
     ) -> Result<
-        ironclaw_host_api::ProductSurfaceStreamResponse,
-        ironclaw_host_api::ProductSurfaceError,
+        ironclaw_host_api::product_surface::ProductSurfaceStreamResponse,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
     > {
-        Err(ironclaw_host_api::ProductSurfaceError::internal())
+        Err(ironclaw_host_api::product_surface::ProductSurfaceError::internal())
     }
 }
 
@@ -3389,8 +3448,10 @@ impl ChannelEgressTransport for RecordingEgress {
     async fn execute(
         &self,
         approved: ApprovedChannelEgress,
-    ) -> Result<ironclaw_host_api::RestrictedEgressResponse, ironclaw_host_api::RestrictedEgressError>
-    {
+    ) -> Result<
+        ironclaw_host_api::tool_adapter::RestrictedEgressResponse,
+        ironclaw_host_api::tool_adapter::RestrictedEgressError,
+    > {
         let response = slack_response_for_approved(&approved);
         self.requests
             .lock()
@@ -3402,9 +3463,9 @@ impl ChannelEgressTransport for RecordingEgress {
 
 fn slack_response_for_approved(
     approved: &ApprovedChannelEgress,
-) -> ironclaw_host_api::RestrictedEgressResponse {
-    fn response(body: &[u8]) -> ironclaw_host_api::RestrictedEgressResponse {
-        ironclaw_host_api::RestrictedEgressResponse {
+) -> ironclaw_host_api::tool_adapter::RestrictedEgressResponse {
+    fn response(body: &[u8]) -> ironclaw_host_api::tool_adapter::RestrictedEgressResponse {
+        ironclaw_host_api::tool_adapter::RestrictedEgressResponse {
             status: 200,
             body: body.to_vec(),
         }
@@ -3624,7 +3685,7 @@ impl AdminUserService for FakeAdminUsers {
         &self,
         _tenant: &TenantId,
         _user_id: &UserId,
-        _handle: ironclaw_host_api::SecretHandle,
+        _handle: ironclaw_host_api::ids::SecretHandle,
         _material: secrecy::SecretString,
     ) -> Result<AdminUserSecretMeta, AdminUserError> {
         Err(AdminUserError::Internal)
@@ -3634,7 +3695,7 @@ impl AdminUserService for FakeAdminUsers {
         &self,
         _tenant: &TenantId,
         _user_id: &UserId,
-        _handle: ironclaw_host_api::SecretHandle,
+        _handle: ironclaw_host_api::ids::SecretHandle,
     ) -> Result<bool, AdminUserError> {
         Err(AdminUserError::Internal)
     }

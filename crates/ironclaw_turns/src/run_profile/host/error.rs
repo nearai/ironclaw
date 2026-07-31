@@ -84,12 +84,12 @@ impl AgentLoopHostErrorKind {
     }
 
     /// Project this loop-host error kind onto the unified closed
-    /// [`ironclaw_host_api::FailureKind`] vocabulary. Exhaustive on purpose: a
+    /// [`ironclaw_host_api::result_meta::FailureKind`] vocabulary. Exhaustive on purpose: a
     /// new `AgentLoopHostErrorKind` variant must pick its honest failure kind
     /// here instead of falling into a wildcard bucket. Decision sites ask
-    /// [`ironclaw_host_api::FailureKind::fate`] for the disposition.
-    pub fn failure_kind(self) -> ironclaw_host_api::FailureKind {
-        use ironclaw_host_api::FailureKind;
+    /// [`ironclaw_host_api::result_meta::FailureKind::fate`] for the disposition.
+    pub fn failure_kind(self) -> ironclaw_host_api::result_meta::FailureKind {
+        use ironclaw_host_api::result_meta::FailureKind;
         match self {
             Self::Unauthorized => FailureKind::Authorization,
             Self::CredentialUnavailable => FailureKind::AuthRequired,
@@ -281,7 +281,7 @@ mod tests {
     /// each projects the fate its variant doc prescribes.
     #[test]
     fn budget_and_checkpoint_port_errors_project_honest_fates() {
-        use ironclaw_host_api::{FailureFate, FailureKind};
+        use ironclaw_host_api::result_meta::{FailureFate, FailureKind};
         // Park semantic: "callers surface an approval gate ... and retry
         // after the user resolves it" — not a tool error to route around.
         assert_eq!(

@@ -4,7 +4,7 @@
 
 use crate::ExternalConversationRef;
 use chrono::Utc;
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::ids::{TenantId, UserId};
 use ironclaw_outbound::{DeliveredGateRouteRecord, DeliveredGateRouteStore};
 use ironclaw_turns::{TurnRunId, TurnScope};
 

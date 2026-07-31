@@ -324,8 +324,15 @@ jobs:
             echo "::endgroup::"
           done < <(printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[]')
 
-          # Concat per-package lcov into one artifact per bucket (keeps artifact count bounded by the matrix, not ~60); merge script parses end_of_record blocks per file already, so `cat` is sufficient.
-          cat coverage/*.lcov > "bucket-${BUCKET_NAME}.lcov"
+          # Merge per-package reports into one artifact per bucket. Keep the
+          # reports as separate inputs: cargo-llvm-cov does not guarantee a
+          # trailing newline, so raw concatenation can produce a malformed
+          # `end_of_recordSF:` boundary and silently drop the next package's
+          # first source file from changed-line coverage.
+          package_parts=(coverage/*.lcov)
+          scripts/ci/reborn-coverage-merge-lcov.sh \
+            "bucket-${BUCKET_NAME}.lcov" \
+            "${package_parts[@]}"
 
       - name: Upload bucket lcov artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -1,6 +1,22 @@
 use chrono::{Duration, Utc};
 use ironclaw_authorization::*;
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    capability::{
+        CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
+        PermissionMode,
+    },
+    decision::{Decision, DenyReason, Obligation},
+    ids::{
+        CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ProjectId,
+        SecretHandle, TenantId, UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::{ResourceCeiling, ResourceEstimate, ResourceScope, SandboxQuota},
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use serde_json::json;
 

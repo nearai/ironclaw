@@ -8,7 +8,11 @@ use ironclaw_first_party_extensions::skills::{
     SkillManagementCapabilityRequest, dispatch,
 };
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, HostApiError, PermissionMode, ResourceUsage, RuntimeDispatchErrorKind,
+    capability::{EffectKind, PermissionMode},
+    dispatch::RuntimeDispatchErrorKind,
+    error::HostApiError,
+    ids::CapabilityId,
+    resource::ResourceUsage,
 };
 use ironclaw_skills::InstalledSkillMetadataSource;
 use serde_json::{Map, Value, json};

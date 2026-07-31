@@ -97,18 +97,20 @@ where
 {
     pub async fn query_on(
         &self,
-        surface: &ironclaw_host_api::BoundProductSurface,
+        surface: &ironclaw_host_api::product_surface::BoundProductSurface,
         params: Params,
         cursor: Option<String>,
     ) -> Result<Output, ProductSurfaceError> {
         let query = self.query(params, cursor)?;
         let page = surface
-            .query(ironclaw_host_api::ProductSurfaceQueryRequest {
-                view_id: query.view_id,
-                input: query.params,
-                cursor: query.cursor,
-                limit: None,
-            })
+            .query(
+                ironclaw_host_api::product_surface::ProductSurfaceQueryRequest {
+                    view_id: query.view_id,
+                    input: query.params,
+                    cursor: query.cursor,
+                    limit: None,
+                },
+            )
             .await?;
         let payload = page
             .items

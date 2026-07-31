@@ -1,7 +1,9 @@
 use ironclaw_authorization::CapabilityLeaseError;
 use ironclaw_host_api::{
-    CapabilityId, DenyReason, DispatchError, DispatchFailureDetail, DispatchFailureKind,
-    HostApiError, Obligation, RuntimeCredentialAuthRequirement, SecretHandle,
+    decision::{DenyReason, Obligation, RuntimeCredentialAuthRequirement},
+    dispatch::{DispatchError, DispatchFailureDetail, DispatchFailureKind},
+    error::HostApiError,
+    ids::{CapabilityId, SecretHandle},
 };
 use ironclaw_processes::{ProcessError, ProcessInvocationError, ProcessInvocationStatus};
 
@@ -212,9 +214,13 @@ fn dispatch_error_detail(error: &DispatchError) -> Option<DispatchFailureDetail>
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode, ExtensionId,
-        RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
-        VendorId,
+        decision::RuntimeCredentialAuthRequirement,
+        dispatch::{
+            DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode,
+            RuntimeDispatchErrorKind,
+        },
+        ids::{ExtensionId, SecretHandle, VendorId},
+        runtime::RuntimeKind,
     };
 
     fn cap() -> CapabilityId {
@@ -404,7 +410,7 @@ mod tests {
     fn from_dispatch_auth_required_round_trips_credential_requirements() {
         let requirement = RuntimeCredentialAuthRequirement {
             provider: VendorId::new("google").unwrap(),
-            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+            setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                 scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
             },
             requester_extension: ExtensionId::new("gmail").unwrap(),

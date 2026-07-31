@@ -384,7 +384,7 @@ pub struct ThreadScope { pub tenant_id: TenantId, pub agent_id: AgentId,
 
 use std::sync::Arc;
 use async_trait::async_trait;
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_turns::{
     AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileRequest,
     SourceBindingRef, TurnActor, TurnCoordinator, TurnRunId, TurnScope,

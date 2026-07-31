@@ -1,6 +1,6 @@
 //! Bounded loop-ref newtypes and the shared trait-impl macros that back them.
 
-use ironclaw_host_api::INPUT_ENCODE_HUMAN_SUMMARY;
+use ironclaw_host_api::dispatch::INPUT_ENCODE_HUMAN_SUMMARY;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::run_context::LoopRunContext;

@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, RestrictedEgress};
+use ironclaw_host_api::{ids::CapabilityId, tool_adapter::RestrictedEgress};
 use tokio::sync::Mutex;
 
 use crate::active::{
@@ -54,7 +54,7 @@ pub trait EgressFactory: Send + Sync {
         &self,
         extension_id: &str,
         installation_id: &str,
-        declared: &[ironclaw_host_api::ChannelEgressDescriptor],
+        declared: &[ironclaw_host_api::channel::ChannelEgressDescriptor],
     ) -> Arc<dyn RestrictedEgress>;
 }
 

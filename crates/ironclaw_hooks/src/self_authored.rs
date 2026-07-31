@@ -282,8 +282,8 @@ mod tests {
         }
     }
 
-    fn tenant() -> ironclaw_host_api::TenantId {
-        ironclaw_host_api::TenantId::new("alpha").expect("tenant")
+    fn tenant() -> ironclaw_host_api::ids::TenantId {
+        ironclaw_host_api::ids::TenantId::new("alpha").expect("tenant")
     }
 
     fn hook_id() -> HookId {

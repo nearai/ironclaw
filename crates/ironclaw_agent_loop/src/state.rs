@@ -25,7 +25,7 @@ pub use slots::{
 pub use terminal_warning::TerminalWarningState;
 pub(crate) use terminal_warning::{TerminalWarningKind, TerminalWarningObservation};
 
-use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId};
+use ironclaw_host_api::ids::{ApprovalRequestId, CapabilityId, CorrelationId};
 use ironclaw_turns::{
     LoopGateRef, LoopMessageRef, LoopResultRef,
     run_profile::{
@@ -448,7 +448,7 @@ pub enum CheckpointPayloadError {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{CapabilityId, TenantId, ThreadId};
+    use ironclaw_host_api::ids::{CapabilityId, TenantId, ThreadId};
     use ironclaw_turns::{
         AgentLoopDriverDescriptor, GateResumeDisposition, RunProfileId, RunProfileVersion, TurnId,
         TurnRunId, TurnScope,
@@ -1147,7 +1147,7 @@ mod tests {
 
     #[test]
     fn pending_auth_resume_optional_fields_round_trip_through_checkpoint_payload() {
-        use ironclaw_host_api::{ApprovalRequestId, CorrelationId};
+        use ironclaw_host_api::ids::{ApprovalRequestId, CorrelationId};
         use ironclaw_turns::run_profile::{AuthResumeApprovalIdentity, CapabilityResumeToken};
 
         let context = test_run_context();
@@ -1213,7 +1213,7 @@ mod tests {
         // The `Some(Denied)` disposition stamped on `pending_approval_resume` before the
         // capability stage must survive the checkpoint encode/decode cycle so that a
         // resumed run still sees the approval denial.
-        use ironclaw_host_api::{ApprovalRequestId, CorrelationId};
+        use ironclaw_host_api::ids::{ApprovalRequestId, CorrelationId};
         use ironclaw_turns::run_profile::CapabilityResumeToken;
 
         let context = test_run_context();

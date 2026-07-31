@@ -1,4 +1,4 @@
-use crate::HostApiError;
+use crate::error::HostApiError;
 
 pub(crate) enum PrefixRule {
     Any,

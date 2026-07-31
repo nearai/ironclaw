@@ -9,9 +9,13 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApprovalRequestId, Blocked, CapabilityDisplayOutputPreview, CapabilityId, ExtensionId,
-    FailureKind, ProcessId, Resolution, ResourceEstimate, RuntimeCredentialAuthRequirement,
-    RuntimeKind, VendorId,
+    decision::RuntimeCredentialAuthRequirement,
+    dispatch::CapabilityDisplayOutputPreview,
+    ids::{ApprovalRequestId, CapabilityId, ExtensionId, ProcessId, VendorId},
+    resolution::{Blocked, Resolution},
+    resource::ResourceEstimate,
+    result_meta::FailureKind,
+    runtime::RuntimeKind,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, HostRuntime, HostRuntimeError,
@@ -1218,7 +1222,7 @@ async fn approval_resume_metadata_invokes_runtime_resume_with_original_invocatio
     // The fresh gate raise must have persisted the host-private replay payload
     // keyed by the invocation id encoded in the resume token — the loop-facing
     // outcome deliberately no longer carries raw input/estimate.
-    let raised_invocation_id = ironclaw_host_api::InvocationId::parse(resume_token.as_str())
+    let raised_invocation_id = ironclaw_host_api::ids::InvocationId::parse(resume_token.as_str())
         .expect("resume token carries original invocation id");
     let persisted = replay_store
         .get(raised_invocation_id)
@@ -1258,8 +1262,9 @@ async fn approval_resume_metadata_invokes_runtime_resume_with_original_invocatio
     let resume_requests = runtime.resume_requests();
     assert_eq!(resume_requests.len(), 1);
     assert_eq!(resume_requests[0].1, approval_request_id);
-    let resume_invocation_id = ironclaw_host_api::InvocationId::parse(resume.resume_token.as_str())
-        .expect("resume token carries original invocation id");
+    let resume_invocation_id =
+        ironclaw_host_api::ids::InvocationId::parse(resume.resume_token.as_str())
+            .expect("resume token carries original invocation id");
     assert_eq!(resume_requests[0].0.invocation_id, resume_invocation_id);
     assert_eq!(
         resume_requests[0].0.resource_scope.invocation_id,
@@ -1336,7 +1341,7 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
             .as_str(),
     )
     .expect("valid resume token");
-    let raised_invocation_id = ironclaw_host_api::InvocationId::parse(resume_token.as_str())
+    let raised_invocation_id = ironclaw_host_api::ids::InvocationId::parse(resume_token.as_str())
         .expect("resume token carries original invocation id");
     let persisted = replay_store
         .get(raised_invocation_id)
@@ -1400,7 +1405,7 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
     // Auth re-dispatch must reuse the original invocation identifier so that
     // fingerprinted approval leases (scoped to the original invocation) remain matchable.
     let original_invocation_id =
-        ironclaw_host_api::InvocationId::parse(resume.resume_token.as_str())
+        ironclaw_host_api::ids::InvocationId::parse(resume.resume_token.as_str())
             .expect("resume token carries original invocation id");
     let auth_resume_requests = runtime.auth_resume_requests();
     assert_eq!(auth_resume_requests.len(), 1);
@@ -1482,7 +1487,7 @@ async fn approval_resume_host_error_returns_failed_outcome_and_emits_failure_mil
                 .as_str(),
         )
         .expect("valid resume token"),
-        correlation_id: ironclaw_host_api::CorrelationId::new(),
+        correlation_id: ironclaw_host_api::ids::CorrelationId::new(),
         input_ref: first_invocation.input_ref.clone(),
     };
 

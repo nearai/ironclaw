@@ -7,7 +7,10 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+use ironclaw_host_api::{
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+};
 use ironclaw_processes::{
     GetProcessCheckpointRequest, ProcessCheckpointId, ProcessCheckpointPort,
     ProcessCheckpointRecord, ProcessJournalStore, ProcessRuntimePort, ProcessTransitionPort,

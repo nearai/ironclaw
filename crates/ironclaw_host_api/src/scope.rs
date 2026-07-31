@@ -9,9 +9,16 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentId, CapabilitySet, CorrelationId, ExtensionId, HostApiError, InvocationId,
-    InvocationOrigin, MissionId, MountView, ProcessId, ProjectId, ResourceScope, RunId,
-    RuntimeKind, SystemServiceId, TenantId, ThreadId, TrustClass, UserId,
+    capability::CapabilitySet,
+    error::HostApiError,
+    ids::{
+        AgentId, CorrelationId, ExtensionId, InvocationId, MissionId, ProcessId, ProjectId, RunId,
+        SystemServiceId, TenantId, ThreadId, UserId,
+    },
+    invocation::InvocationOrigin,
+    mount::MountView,
+    resource::ResourceScope,
+    runtime::{RuntimeKind, TrustClass},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -68,7 +75,7 @@ pub struct ExecutionContext {
     /// loop orchestration stamps [`InvocationOrigin::LoopRun`], product
     /// surfaces stamp [`InvocationOrigin::Product`], and the routine/heartbeat
     /// scheduler stamps [`InvocationOrigin::Automation`]. Consumed by the
-    /// capability kernel's `authorize()` fold to seal the [`crate::Invocation`]
+    /// capability kernel's `authorize()` fold to seal the [`crate::invocation::Invocation`]
     /// origin.
     ///
     /// `None` for a context whose ingress has not (yet) stamped an origin; the

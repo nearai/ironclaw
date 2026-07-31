@@ -29,8 +29,11 @@ use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-    RuntimeHttpEgressRequest, UserId, VirtualPath,
+    http::RuntimeHttpEgressRequest,
+    ids::{CapabilityId, InvocationId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_llm::Role;
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
@@ -926,7 +929,7 @@ impl RebornIntegrationHarness {
             );
         }
         let (event_id, envelope) = self.build_user_envelope(text)?;
-        let attachment = ironclaw_attachments::InboundAttachment {
+        let attachment = ironclaw_host_api::attachment::InboundAttachment {
             id: format!("{event_id}-att-0"),
             mime_type: mime_type.to_string(),
             filename: Some(filename.to_string()),
@@ -963,14 +966,14 @@ impl RebornIntegrationHarness {
         let inbound = attachments
             .into_iter()
             .enumerate()
-            .map(
-                |(index, (filename, mime_type, bytes))| ironclaw_attachments::InboundAttachment {
+            .map(|(index, (filename, mime_type, bytes))| {
+                ironclaw_host_api::attachment::InboundAttachment {
                     id: format!("{event_id}-att-{index}"),
                     mime_type: mime_type.to_string(),
                     filename: Some(filename.to_string()),
                     bytes,
-                },
-            )
+                }
+            })
             .collect();
         let ack = self
             .workflow

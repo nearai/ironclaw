@@ -11,10 +11,15 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use crate::{
-    ActivityId, AdapterInstallationId, AgentId, CapabilityId, ChannelInboundClassification,
-    NormalizedInboundMessage, ProductAdapterError, ProductAdapterId, ProductInboundAck,
-    ProductInboundEnvelope, ProductSourceChannel, ProjectId, ProtocolAuthEvidence, RedactedString,
-    TenantId, ThreadId, TurnActor, TurnScope, UserId,
+    ids::{ActivityId, AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
+    product_adapter::{
+        AdapterInstallationId, ChannelAdapter, ChannelInboundClassification,
+        NormalizedInboundMessage, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
+        ProductSourceChannel, ProtocolAuthEvidence,
+    },
+    product_adapter_error::{ProductAdapterError, ProductSurfaceRejectionKind, RedactedString},
+    tool_adapter::RestrictedEgress,
+    turn::{TurnActor, TurnScope},
 };
 
 /// One verified, normalized channel message admitted through a product surface.
@@ -71,6 +76,44 @@ pub trait ChannelInboundProductSurface: Send + Sync {
         &self,
         request: ChannelInboundSurfaceRequest,
     ) -> ChannelInboundSurfaceOutcome;
+
+    /// Admit one channel message while pinning the exact adapter and
+    /// manifest-restricted egress authority that parsed it, so accepted
+    /// user-message intake can fetch attachment bytes through restricted
+    /// egress after replay dedupe and before-inbound policy. The authority is
+    /// transient host state and never enters the serialized envelope or the
+    /// durable action ledger.
+    ///
+    /// The default admits attachment-free messages through
+    /// [`Self::admit_channel_inbound`] and fails attachment-bearing admission
+    /// closed for surfaces without transfer support.
+    ///
+    /// The failure is **permanent**: a surface that does not implement
+    /// transfer will never implement it for a redelivery of the same message,
+    /// so a retryable outcome would leave the vendor redelivering forever
+    /// while the user receives nothing — not even the message text. This
+    /// matches the equivalent default on the inbound turn service, which is
+    /// the same structural gap one layer down. A missing *deployment* egress
+    /// transport is a different, operator-fixable condition and stays
+    /// retryable at the ingress sink.
+    async fn admit_channel_inbound_with_attachment_transfer(
+        &self,
+        request: ChannelInboundSurfaceRequest,
+        _channel_adapter: Arc<dyn ChannelAdapter>,
+        _channel_egress: Arc<dyn RestrictedEgress>,
+    ) -> ChannelInboundSurfaceOutcome {
+        if request.message.attachments.is_empty() {
+            return self.admit_channel_inbound(request).await;
+        }
+        ChannelInboundSurfaceOutcome::Invalid(ProductAdapterError::SurfaceRejected {
+            kind: ProductSurfaceRejectionKind::InvalidRequest,
+            status_code: 400,
+            retryable: false,
+            reason: RedactedString::new(
+                "channel attachment transfer is not supported by this product surface",
+            ),
+        })
+    }
 }
 
 /// Authenticated product-surface caller stamped by a trusted terminal boundary.
@@ -617,7 +660,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{AgentId, ProjectId, TenantId, UserId};
+    use crate::ids::{AgentId, ProjectId, TenantId, UserId};
 
     #[test]
     fn product_stream_continuation_is_single_consumer() {

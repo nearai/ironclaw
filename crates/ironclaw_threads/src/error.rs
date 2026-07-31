@@ -1,4 +1,4 @@
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::ids::ThreadId;
 use thiserror::Error;
 
 use crate::{MessageStatus, ThreadMessageId};

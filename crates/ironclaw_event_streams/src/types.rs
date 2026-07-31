@@ -5,7 +5,8 @@ use ironclaw_event_projections::{
     ProjectionSnapshot,
 };
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, InvocationId, MissionId, ProcessId, RuntimeKind, ThreadId,
+    ids::{CapabilityId, ExtensionId, InvocationId, MissionId, ProcessId, ThreadId},
+    runtime::RuntimeKind,
 };
 use ironclaw_outbound::{OutboundPushKind, ProjectionUpdateRef};
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};

@@ -1269,14 +1269,14 @@ mod tests {
         async fn invoke_capability(
             &self,
             request: LoopRequest,
-        ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
+        ) -> Result<ironclaw_host_api::resolution::Resolution, AgentLoopHostError> {
             self.inner.invoke_capability(request).await
         }
 
         async fn invoke_capability_batch(
             &self,
             request: LoopRequestBatch,
-        ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
+        ) -> Result<ironclaw_host_api::resolution::ResolutionBatch, AgentLoopHostError> {
             self.inner.invoke_capability_batch(request).await
         }
     }
@@ -1378,7 +1378,7 @@ mod tests {
         context: &LoopRunContext,
     ) -> ironclaw_agent_loop::state::LoopExecutionState {
         use ironclaw_agent_loop::state::PendingAuthResume;
-        use ironclaw_host_api::CapabilityId;
+        use ironclaw_host_api::ids::CapabilityId;
         use ironclaw_turns::LoopGateRef;
         use ironclaw_turns::run_profile::{CapabilityInputRef, CapabilitySurfaceVersion};
 
@@ -1557,7 +1557,7 @@ mod tests {
         context: &LoopRunContext,
     ) -> ironclaw_agent_loop::state::LoopExecutionState {
         use ironclaw_agent_loop::state::PendingApprovalResume;
-        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId};
+        use ironclaw_host_api::ids::{ApprovalRequestId, CapabilityId, CorrelationId};
         use ironclaw_turns::LoopGateRef;
         use ironclaw_turns::run_profile::{
             CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion,
@@ -1667,7 +1667,7 @@ mod tests {
         context: &LoopRunContext,
     ) -> ironclaw_agent_loop::state::LoopExecutionState {
         use ironclaw_agent_loop::state::PendingExternalToolResume;
-        use ironclaw_host_api::CapabilityId;
+        use ironclaw_host_api::ids::CapabilityId;
         use ironclaw_turns::CapabilityActivityId;
         use ironclaw_turns::LoopGateRef;
         use ironclaw_turns::run_profile::{CapabilityInputRef, CapabilitySurfaceVersion};
@@ -1745,7 +1745,7 @@ mod tests {
         context: &LoopRunContext,
     ) -> ironclaw_agent_loop::state::LoopExecutionState {
         use ironclaw_agent_loop::state::{PendingApprovalResume, PendingAuthResume};
-        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId};
+        use ironclaw_host_api::ids::{ApprovalRequestId, CapabilityId, CorrelationId};
         use ironclaw_turns::LoopGateRef;
         use ironclaw_turns::run_profile::{
             CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion,
@@ -1932,7 +1932,7 @@ mod tests {
         context: &LoopRunContext,
     ) -> ironclaw_agent_loop::state::LoopExecutionState {
         use ironclaw_agent_loop::state::{PendingApprovalResume, PendingAuthResume};
-        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId};
+        use ironclaw_host_api::ids::{ApprovalRequestId, CapabilityId, CorrelationId};
         use ironclaw_turns::LoopGateRef;
         use ironclaw_turns::run_profile::{
             CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion,

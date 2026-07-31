@@ -15,8 +15,22 @@ use ironclaw_capabilities::{
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_host_api::FailureKind;
-use ironclaw_host_api::*;
+use ironclaw_host_api::result_meta::FailureKind;
+use ironclaw_host_api::{
+    action::NetworkPolicy,
+    capability::{
+        CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
+    },
+    decision::{Decision, Obligation, Obligations},
+    dispatch::{CapabilityDispatcher, DispatchError, RuntimeDispatchErrorKind},
+    host_port::HostPortCatalog,
+    ids::{CapabilityGrantId, CapabilityId, ExtensionId, PackageId, RunId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::{ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage},
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
     RuntimeCapabilityOutcome,

@@ -2,7 +2,8 @@ use std::collections::HashSet;
 
 use chrono::Utc;
 use ironclaw_host_api::{
-    AgentId, InvocationId, ProcessId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+    ids::{AgentId, InvocationId, ProcessId, ProjectId, TenantId, ThreadId, UserId},
+    resource::ResourceScope,
 };
 use serde_json::json;
 
@@ -1304,7 +1305,7 @@ fn runner_failure_recovery_covers_terminal_checkpoint_cancel_and_bounded_redrive
                     suspension: None,
                     checkpoint_ref: None,
                     failure: Some(
-                        ironclaw_host_api::SanitizedFailure::new("runner_failure")
+                        ironclaw_host_api::turn::SanitizedFailure::new("runner_failure")
                             .expect("failure"),
                     ),
                     failure_recovery: recovery,
@@ -1319,7 +1320,7 @@ fn runner_failure_recovery_covers_terminal_checkpoint_cancel_and_bounded_redrive
             result
                 .failure
                 .as_ref()
-                .map(ironclaw_host_api::SanitizedFailure::category),
+                .map(ironclaw_host_api::turn::SanitizedFailure::category),
             expected_failure,
             "{label}"
         );

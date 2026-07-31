@@ -18,7 +18,7 @@
 #![allow(dead_code)]
 
 use ironclaw_events::{SecurityBoundary, SecurityDecision};
-use ironclaw_host_api::ProcessId;
+use ironclaw_host_api::ids::ProcessId;
 use ironclaw_processes::ProcessKind;
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::{ResourceAccount, ResourceGovernor, ResourceTally};

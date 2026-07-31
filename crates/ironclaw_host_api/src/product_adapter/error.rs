@@ -1,1 +1,1 @@
-pub use crate::{ProductAdapterError, ProductSurfaceRejectionKind};
+pub use crate::product_adapter_error::{ProductAdapterError, ProductSurfaceRejectionKind};

@@ -37,7 +37,10 @@ use crate::{
 use async_trait::async_trait;
 use axum::Json;
 use axum::response::{IntoResponse, Response};
-use ironclaw_host_api::{ActivityId, BoundProductSurface, ProductSurface, ThreadId};
+use ironclaw_host_api::{
+    ids::{ActivityId, ThreadId},
+    product_surface::{BoundProductSurface, ProductSurface},
+};
 use ironclaw_product::{
     CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND, ProductCancelRunRequest, ProductCreateThreadRequest,
     ProductSubmitTurnRequest, SUBMIT_TURN_COMMAND,

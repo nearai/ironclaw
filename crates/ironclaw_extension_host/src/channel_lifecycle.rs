@@ -1,5 +1,5 @@
 use ironclaw_extensions::ExtensionPackage;
-use ironclaw_host_api::RuntimeCredentialAccountSetup;
+use ironclaw_host_api::capability::RuntimeCredentialAccountSetup;
 use ironclaw_product::adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product::{
     ChannelConnectionRequirement, ExtensionAccountSetupDescriptor, RebornChannelConnectStrategy,

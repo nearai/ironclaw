@@ -6,14 +6,23 @@ use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_host_api::FailureKind;
+use ironclaw_host_api::result_meta::FailureKind;
 use ironclaw_host_api::{
-    AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet,
-    CorrelationId, CredentialStageError, Decision, EffectKind, ExecutionContext, ExtensionId,
-    GrantConstraints, HostPath, InvocationId, MissionId, MountView, NetworkMethod, NetworkPolicy,
-    NetworkScheme, NetworkTargetPattern, Obligation, Obligations, PackageId, Principal, ProjectId,
-    ResourceEstimate, ResourceScope, RunId, RuntimeKind, SecretHandle, TenantId, TrustClass,
-    UserId, VendorId, VirtualPath,
+    action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    capability::{
+        CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
+    },
+    decision::{Decision, Obligation, Obligations},
+    dispatch::CredentialStageError,
+    ids::{
+        AgentId, CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId, InvocationId,
+        MissionId, PackageId, ProjectId, RunId, SecretHandle, TenantId, UserId, VendorId,
+    },
+    mount::MountView,
+    path::{HostPath, VirtualPath},
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
@@ -55,7 +64,8 @@ macro_rules! github_wasm_services_for_test {
                 Obligation::InjectCredentialAccountOnce {
                     handle: SecretHandle::new("github_runtime_token").unwrap(),
                     provider: VendorId::new("github").unwrap(),
-                    setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+                    setup:
+                        ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
                     provider_scopes: Vec::new(),
                     requester_extension: ExtensionId::new("github").unwrap(),
                 },
@@ -98,7 +108,7 @@ macro_rules! google_wasm_services_for_test {
                 Obligation::InjectCredentialAccountOnce {
                     handle: SecretHandle::new("google_runtime_token").unwrap(),
                     provider: VendorId::new("google").unwrap(),
-                    setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                    setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                         scopes: required_scopes.clone(),
                     },
                     provider_scopes: required_scopes.clone(),
@@ -148,7 +158,7 @@ async fn host_runtime_services_routes_structured_github_wasm_search_through_runt
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: VendorId::new("github").unwrap(),
-                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+                setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
                 provider_scopes: Vec::new(),
                 requester_extension: ExtensionId::new("github").unwrap(),
             },
@@ -236,7 +246,7 @@ async fn host_runtime_services_restages_github_product_auth_for_multi_request_wa
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: VendorId::new("github").unwrap(),
-                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+                setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
                 provider_scopes: Vec::new(),
                 requester_extension: ExtensionId::new("github").unwrap(),
             },
@@ -329,7 +339,7 @@ async fn host_runtime_services_routes_google_drive_wasm_list_files_with_scoped_g
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: VendorId::new("google").unwrap(),
-                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                     scopes: required_scopes.clone(),
                 },
                 provider_scopes: required_scopes.clone(),
@@ -531,7 +541,7 @@ async fn host_runtime_services_maps_google_drive_wasm_401_to_auth_required() {
             assert_eq!(requirement.provider, VendorId::new("google").unwrap());
             assert_eq!(
                 requirement.setup,
-                ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                     scopes: vec!["https://www.googleapis.com/auth/drive.readonly".to_string()]
                 }
             );
@@ -604,7 +614,7 @@ async fn host_runtime_services_maps_google_drive_upload_wasm_401_to_auth_require
             assert_eq!(requirement.provider, VendorId::new("google").unwrap());
             assert_eq!(
                 requirement.setup,
-                ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                     scopes: vec!["https://www.googleapis.com/auth/drive".to_string()]
                 }
             );
@@ -939,7 +949,7 @@ async fn host_runtime_services_missing_github_runtime_secret_blocks_on_auth() {
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: VendorId::new("github").unwrap(),
-                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+                setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
                 provider_scopes: Vec::new(),
                 requester_extension: ExtensionId::new("github").unwrap(),
             },
@@ -1017,7 +1027,7 @@ async fn host_runtime_services_injects_personal_xoxp_token_for_slack_user_search
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: VendorId::new("slack").unwrap(),
-                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                     scopes: slack_user_scopes(),
                 },
                 provider_scopes: slack_user_scopes(),
@@ -1123,7 +1133,7 @@ async fn host_runtime_services_missing_slack_account_blocks_slack_user_on_auth()
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: VendorId::new("slack").unwrap(),
-                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                     scopes: slack_user_scopes(),
                 },
                 provider_scopes: slack_user_scopes(),
@@ -2622,7 +2632,7 @@ macro_rules! slack_enrichment_services_for_test {
                 Obligation::InjectCredentialAccountOnce {
                     handle: SecretHandle::new("slack_user_token").unwrap(),
                     provider: VendorId::new("slack").unwrap(),
-                    setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                    setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                         scopes: $scopes,
                     },
                     provider_scopes: $scopes,

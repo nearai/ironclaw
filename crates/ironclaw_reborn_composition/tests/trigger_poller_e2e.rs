@@ -17,10 +17,17 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ExternalActorRef};
 use ironclaw_host_api::{
-    AdapterInstallationId as ProductAdapterInstallationId, AgentId, CapabilityGrant,
-    CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId,
-    GrantConstraints, MountView, NetworkPolicy, Principal, ProviderToolName, ResourceEstimate,
-    RunId, RuntimeKind, TenantId, TrustClass, UserId,
+    action::NetworkPolicy,
+    capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
+    ids::{
+        AgentId, CapabilityGrantId, CapabilityId, ExtensionId, ProviderToolName, RunId, TenantId,
+        UserId,
+    },
+    mount::MountView,
+    product_adapter::AdapterInstallationId as ProductAdapterInstallationId,
+    resource::ResourceEstimate,
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
     RuntimeCapabilityOutcome, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,

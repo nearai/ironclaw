@@ -7,8 +7,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    HostApiError, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-    ScopedPath, TenantId, UserId, VirtualPath,
+    error::HostApiError,
+    ids::{InvocationId, TenantId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, ScopedPath, VirtualPath},
+    resource::ResourceScope,
 };
 
 use super::*;
@@ -407,6 +410,85 @@ async fn ensure_index_succeeds_with_write() {
         )
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn create_subtree_atomic_denies_before_dispatch_when_write_is_missing() {
+    let scoped = scoped_in_memory(no_op(true, false, true, false));
+    let error = scoped
+        .create_subtree_atomic(
+            &test_scope(),
+            &ScopedPath::new("/workspace/attachments/message-1").unwrap(),
+            vec![ScopedAtomicSubtreeEntry {
+                path: ScopedPath::new("/workspace/attachments/message-1/0-alpha.txt").unwrap(),
+                entry: Entry::bytes(b"alpha".to_vec()),
+            }],
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        FilesystemError::PermissionDenied {
+            operation: FilesystemOperation::CreateSubtreeAtomic,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn create_subtree_atomic_resolves_one_composite_mount_and_publishes_all_entries() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let mut root = CompositeRootFilesystem::new();
+    root.mount(
+        descriptor_for("/engine", backend.as_ref(), "workspace"),
+        Arc::clone(&backend),
+    )
+    .unwrap();
+    let scoped = ScopedFilesystem::with_fixed_view(
+        Arc::new(root),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").unwrap(),
+            VirtualPath::new("/engine/project-1").unwrap(),
+            no_op(true, true, true, false),
+        )])
+        .unwrap(),
+    );
+
+    let versions = scoped
+        .create_subtree_atomic(
+            &test_scope(),
+            &ScopedPath::new("/workspace/attachments/message-1").unwrap(),
+            vec![
+                ScopedAtomicSubtreeEntry {
+                    path: ScopedPath::new("/workspace/attachments/message-1/0-alpha.txt").unwrap(),
+                    entry: Entry::bytes(b"alpha".to_vec()),
+                },
+                ScopedAtomicSubtreeEntry {
+                    path: ScopedPath::new("/workspace/attachments/message-1/1-beta.txt").unwrap(),
+                    entry: Entry::bytes(b"beta".to_vec()),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        versions,
+        vec![
+            RecordVersion::from_backend(1),
+            RecordVersion::from_backend(1)
+        ]
+    );
+    assert_eq!(
+        backend
+            .read_file(
+                &VirtualPath::new("/engine/project-1/attachments/message-1/0-alpha.txt").unwrap(),
+            )
+            .await
+            .unwrap(),
+        b"alpha"
+    );
 }
 
 #[tokio::test]

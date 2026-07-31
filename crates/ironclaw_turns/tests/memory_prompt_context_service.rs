@@ -1,6 +1,6 @@
 //! Contract tests for [`MemoryPromptContextService`] and [`EmptyMemoryPromptContextService`].
 
-use ironclaw_host_api::{TenantId, ThreadId, UserId};
+use ironclaw_host_api::ids::{TenantId, ThreadId, UserId};
 use ironclaw_turns::run_profile::{
     ContextProfileId, EmptyMemoryPromptContextService, MemoryPromptContextRequest,
     MemoryPromptContextService,

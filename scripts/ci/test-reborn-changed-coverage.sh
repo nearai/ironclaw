@@ -408,7 +408,10 @@ check_text "in-span scaffolding cannot manufacture a denominator" "Changed line 
 
 echo "▶ test-only Rust changes do not dilute the production denominator"
 test_source="crates/ironclaw_demo/src/tests.rs"
+e2e_test_source="crates/ironclaw_demo/src/channel_host/e2e_tests.rs"
 printf '%s\n' '#[test]' 'fn helper_test() {}' >"${case_root}/${test_source}"
+mkdir -p "$(dirname "${case_root}/${e2e_test_source}")"
+printf '%s\n' '#[test]' 'fn e2e_helper_test() {}' >"${case_root}/${e2e_test_source}"
 cat >"${work}/change.diff" <<'DIFF'
 diff --git a/crates/ironclaw_demo/src/tests.rs b/crates/ironclaw_demo/src/tests.rs
 --- /dev/null
@@ -416,6 +419,12 @@ diff --git a/crates/ironclaw_demo/src/tests.rs b/crates/ironclaw_demo/src/tests.
 @@ -0,0 +1,2 @@
 +#[test]
 +fn helper_test() {}
+diff --git a/crates/ironclaw_demo/src/channel_host/e2e_tests.rs b/crates/ironclaw_demo/src/channel_host/e2e_tests.rs
+--- /dev/null
++++ b/crates/ironclaw_demo/src/channel_host/e2e_tests.rs
+@@ -0,0 +1,2 @@
++#[test]
++fn e2e_helper_test() {}
 diff --git a/crates/ironclaw_demo/src/lib.rs b/crates/ironclaw_demo/src/lib.rs
 --- a/crates/ironclaw_demo/src/lib.rs
 +++ b/crates/ironclaw_demo/src/lib.rs

@@ -24,8 +24,12 @@ pub use dispatch::{
 pub use error::{CapabilityInvocationError, ResumeContextMismatchKind};
 pub use host::CapabilityHost;
 pub use ironclaw_host_api::{
-    Authorized, CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher,
-    CapabilityDisplayOutputPreview, DispatchError, DispatchFailureDetail, RuntimeDispatchErrorKind,
+    authorized::Authorized,
+    dispatch::{
+        CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher,
+        CapabilityDisplayOutputPreview, DispatchError, DispatchFailureDetail,
+        RuntimeDispatchErrorKind,
+    },
 };
 pub use obligations::{
     CapabilityObligationAbortRequest, CapabilityObligationCompletionRequest,

@@ -19,7 +19,10 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ironclaw_host_api::{CorrelationId, InvocationId, ResourceScope, TenantId, UserId};
+use ironclaw_host_api::{
+    ids::{CorrelationId, InvocationId, TenantId, UserId},
+    resource::ResourceScope,
+};
 use ironclaw_memory_mem0::{
     Mem0Config, Mem0HttpTransport, Mem0MemoryService, Mem0Transport, MemoryInvocation,
     MemoryService, MemoryServiceProfileSetRequest, MemoryServiceReadRequest,

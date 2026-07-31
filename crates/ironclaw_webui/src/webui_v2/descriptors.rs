@@ -12,7 +12,7 @@ use ironclaw_host_api::ingress::{
     IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
-use ironclaw_host_api::{IngressScopeSource, NetworkMethod};
+use ironclaw_host_api::{action::NetworkMethod, ingress::IngressScopeSource};
 use std::num::{NonZeroU32, NonZeroU64};
 
 mod run_action_descriptors;

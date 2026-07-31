@@ -44,7 +44,7 @@ use ironclaw_events::{
     EventStreamKey, ReadScope, RuntimeEvent, runtime_event_from_trusted_json_slice,
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem, SeqNo};
-use ironclaw_host_api::{AuditEnvelope, ResourceScope, ScopedPath};
+use ironclaw_host_api::{audit::AuditEnvelope, path::ScopedPath, resource::ResourceScope};
 
 use crate::{StreamKind, durable_error};
 

@@ -1,6 +1,9 @@
 use std::net::IpAddr;
 
-use ironclaw_host_api::{NetworkMethod, NetworkPolicy, NetworkTarget, ResourceScope};
+use ironclaw_host_api::{
+    action::{NetworkMethod, NetworkPolicy, NetworkTarget},
+    resource::ResourceScope,
+};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub const DEFAULT_RESPONSE_BODY_LIMIT: u64 = 10 * 1024 * 1024;
@@ -126,7 +129,10 @@ pub struct NetworkUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{InvocationId, NetworkScheme, NetworkTargetPattern, TenantId, UserId};
+    use ironclaw_host_api::{
+        action::{NetworkScheme, NetworkTargetPattern},
+        ids::{InvocationId, TenantId, UserId},
+    };
 
     #[test]
     fn network_http_request_scrubs_url_and_header_values() {

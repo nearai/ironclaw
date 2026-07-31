@@ -61,14 +61,6 @@ vi.mock("../../../design-system/icons", async () => {
 vi.mock("../../../lib/toast", () => ({ toast: () => {} }));
 vi.mock("../../../lib/i18n", () => ({ useT: () => (key) => key }));
 
-vi.mock("./project-file-chips", async () => {
-  const { createElement } = await import("react");
-  return {
-    ProjectFileChips: () =>
-      createElement("div", { "data-testid": "project-file-chips" }),
-  };
-});
-
 vi.mock("./attachment-chip", async () => {
   const { createElement } = await import("react");
   return {
@@ -116,6 +108,41 @@ test("assistant bubbles expose final reply state for live QA", () => {
     messageBubbleSource,
     /data-final-reply=\{finalReplyState\}/,
     "live QA should be able to distinguish streaming text from the final answer",
+  );
+});
+
+test("assistant bubbles render only durable attachment references, not workspace paths in prose", async () => {
+  const { MessageBubble } = await import("./message-bubble");
+  const render = (attachments?: Array<Record<string, unknown>>) =>
+    renderToStaticMarkup(
+      React.createElement(MessageBubble, {
+        message: {
+          id: "assistant-attachment",
+          role: CHAT_MESSAGE_ROLES.ASSISTANT,
+          content: "I saved it to /workspace/report.pdf.",
+          attachments,
+        },
+        threadId: "thread-1",
+      }),
+    );
+
+  assert.doesNotMatch(
+    render(),
+    /data-testid="attachment-chip"/,
+    "a path mentioned in prose must not become an attachment",
+  );
+  assert.match(
+    render([
+      {
+        id: "attachment-1",
+        filename: "report.pdf",
+        mime_type: "application/pdf",
+        fetch_url:
+          "/api/webchat/v2/threads/thread-1/messages/message-1/attachments/attachment-1",
+      },
+    ]),
+    /data-testid="attachment-chip"/,
+    "a durable attachment reference must render an attachment chip",
   );
 });
 

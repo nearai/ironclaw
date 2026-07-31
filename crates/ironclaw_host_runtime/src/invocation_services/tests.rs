@@ -4,7 +4,10 @@ use ironclaw_filesystem::{
     DiskFilesystem, FilesystemError, FilesystemOperation, InMemoryBackend, RootFilesystem,
 };
 use ironclaw_host_api::{
-    CapabilityId, MountAlias, MountGrant, MountPermissions, ResourceScope, VirtualPath,
+    ids::CapabilityId,
+    mount::{MountGrant, MountPermissions},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
     runtime_policy::{RuntimeProfile, SecretMode},
 };
 use ironclaw_secrets::SecretStore;
@@ -32,13 +35,13 @@ impl RuntimeProcessPort for NoopProcessPort {
 struct NoopRuntimeHttpEgress;
 
 #[async_trait]
-impl ironclaw_host_api::RuntimeHttpEgress for NoopRuntimeHttpEgress {
+impl ironclaw_host_api::http::RuntimeHttpEgress for NoopRuntimeHttpEgress {
     async fn execute(
         &self,
-        _request: ironclaw_host_api::RuntimeHttpEgressRequest,
+        _request: ironclaw_host_api::http::RuntimeHttpEgressRequest,
     ) -> Result<
-        ironclaw_host_api::RuntimeHttpEgressResponse,
-        ironclaw_host_api::RuntimeHttpEgressError,
+        ironclaw_host_api::http::RuntimeHttpEgressResponse,
+        ironclaw_host_api::http::RuntimeHttpEgressError,
     > {
         unreachable!("resolver tests must not execute HTTP requests")
     }

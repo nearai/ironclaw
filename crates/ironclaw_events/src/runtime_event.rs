@@ -1,7 +1,10 @@
 use chrono::Utc;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, INPUT_ENCODE_HUMAN_SUMMARY, InvocationId, ProcessId, ResourceScope,
-    RuntimeKind, Timestamp,
+    Timestamp,
+    dispatch::INPUT_ENCODE_HUMAN_SUMMARY,
+    ids::{CapabilityId, ExtensionId, InvocationId, ProcessId},
+    resource::ResourceScope,
+    runtime::RuntimeKind,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -237,7 +240,7 @@ struct TrustedRuntimeEventWire {
     provider: Option<ExtensionId>,
     #[serde(
         default,
-        deserialize_with = "ironclaw_host_api::deserialize_trusted_optional_runtime_kind"
+        deserialize_with = "ironclaw_host_api::runtime::deserialize_trusted_optional_runtime_kind"
     )]
     runtime: Option<RuntimeKind>,
     #[serde(default)]
@@ -1198,7 +1201,8 @@ fn is_safe_hook_id(value: &str) -> bool {
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        AgentId, INPUT_ENCODE_HUMAN_SUMMARY, InvocationId, ProjectId, TenantId, UserId,
+        dispatch::INPUT_ENCODE_HUMAN_SUMMARY,
+        ids::{AgentId, InvocationId, ProjectId, TenantId, UserId},
     };
 
     fn scope() -> ResourceScope {

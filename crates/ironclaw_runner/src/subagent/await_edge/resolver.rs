@@ -11,8 +11,8 @@
 use std::sync::{Arc, OnceLock, RwLock};
 
 #[cfg(test)]
-use ironclaw_host_api::CapabilityId;
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_host_api::ids::UserId;
 #[cfg(test)]
 use ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID;
 use ironclaw_loop_host::{AwaitEdgeSettler, ResolveOutcome};
@@ -889,7 +889,10 @@ mod tests {
     fn recon_scoped_fs()
     -> Arc<ironclaw_filesystem::ScopedFilesystem<ironclaw_filesystem::InMemoryBackend>> {
         use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-        use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+        use ironclaw_host_api::{
+            mount::{MountGrant, MountPermissions, MountView},
+            path::{MountAlias, VirtualPath},
+        };
         let mounts = MountView::new(vec![MountGrant::new(
             MountAlias::new("/processes").unwrap(),
             VirtualPath::new("/processes").unwrap(),
@@ -916,9 +919,9 @@ mod tests {
     }
 
     fn recon_child_record(
-        tenant_id: &ironclaw_host_api::TenantId,
-        agent_id: &ironclaw_host_api::AgentId,
-        child_thread_id: &ironclaw_host_api::ThreadId,
+        tenant_id: &ironclaw_host_api::ids::TenantId,
+        agent_id: &ironclaw_host_api::ids::AgentId,
+        child_thread_id: &ironclaw_host_api::ids::ThreadId,
         child_run_id: TurnRunId,
         parent_run_id: TurnRunId,
         resolved_run_profile: ironclaw_turns::run_profile::ResolvedRunProfile,
@@ -982,9 +985,9 @@ mod tests {
 
     async fn recon_seed_thread(
         thread_service: &ironclaw_threads::InMemorySessionThreadService,
-        tenant_id: &ironclaw_host_api::TenantId,
-        agent_id: &ironclaw_host_api::AgentId,
-        child_thread_id: &ironclaw_host_api::ThreadId,
+        tenant_id: &ironclaw_host_api::ids::TenantId,
+        agent_id: &ironclaw_host_api::ids::AgentId,
+        child_thread_id: &ironclaw_host_api::ids::ThreadId,
         owner_user_id: &UserId,
         metadata_json: Option<String>,
     ) {
@@ -1013,10 +1016,12 @@ mod tests {
     // matches the metadata-cached one).
     #[tokio::test]
     async fn reconstruct_edge_builds_edge_from_cached_metadata() {
-        let tenant_id = ironclaw_host_api::TenantId::new("recon-tenant-t1").unwrap();
-        let agent_id = ironclaw_host_api::AgentId::new("recon-agent-t1").unwrap();
-        let child_thread_id = ironclaw_host_api::ThreadId::new("recon-child-thread-t1").unwrap();
-        let parent_thread_id = ironclaw_host_api::ThreadId::new("recon-parent-thread-t1").unwrap();
+        let tenant_id = ironclaw_host_api::ids::TenantId::new("recon-tenant-t1").unwrap();
+        let agent_id = ironclaw_host_api::ids::AgentId::new("recon-agent-t1").unwrap();
+        let child_thread_id =
+            ironclaw_host_api::ids::ThreadId::new("recon-child-thread-t1").unwrap();
+        let parent_thread_id =
+            ironclaw_host_api::ids::ThreadId::new("recon-parent-thread-t1").unwrap();
         let owner_user_id = UserId::new("recon-owner-t1").unwrap();
         let parent_run_id = TurnRunId::new();
         let child_run_id = TurnRunId::new();
@@ -1092,10 +1097,12 @@ mod tests {
     // `Ok(None)`, never reconstruct against the wrong parent.
     #[tokio::test]
     async fn reconstruct_edge_fails_closed_on_parent_run_id_mismatch() {
-        let tenant_id = ironclaw_host_api::TenantId::new("recon-tenant-t2").unwrap();
-        let agent_id = ironclaw_host_api::AgentId::new("recon-agent-t2").unwrap();
-        let child_thread_id = ironclaw_host_api::ThreadId::new("recon-child-thread-t2").unwrap();
-        let parent_thread_id = ironclaw_host_api::ThreadId::new("recon-parent-thread-t2").unwrap();
+        let tenant_id = ironclaw_host_api::ids::TenantId::new("recon-tenant-t2").unwrap();
+        let agent_id = ironclaw_host_api::ids::AgentId::new("recon-agent-t2").unwrap();
+        let child_thread_id =
+            ironclaw_host_api::ids::ThreadId::new("recon-child-thread-t2").unwrap();
+        let parent_thread_id =
+            ironclaw_host_api::ids::ThreadId::new("recon-parent-thread-t2").unwrap();
         let owner_user_id = UserId::new("recon-owner-t2").unwrap();
         let parent_run_id = TurnRunId::new();
         let wrong_parent_run_id = TurnRunId::new();
@@ -1156,9 +1163,10 @@ mod tests {
     // a fabricated edge.
     #[tokio::test]
     async fn reconstruct_edge_returns_none_for_absent_or_malformed_metadata() {
-        let tenant_id = ironclaw_host_api::TenantId::new("recon-tenant-t3").unwrap();
-        let agent_id = ironclaw_host_api::AgentId::new("recon-agent-t3").unwrap();
-        let child_thread_id = ironclaw_host_api::ThreadId::new("recon-child-thread-t3").unwrap();
+        let tenant_id = ironclaw_host_api::ids::TenantId::new("recon-tenant-t3").unwrap();
+        let agent_id = ironclaw_host_api::ids::AgentId::new("recon-agent-t3").unwrap();
+        let child_thread_id =
+            ironclaw_host_api::ids::ThreadId::new("recon-child-thread-t3").unwrap();
         let owner_user_id = UserId::new("recon-owner-t3").unwrap();
         let parent_run_id = TurnRunId::new();
         let child_run_id = TurnRunId::new();
@@ -1227,10 +1235,12 @@ mod tests {
     // values).
     #[tokio::test]
     async fn reconstruct_edge_anti_tamper_pin_overrides_metadata_scope_with_trusted_anchor() {
-        let tenant_id = ironclaw_host_api::TenantId::new("recon-tenant-t4").unwrap();
-        let agent_id = ironclaw_host_api::AgentId::new("recon-agent-t4").unwrap();
-        let child_thread_id = ironclaw_host_api::ThreadId::new("recon-child-thread-t4").unwrap();
-        let parent_thread_id = ironclaw_host_api::ThreadId::new("recon-parent-thread-t4").unwrap();
+        let tenant_id = ironclaw_host_api::ids::TenantId::new("recon-tenant-t4").unwrap();
+        let agent_id = ironclaw_host_api::ids::AgentId::new("recon-agent-t4").unwrap();
+        let child_thread_id =
+            ironclaw_host_api::ids::ThreadId::new("recon-child-thread-t4").unwrap();
+        let parent_thread_id =
+            ironclaw_host_api::ids::ThreadId::new("recon-parent-thread-t4").unwrap();
         let owner_user_id = UserId::new("recon-owner-t4").unwrap();
         let parent_run_id = TurnRunId::new();
         let child_run_id = TurnRunId::new();
@@ -1239,8 +1249,8 @@ mod tests {
         // Attacker-controlled thread metadata claims a different
         // tenant/thread than the trusted child run record — this must never
         // win.
-        let attacker_tenant = ironclaw_host_api::TenantId::new("attacker-tenant-t4").unwrap();
-        let attacker_thread = ironclaw_host_api::ThreadId::new("attacker-thread-t4").unwrap();
+        let attacker_tenant = ironclaw_host_api::ids::TenantId::new("attacker-tenant-t4").unwrap();
+        let attacker_thread = ironclaw_host_api::ids::ThreadId::new("attacker-thread-t4").unwrap();
         tampered_context.scope =
             TurnScope::new(attacker_tenant.clone(), None, None, attacker_thread.clone());
 
@@ -1424,7 +1434,7 @@ mod tests {
     #[tokio::test]
     async fn mixed_status_group_updates_each_result_resumes_once_and_consumes_every_edge() {
         use chrono::Utc;
-        use ironclaw_host_api::ProcessId;
+        use ironclaw_host_api::ids::ProcessId;
         use ironclaw_loop_host::{AwaitedChildSetRecord, SpawnSubagentMode, SubagentKindId};
         use ironclaw_processes::{
             ProcessDependencyPort, ProcessDependencySubmission, ProcessJournalStore, ProcessKind,
@@ -1458,11 +1468,11 @@ mod tests {
             .bind_coordinator(Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>)
             .expect("bind coordinator");
 
-        let tenant_id = ironclaw_host_api::TenantId::new("drain-tenant").expect("tenant");
+        let tenant_id = ironclaw_host_api::ids::TenantId::new("drain-tenant").expect("tenant");
         let user_id = UserId::new("drain-user").expect("user");
-        let agent_id = ironclaw_host_api::AgentId::new("drain-agent").expect("agent");
+        let agent_id = ironclaw_host_api::ids::AgentId::new("drain-agent").expect("agent");
         let parent_thread_id =
-            ironclaw_host_api::ThreadId::new("drain-parent-thread").expect("parent thread");
+            ironclaw_host_api::ids::ThreadId::new("drain-parent-thread").expect("parent thread");
         let parent_scope = TurnScope::new_with_owner(
             tenant_id.clone(),
             Some(agent_id.clone()),
@@ -1536,8 +1546,9 @@ mod tests {
 
         for (label, terminal_kind, terminal_reason, final_text) in child_cases {
             let child_run_id = TurnRunId::new();
-            let child_thread_id = ironclaw_host_api::ThreadId::new(format!("drain-child-{label}"))
-                .expect("child thread");
+            let child_thread_id =
+                ironclaw_host_api::ids::ThreadId::new(format!("drain-child-{label}"))
+                    .expect("child thread");
             let child_scope = TurnScope::new_with_owner(
                 tenant_id.clone(),
                 Some(agent_id.clone()),

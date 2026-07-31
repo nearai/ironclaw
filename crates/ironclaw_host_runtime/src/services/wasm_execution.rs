@@ -16,7 +16,7 @@ use super::{
     ResourceUsage, RootFilesystem, RuntimeAdapterResult, RuntimeDispatchErrorKind,
     RuntimeLaneRequest, WasmError, WitToolHost, WitToolRuntime,
 };
-use ironclaw_host_api::ResourceReceipt;
+use ironclaw_host_api::resource::ResourceReceipt;
 
 /// RAII guard over an in-flight `ResourceGovernor` reservation.
 ///
@@ -436,7 +436,7 @@ mod tests {
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use ironclaw_host_api::{ReservationStatus, ResourceEstimate, ResourceReservation};
+    use ironclaw_host_api::resource::{ReservationStatus, ResourceEstimate, ResourceReservation};
     use ironclaw_resources::{
         AccountSnapshot, ReservationOutcome, ResourceAccount, ResourceError, ResourceLimits,
     };

@@ -6,7 +6,7 @@ mod parity_qa_support;
 mod reborn_support;
 mod support;
 
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_host_runtime::READ_FILE_CAPABILITY_ID;
 use ironclaw_loop_host::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};

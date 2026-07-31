@@ -15,10 +15,10 @@
 //! out-of-band `None` path.
 
 use ironclaw_host_api::product_adapter::{
-    AdapterInstallationId, AttachmentRef, ExternalActorRef, ExternalConversationRef,
-    ExternalEventId, InboundCommandPayload, NormalizedInboundMessage, ParsedProductInbound,
-    ProductAdapterError, ProductAttachmentDescriptor, ProductAttachmentKind, ProductInboundPayload,
-    ProductTriggerReason, ProtocolAuthEvidence, UserMessagePayload,
+    AdapterInstallationId, ChannelAttachmentRef, ExternalActorRef, ExternalConversationRef,
+    ExternalEventId, InboundBatchFragment, InboundCommandPayload, NormalizedInboundMessage,
+    ParsedProductInbound, ProductAdapterError, ProductAttachmentDescriptor, ProductAttachmentKind,
+    ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence, UserMessagePayload,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -26,6 +26,7 @@ use thiserror::Error;
 pub const TELEGRAM_API_HOST: &str = "api.telegram.org";
 pub const TELEGRAM_FILE_API_HOST: &str = "api.telegram.org";
 pub const TELEGRAM_USER_ACTOR_KIND: &str = "telegram_user";
+const TELEGRAM_MEDIA_GROUP_SETTLE_MILLIS: u64 = 1_000;
 
 /// What an adapter installation is configured to recognize as an explicit
 /// trigger inside group/supergroup chats.
@@ -363,6 +364,7 @@ fn slice_text_by_offset(text: &str, offset: u32, length: u32) -> Option<&str> {
 pub enum TelegramInboundEvent {
     Ignore,
     Message(Box<NormalizedInboundMessage>),
+    BatchFragment(Box<InboundBatchFragment>),
 }
 
 /// Parse one HOST-VERIFIED Telegram update into its normalized channel form.
@@ -384,8 +386,6 @@ pub fn normalize_telegram_update(
     if update_id == 0 {
         return Err(PayloadParseError::MissingUpdateId);
     }
-    let event_id = build_event_id(installation_id, update_id)?;
-
     let Some(message) = update.message else {
         return Ok(TelegramInboundEvent::Ignore);
     };
@@ -393,8 +393,19 @@ pub fn normalize_telegram_update(
         return Ok(TelegramInboundEvent::Ignore);
     }
     let chat_kind = TelegramChatKind::from_str(message.chat.kind.as_str());
-    let Some(trigger) = classify_trigger(&message, chat_kind, group_trigger_policy) else {
+    let trigger = classify_trigger(&message, chat_kind, group_trigger_policy);
+    if trigger.is_none() && message.media_group_id.is_none() {
         return Ok(TelegramInboundEvent::Ignore);
+    }
+    let triggered = trigger.is_some();
+    let trigger = trigger.unwrap_or(ProductTriggerReason::DirectChat);
+    let scoped_media_group_key = message
+        .media_group_id
+        .as_deref()
+        .map(|media_group_id| build_media_group_key(&message, media_group_id));
+    let event_id = match scoped_media_group_key.as_deref() {
+        Some(media_group_key) => build_media_group_event_id(installation_id, media_group_key)?,
+        None => build_event_id(installation_id, update_id)?,
     };
     let actor = build_actor_ref(message.from.as_ref())?;
     let conversation = build_conversation_ref(&message)?;
@@ -402,26 +413,47 @@ pub fn normalize_telegram_update(
     let text = normalize_forwarded_text(&message, group_trigger_policy);
     let attachments = attachments
         .into_iter()
-        .map(|descriptor| AttachmentRef {
+        .map(|descriptor| ChannelAttachmentRef {
             vendor_ref: descriptor.external_file_id.clone(),
-            mime_hint: Some(descriptor.mime_type.clone()),
             descriptor,
         })
         .collect();
-    Ok(TelegramInboundEvent::Message(Box::new(
-        NormalizedInboundMessage {
-            actor,
-            conversation,
-            event_id,
-            text,
-            trigger,
-            attachments,
-            // Reply routing rides the conversation ref's thread anchors
-            // (pre-coordinator delivery path); adopted when the P5 delivery
-            // coordinator consumes stored contexts.
-            reply_context: None,
-        },
-    )))
+    let normalized = NormalizedInboundMessage {
+        actor,
+        conversation,
+        event_id,
+        text,
+        trigger,
+        attachments,
+        // Reply routing rides the conversation ref's thread anchors
+        // (pre-coordinator delivery path); adopted when the P5 delivery
+        // coordinator consumes stored contexts.
+        reply_context: None,
+    };
+    let Some(media_group_key) = scoped_media_group_key else {
+        return Ok(TelegramInboundEvent::Message(Box::new(normalized)));
+    };
+    let order = u64::try_from(message.message_id).map_err(|error| {
+        PayloadParseError::InvalidExternalRef {
+            kind: "telegram_media_group_order",
+            reason: error.to_string(),
+        }
+    })?;
+    let fragment = InboundBatchFragment {
+        batch_key: media_group_key,
+        fragment_id: format!("tg-update-{update_id}"),
+        order,
+        settle_millis: TELEGRAM_MEDIA_GROUP_SETTLE_MILLIS,
+        triggered,
+        message: normalized,
+    };
+    fragment
+        .validate()
+        .map_err(|error| PayloadParseError::InvalidExternalRef {
+            kind: "telegram_media_group",
+            reason: error.to_string(),
+        })?;
+    Ok(TelegramInboundEvent::BatchFragment(Box::new(fragment)))
 }
 
 fn normalize_forwarded_text(message: &TelegramMessage, policy: &GroupTriggerPolicy) -> String {
@@ -511,6 +543,31 @@ fn build_event_id(
             reason: err.to_string(),
         }
     })
+}
+
+fn build_media_group_event_id(
+    installation_id: &AdapterInstallationId,
+    media_group_key: &str,
+) -> Result<ExternalEventId, PayloadParseError> {
+    ExternalEventId::new(format!(
+        "tg-{}-media-{media_group_key}",
+        installation_id.as_str()
+    ))
+    .map_err(|err| PayloadParseError::InvalidExternalRef {
+        kind: "external_event_id",
+        reason: err.to_string(),
+    })
+}
+
+fn build_media_group_key(message: &TelegramMessage, media_group_id: &str) -> String {
+    let thread = message
+        .message_thread_id
+        .map(|thread_id| thread_id.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    format!(
+        "chat-{}-thread-{thread}-group-{media_group_id}",
+        message.chat.id
+    )
 }
 
 fn build_actor_ref(sender: Option<&TelegramUser>) -> Result<ExternalActorRef, PayloadParseError> {
@@ -832,6 +889,8 @@ struct TelegramUpdate {
 struct TelegramMessage {
     #[serde(default)]
     message_id: i64,
+    #[serde(default)]
+    media_group_id: Option<String>,
     #[serde(default)]
     from: Option<TelegramUser>,
     chat: TelegramChat,
@@ -1716,6 +1775,104 @@ mod tests {
             }
             other => panic!("expected UserMessage, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn media_group_fragments_share_one_durable_event_identity() {
+        let first = br#"{
+            "update_id": 701,
+            "message": {
+                "message_id": 81,
+                "media_group_id": "album-6364",
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+                "chat": {"id": 777, "type": "private"},
+                "document": {
+                    "file_id": "file-alpha",
+                    "file_name": "alpha.txt",
+                    "mime_type": "text/plain",
+                    "file_size": 5
+                }
+            }
+        }"#;
+        let second = br#"{
+            "update_id": 702,
+            "message": {
+                "message_id": 82,
+                "media_group_id": "album-6364",
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+                "chat": {"id": 777, "type": "private"},
+                "caption": "read both",
+                "document": {
+                    "file_id": "file-beta",
+                    "file_name": "beta.txt",
+                    "mime_type": "text/plain",
+                    "file_size": 4
+                }
+            }
+        }"#;
+        let TelegramInboundEvent::BatchFragment(first) =
+            normalize_telegram_update(first, &install_id(), &policy()).expect("first normalizes")
+        else {
+            panic!("first media-group fragment must normalize");
+        };
+        let TelegramInboundEvent::BatchFragment(second) =
+            normalize_telegram_update(second, &install_id(), &policy()).expect("second normalizes")
+        else {
+            panic!("second media-group fragment must normalize");
+        };
+
+        assert_eq!(
+            first.message.event_id, second.message.event_id,
+            "all media-group fragments must converge on one durable event"
+        );
+        assert_ne!(first.fragment_id, second.fragment_id);
+    }
+
+    #[test]
+    fn media_group_identity_is_scoped_to_chat_and_thread() {
+        let payload = |update_id: i64, chat_id: i64, thread_id: Option<i64>| {
+            let mut message = serde_json::json!({
+                "message_id": update_id,
+                "media_group_id": "provider-reused-id",
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice"},
+                "chat": {"id": chat_id, "type": "private"},
+                "document": {
+                    "file_id": format!("file-{update_id}"),
+                    "file_name": "report.txt",
+                    "mime_type": "text/plain",
+                    "file_size": 5
+                }
+            });
+            if let Some(thread_id) = thread_id {
+                message["message_thread_id"] = serde_json::json!(thread_id);
+            }
+            serde_json::to_vec(&serde_json::json!({
+                "update_id": update_id,
+                "message": message,
+            }))
+            .expect("payload serializes")
+        };
+        let normalize = |payload: Vec<u8>| {
+            let TelegramInboundEvent::BatchFragment(fragment) =
+                normalize_telegram_update(&payload, &install_id(), &policy())
+                    .expect("media group normalizes")
+            else {
+                panic!("expected media-group fragment");
+            };
+            fragment
+        };
+
+        let first = normalize(payload(801, 777, None));
+        let other_chat = normalize(payload(802, 778, None));
+        let other_thread = normalize(payload(803, 777, Some(42)));
+
+        assert_ne!(first.batch_key, other_chat.batch_key);
+        assert_ne!(first.message.event_id, other_chat.message.event_id);
+        assert_ne!(first.batch_key, other_thread.batch_key);
+        assert_ne!(first.message.event_id, other_thread.message.event_id);
     }
 
     #[test]

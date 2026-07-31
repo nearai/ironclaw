@@ -56,7 +56,7 @@ use std::time::Duration;
 
 use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_filesystem::CompositeRootFilesystem;
-use ironclaw_host_api::{ResourceScope, UserId};
+use ironclaw_host_api::{ids::UserId, resource::ResourceScope};
 use ironclaw_llm::testing::{provider_chain_over, provider_chain_over_with_fallback};
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_host::{
@@ -367,6 +367,29 @@ impl GroupCapability {
             Self::HostRuntime(harness) => harness.gate_record_store(),
             Self::Recording | Self::RecordingNoProgress | Self::RecordingRecoverablePortError => {
                 None
+            }
+        }
+    }
+
+    /// Return the same reply-attachment intent port used by a
+    /// production-composed built-in handler. The planned runtime finalizer
+    /// must seal that exact store; lightweight backends without composed
+    /// Reborn services retain the prior isolated in-memory test store.
+    pub(crate) fn reply_attachment_intent_port(
+        &self,
+    ) -> Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort> {
+        let fresh_store = || {
+            Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store())
+                as Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort>
+        };
+        match self {
+            Self::HostRuntime(harness) => harness
+                .reborn_services_for_test()
+                .and_then(|runtime| runtime.outbound_delivery_stores_for_test())
+                .map(|(_, _, _, reply_attachment_intents)| reply_attachment_intents)
+                .unwrap_or_else(fresh_store),
+            Self::Recording | Self::RecordingNoProgress | Self::RecordingRecoverablePortError => {
+                fresh_store()
             }
         }
     }
@@ -848,7 +871,7 @@ pub struct RebornIntegrationGroupBuilder {
     /// wires. Default `None` (no memory consumers, today's behavior).
     bound_memory: Option<(
         Arc<dyn ironclaw_memory::MemoryService>,
-        ironclaw_host_api::MemoryDescriptor,
+        ironclaw_host_api::memory::MemoryDescriptor,
     )>,
 }
 
@@ -1148,6 +1171,7 @@ impl RebornIntegrationGroupBuilder {
                 }),
                 None => Arc::clone(&user_profile_source),
             };
+        let reply_attachment_intent_port = capability.reply_attachment_intent_port();
         let parts = DefaultPlannedRuntimeParts {
             process_system: process_system.clone(),
             thread_service: runtime_thread_service,
@@ -1246,6 +1270,7 @@ impl RebornIntegrationGroupBuilder {
             attachment_read_port: capability_recorder
                 .attachment_test_support()
                 .map(|support| support.read_port),
+            reply_attachment_intent_port: Some(reply_attachment_intent_port),
             // §5.2.9 render-from-record: the SAME durable gate-record store this
             // group's capability port persists `GateRecord::Auth` into, so the
             // turn executor re-reads an auth block's `credential_requirements`

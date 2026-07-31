@@ -9,7 +9,7 @@ use std::fmt;
 
 use async_trait::async_trait;
 use chrono_tz::Tz;
-use ironclaw_host_api::{CorrelationId, ResourceScope};
+use ironclaw_host_api::{ids::CorrelationId, resource::ResourceScope};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -822,7 +822,7 @@ fn validate_locale(value: &str) -> Result<(), MemoryServiceError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::ResourceScope;
+    use ironclaw_host_api::resource::ResourceScope;
 
     /// A provider that overrides NOTHING — every `MemoryService` method (including
     /// `record_interaction`) is inherited from the trait default.

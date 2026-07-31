@@ -15,7 +15,8 @@
 
 use async_trait::async_trait;
 
-use crate::RestrictedEgress;
+use crate::attachment::{InboundAttachment, WorkspaceFile};
+use crate::tool_adapter::RestrictedEgress;
 
 use crate::product_adapter::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
@@ -50,6 +51,18 @@ pub trait ChannelAdapter: Send + Sync {
     /// Parse one host-verified inbound request into a normalized outcome.
     /// Pure protocol work: no I/O, no secrets, bounded input.
     fn inbound(&self, request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError>;
+
+    /// Fetch one inbound attachment's bytes through the channel's restricted
+    /// egress. The generic workflow calls this only after duplicate replay has
+    /// missed and before-inbound policy has returned Allow or Rewrite, then
+    /// lands the returned bytes through the canonical project filesystem path.
+    async fn fetch_attachment(
+        &self,
+        _attachment: &ChannelAttachmentRef,
+        _egress: &dyn RestrictedEgress,
+    ) -> Result<InboundAttachment, ChannelError> {
+        Err(ChannelError::Unsupported)
+    }
 
     /// Render and send one normalized outbound envelope through restricted
     /// egress. Owns vendor formatting, splitting, target syntax, DM
@@ -100,10 +113,71 @@ pub struct VerifiedInbound<'a> {
 pub enum InboundOutcome {
     /// Normalized message(s) for the workflow.
     Messages(Vec<NormalizedInboundMessage>),
+    /// One fragment of a provider-level message batch. The generic host
+    /// settles concurrent fragments before admitting one atomic normalized
+    /// message.
+    BatchFragment(Box<InboundBatchFragment>),
     /// Bounded immediate response (e.g. a URL-verification challenge).
     Respond(ImmediateResponse),
     /// Authenticated no-op (ignored event types).
     Ignore,
+}
+
+/// Maximum provider batch-key or fragment-id length accepted from an adapter.
+pub const MAX_INBOUND_BATCH_REF_BYTES: usize = 512;
+/// Maximum settle window an adapter may request for provider batch fragments.
+pub const MAX_INBOUND_BATCH_SETTLE_MILLIS: u64 = 2_000;
+
+/// One fragment of a provider-level message batch.
+///
+/// The adapter assigns every fragment in one provider batch the same
+/// `batch_key` and normalized `message.event_id`, while `fragment_id` remains
+/// unique per vendor delivery. `order` preserves provider order through the
+/// host-owned merge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundBatchFragment {
+    pub batch_key: String,
+    pub fragment_id: String,
+    pub order: u64,
+    pub settle_millis: u64,
+    /// Whether this fragment independently satisfies the channel's trigger
+    /// policy. The host admits the merged batch only when at least one
+    /// fragment is triggered, allowing uncaptioned group-album fragments to
+    /// contribute attachments without forwarding ambient group traffic.
+    pub triggered: bool,
+    pub message: NormalizedInboundMessage,
+}
+
+impl InboundBatchFragment {
+    /// Validate untrusted adapter-supplied batching metadata and the enclosed
+    /// normalized message before the host retains it.
+    pub fn validate(&self) -> Result<(), ChannelError> {
+        validate_batch_ref("batch_key", &self.batch_key)?;
+        validate_batch_ref("fragment_id", &self.fragment_id)?;
+        if self.settle_millis == 0 || self.settle_millis > MAX_INBOUND_BATCH_SETTLE_MILLIS {
+            return Err(ChannelError::Parse {
+                reason: format!(
+                    "batch settle window must be between 1 and \
+                     {MAX_INBOUND_BATCH_SETTLE_MILLIS} milliseconds"
+                ),
+            });
+        }
+        self.message.validate()
+    }
+}
+
+fn validate_batch_ref(kind: &str, value: &str) -> Result<(), ChannelError> {
+    if value.is_empty()
+        || value.len() > MAX_INBOUND_BATCH_REF_BYTES
+        || value.chars().any(|character| character.is_control())
+    {
+        return Err(ChannelError::Parse {
+            reason: format!(
+                "{kind} must be 1..={MAX_INBOUND_BATCH_REF_BYTES} bytes without control characters"
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// One normalized inbound message.
@@ -117,7 +191,7 @@ pub struct NormalizedInboundMessage {
     /// thread reply, …). The workflow's user-message payload requires it, so
     /// any host sink mapping normalized messages into the workflow needs it.
     pub trigger: ProductTriggerReason,
-    pub attachments: Vec<AttachmentRef>,
+    pub attachments: Vec<ChannelAttachmentRef>,
     /// Opaque per-message context (≤ 4 KiB) the host stores server-side and
     /// hands back at delivery time (reply routing). Never interpreted by the
     /// host.
@@ -127,14 +201,27 @@ pub struct NormalizedInboundMessage {
 /// Maximum size of an inbound message's opaque `reply_context`.
 pub const MAX_REPLY_CONTEXT_BYTES: usize = 4 * 1024;
 
-/// An attachment reference — the vendor URL/id plus a mime hint. Bytes are
+/// A transient vendor attachment reference: the descriptor the message
+/// declares plus the opaque provider handle used to fetch it. Bytes are
 /// fetched host-side through restricted egress with the channel credential
 /// only when a consumer needs them, keeping `inbound` pure.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AttachmentRef {
+///
+/// Named distinctly from `ironclaw_common::ChannelAttachmentRef`, which is the
+/// durable byte-free transcript reference — a different concept that used to
+/// share this name and forced import aliases wherever both appeared.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ChannelAttachmentRef {
     pub descriptor: ProductAttachmentDescriptor,
     pub vendor_ref: String,
-    pub mime_hint: Option<String>,
+}
+
+impl std::fmt::Debug for ChannelAttachmentRef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChannelAttachmentRef")
+            .field("descriptor", &self.descriptor)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A bounded immediate response (returned after verification, before any
@@ -178,11 +265,15 @@ pub struct OutboundTarget {
 #[derive(Debug, Clone)]
 pub enum OutboundPart {
     Text(String),
+    /// A project-workspace file materialized immediately before adapter
+    /// delivery. Raw bytes are transient: this part is never persisted in a
+    /// delivery attempt, event, projection, or transcript.
+    File(WorkspaceFile),
     /// Structured authentication challenge. The coordinator forwards this
     /// unchanged; each channel adapter owns native rendering while preserving
     /// the same recipe materialization WebUI consumes.
     AuthPrompt {
-        view: Box<crate::AuthPromptView>,
+        view: Box<crate::product_adapter::AuthPromptView>,
         direct_message: bool,
     },
     /// Remove an earlier delivery in the target conversation (the `Cleanup`
@@ -245,6 +336,8 @@ pub enum ChannelError {
     Render { reason: String },
     #[error("vendor wiring failed: {reason}")]
     VendorWiring { reason: String },
+    #[error("attachment transfer failed: {reason}")]
+    AttachmentTransfer { reason: String, retryable: bool },
     #[error("channel operation is not supported by this adapter")]
     Unsupported,
 }
@@ -279,6 +372,26 @@ impl ImmediateResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::product_adapter::ProductAttachmentKind;
+
+    #[test]
+    fn channel_attachment_ref_debug_redacts_the_vendor_reference() {
+        let attachment = ChannelAttachmentRef {
+            descriptor: ProductAttachmentDescriptor::new(
+                "file-1",
+                "application/pdf",
+                Some("report.pdf".to_string()),
+                Some(4),
+                ProductAttachmentKind::Document,
+            )
+            .expect("descriptor"),
+            vendor_ref: "opaque-provider-secret-reference".to_string(),
+        };
+
+        let debug = format!("{attachment:?}");
+        assert!(debug.contains("file-1"));
+        assert!(!debug.contains("opaque-provider-secret-reference"));
+    }
 
     #[test]
     fn reply_context_bound_is_enforced_host_side() {
@@ -305,5 +418,65 @@ mod tests {
             body: vec![0u8; MAX_IMMEDIATE_RESPONSE_BYTES + 1],
         };
         assert!(response.validate().is_err());
+    }
+
+    fn valid_batch_fragment() -> InboundBatchFragment {
+        InboundBatchFragment {
+            batch_key: "album-1".to_string(),
+            fragment_id: "message-1".to_string(),
+            order: 1,
+            settle_millis: 1_000,
+            triggered: true,
+            message: NormalizedInboundMessage {
+                actor: ExternalActorRef::new("user", "u-1", None::<&str>).expect("actor"),
+                conversation: ExternalConversationRef::new(None, "c-1", None, None)
+                    .expect("conversation"),
+                event_id: ExternalEventId::new("album-event").expect("event"),
+                text: "read both".to_string(),
+                trigger: ProductTriggerReason::DirectChat,
+                attachments: Vec::new(),
+                reply_context: None,
+            },
+        }
+    }
+
+    #[test]
+    fn inbound_batch_metadata_bounds_fail_closed() {
+        let mut fragment = valid_batch_fragment();
+        assert!(fragment.validate().is_ok());
+
+        fragment.batch_key.clear();
+        assert!(matches!(
+            fragment.validate(),
+            Err(ChannelError::Parse { .. })
+        ));
+
+        fragment = valid_batch_fragment();
+        fragment.fragment_id = "contains\ncontrol".to_string();
+        assert!(matches!(
+            fragment.validate(),
+            Err(ChannelError::Parse { .. })
+        ));
+
+        fragment = valid_batch_fragment();
+        fragment.batch_key = "x".repeat(MAX_INBOUND_BATCH_REF_BYTES + 1);
+        assert!(matches!(
+            fragment.validate(),
+            Err(ChannelError::Parse { .. })
+        ));
+
+        fragment = valid_batch_fragment();
+        fragment.settle_millis = 0;
+        assert!(matches!(
+            fragment.validate(),
+            Err(ChannelError::Parse { .. })
+        ));
+
+        fragment = valid_batch_fragment();
+        fragment.settle_millis = MAX_INBOUND_BATCH_SETTLE_MILLIS + 1;
+        assert!(matches!(
+            fragment.validate(),
+            Err(ChannelError::Parse { .. })
+        ));
     }
 }

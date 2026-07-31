@@ -1,4 +1,4 @@
-use ironclaw_host_api::{ProductSurfaceError, ProductSurfaceErrorCode};
+use ironclaw_host_api::product_surface::{ProductSurfaceError, ProductSurfaceErrorCode};
 use ironclaw_product::{ProductAdapterError, ProductSurfaceRejectionKind};
 use ironclaw_product::{ProductRejection, ProductRejectionKind};
 use serde::{Deserialize, Serialize};

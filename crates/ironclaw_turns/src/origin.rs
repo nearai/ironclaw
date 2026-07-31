@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use ironclaw_host_api::TurnOwner;
+use ironclaw_host_api::turn::TurnOwner;
 
 /// How this turn run was initiated. Generic — no product/channel specifics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,7 +160,7 @@ mod tests {
             Some(TurnSurfaceType::Channel),
             Some(RunOriginAdapter::new("telegram").unwrap()),
             TurnOwner::Personal {
-                user: ironclaw_host_api::UserId::new("u1").unwrap(),
+                user: ironclaw_host_api::ids::UserId::new("u1").unwrap(),
             },
         );
         let json = serde_json::to_string(&ctx).unwrap();
@@ -180,7 +180,7 @@ mod tests {
             None,
             Some(RunOriginAdapter::new("webui").unwrap()),
             TurnOwner::Personal {
-                user: ironclaw_host_api::UserId::new("u1").unwrap(),
+                user: ironclaw_host_api::ids::UserId::new("u1").unwrap(),
             },
         );
         let json = serde_json::to_string(&ctx).unwrap();

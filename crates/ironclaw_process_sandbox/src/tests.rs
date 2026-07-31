@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ironclaw_host_api::{RuntimeCredentialTarget, SecretHandle};
+use ironclaw_host_api::{http::RuntimeCredentialTarget, ids::SecretHandle};
 
 use crate::{
     ProcessSandboxPlanError as SandboxPlanError, SandboxCommandPlan, SandboxCredentialBinding,

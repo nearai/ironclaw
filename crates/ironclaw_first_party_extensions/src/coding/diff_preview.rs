@@ -1,4 +1,6 @@
-use ironclaw_host_api::{CapabilityDisplayOutputPreview, truncate_capability_display_text};
+use ironclaw_host_api::dispatch::{
+    CapabilityDisplayOutputPreview, truncate_capability_display_text,
+};
 use similar::{ChangeTag, TextDiff};
 
 const DIFF_CONTEXT_LINES: usize = 3;

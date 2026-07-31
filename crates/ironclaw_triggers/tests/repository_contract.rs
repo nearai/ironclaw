@@ -1,7 +1,11 @@
 use chrono::{SecondsFormat, TimeZone, Utc};
 use ironclaw_common::AutomationName;
 use ironclaw_filesystem::{LibSqlRootFilesystem, RootFilesystem, SeqNo};
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId, VirtualPath};
+use ironclaw_host_api::{
+    Timestamp,
+    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+    path::VirtualPath,
+};
 use ironclaw_libsql_runtime::LibSqlRuntime;
 use ironclaw_triggers::PostgresTriggerRepository;
 use ironclaw_triggers::{

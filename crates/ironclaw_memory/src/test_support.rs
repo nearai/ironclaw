@@ -33,7 +33,8 @@
 //! `async |service, invocation, write_request| { … }`.
 
 use ironclaw_host_api::{
-    AgentId, CorrelationId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+    ids::{AgentId, CorrelationId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
+    resource::ResourceScope,
 };
 
 use crate::{

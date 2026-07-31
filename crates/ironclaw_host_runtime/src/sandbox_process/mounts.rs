@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use ironclaw_host_api::{MountGrant, MountView, VirtualPath};
+use ironclaw_host_api::{
+    mount::{MountGrant, MountView},
+    path::VirtualPath,
+};
 
 use crate::RuntimeProcessError;
 
@@ -247,7 +250,7 @@ fn reject_nul(label: &str, value: &str) -> Result<(), RuntimeProcessError> {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{MountAlias, MountPermissions};
+    use ironclaw_host_api::{mount::MountPermissions, path::MountAlias};
 
     use super::*;
 

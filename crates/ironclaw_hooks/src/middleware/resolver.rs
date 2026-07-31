@@ -14,7 +14,7 @@
 //! unresolved case.
 
 use async_trait::async_trait;
-use ironclaw_host_api::ExtensionId;
+use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_turns::run_profile::LoopRequest;
 
 /// Resolves a [`LoopRequest`]'s input ref to a sanitized JSON view.
@@ -103,7 +103,7 @@ impl CapabilityProviderResolver for NullCapabilityProviderResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::CapabilityId;
+    use ironclaw_host_api::ids::CapabilityId;
     use ironclaw_turns::run_profile::{CapabilityInputRef, CapabilitySurfaceVersion};
 
     #[tokio::test]
