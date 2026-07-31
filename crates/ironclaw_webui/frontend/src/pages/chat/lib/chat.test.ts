@@ -359,7 +359,7 @@ test("Chat shows typing indicator before assistant text streams", () => {
   assert.ok(findComponent(tree, components.TypingIndicator));
 });
 
-test("Chat hides typing indicator once the active run streams assistant text", () => {
+test("Chat keeps typing indicator while the active run streams assistant text", () => {
   const { tree, components } = renderChat({
     hookState: {
       messages: [
@@ -392,7 +392,7 @@ test("Chat hides typing indicator once the active run streams assistant text", (
     },
   });
 
-  assert.equal(findComponent(tree, components.TypingIndicator), null);
+  assert.ok(findComponent(tree, components.TypingIndicator));
 });
 
 test("Chat keeps typing indicator when streamed text belongs to another run", () => {

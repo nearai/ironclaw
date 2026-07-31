@@ -830,11 +830,11 @@ export function ChatInput({
         />
 
         <div className="mt-2 flex items-center gap-2">
-          {isSubmitDisabled &&
+          {isSubmitDisabled && statusText &&
           (
             <span className="inline-flex items-center gap-2 text-xs text-[var(--v2-text-muted)]">
               <span className="h-2 w-2 rounded-full bg-[var(--v2-accent)]" />
-              {statusText || t("chat.statusWorking")}
+              {statusText}
             </span>
           )}
           <div className="ml-auto flex items-center gap-1.5">
