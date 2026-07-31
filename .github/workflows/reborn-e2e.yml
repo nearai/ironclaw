@@ -404,11 +404,15 @@ jobs:
           tar -C target/debug -xzf \
             artifacts/reborn-webui-v2-binary/ironclaw-reborn.tar.gz ironclaw
           chmod +x target/debug/ironclaw
+          # The archive preserves build time, while checkout uses current time.
+          # Mark this same-commit binary fresh so E2E fixtures do not rebuild it.
+          touch target/debug/ironclaw
           if [[ "${{ matrix.kind }}" == "browser" ]]; then
             mkdir -p target/e2e-sso/debug
             tar -C target/e2e-sso/debug -xzf \
               artifacts/reborn-webui-v2-sso-binary/ironclaw-sso.tar.gz ironclaw
             chmod +x target/e2e-sso/debug/ironclaw
+            touch target/e2e-sso/debug/ironclaw
           fi
           touch target/debug/.ironclaw-reborn-openai-compat.stamp
 
