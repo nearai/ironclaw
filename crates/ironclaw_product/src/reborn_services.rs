@@ -6643,12 +6643,17 @@ fn map_timeline_probe_error(error: SessionThreadError) -> ProductSurfaceError {
         SessionThreadError::Serialization(_)
         | SessionThreadError::Deserialization(_)
         | SessionThreadError::InvalidMessageTimestamp { .. }
-        | SessionThreadError::Backend(_) => ProductSurfaceError::from_status_kind(
-            ProductSurfaceErrorCode::Unavailable,
-            ProductSurfaceErrorKind::TimelineUnavailable,
-            503,
-            true,
-        ),
+        | SessionThreadError::Backend(_) => {
+            // The boundary error is sanitized to a retryable 503; the cause
+            // must stay visible server-side or these become undiagnosable.
+            tracing::warn!(%error, "timeline probe failed; returning retryable TimelineUnavailable");
+            ProductSurfaceError::from_status_kind(
+                ProductSurfaceErrorCode::Unavailable,
+                ProductSurfaceErrorKind::TimelineUnavailable,
+                503,
+                true,
+            )
+        }
         _ => map_ownership_probe_error(error),
     }
 }
