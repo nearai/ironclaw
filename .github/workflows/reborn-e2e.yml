@@ -359,7 +359,7 @@ jobs:
       IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE: "1"
     strategy:
       fail-fast: false
-      max-parallel: 6
+      max-parallel: 7
       matrix:
         include:
           - lane: browser
@@ -367,6 +367,9 @@ jobs:
             shard: ""
           - lane: fast-contracts
             kind: fast-contracts
+            shard: ""
+          - lane: provider-contracts
+            kind: provider
             shard: ""
           - lane: provider-0
             kind: provider
@@ -504,18 +507,18 @@ jobs:
                 tests/e2e/scenarios/test_reborn_blackbox_smoke.py \
                 -v --timeout=120
               ;;
-            provider-0)
-              IRONCLAW_PROVIDER_OPERATION_SHARD="${PROVIDER_SHARD}" \
-                scripts/ci/run-hermetic-deterministic-suite.sh command pytest \
-                  tests/e2e/scenarios/test_provider_capability_inventory.py \
-                  tests/e2e/scenarios/test_journey_coverage.py \
-                  tests/e2e/scenarios/test_emulate_reborn_provider_contracts.py \
-                  tests/e2e/scenarios/test_provider_fault_proxy.py \
-                  tests/e2e/scenarios/test_emulate_build_parity.py \
-                  tests/e2e/scenarios/test_provider_world_isolation.py \
-                  tests/e2e/scenarios/test_reborn_qa_trace_replay.py \
-                  tests/e2e/scenarios/test_reborn_qa_trace_full_path.py \
-                  -m "not shared_world" -v --timeout=120
+            provider-contracts)
+              scripts/ci/run-hermetic-deterministic-suite.sh command pytest \
+                tests/e2e/scenarios/test_provider_capability_inventory.py \
+                tests/e2e/scenarios/test_journey_coverage.py \
+                tests/e2e/scenarios/test_emulate_reborn_provider_contracts.py \
+                tests/e2e/scenarios/test_provider_fault_proxy.py \
+                tests/e2e/scenarios/test_emulate_build_parity.py \
+                tests/e2e/scenarios/test_provider_world_isolation.py \
+                tests/e2e/scenarios/test_reborn_qa_trace_replay.py \
+                tests/e2e/scenarios/test_reborn_qa_trace_full_path.py \
+                -k "not provider_operation_case_executes_with_provider_readback" \
+                -m "not shared_world" -v --timeout=120
               ;;
             provider-*)
               IRONCLAW_PROVIDER_OPERATION_SHARD="${PROVIDER_SHARD}" \
