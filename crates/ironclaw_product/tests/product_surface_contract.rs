@@ -14,6 +14,10 @@ use ironclaw_conversations::{
     InMemoryConversationServices,
 };
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, LoopGateRef, RunProfileId, RunProfileVersion, TurnActor,
+    TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
+};
 use ironclaw_host_api::{
     attachment::InboundAttachment,
     ids::{AgentId, ApprovalRequestId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
@@ -56,10 +60,8 @@ use ironclaw_product::{
 };
 use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GetRunStateRequest,
-    LoopGateRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
-    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor, TurnCoordinator, TurnError,
-    TurnGateRef, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
+    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnCoordinator, TurnError, TurnRunState,
 };
 
 fn sample_envelope(event_suffix: &str) -> ProductInboundEnvelope {
@@ -2759,7 +2761,7 @@ async fn bare_approve_with_invalid_stored_approval_route_rejects_invalid_gate_re
         "test string must pass is_approval_gate_ref"
     );
     assert!(
-        ironclaw_turns::TurnGateRef::new(invalid_gate_ref_str.as_str()).is_err(),
+        ironclaw_host_api::turn::TurnGateRef::new(invalid_gate_ref_str.as_str()).is_err(),
         "test string must fail TurnGateRef::new"
     );
 
@@ -2817,7 +2819,7 @@ async fn bare_approve_with_invalid_stored_approval_route_rejects_invalid_gate_re
 /// This verifies the `InvalidGateRef` branch in
 /// `resolve_via_delivered_auth_route`.  The BindingRequired fallback path is
 /// used because it fires BEFORE `dispatch_auth_resolution` calls
-/// `TurnGateRef::new` on the payload string (line ~1135), allowing the oversized
+/// `TurnGateRef::new` on the payload string, allowing the oversized
 /// invalid gate_ref to reach the delivered-route selection code.  The
 /// BindingRequired path calls `resolve_via_delivered_auth_route` with
 /// `expected_gate_ref = Some(payload.auth_request_ref)`, so the oversized
@@ -2838,7 +2840,7 @@ async fn bare_auth_deny_with_invalid_stored_auth_route_rejects_invalid_gate_ref(
         "test string must pass is_auth_gate_ref"
     );
     assert!(
-        ironclaw_turns::TurnGateRef::new(invalid_gate_ref_str.as_str()).is_err(),
+        ironclaw_host_api::turn::TurnGateRef::new(invalid_gate_ref_str.as_str()).is_err(),
         "test string must fail TurnGateRef::new"
     );
 

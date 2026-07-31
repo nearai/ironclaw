@@ -3,10 +3,9 @@ use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowRecord, AuthFlowStatus,
     AuthProductScope, CredentialAccountId, CredentialAccountStatus, Timestamp,
 };
-use ironclaw_turns::{
-    CancelRunResponse, IdempotencyKey, ResumeTurnResponse, TurnActor, TurnGateRef,
-};
-use ironclaw_turns::{TurnRunId, TurnScope};
+use ironclaw_host_api::turn::{IdempotencyKey, TurnActor, TurnGateRef};
+use ironclaw_host_api::turn::{TurnRunId, TurnScope};
+use ironclaw_turns::{CancelRunResponse, ResumeTurnResponse};
 use serde::{Deserialize, Serialize};
 
 use super::auth_rejected;

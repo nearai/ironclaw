@@ -16,7 +16,7 @@
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
-use ironclaw_turns::{TurnGateRef, TurnStatus};
+use ironclaw_host_api::turn::{TurnGateRef, TurnStatus};
 use serde_json::json;
 
 pub async fn stale_gate_ref_resume(g: &RebornIntegrationGroup) -> HarnessResult<()> {

@@ -28,6 +28,10 @@ use std::time::Duration;
 use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
+use ironclaw_host_api::turn::{
+    IdempotencyKey, ReplyTargetBindingRef, SanitizedCancelReason, SourceBindingRef, TurnActor,
+    TurnGateRef, TurnRunId, TurnScope, TurnStatus,
+};
 use ironclaw_host_api::{
     http::RuntimeHttpEgressRequest,
     ids::{CapabilityId, InvocationId, UserId},
@@ -50,9 +54,7 @@ use ironclaw_turns::run_profile::{
 };
 use ironclaw_turns::{
     AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, GateResumeDisposition,
-    IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
-    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnCoordinator, TurnGateRef, TurnRunId,
-    TurnRunState, TurnScope, TurnStatus,
+    ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnRunState,
 };
 
 use super::capability_backend::{

@@ -2,6 +2,9 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_host_api::turn::{
+    LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnGateRef, TurnRunId, TurnScope,
+};
 use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, InvocationId, ProcessId, ProjectId, TenantId, ThreadId, UserId},
     mount::{MountGrant, MountPermissions, MountView},
@@ -16,9 +19,6 @@ use ironclaw_processes::{
     SettleProcessDependencyRequest, SubmitProcessRequest,
 };
 use ironclaw_runner::subagent::await_edge::{EdgeTerminalKind, store::AwaitEdgeStore};
-use ironclaw_turns::{
-    LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnGateRef, TurnRunId, TurnScope,
-};
 
 #[tokio::test]
 async fn runner_await_edge_is_a_projection_over_process_dependencies() {

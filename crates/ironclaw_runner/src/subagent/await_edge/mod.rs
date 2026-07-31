@@ -6,10 +6,10 @@ pub mod store;
 
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::ids::{CapabilityId, ThreadId};
-use ironclaw_loop_host::{SpawnSubagentMode, SubagentKindId};
-use ironclaw_turns::{
+use ironclaw_host_api::turn::{
     LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnGateRef, TurnRunId, TurnScope,
 };
+use ironclaw_loop_host::{SpawnSubagentMode, SubagentKindId};
 use serde::{Deserialize, Serialize};
 
 /// CAS state machine (§2): `Open -> Settled -> Drained`, `Open -> Abandoned`.

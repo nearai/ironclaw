@@ -14,6 +14,10 @@ use ironclaw_event_projections::{
     CapabilityActivityProjection, ProjectionSnapshot, ThreadTimeline,
 };
 use ironclaw_events::{InMemoryDurableEventLog, RuntimeEvent};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, RunProfileId, RunProfileVersion, SourceBindingRef, TurnGateRef, TurnRunId,
+    TurnStatus,
+};
 use ironclaw_host_api::{
     action::{Action, NetworkMethod, NetworkScheme, NetworkTarget},
     approval::ApprovalRequest,
@@ -27,11 +31,10 @@ use ironclaw_host_api::{
     scope::Principal,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor as TurnEventCursor,
-    GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnBlockedGateKind,
-    TurnBlockedGateMetadata, TurnError, TurnEventKind, TurnEventPage, TurnGateRef,
-    TurnLifecycleEvent, TurnRunId, TurnRunState, TurnStatus,
+    CancelRunRequest, CancelRunResponse, EventCursor as TurnEventCursor, GetRunStateRequest,
+    ResumeTurnRequest, ResumeTurnResponse, SubmitTurnRequest, SubmitTurnResponse,
+    TurnBlockedGateKind, TurnBlockedGateMetadata, TurnError, TurnEventKind, TurnEventPage,
+    TurnLifecycleEvent, TurnRunState,
     run_profile::{
         LoopSafeSummary, SystemInferenceError, SystemInferencePort, SystemInferenceRequest,
         SystemInferenceResponse, SystemInferenceTaskId, SystemTaskKind,

@@ -39,6 +39,7 @@ use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
+use ironclaw_host_api::turn::TurnGateRef;
 use ironclaw_loop_host::{ModelCost, ModelCostTable, StaticModelCostTable};
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
@@ -47,7 +48,6 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::BudgetGateId;
-use ironclaw_turns::TurnGateRef;
 
 fn standalone_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
@@ -76,7 +76,7 @@ fn assert_budget_blocked_outcome(outcome: RebornTurnDriveOutcome) -> BudgetGateI
         } => {
             assert_eq!(
                 status,
-                ironclaw_turns::TurnStatus::BlockedResource,
+                ironclaw_host_api::turn::TurnStatus::BlockedResource,
                 "unexpected budget approval status"
             );
             assert_eq!(partial_text, None);

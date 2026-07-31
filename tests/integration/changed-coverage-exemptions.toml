@@ -17,3 +17,62 @@ branch_percent = 100.0
 # reason = "Target-specific arm cannot execute on the Linux coverage runner."
 # issue = "https://github.com/nearai/ironclaw/issues/NNNN"
 # review_after = "2026-10-30"
+
+# ---------------------------------------------------------------------------
+# WS1.1 turn-vocabulary move (PR #6967). These lines are a verbatim relocation
+# of existing bodies from `ironclaw_turns` into `ironclaw_host_api::turn`. No
+# test was deleted and no behavior changed: the 17 unit tests that exercise
+# them moved with them (ironclaw_host_api 347 -> 366 tests, ironclaw_turns
+# 380 -> 363, net +2 for two new assertions).
+#
+# Why they read as uncovered is a counter-attribution artifact of moving code
+# across a crate boundary, NOT lost integration coverage. Proof from the two
+# merged integration lcovs: `GateKind::from_status` scored 20 hits at its old
+# home (ironclaw_turns/src/status.rs:209) and 0 at its new one, while in the
+# SAME PR lcov its caller `ironclaw_turns/src/events.rs:55`
+# (`GateKind::from_status(status).map(Self::from)`) scored 8 hits. A caller
+# that executed 8 times proves the callee executed; llvm-cov simply attributes
+# the executed instantiation to the caller's crate rather than to the new
+# defining crate. Both crates are fully instrumented in this lane
+# (ironclaw_host_api overall: 82.9% of DA records non-zero), so this is not an
+# instrumentation-scope gap either.
+#
+# Tracked as the third gate-vs-restructure collision in #6963: every Wave 1-3
+# repoint PR and every Wave 5 family move will reproduce it until the gate
+# learns to treat a verbatim cross-crate move as unchanged code.
+
+[[exemption]]
+path = "crates/ironclaw_host_api/src/turn.rs"
+lines = [
+  803, 804, 805, 818, 819, 820, 824, 825, 826, 830, 831, 832,
+  869, 870, 871, 901, 902, 910, 911, 912, 913, 914, 915, 916,
+  923, 925, 940, 941, 942, 977, 978, 991, 992,
+]
+owner = "@nearai/reborn"
+reason = "Verbatim move of RunOriginAdapter accessors, TurnStatus::is_blocked, GateKind::blocked_status/from_status/into_blocked_reason and BlockedReason::gate_kind/gate_ref from ironclaw_turns. Cross-crate counter-attribution artifact, proven by the caller ironclaw_turns/src/events.rs:55 scoring 8 hits in the same lcov; unit coverage moved with the code."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_product/src/approval_prompt.rs"
+lines = [58]
+owner = "@nearai/reborn"
+reason = "Line is unchanged except for the GateRef -> TurnGateRef type rename that retired the colliding ironclaw_turns alias; integration-tier coverage state is identical before and after."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_product/src/auth_continuation.rs"
+lines = [411, 412, 413]
+owner = "@nearai/reborn"
+reason = "Lines are unchanged except for the GateRef -> TurnGateRef type rename that retired the colliding ironclaw_turns alias; integration-tier coverage state is identical before and after."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/runtime/auth_interaction.rs"
+lines = [94, 169]
+owner = "@nearai/reborn"
+reason = "Lines are unchanged except for the GateRef -> TurnGateRef type rename that retired the colliding ironclaw_turns alias; integration-tier coverage state is identical before and after."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"

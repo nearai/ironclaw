@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_approvals::{ApprovalRequestStorePort, ApprovalStoreError};
 use ironclaw_host_api::resource::ResourceScope;
-use ironclaw_turns::{TurnGateRef, TurnRunId};
+use ironclaw_host_api::turn::{TurnGateRef, TurnRunId};
 
 use super::gate_ref::{approval_gate_ref, approval_request_id_from_gate_ref};
 use super::{ApprovalGateRecord, ApprovalInteractionScope};

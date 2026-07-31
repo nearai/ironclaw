@@ -33,14 +33,12 @@ use crate::{
 };
 use async_trait::async_trait;
 use ironclaw_host_api::ids::UserId;
+use ironclaw_host_api::turn::{TurnGateRef, TurnRunId, TurnScope, TurnStatus};
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundError,
     OutboundStateStorePort,
 };
-use ironclaw_turns::{
-    GetRunStateRequest, TurnCoordinator, TurnGateRef, TurnRunId, TurnRunState, TurnScope,
-    TurnStatus,
-};
+use ironclaw_turns::{GetRunStateRequest, TurnCoordinator, TurnRunState};
 
 use crate::auth_prompt::{BlockedAuthFlowCanceller, BlockedAuthPromptRequest};
 

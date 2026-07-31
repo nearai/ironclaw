@@ -1,14 +1,13 @@
 use crate::ProductSurfaceRejectionKind;
 use ironclaw_approvals::ApprovalStatus;
+use ironclaw_host_api::turn::{IdempotencyKey, TurnActor, TurnGateRef, TurnRunId, TurnScope};
 use ironclaw_host_api::{
     action::Action,
     approval::ApprovalRequest,
     ids::{ApprovalRequestId, CapabilityId, InvocationId},
     resource::ResourceScope,
 };
-use ironclaw_turns::{
-    IdempotencyKey, ResumeTurnResponse, TurnActor, TurnGateRef, TurnRunId, TurnScope,
-};
+use ironclaw_turns::ResumeTurnResponse;
 use serde::{Deserialize, Serialize};
 
 use super::{approval_gate_ref, approval_rejected};

@@ -12,6 +12,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ironclaw_filesystem::RootFilesystem;
+use ironclaw_host_api::turn::{IdempotencyKey, TurnGateRef, TurnRunId, TurnScope, TurnStatus};
 use ironclaw_host_api::{
     ids::{AgentId, ProjectId, TenantId, ThreadId},
     path::VirtualPath,
@@ -57,8 +58,8 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, GetRunStateRequest,
-    IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnError,
-    TurnErrorCategory, TurnGateRef, TurnRunId, TurnScope, TurnStatus, run_profile::LoopModelUsage,
+    ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnError, TurnErrorCategory,
+    run_profile::LoopModelUsage,
 };
 use sha2::{Digest, Sha256};
 

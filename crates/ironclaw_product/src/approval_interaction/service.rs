@@ -7,12 +7,13 @@ use ironclaw_approvals::{
     PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverrideKey,
     ToolPermissionOverrideStorePort,
 };
+use ironclaw_host_api::turn::{TurnGateRef, TurnRunId, TurnStatus};
 use ironclaw_host_api::{
     action::Action, ids::CapabilityId, resource::ResourceScope, scope::Principal,
 };
 use ironclaw_turns::{
     GateResumeDisposition, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnError,
-    TurnErrorCategory, TurnGateRef, TurnRunId, TurnStatus,
+    TurnErrorCategory,
 };
 
 use super::gate_ref::{approval_reply_binding_ref, approval_source_binding_ref};

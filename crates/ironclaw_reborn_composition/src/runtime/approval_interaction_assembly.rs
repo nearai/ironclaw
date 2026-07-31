@@ -114,7 +114,7 @@ impl ProcessGateApprovalTurnRunLocator {
     async fn query(
         &self,
         scope: &ApprovalInteractionScope,
-        gate_ref: Option<ironclaw_turns::TurnGateRef>,
+        gate_ref: Option<ironclaw_host_api::turn::TurnGateRef>,
         include_historical: bool,
     ) -> Result<Vec<ironclaw_processes::ProcessGateRecord>, ironclaw_product::ProductSurfaceFailure>
     {
@@ -197,7 +197,7 @@ impl ApprovalTurnRunLocator for ProcessGateApprovalTurnRunLocator {
     async fn approval_run_for_gate(
         &self,
         scope: &ApprovalInteractionScope,
-        gate_ref: &ironclaw_turns::TurnGateRef,
+        gate_ref: &ironclaw_host_api::turn::TurnGateRef,
     ) -> Result<Option<TurnRunId>, ironclaw_product::ProductSurfaceFailure> {
         Ok(first_turn_run_for_gate(
             self.query(scope, Some(gate_ref.clone()), true).await?,

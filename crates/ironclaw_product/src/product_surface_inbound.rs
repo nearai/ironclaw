@@ -5,15 +5,14 @@
 //! evidence, WASM, or adapter registries.
 
 use ironclaw_attachments::{AttachmentBudgets, DEFAULT_ATTACHMENT_BUDGETS};
+use ironclaw_host_api::turn::{IdempotencyKey, SanitizedCancelReason, TurnGateRef, TurnRunId};
 use ironclaw_host_api::{
     attachment::InboundAttachment,
     ids::ThreadId,
     product_surface::{ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode},
     turn::{TurnActor, TurnScope},
 };
-use ironclaw_turns::{
-    CancelRunRequest, IdempotencyKey, SanitizedCancelReason, TurnGateRef, TurnRunId,
-};
+use ironclaw_turns::CancelRunRequest;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

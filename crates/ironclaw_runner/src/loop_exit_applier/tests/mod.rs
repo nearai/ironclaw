@@ -2,6 +2,10 @@
 use std::sync::Arc;
 
 use ironclaw_host_api::ids::{AgentId, ApprovalRequestId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::turn::{
+    LoopGateRef, LoopMessageRef, LoopResultRef, TurnActor, TurnCheckpointId, TurnGateRef, TurnId,
+    TurnRunId, TurnScope, TurnStatus,
+};
 use ironclaw_loop_host::SpawnSubagentMode;
 use ironclaw_threads::{
     AppendAssistantDraftRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
@@ -12,9 +16,7 @@ use ironclaw_turns::test_support::{in_memory_agent_turn_runtime, in_memory_loop_
 use ironclaw_turns::{
     AgentTurnRuntimePort, LoopBlocked, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStateRef,
     LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopExit, LoopFailed, LoopFailureKind,
-    LoopGateRef, LoopMessageRef, LoopResultRef, PutLoopCheckpointRequest,
-    RedactedCheckpointPayload, TurnActor, TurnCheckpointId, TurnError, TurnGateRef, TurnId,
-    TurnRunId, TurnScope, TurnStatus, run_profile::LoopModelUsage,
+    PutLoopCheckpointRequest, RedactedCheckpointPayload, TurnError, run_profile::LoopModelUsage,
 };
 
 use super::{

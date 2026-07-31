@@ -5,6 +5,7 @@ use ironclaw_auth::{
     AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource, AuthGateRef, TurnGateAuthFlowQuery,
     TurnRunRef, flow_matches_turn_gate_query,
 };
+use ironclaw_host_api::turn::{TurnGateRef, TurnRunId, TurnScope};
 use ironclaw_processes::{
     ProcessGateOwnerMatch, ProcessGateQuery, ProcessGateQuerySource, ProcessSuspensionKind,
 };
@@ -14,7 +15,6 @@ use ironclaw_product::{
     ListPendingAuthInteractionsResponse, ProductSurfaceFailure, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse,
 };
-use ironclaw_turns::{TurnGateRef, TurnRunId, TurnScope};
 
 use crate::process_gate_turn_view::{current_turn_gate_runs, first_turn_run_for_gate};
 

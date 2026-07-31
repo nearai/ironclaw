@@ -25,7 +25,7 @@ mod reborn_support;
 #[path = "../../support/mod.rs"]
 mod support;
 
-use ironclaw_turns::{TurnGateRef, TurnStatus};
+use ironclaw_host_api::turn::{TurnGateRef, TurnStatus};
 use reborn_support::assertions::ToolErrorClass;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::group::RebornIntegrationGroup;

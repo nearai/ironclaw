@@ -514,6 +514,10 @@ fn production_scheduler_wake_guard_passes_standalone_with_absent_wiring() {
 
 use ironclaw_host_api::ids::ProjectId;
 use ironclaw_host_api::state::{InstallationState, LifecyclePublicState};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, IdempotencyKey, LoopResultRef, ReplyTargetBindingRef,
+    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnId, TurnRunId, TurnScope, TurnStatus,
+};
 use ironclaw_host_api::{
     ids::{
         ActivityId, AgentId, ApprovalRequestId, CapabilityId, InvocationId, TenantId, ThreadId,
@@ -554,10 +558,8 @@ use ironclaw_threads::{
     ToolResultSafeSummary,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, GetRunStateRequest, IdempotencyKey,
-    LoopResultRef, ReplyTargetBindingRef, SanitizedCancelReason, SourceBindingRef,
-    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnId, TurnRunId,
-    TurnScope, TurnStatus,
+    AllowAllTurnAdmissionPolicy, GetRunStateRequest, SubmitChildRunRequest, SubmitTurnRequest,
+    SubmitTurnResponse,
     run_profile::{
         InMemoryRunProfileResolver, LoopCapabilityPort, LoopRunContext, ModelProfileId,
         ProviderToolCall, RegisterProviderToolCallRequest, RunProfileResolutionRequest,
@@ -1570,7 +1572,7 @@ fn nearai_gateway_test_request() -> HostManagedModelRequest {
         messages: vec![ironclaw_loop_host::HostManagedModelMessage {
             role: HostManagedModelMessageRole::User,
             content: "hello model".to_string(),
-            content_ref: ironclaw_turns::LoopMessageRef::new(
+            content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
                 "msg:22222222-2222-2222-2222-222222222222",
             )
             .expect("message ref"),
@@ -3396,7 +3398,7 @@ async fn send_user_message_auto_queues_trace_for_enrolled_scope() {
 /// carried.
 #[tokio::test(flavor = "multi_thread")]
 async fn send_user_message_persists_personal_owner_for_webui() {
-    use ironclaw_turns::TurnOwner;
+    use ironclaw_host_api::turn::TurnOwner;
 
     let root = tempfile::tempdir().expect("tempdir");
     let actor_owner_id = "runtime-personal-owner-user";
@@ -3801,8 +3803,10 @@ async fn cancel_run_propagates_to_subagent_children() {
                     result_ref,
                     handoff: None,
                     parent_run_context: parent_run_context.clone(),
-                    gate_ref: ironclaw_turns::TurnGateRef::new("gate:runtime-cancel-child")
-                        .unwrap(),
+                    gate_ref: ironclaw_host_api::turn::TurnGateRef::new(
+                        "gate:runtime-cancel-child",
+                    )
+                    .unwrap(),
                 })
                 .unwrap(),
             ),

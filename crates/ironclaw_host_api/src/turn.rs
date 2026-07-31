@@ -1040,6 +1040,39 @@ mod tests {
     }
 
     #[test]
+    fn turn_gate_ref_is_bounded_only_unlike_the_prefix_validated_loop_gate_ref() {
+        // `TurnGateRef` is `bounded_ref!`, NOT `loop_ref!`: production mints
+        // `gate:approval-{id}` / `gate:auth-{id}` and `is_auth_gate_ref`-style
+        // predicates match that prefix, but the *type* enforces only
+        // non-empty / <= 256 bytes / no control characters. Callers and
+        // fixtures across the workspace legitimately hold unprefixed refs
+        // (`"gate-alpha"`, `"custom-auth-gate"`, `"stress-gate:{run_id}"`), so
+        // tightening this constructor would break them and orphan every
+        // persisted ref. `LoopGateRef` is the prefix-validated family.
+        for accepted in [
+            "gate-alpha",
+            "custom-auth-gate",
+            "approval:missing",
+            "gate:auth-1",
+        ] {
+            assert!(
+                TurnGateRef::new(accepted).is_ok(),
+                "{accepted:?} must remain a valid TurnGateRef"
+            );
+        }
+        assert!(TurnGateRef::new("").is_err());
+        assert!(TurnGateRef::new("x".repeat(257)).is_err());
+        assert!(TurnGateRef::new("gate:has\u{7f}control").is_err());
+
+        // The contrast that motivates this test.
+        assert!(LoopGateRef::new("gate:alpha").is_ok());
+        assert!(
+            LoopGateRef::new("gate-alpha").is_err(),
+            "LoopGateRef is the prefix-validated family"
+        );
+    }
+
+    #[test]
     fn run_origin_adapter_rejects_empty() {
         assert!(RunOriginAdapter::new("").is_err());
     }

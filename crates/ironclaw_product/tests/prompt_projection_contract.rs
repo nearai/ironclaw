@@ -2,6 +2,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use ironclaw_auth::{AuthProductError, AuthProviderId, OAuthAuthorizationUrl};
+use ironclaw_host_api::turn::{TurnGateRef, TurnRunId, TurnScope};
 use ironclaw_host_api::{
     capability::RuntimeCredentialAccountSetup,
     decision::RuntimeCredentialAuthRequirement,
@@ -12,7 +13,6 @@ use ironclaw_product::{
     AuthChallengeProvider, AuthChallengeView, BlockedAuthPromptRequest, approval_prompt_lookup,
     auth_prompt_view_for_blocked_auth,
 };
-use ironclaw_turns::{TurnGateRef, TurnRunId, TurnScope};
 
 #[derive(Debug)]
 struct OAuthChallenge {

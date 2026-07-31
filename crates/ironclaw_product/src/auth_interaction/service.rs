@@ -5,9 +5,10 @@ use ironclaw_auth::{
     AuthChallenge, AuthFlowId, AuthFlowManager, AuthFlowStatus, AuthProductError,
     CredentialAccountId, CredentialSelectionInput,
 };
+use ironclaw_host_api::turn::{TurnGateRef, TurnRunId, TurnStatus};
 use ironclaw_turns::{
     GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
-    TurnCoordinator, TurnError, TurnErrorCategory, TurnGateRef, TurnRunId, TurnStatus,
+    TurnCoordinator, TurnError, TurnErrorCategory,
 };
 
 use super::types::is_pending_auth_status;

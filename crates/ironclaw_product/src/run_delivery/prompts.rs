@@ -6,8 +6,8 @@
 //! them into their native markup.
 
 use crate::{ApprovalPromptContextView, AuthPromptChallengeKind, AuthPromptView, GatePromptView};
+use ironclaw_host_api::turn::{TurnGateRef, TurnRunId};
 use ironclaw_outbound::RunNotificationEventKind;
-use ironclaw_turns::{TurnGateRef, TurnRunId};
 
 use crate::is_approval_gate_ref;
 
@@ -226,7 +226,7 @@ pub(crate) fn triggered_label_from_prompt(prompt: &str) -> String {
 mod tests {
     use super::*;
     use ironclaw_host_api::product_adapter::PairingPromptView;
-    use ironclaw_turns::TurnRunId;
+    use ironclaw_host_api::turn::TurnRunId;
 
     fn view(challenge_kind: Option<AuthPromptChallengeKind>) -> AuthPromptView {
         AuthPromptView {

@@ -242,6 +242,7 @@ mod tests {
     use ironclaw_auth::{
         AuthFlowId, AuthGateRef, AuthProductScope, AuthProviderId, AuthSurface, TurnRunRef,
     };
+    use ironclaw_host_api::turn::{EventCursor, TurnGateRef, TurnScope, TurnStatus};
     use ironclaw_host_api::{
         capability::RuntimeCredentialAccountSetup,
         decision::RuntimeCredentialAuthRequirement,
@@ -250,8 +251,8 @@ mod tests {
     };
     use ironclaw_processes::{ProcessGateRecord, ProcessSuspension};
     use ironclaw_turns::{
-        CancelRunRequest, CancelRunResponse, EventCursor, GetRunStateRequest, SubmitTurnRequest,
-        SubmitTurnResponse, TurnError, TurnGateRef, TurnRunState, TurnScope, TurnStatus,
+        CancelRunRequest, CancelRunResponse, GetRunStateRequest, SubmitTurnRequest,
+        SubmitTurnResponse, TurnError, TurnRunState,
     };
 
     struct RecordingInnerDispatcher {

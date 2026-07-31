@@ -6,12 +6,12 @@ use crate::{
 };
 use ironclaw_approvals::ApprovalRequestStorePort;
 use ironclaw_approvals::ApprovalStoreError;
+use ironclaw_host_api::turn::{TurnActor, TurnGateRef, TurnScope};
 use ironclaw_host_api::{
     action::{Action, NetworkMethod, NetworkScheme},
     approval::ApprovalRequest,
     ids::{InvocationId, UserId},
 };
-use ironclaw_turns::{TurnActor, TurnGateRef, TurnScope};
 use thiserror::Error;
 
 use crate::{ApprovalInteractionScope, approval_request_id_from_gate_ref};

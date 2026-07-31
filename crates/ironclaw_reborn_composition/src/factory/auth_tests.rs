@@ -9,6 +9,11 @@ use ironclaw_auth::{
     TurnRunRef,
 };
 use ironclaw_events::{InMemorySecurityAuditSink, SecurityBoundary, SecurityDecision};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, IdempotencyKey, ReplyTargetBindingRef, RunProfileId,
+    RunProfileRequest, RunProfileVersion, SourceBindingRef, TurnActor, TurnGateRef, TurnId,
+    TurnRunId, TurnScope, TurnStatus,
+};
 use ironclaw_host_api::{
     http::{
         RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
@@ -24,10 +29,8 @@ use ironclaw_processes::{
 use ironclaw_product::ProductAuthTurnGateResumeDispatcher;
 use ironclaw_secrets::SecretStore;
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GetRunStateRequest,
-    IdempotencyKey, ReplyTargetBindingRef, RunProfileId, RunProfileRequest, RunProfileVersion,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
-    TurnGateRef, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    CancelRunRequest, CancelRunResponse, GetRunStateRequest, SubmitTurnRequest, SubmitTurnResponse,
+    TurnCoordinator, TurnError, TurnRunState,
 };
 use secrecy::SecretString;
 use std::sync::Mutex;
@@ -207,7 +210,7 @@ async fn standalone_oauth_turn_gate_callback_resumes_default_turn_coordinator() 
         .await
         .expect("submit turn");
     let SubmitTurnResponse::Accepted { run_id, .. } = submit;
-    let gate_ref = ironclaw_turns::TurnGateRef::new("gate:auth-callback").unwrap();
+    let gate_ref = ironclaw_host_api::turn::TurnGateRef::new("gate:auth-callback").unwrap();
     suspend_auth_process(
         runtime_surfaces.processes.transitions(),
         &scope,
@@ -894,7 +897,7 @@ async fn suspend_auth_process(
             worker_id,
             lease_token: claimed.lease_token,
             checkpoint_ref: ProcessCheckpointRef::from_trusted(
-                ironclaw_turns::TurnCheckpointId::new()
+                ironclaw_host_api::turn::TurnCheckpointId::new()
                     .as_uuid()
                     .to_string(),
             ),
@@ -965,7 +968,7 @@ async fn submit_and_block_auth_run(
     scope: TurnScope,
     actor: TurnActor,
     gate_ref: &str,
-) -> ironclaw_turns::TurnRunId {
+) -> ironclaw_host_api::turn::TurnRunId {
     let submit = turn_coordinator
         .submit_turn(SubmitTurnRequest {
             requested_model: None,
@@ -990,7 +993,7 @@ async fn submit_and_block_auth_run(
         runtime_surfaces.processes.transitions(),
         &scope,
         run_id,
-        ironclaw_turns::TurnGateRef::new(gate_ref).unwrap(),
+        ironclaw_host_api::turn::TurnGateRef::new(gate_ref).unwrap(),
         Vec::new(),
     )
     .await;

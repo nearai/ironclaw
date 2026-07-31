@@ -10,10 +10,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 pub use ironclaw_auth::RebornAuthContinuationDispatcher as ProductAuthContinuationDispatcher;
 use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthProductError};
+use ironclaw_host_api::turn::{IdempotencyKey, TurnGateRef, TurnRunId, TurnScope, TurnStatus};
 use ironclaw_turns::{
-    GateResumeDisposition, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
-    ResumeTurnRequest, TurnCoordinator, TurnError, TurnErrorCategory, TurnGateRef, TurnRunId,
-    TurnScope, TurnStatus,
+    GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
+    TurnCoordinator, TurnError, TurnErrorCategory,
 };
 use uuid::Uuid;
 

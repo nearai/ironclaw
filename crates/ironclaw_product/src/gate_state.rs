@@ -1,7 +1,5 @@
-use ironclaw_turns::{
-    GetRunStateRequest, TurnActor, TurnCoordinator, TurnError, TurnGateRef, TurnRunId, TurnScope,
-    TurnStatus,
-};
+use ironclaw_host_api::turn::{TurnActor, TurnGateRef, TurnRunId, TurnScope, TurnStatus};
+use ironclaw_turns::{GetRunStateRequest, TurnCoordinator, TurnError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BlockedGateState {

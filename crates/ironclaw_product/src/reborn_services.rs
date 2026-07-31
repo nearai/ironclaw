@@ -27,6 +27,10 @@ use ironclaw_auth::{
     ProviderScope,
 };
 use ironclaw_common::{AutomationName, AutomationNameError};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, IdempotencyKey, SanitizedCancelReason, TurnActor, TurnGateRef, TurnRunId,
+    TurnScope, TurnStatus,
+};
 use ironclaw_host_api::{
     attachment::InboundAttachment,
     capability::{EffectKind, GrantConstraints, PermissionMode},
@@ -51,10 +55,8 @@ use ironclaw_threads::{
     ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
-    ResumeTurnRequest, RetryTurnRequest, SanitizedCancelReason, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnGateRef, TurnRunId, TurnScope,
-    TurnStatus,
+    GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest, RetryTurnRequest,
+    SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError,
 };
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -6557,7 +6559,7 @@ fn parse_replay_run_id(value: Option<String>) -> Result<TurnRunId, ProductSurfac
 fn webui_source_binding_ref_from_raw(
     prefix: &str,
     raw: &str,
-) -> Result<ironclaw_turns::SourceBindingRef, ProductSurfaceError> {
+) -> Result<ironclaw_host_api::turn::SourceBindingRef, ProductSurfaceError> {
     bounded_source_binding_ref(prefix, raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES).map_err(|_| {
         ProductSurfaceError::from_status(ProductSurfaceErrorCode::Internal, 500, false)
     })
@@ -6566,7 +6568,7 @@ fn webui_source_binding_ref_from_raw(
 fn webui_reply_target_binding_ref_from_raw(
     prefix: &str,
     raw: &str,
-) -> Result<ironclaw_turns::ReplyTargetBindingRef, ProductSurfaceError> {
+) -> Result<ironclaw_host_api::turn::ReplyTargetBindingRef, ProductSurfaceError> {
     bounded_reply_target_binding_ref(prefix, raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES).map_err(|_| {
         ProductSurfaceError::from_status(ProductSurfaceErrorCode::Internal, 500, false)
     })
@@ -6839,7 +6841,7 @@ fn webui_retry_binding_id(
     )
 }
 
-fn gate_ref_string(gate_ref: &ironclaw_turns::TurnGateRef) -> String {
+fn gate_ref_string(gate_ref: &ironclaw_host_api::turn::TurnGateRef) -> String {
     gate_ref.as_str().to_string()
 }
 
@@ -7095,7 +7097,7 @@ fn kind_for_surface_rejection(kind: ProductSurfaceRejectionKind) -> ProductSurfa
 }
 
 fn create_thread_metadata_json(
-    client_action_id: &ironclaw_turns::IdempotencyKey,
+    client_action_id: &ironclaw_host_api::turn::IdempotencyKey,
 ) -> Result<String, ProductSurfaceError> {
     serde_json::to_string(&serde_json::json!({
         "client_action_id": client_action_id.as_str(),
@@ -7220,7 +7222,7 @@ fn product_agent_bound_caller_from_webui(
 
 fn generated_thread_id(
     caller: &ProductSurfaceCaller,
-    client_action_id: &ironclaw_turns::IdempotencyKey,
+    client_action_id: &ironclaw_host_api::turn::IdempotencyKey,
 ) -> ThreadId {
     let seed = format!(
         "{}{}{}{}{}{}",

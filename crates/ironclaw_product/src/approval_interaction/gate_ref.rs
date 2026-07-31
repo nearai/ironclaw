@@ -1,5 +1,5 @@
 use ironclaw_host_api::ids::ApprovalRequestId;
-use ironclaw_turns::{ReplyTargetBindingRef, SourceBindingRef, TurnGateRef};
+use ironclaw_host_api::turn::{ReplyTargetBindingRef, SourceBindingRef, TurnGateRef};
 
 use super::{ApprovalInteractionRejectionKind, approval_rejected};
 use crate::binding_ref::{
