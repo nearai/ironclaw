@@ -160,6 +160,10 @@ where
     filesystem: Arc<ScopedFilesystem<F>>,
     known_thread_index_rows: Mutex<HashSet<String>>,
     ready_thread_index_scopes: Mutex<HashSet<String>>,
+    /// Mounts whose `/threads`-root index specs are already declared, keyed by
+    /// `tenant:user` — the pair the alias resolves through. Keeps thread create
+    /// off the index-DDL path after a mount's first thread.
+    ready_index_mounts: Mutex<HashSet<String>>,
     thread_index_declaration_lock: tokio::sync::Mutex<()>,
     one_shot_context_windows: Mutex<HashMap<String, ContextWindow>>,
 }
@@ -173,6 +177,7 @@ where
             filesystem,
             known_thread_index_rows: Mutex::new(HashSet::new()),
             ready_thread_index_scopes: Mutex::new(HashSet::new()),
+            ready_index_mounts: Mutex::new(HashSet::new()),
             thread_index_declaration_lock: tokio::sync::Mutex::new(()),
             one_shot_context_windows: Mutex::new(HashMap::new()),
         }
@@ -293,28 +298,66 @@ where
             ))
     }
 
-    async fn ensure_thread_record_indexes(
+    /// Declare every ordered-index spec this crate queries, once per mount.
+    ///
+    /// These are declared at the `/threads` alias root rather than under each
+    /// thread. An ordered-index declaration installs write-maintained
+    /// projection triggers whose match clause embeds the declared prefix, so
+    /// declaring per thread both cost a DDL transaction on every thread create
+    /// and accumulated triggers without bound (three per spec per thread) on
+    /// the shared entries table. Every spec leads with its partition key
+    /// (`thread_id`, or `scope_key` for the listing projection), so a single
+    /// declaration above the per-thread paths serves every thread under this
+    /// mount; `query_ordered` resolves it by walking ancestor prefixes.
+    ///
+    /// The alias root resolves to a per-(tenant, user) backend path, so the
+    /// memo is keyed by that pair. Racing callers may each declare once more
+    /// than strictly needed — declarations are idempotent by contract, and the
+    /// backend keeps its own cache on the same resolved path — which is why
+    /// this deliberately takes no lock.
+    ///
+    /// `fail_soft_unsupported` lets a caller that only needs the projection for
+    /// an optional listing tolerate a mount without ordered-index support;
+    /// callers that require it propagate. The mount is memoized as declared
+    /// only on full success, so a fail-soft skip does not suppress a later
+    /// required declaration.
+    pub(super) async fn declare_root_indexes(
         &self,
         scope: &ThreadScope,
-        thread_id: &ThreadId,
+        fail_soft_unsupported: bool,
     ) -> Result<(), SessionThreadError> {
-        let messages = messages_root(scope, thread_id)?;
-        for index in [
-            message_sequence_index_spec()?,
-            message_kind_status_index_spec()?,
-        ] {
-            self.filesystem
-                .ensure_index(&scope.to_resource_scope(), &messages, &index)
-                .await?;
+        let resource_scope = scope.to_resource_scope();
+        let mount_key = format!(
+            "{}:{}",
+            resource_scope.tenant_id.as_str(),
+            resource_scope.user_id.as_str()
+        );
+        if self
+            .ready_index_mounts
+            .lock()
+            .map(|ready| ready.contains(&mount_key))
+            .unwrap_or(false)
+        {
+            return Ok(());
         }
-        let summaries = summaries_root(scope, thread_id)?;
-        self.filesystem
-            .ensure_index(
-                &scope.to_resource_scope(),
-                &summaries,
-                &summary_index_spec()?,
-            )
-            .await?;
+        let root = scoped_path(THREADS_PREFIX)?;
+        for index in root_index_specs()? {
+            match self
+                .filesystem
+                .ensure_index(&resource_scope, &root, &index)
+                .await
+            {
+                Ok(()) => {}
+                Err(FilesystemError::Unsupported { .. }) if fail_soft_unsupported => {
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if let Ok(mut ready) = self.ready_index_mounts.lock() {
+            ready.insert(mount_key.clone());
+            thread_index::evict_hash_set_entry_over_limit(&mut ready, 512, &mount_key);
+        }
         Ok(())
     }
 
@@ -1328,8 +1371,7 @@ where
         .await
         .map_err(map_cas_error)?;
         if created {
-            self.ensure_thread_record_indexes(&record.scope, &record.thread_id)
-                .await?;
+            self.declare_root_indexes(&record.scope, false).await?;
         }
         if created || !self.is_thread_index_known(&record.scope, &record.thread_id) {
             self.refresh_thread_index_from_source(&record.scope, &record.thread_id)
@@ -2841,6 +2883,18 @@ fn fs_index_key(raw: &str) -> Result<IndexKey, SessionThreadError> {
 fn fs_index_name(raw: &str) -> Result<IndexName, SessionThreadError> {
     IndexName::new(raw)
         .map_err(|error| SessionThreadError::Backend(format!("invalid index name: {error}")))
+}
+
+/// Every ordered-index spec this crate queries, all declared together at the
+/// `/threads` alias root. Each leads with its partition key, so one
+/// declaration above the per-thread paths serves every thread on the mount.
+fn root_index_specs() -> Result<[IndexSpec; 4], SessionThreadError> {
+    Ok([
+        message_sequence_index_spec()?,
+        message_kind_status_index_spec()?,
+        summary_index_spec()?,
+        thread_index::thread_activity_index_spec()?,
+    ])
 }
 
 fn summary_index_spec() -> Result<IndexSpec, SessionThreadError> {

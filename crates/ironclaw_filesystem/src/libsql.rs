@@ -805,14 +805,31 @@ impl RootFilesystem for LibSqlRootFilesystem {
         page: &crate::OrderedPage,
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
         let conn = self.read_connection().await?;
+        // Resolve the spec against `path` and every ancestor prefix, most
+        // specific first, so a caller may declare the index once on a higher
+        // prefix and query a child path. `/shared` keeps its existing
+        // precedence over every path-derived candidate. The candidate list is
+        // bounded by path depth, so this stays a keyed lookup, not a scan.
+        let candidate_prefixes = crate::index::ancestor_prefixes(path.as_str());
+        let mut spec_params: Vec<libsql::Value> = candidate_prefixes
+            .iter()
+            .map(|prefix| libsql::Value::Text((*prefix).to_string()))
+            .collect();
+        spec_params.push(libsql::Value::Text("/shared".to_string()));
+        let spec_placeholders: Vec<String> = (1..=spec_params.len())
+            .map(|position| format!("?{position}"))
+            .collect();
+        let name_placeholder = format!("?{}", spec_params.len() + 1);
+        spec_params.push(libsql::Value::Text(page.index.as_str().to_string()));
+        let spec_sql = format!(
+            "SELECT keys, kind FROM root_filesystem_index_specs \
+             WHERE prefix IN ({}) AND name = {name_placeholder} \
+             ORDER BY CASE WHEN prefix = '/shared' THEN 0 ELSE 1 END, LENGTH(prefix) DESC \
+             LIMIT 1",
+            spec_placeholders.join(", ")
+        );
         let mut spec_rows = conn
-            .query(
-                "SELECT keys, kind FROM root_filesystem_index_specs \
-                 WHERE prefix IN (?1, '/shared') AND name = ?2 \
-                 ORDER BY CASE WHEN prefix = '/shared' THEN 0 ELSE 1 END \
-                 LIMIT 1",
-                libsql::params![path.as_str(), page.index.as_str()],
-            )
+            .query(&spec_sql, spec_params)
             .await
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Query, error))?;
         let spec = if let Some(row) = spec_rows
@@ -2234,7 +2251,7 @@ impl LibSqlRootFilesystem {
         // Scan the spec catalog for FTS specs whose prefix is path or any
         // ancestor (so callers may declare the index on a higher prefix
         // and query a child path).
-        let candidate_prefixes = ancestor_prefixes(path.as_str());
+        let candidate_prefixes = crate::index::ancestor_prefixes(path.as_str());
         let placeholders: Vec<String> = (1..=candidate_prefixes.len())
             .map(|i| format!("?{i}"))
             .collect();
@@ -2245,7 +2262,7 @@ impl LibSqlRootFilesystem {
         );
         let params: Vec<libsql::Value> = candidate_prefixes
             .iter()
-            .map(|p| libsql::Value::Text(p.clone()))
+            .map(|p| libsql::Value::Text((*p).to_string()))
             .collect();
         let mut rows = conn
             .query(&sql, params)
@@ -2730,22 +2747,6 @@ fn collect_fts_keys(filter: &Filter, out: &mut Vec<String>) {
     }
 }
 
-/// All ancestor paths of `path`, **most specific first**, ending at `/`.
-/// Used to find an FTS index declared on a higher prefix that should still
-/// cover descendant queries.
-fn ancestor_prefixes(path: &str) -> Vec<String> {
-    let mut out = vec![path.trim_end_matches('/').to_string()];
-    let mut cur = path.trim_end_matches('/').to_string();
-    while let Some(idx) = cur.rfind('/') {
-        if idx == 0 {
-            out.push("/".to_string());
-            break;
-        }
-        cur.truncate(idx);
-        out.push(cur.clone());
-    }
-    out
-}
 fn bind_index_value(
     path: &VirtualPath,
     value: &IndexValue,

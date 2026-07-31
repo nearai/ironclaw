@@ -1172,6 +1172,192 @@ async fn libsql_ordered_index_declaration_never_backfills_existing_rows() {
     );
 }
 
+/// Shared cross-backend body: an ordered-index spec declared on an ancestor
+/// prefix serves queries at child paths, and those queries stay scoped to the
+/// queried child subtree.
+///
+/// Projection rows are keyed by spec name and path only, with no record of the
+/// prefix that declared them, so a backend resolving an ancestor spec must
+/// still constrain results to the queried subtree. Without that constraint a
+/// child query returns a sibling's rows — a scope leak, not just a parity
+/// difference.
+async fn ancestor_declared_ordered_index_contract<F: RootFilesystem>(filesystem: &F, base: &str) {
+    let rank = IndexKey::new("rank").unwrap();
+    let item_id = IndexKey::new("item_id").unwrap();
+    let spec = IndexSpec::new(
+        IndexName::new("ancestor_declared_items_v1").unwrap(),
+        vec![rank.clone(), item_id.clone()],
+        IndexKind::Exact,
+    );
+    let root = VirtualPath::new(base.to_string()).unwrap();
+    filesystem.ensure_index(&root, &spec).await.unwrap();
+
+    for (child, leaf) in [("alpha", "a-1"), ("alpha", "a-2"), ("beta", "b-1")] {
+        filesystem
+            .put(
+                &VirtualPath::new(format!("{base}/{child}/{leaf}")).unwrap(),
+                Entry::record(
+                    RecordKind::new("ancestor_item").unwrap(),
+                    &serde_json::json!({}),
+                )
+                .unwrap()
+                .with_indexed(rank.clone(), IndexValue::Text(leaf.to_string()))
+                .with_indexed(item_id.clone(), IndexValue::Text(leaf.to_string())),
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+    }
+
+    let page = || {
+        ironclaw_filesystem::OrderedPage::new(
+            spec.name.clone(),
+            rank.clone(),
+            item_id.clone(),
+            SortDirection::Ascending,
+            10,
+        )
+    };
+    let paths_at = async |prefix: String| -> Vec<String> {
+        filesystem
+            .query_ordered(&VirtualPath::new(prefix).unwrap(), &Filter::All, &page())
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.path.as_str().to_string())
+            .collect()
+    };
+
+    // Declared on the ancestor, queried on a child: the write path projected
+    // into the ancestor declaration, and resolution found it from below.
+    assert_eq!(
+        paths_at(format!("{base}/alpha")).await,
+        vec![format!("{base}/alpha/a-1"), format!("{base}/alpha/a-2")],
+        "a child query must see the rows in its own subtree"
+    );
+    assert_eq!(
+        paths_at(format!("{base}/beta")).await,
+        vec![format!("{base}/beta/b-1")],
+        "a sibling subtree must not leak into a child query resolved from an ancestor spec"
+    );
+    // The declaring prefix itself still spans the whole subtree.
+    assert_eq!(paths_at(base.to_string()).await.len(), 3);
+}
+
+/// Shared cross-backend body for the existing-deployment path: a narrower spec
+/// declared before the root one keeps serving its own subtree once the root
+/// declaration is added, and a subtree that never had its own declaration is
+/// served by the root spec.
+///
+/// Declarations never backfill, so resolution must prefer the more specific
+/// spec — its projection is the one already holding rows written before the
+/// root declaration existed.
+async fn narrow_then_root_ordered_index_contract<F: RootFilesystem>(filesystem: &F, base: &str) {
+    let rank = IndexKey::new("rank").unwrap();
+    let item_id = IndexKey::new("item_id").unwrap();
+    let spec = || {
+        IndexSpec::new(
+            IndexName::new("migrating_items_v1").unwrap(),
+            vec![rank.clone(), item_id.clone()],
+            IndexKind::Exact,
+        )
+    };
+    let write = async |path: String, leaf: &str| {
+        filesystem
+            .put(
+                &VirtualPath::new(path).unwrap(),
+                Entry::record(
+                    RecordKind::new("migrating_item").unwrap(),
+                    &serde_json::json!({}),
+                )
+                .unwrap()
+                .with_indexed(rank.clone(), IndexValue::Text(leaf.to_string()))
+                .with_indexed(item_id.clone(), IndexValue::Text(leaf.to_string())),
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+    };
+
+    // The deployment as it stands before the fix: a per-thread declaration,
+    // and a row written under it.
+    filesystem
+        .ensure_index(
+            &VirtualPath::new(format!("{base}/threads/t-1")).unwrap(),
+            &spec(),
+        )
+        .await
+        .unwrap();
+    write(format!("{base}/threads/t-1/m-1"), "m-1").await;
+
+    // The upgrade: the root declaration lands while the narrow one remains.
+    filesystem
+        .ensure_index(&VirtualPath::new(base.to_string()).unwrap(), &spec())
+        .await
+        .unwrap();
+    write(format!("{base}/threads/t-1/m-2"), "m-2").await;
+    // A thread created after the upgrade never gets its own declaration.
+    write(format!("{base}/threads/t-2/m-1"), "m-1").await;
+
+    let paths_at = async |prefix: String| -> Vec<String> {
+        filesystem
+            .query_ordered(
+                &VirtualPath::new(prefix).unwrap(),
+                &Filter::All,
+                &ironclaw_filesystem::OrderedPage::new(
+                    IndexName::new("migrating_items_v1").unwrap(),
+                    rank.clone(),
+                    item_id.clone(),
+                    SortDirection::Ascending,
+                    10,
+                ),
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.path.as_str().to_string())
+            .collect()
+    };
+
+    assert_eq!(
+        paths_at(format!("{base}/threads/t-1")).await,
+        vec![
+            format!("{base}/threads/t-1/m-1"),
+            format!("{base}/threads/t-1/m-2"),
+        ],
+        "rows written before the root declaration must stay queryable after it"
+    );
+    assert_eq!(
+        paths_at(format!("{base}/threads/t-2")).await,
+        vec![format!("{base}/threads/t-2/m-1")],
+        "a subtree with no declaration of its own is served by the root spec"
+    );
+}
+
+#[tokio::test]
+async fn libsql_ordered_index_declared_at_ancestor_serves_scoped_descendant_queries() {
+    let filesystem = libsql_root().await;
+    ancestor_declared_ordered_index_contract(&*filesystem, "/engine/ancestor-declared").await;
+}
+
+#[tokio::test]
+async fn libsql_ordered_index_narrow_declaration_survives_root_declaration() {
+    let filesystem = libsql_root().await;
+    narrow_then_root_ordered_index_contract(&*filesystem, "/engine/narrow-then-root").await;
+}
+
+#[tokio::test]
+async fn in_memory_ordered_index_declared_at_ancestor_serves_scoped_descendant_queries() {
+    let filesystem = ironclaw_filesystem::InMemoryBackend::new();
+    ancestor_declared_ordered_index_contract(&filesystem, "/engine/ancestor-declared").await;
+}
+
+#[tokio::test]
+async fn in_memory_ordered_index_narrow_declaration_survives_root_declaration() {
+    let filesystem = ironclaw_filesystem::InMemoryBackend::new();
+    narrow_then_root_ordered_index_contract(&filesystem, "/engine/narrow-then-root").await;
+}
+
 #[tokio::test]
 async fn libsql_query_filters_on_indexed_projection() {
     let filesystem = libsql_root().await;
@@ -1904,6 +2090,22 @@ mod postgres_tests {
 
     fn vpath(prefix: &str, leaf: &str) -> VirtualPath {
         VirtualPath::new(format!("{prefix}/{leaf}")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn postgres_ordered_index_declared_at_ancestor_serves_scoped_descendant_queries() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        super::ancestor_declared_ordered_index_contract(&fs, &prefix).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_ordered_index_narrow_declaration_survives_root_declaration() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        super::narrow_then_root_ordered_index_contract(&fs, &prefix).await;
     }
 
     #[tokio::test]

@@ -2067,6 +2067,76 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
     assert_eq!(ids_b, ["t-b-001"]);
 }
 
+/// PR #6696 declared the transcript and listing projections under each thread,
+/// so every thread create paid an index-DDL transaction and — on the SQL
+/// backends, where a declaration installs projection triggers whose match
+/// clause embeds the declared prefix — permanently added three more triggers
+/// per spec to the shared entries table. The specs are now declared once per
+/// mount at the `/threads` alias root, so only a mount's first thread create
+/// issues DDL and listing still resolves the spec from a deeper path.
+#[tokio::test]
+async fn filesystem_thread_create_declares_indexes_once_per_mount() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-index-ddl", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("index-ddl");
+    let create = async |id: &str| {
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(ThreadId::new(id.to_string()).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    };
+
+    create("ddl-000").await;
+    let after_first = backend.count(FilesystemOperation::EnsureIndex);
+    assert_eq!(
+        after_first, 4,
+        "a mount's first thread declares exactly the four root specs \
+         (message sequence, message kind/status, summary, thread activity)"
+    );
+
+    for index in 1..5 {
+        create(&format!("ddl-{index:03}")).await;
+    }
+    assert_eq!(
+        backend.count(FilesystemOperation::EnsureIndex),
+        after_first,
+        "thread create must issue no index DDL after a mount's first thread"
+    );
+
+    // Every declaration lands on the mount root, never a per-thread path.
+    for path in backend.recorded_paths(FilesystemOperation::EnsureIndex) {
+        assert_eq!(
+            path.as_str(),
+            "/tenants/tenant-index-ddl/users/alice/threads",
+            "projections are declared at the mount root, above the per-thread paths"
+        );
+    }
+
+    // Listing resolves the root-declared spec from the deeper per-scope path,
+    // and needs no further declaration to do it.
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(listed.threads.len(), 5);
+    assert_eq!(
+        backend.count(FilesystemOperation::EnsureIndex),
+        after_first,
+        "listing resolves the ancestor-declared spec without redeclaring it"
+    );
+}
+
 #[tokio::test]
 async fn filesystem_list_threads_page_does_not_scan_scope_or_source_directory() {
     let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));

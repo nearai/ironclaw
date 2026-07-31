@@ -111,26 +111,10 @@ where
                 return Ok(());
             }
         }
-        let root = thread_index_root(scope)?;
-        let spec = IndexSpec::new(
-            thread_index_name()?,
-            vec![
-                thread_index_key(THREAD_SCOPE_INDEX_KEY)?,
-                thread_index_key(THREAD_ACTIVITY_SORT_KEY)?,
-                thread_index_key(THREAD_ID_INDEX_KEY)?,
-            ],
-            IndexKind::Exact,
-        );
-        let result = self
-            .filesystem
-            .ensure_index(&scope.to_resource_scope(), &root, &spec)
-            .await;
-        if let Err(ironclaw_filesystem::FilesystemError::Unsupported { .. }) = result
-            && !required
-        {
-            return Ok(());
-        }
-        result.map_err(SessionThreadError::from)?;
+        // The listing projection is declared once per mount at the `/threads`
+        // alias root, not per scope. Ancestor-prefix resolution lets the
+        // per-scope `thread_index_root` query below still find it.
+        self.declare_root_indexes(scope, !required).await?;
         if let Ok(mut ready) = self.ready_thread_index_scopes.lock() {
             ready.insert(scope_key.clone());
             evict_hash_set_entry_over_limit(&mut ready, 128, &scope_key);
@@ -536,8 +520,8 @@ where
             .map(|entry| ThreadId::new(entry.name).map_err(invalid_path))
             .collect::<Result<Vec<_>, _>>()?;
         let mut migrated = 0usize;
+        self.declare_root_indexes(scope, false).await?;
         for thread_id in thread_ids {
-            self.ensure_thread_record_indexes(scope, &thread_id).await?;
             for (prefix, messages) in [
                 (messages_root(scope, &thread_id)?, true),
                 (summaries_root(scope, &thread_id)?, false),
@@ -686,6 +670,20 @@ fn thread_index_name() -> Result<IndexName, SessionThreadError> {
         .map_err(|error| SessionThreadError::Backend(error.to_string()))
 }
 
+/// The thread-listing projection, declared once per mount at the `/threads`
+/// alias root alongside the transcript projections.
+pub(super) fn thread_activity_index_spec() -> Result<IndexSpec, SessionThreadError> {
+    Ok(IndexSpec::new(
+        thread_index_name()?,
+        vec![
+            thread_index_key(THREAD_SCOPE_INDEX_KEY)?,
+            thread_index_key(THREAD_ACTIVITY_SORT_KEY)?,
+            thread_index_key(THREAD_ID_INDEX_KEY)?,
+        ],
+        IndexKind::Exact,
+    ))
+}
+
 #[derive(Serialize, Deserialize)]
 struct ThreadIndexCursor {
     activity_sort: String,
@@ -755,7 +753,11 @@ fn thread_activity_sort_key(record: &SessionThreadRecord) -> String {
     format!("{descending_rank:020}")
 }
 
-fn evict_hash_set_entry_over_limit(set: &mut HashSet<String>, max_entries: usize, keep: &str) {
+pub(super) fn evict_hash_set_entry_over_limit(
+    set: &mut HashSet<String>,
+    max_entries: usize,
+    keep: &str,
+) {
     if set.len() <= max_entries {
         return;
     }

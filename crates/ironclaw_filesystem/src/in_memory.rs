@@ -345,10 +345,18 @@ impl RootFilesystem for InMemoryBackend {
         page: &crate::OrderedPage,
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
         let state = self.state.lock().await;
-        let Some(materialized) = state
-            .ordered_indexes
-            .get(path.as_str())
-            .and_then(|indexes| indexes.get(&page.index))
+        // Resolve against `path` and every ancestor prefix, most specific
+        // first, so a caller may declare the index once on a higher prefix and
+        // query a child path. Bounded by path depth, not a scan over declared
+        // prefixes.
+        let Some(materialized) = crate::index::ancestor_prefixes(path.as_str())
+            .into_iter()
+            .find_map(|prefix| {
+                state
+                    .ordered_indexes
+                    .get(prefix)
+                    .and_then(|indexes| indexes.get(&page.index))
+            })
         else {
             return Err(FilesystemError::Unsupported {
                 path: path.clone(),
@@ -388,6 +396,14 @@ impl RootFilesystem for InMemoryBackend {
                     {
                         continue;
                     }
+                    // A spec resolved from an ancestor covers a wider subtree
+                    // than the caller asked for; its rows carry no record of
+                    // the declaring prefix. Without this check a query would
+                    // return sibling subtrees' rows. The SQL backends apply the
+                    // equivalent predicate in their row SELECT.
+                    if !crate::index::path_within_prefix(matched_path.as_str(), path.as_str()) {
+                        continue;
+                    }
                     push_ordered_result(&state, matched_path, &mut results);
                     if results.len() >= page.limit as usize {
                         break;
@@ -413,6 +429,11 @@ impl RootFilesystem for InMemoryBackend {
                         && (values.get(sort_position), values.get(sort_position + 1))
                             >= (Some(&cursor.value), Some(&cursor.tie_breaker))
                     {
+                        continue;
+                    }
+                    // See the ascending branch: ancestor-resolved specs cover a
+                    // wider subtree than the caller asked for.
+                    if !crate::index::path_within_prefix(matched_path.as_str(), path.as_str()) {
                         continue;
                     }
                     push_ordered_result(&state, matched_path, &mut results);
@@ -677,7 +698,9 @@ fn update_materialized_indexes(
     old_entry: Option<&Entry>,
     new_entry: Option<&Entry>,
 ) {
-    for prefix in ancestor_paths(path.as_str()) {
+    // Projects into every matching ancestor declaration, so a root-declared
+    // spec and a narrower one declared under it both stay current.
+    for prefix in crate::index::ancestor_prefixes(path.as_str()) {
         let Some(indexes) = state.ordered_indexes.get_mut(prefix) else {
             continue;
         };
@@ -694,19 +717,6 @@ fn update_materialized_indexes(
             }
         }
     }
-}
-
-fn ancestor_paths(path: &str) -> Vec<&str> {
-    let mut prefixes = vec!["/"];
-    prefixes.extend(
-        path.char_indices()
-            .filter(|(index, character)| *index > 0 && *character == '/')
-            .filter_map(|(index, _)| path.get(..index)),
-    );
-    if path != "/" {
-        prefixes.push(path);
-    }
-    prefixes
 }
 
 fn state_append(state: &mut State, path: &VirtualPath, payload: Vec<u8>) -> SeqNo {

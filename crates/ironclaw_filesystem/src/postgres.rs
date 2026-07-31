@@ -556,13 +556,24 @@ impl RootFilesystem for PostgresRootFilesystem {
         page: &crate::OrderedPage,
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
         let client = self.client().await?;
+        // Resolve the spec against `path` and every ancestor prefix, most
+        // specific first, so a caller may declare the index once on a higher
+        // prefix and query a child path. `/shared` keeps its existing
+        // precedence over every path-derived candidate. Binding the candidates
+        // as one array keeps this a single prepared statement regardless of
+        // path depth, and the lookup stays keyed rather than a catalog scan.
+        let mut candidate_prefixes: Vec<String> = crate::index::ancestor_prefixes(path.as_str())
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        candidate_prefixes.push("/shared".to_string());
         let spec_row = cached_query_opt(
             &client,
             "SELECT keys, kind FROM root_filesystem_index_specs \
-             WHERE prefix IN ($1, '/shared') AND name = $2 \
-             ORDER BY CASE WHEN prefix = '/shared' THEN 0 ELSE 1 END \
+             WHERE prefix = ANY($1) AND name = $2 \
+             ORDER BY CASE WHEN prefix = '/shared' THEN 0 ELSE 1 END, length(prefix) DESC \
              LIMIT 1",
-            &[&path.as_str(), &page.index.as_str()],
+            &[&candidate_prefixes, &page.index.as_str()],
         )
         .await
         .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
