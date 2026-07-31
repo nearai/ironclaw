@@ -10,7 +10,7 @@
 //! never touches the engine directly (see the crate boundary in `CLAUDE.md`).
 
 use async_trait::async_trait;
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use serde::Deserialize;
 use std::collections::HashSet;
 

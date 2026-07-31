@@ -2,6 +2,8 @@
 
 **What this is:** the recommended way to start and keep tackling the restructure — waves, gates, PR-sizing rules, and decision points. It sequences the workstreams defined in [CHECKLIST.md](CHECKLIST.md) (WS0–WS12); the checklist is the *what*, this is the *when and how*. Nothing here is sacred except the four load-bearing ordering constraints, which are marked ⚠.
 
+**Refreshed 2026-07-30.** The plan got simpler: #6691 and #6696 both merged, so Wave 4 starts from a partly-advanced position and **Wave 6 is no longer gated on anyone else's PR** — the only wave with an external dependency no longer has one. What remains of Wave 6 is a single open design question, which is cheap to hold and can be called in parallel with any other wave.
+
 **Operating principles** (learned from the July train, and from what went wrong in it):
 
 1. **Owner-by-owner, never big-bang.** The extractions that worked (#6529…#6669) moved one coherent owner per PR. The four god-crate narrowings are *many* PRs each, not one.
@@ -47,7 +49,7 @@
 
 ## Wave 4 — Composition, app, domains (WS6)
 
-*Overlaps Waves 2–3 freely — every eviction is independent.* This wave is deliberately aligned with **PR #6691 (IN FLIGHT)**: if it lands first, several evictions become rebases instead of new work; if it doesn't, this wave subsumes its intent. Either way, coordinate with its author before starting the same modules.
+*Overlaps Waves 2–3 freely — every eviction is independent.* ✎ **PR #6691 landed 2026-07-30**, and it did what this wave hoped: composition shed ~8.7k lines, four eviction items are done, and the `local_dev` misnomer is retired. So this wave starts roughly half-advanced — the remaining inventory is in PROPOSAL §6.10.1 and CHECKLIST WS6, both reconciled item-by-item against the merge. Two carry-overs worth planning around: the project service and project-create capability landed in `product` rather than `identity::projects`, so they need a second hop; and the project-create move added a `product → loop_host` behavioral edge that the §6.9.1 shed now has to resolve alongside the two pure-data ones.
 
 - Composition evictions one owner per PR (the §6.10.1 inventory); `local_dev` misnomer retired; `RebornRuntime` slimming; config vendor-section removal with its compat window; CLI vendor-resolution shed; the renames (all decided — 2026-07-29 + 2026-07-30) as pure-rename PRs, no shims, each landing *after* that crate's content-change PRs in Waves 2–3 so a crate churns once for content and once for name, never interleaved: the three stutter kills (`event_log`, `extension_registry`, `assistant`), the naming-audit four (`architecture_tests`, `extension_support`, `turn_runner`, `trace_commons`), and the rest of the `reborn_` batch (`composition`, `config`, `event_store`, `identity`, `openai_compat`, cli dir, root `integration_tests`).
 - **Milestone:** composition reads as assembly (its mass ratchet re-baselined at the new floor); config has no vendor sections; renames done.
@@ -59,9 +61,11 @@
 - Last move lands with the §11.2.1 family⇄layer test and the tree-comparison script.
 - **Milestone:** `crates/` matches PROPOSAL §5 exactly.
 
-## Wave 6 — Process-journal-gated work (WS9) **[#6696 gate]**
+## Wave 6 — Process-journal work (WS9) — ✎ **ungated 2026-07-30; mostly already landed**
 
-*Blocked until #6696-or-equivalent is approved and landed with its import/rollback contract.* Then: processes widening, runner scheduler/await-edge shed, approvals absorption, `run_state` deletion. Until the gate opens, `run_state` carries its freeze charter and nothing else waits on this wave — it is the only wave with an external dependency.
+*The gate is gone.* #6696 merged on 2026-07-29 with its import/rollback contract, and took most of this wave with it: `processes` widened to the row-native journal and `ProcessSupervisor`, `approvals` absorbed the approval and gate records, `run_state` was deleted, the turn store became a projection, and runner's scheduler inverted onto the supervisor.
+
+What is left is one item, and it is a **decision before it is work**: runner's `subagent/await_edge/` (~2.9k lines) was reworked onto process edges rather than deleted, contrary to #6696's own design note. Call it with the journal's author — do process edges express what that resolver does, or is await-edge resolution genuinely loop-tier? — then either shed it into Wave 3's runner narrowing or amend PROPOSAL §6.7.3 to keep it. It is a one-thread decision that no longer blocks any other wave, and no other wave blocks it.
 
 ## Continuous tracks (run alongside every wave)
 
@@ -79,7 +83,8 @@
 
 ## Coordination notes
 
-- **#6691:** review it against this plan's Wave 4 inventory; landing it substantially advances Wave 4. Don't duplicate its modules while it's open.
-- **#6696:** this plan neither waits for it nor prejudges it; Wave 6 is cleanly severable. If it is closed instead of landed, Wave 6 items need a replacement design decision before `run_state` can be deleted.
+- ✎ **#6691 — merged 2026-07-30.** It advanced Wave 4 substantially, as expected. Before restarting any composition eviction, re-read PROPOSAL §6.10.1: four items are done and two of the "done" ones landed in a destination that still needs a second hop.
+- ✎ **#6696 — merged 2026-07-29.** Wave 6 is ungated. One caution for anyone planning against it: **the merge did not match its own design note on runner's await-edge machinery**, so any estimate that assumed runner shrank by 4.6k more than it did is wrong. Re-cost from the live tree, not from the PR description.
+- ✎ **#6863 — merged 2026-07-29** (not previously tracked here). It added `ironclaw_libsql_runtime`, a substrates-layer crate with no workspace dependencies. It needs no wave of its own — it moves with the substrate batch in Wave 5 — but it does change one rule the enforcement track lands (§11.2.6), so WS10's persistence-idiom item is now two assertions rather than one.
 - **Review load:** expect ~35–50 PRs total across waves at the sizes above; the July train demonstrated this cadence is sustainable. Anything trending past ~400 effective lines of *semantic* change (moves excluded) should split.
 - **Where to record progress:** tick [CHECKLIST.md](CHECKLIST.md) boxes in the PRs that land them; PROPOSAL.md stays frozen as the decision record; disagreements found during implementation go back through a PROPOSAL amendment, not silent divergence.

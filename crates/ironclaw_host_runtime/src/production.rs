@@ -30,9 +30,15 @@ use ironclaw_capabilities::{
 use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityDispatcher, CapabilityId, DenyReason, FailureKind, InvocationId,
-    Principal, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
-    runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
+    approval::sha256_digest_token,
+    decision::{DenyReason, RuntimeCredentialAuthRequirement},
+    dispatch::CapabilityDispatcher,
+    ids::{ApprovalRequestId, CapabilityId, InvocationId, SecretHandle},
+    resource::ResourceScope,
+    result_meta::FailureKind,
+    runtime::RuntimeKind,
+    runtime_policy::EffectiveRuntimePolicy,
+    scope::Principal,
 };
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_process_sandbox::{
@@ -962,7 +968,7 @@ impl DefaultHostRuntime {
     /// claiming leases or dispatching.
     async fn resume_actor_preflight_guard(
         &self,
-        context: &ironclaw_host_api::ExecutionContext,
+        context: &ironclaw_host_api::scope::ExecutionContext,
         capability_id: &CapabilityId,
     ) -> Result<Option<RuntimeCapabilityOutcome>, HostRuntimeError> {
         context
@@ -1174,9 +1180,9 @@ impl ironclaw_capabilities::HostPolicyFacts for DefaultHostRuntime {
     async fn persistent_grants(
         &self,
         capability_id: &CapabilityId,
-        context: &ironclaw_host_api::ExecutionContext,
+        context: &ironclaw_host_api::scope::ExecutionContext,
         action: ironclaw_capabilities::PolicyAction,
-    ) -> Vec<ironclaw_host_api::CapabilityGrant> {
+    ) -> Vec<ironclaw_host_api::capability::CapabilityGrant> {
         let Some(policies) = self.persistent_approval_policies.as_ref() else {
             return Vec::new();
         };
@@ -1371,10 +1377,10 @@ fn completed_outcome_from(
 /// a false-positive `AuthRequired` for capabilities whose product-auth account
 /// is already connected.
 pub(crate) fn capability_credential_requirements(
-    descriptor: &ironclaw_host_api::CapabilityDescriptor,
+    descriptor: &ironclaw_host_api::capability::CapabilityDescriptor,
 ) -> (
     Vec<SecretHandle>,
-    Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
+    Vec<ironclaw_host_api::decision::RuntimeCredentialAuthRequirement>,
 ) {
     let provider = descriptor.provider.clone();
     let mut required_secrets = Vec::new();
@@ -1397,7 +1403,7 @@ pub(crate) fn capability_credential_requirements(
         // for capabilities whose product-auth account is already connected.
         if matches!(
             cred.source,
-            ironclaw_host_api::RuntimeCredentialRequirementSource::SecretHandle
+            ironclaw_host_api::capability::RuntimeCredentialRequirementSource::SecretHandle
         ) {
             required_secrets.push(cred.handle.clone());
         }
@@ -1411,7 +1417,7 @@ pub(crate) fn capability_credential_requirements(
 fn auth_required_outcome(
     capability_id: CapabilityId,
     required_secrets: Vec<SecretHandle>,
-    credential_requirements: Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
+    credential_requirements: Vec<ironclaw_host_api::decision::RuntimeCredentialAuthRequirement>,
 ) -> RuntimeCapabilityOutcome {
     RuntimeCapabilityOutcome::AuthRequired(RuntimeAuthGate {
         gate_id: stable_auth_gate_id(&capability_id, &required_secrets, &credential_requirements),
@@ -1474,8 +1480,10 @@ fn stable_auth_gate_id(
 /// `RuntimeCredentialAccountSetup` variant fails the build here rather than
 /// silently hashing to an existing token. OAuth setup scopes use the same
 /// injective [`canonical_scope_list`] encoding as `provider_scopes`.
-fn stable_setup_token(setup: &ironclaw_host_api::RuntimeCredentialAccountSetup) -> String {
-    use ironclaw_host_api::RuntimeCredentialAccountSetup as Setup;
+fn stable_setup_token(
+    setup: &ironclaw_host_api::capability::RuntimeCredentialAccountSetup,
+) -> String {
+    use ironclaw_host_api::capability::RuntimeCredentialAccountSetup as Setup;
     match setup {
         Setup::ManualToken => "manual_token".to_string(),
         Setup::OAuth { scopes } => format!("oauth:{}", canonical_scope_list(scopes)),
@@ -1510,7 +1518,9 @@ fn spawned_process_outcome_from(
     }
 }
 
-fn persistent_approval_grantees(context: &ironclaw_host_api::ExecutionContext) -> Vec<Principal> {
+fn persistent_approval_grantees(
+    context: &ironclaw_host_api::scope::ExecutionContext,
+) -> Vec<Principal> {
     let mut grantees = vec![
         Principal::Extension(context.extension_id.clone()),
         Principal::User(context.user_id.clone()),
@@ -1653,17 +1663,21 @@ fn failure_from(
             // rendered in Debug, run-state rows, or runtime events.
             let (scrubbed, _) = model_visible_cause_scrubber().redact_all_secrets(&raw_cause);
             if failure.detail.is_none() && raw_cause_needs_detail {
-                failure =
-                    failure.with_detail(ironclaw_host_api::DispatchFailureDetail::Diagnostic {
+                failure = failure.with_detail(
+                    ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic {
                         text: bounded_diagnostic_text(&scrubbed),
-                    });
+                    },
+                );
             }
             failure = failure.with_model_visible_cause(scrubbed);
         }
         None if failure.detail.is_none() => {
-            failure = failure.with_detail(ironclaw_host_api::DispatchFailureDetail::Diagnostic {
-                text: ironclaw_host_api::ModelDiagnostic::unavailable().into_inner(),
-            });
+            failure = failure.with_detail(
+                ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic {
+                    text: ironclaw_host_api::result_meta::ModelDiagnostic::unavailable()
+                        .into_inner(),
+                },
+            );
         }
         None => {}
     }
@@ -1673,7 +1687,7 @@ fn failure_from(
 fn bounded_diagnostic_text(value: &str) -> String {
     let mut end = value
         .len()
-        .min(ironclaw_host_api::MODEL_DIAGNOSTIC_MAX_BYTES);
+        .min(ironclaw_host_api::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES);
     while end > 0 && !value.is_char_boundary(end) {
         end -= 1;
     }
@@ -1736,7 +1750,7 @@ fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String
 
 fn dispatch_failure_message(
     safe_summary: Option<&str>,
-    kind: ironclaw_host_api::DispatchFailureKind,
+    kind: ironclaw_host_api::dispatch::DispatchFailureKind,
 ) -> String {
     // This message is the PUBLIC label: persisted into run-state rows and
     // published on the runtime event sink before any downstream validation
@@ -1814,7 +1828,7 @@ mod tests {
     //! mappings.
     //!
     //! The dispatch failure kinds come from typed
-    //! [`ironclaw_host_api::DispatchFailureKind`] values. Their display
+    //! [`ironclaw_host_api::dispatch::DispatchFailureKind`] values. Their display
     //! strings remain part of the public observability contract, but runtime
     //! failure mapping stays type-directed instead of reparsing strings.
 
@@ -1825,9 +1839,11 @@ mod tests {
     };
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
     use ironclaw_host_api::{
-        CapabilityId, DispatchFailureKind, ExtensionId, HostPortCatalog,
-        RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, SecretHandle, VendorId,
-        VirtualPath,
+        decision::RuntimeCredentialAuthRequirement,
+        dispatch::{DispatchFailureKind, RuntimeDispatchErrorKind},
+        host_port::HostPortCatalog,
+        ids::{CapabilityId, ExtensionId, SecretHandle, VendorId},
+        path::VirtualPath,
     };
 
     fn cap() -> CapabilityId {
@@ -1845,7 +1861,7 @@ mod tests {
     fn auth_requirement(scopes: &[&str]) -> RuntimeCredentialAuthRequirement {
         RuntimeCredentialAuthRequirement {
             provider: VendorId::new("notion").unwrap(),
-            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+            setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                 scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
             },
             requester_extension: ExtensionId::new("notion").unwrap(),
@@ -1901,7 +1917,7 @@ mod tests {
         // record produced the same gate id; the write-once gate-record store
         // then reported `GateRecordAlreadyExists`, kept the stale record, and
         // the runner reloaded and rendered the wrong authentication flow.
-        use ironclaw_host_api::RuntimeCredentialAccountSetup as Setup;
+        use ironclaw_host_api::capability::RuntimeCredentialAccountSetup as Setup;
         let requirement_with = |setup: Setup| RuntimeCredentialAuthRequirement {
             provider: VendorId::new("notion").unwrap(),
             setup,
@@ -2324,7 +2340,7 @@ mod tests {
             "shell execution failed: cannot read /workspace/{}\nsecond line",
             "segment/".repeat(600)
         );
-        assert!(raw.len() > ironclaw_host_api::MODEL_DIAGNOSTIC_MAX_BYTES);
+        assert!(raw.len() > ironclaw_host_api::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES);
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor),
             safe_summary: Some(raw.clone()),
@@ -2338,14 +2354,14 @@ mod tests {
             Some("the tool executor failed"),
             "message must stay the fixed category sentence"
         );
-        let Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { text }) =
+        let Some(ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic { text }) =
             failure.detail.as_ref()
         else {
             panic!("rejected public summary must ride the diagnostic detail");
         };
         assert_eq!(
             text,
-            &raw[..ironclaw_host_api::MODEL_DIAGNOSTIC_MAX_BYTES],
+            &raw[..ironclaw_host_api::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES],
             "the inline diagnostic uses the shared model-observation byte cap"
         );
         assert_eq!(
@@ -2365,11 +2381,12 @@ mod tests {
         };
 
         let failure = failure_from(error, cap());
-        let Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { text }) = failure.detail
+        let Some(ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic { text }) =
+            failure.detail
         else {
             panic!("expected a bounded diagnostic");
         };
-        assert!(text.len() <= ironclaw_host_api::MODEL_DIAGNOSTIC_MAX_BYTES);
+        assert!(text.len() <= ironclaw_host_api::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES);
         assert!(text.ends_with('é'));
     }
 
@@ -2381,9 +2398,12 @@ mod tests {
         );
         assert_eq!(
             failure.detail,
-            Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic {
-                text: ironclaw_host_api::ModelDiagnostic::unavailable().into_inner(),
-            })
+            Some(
+                ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic {
+                    text: ironclaw_host_api::result_meta::ModelDiagnostic::unavailable()
+                        .into_inner(),
+                }
+            )
         );
     }
 
@@ -2412,17 +2432,19 @@ mod tests {
 
     #[test]
     fn failure_from_preserves_dispatch_detail() {
-        let issue = ironclaw_host_api::DispatchInputIssue::new(
+        let issue = ironclaw_host_api::dispatch::DispatchInputIssue::new(
             "schedule.kind",
-            ironclaw_host_api::DispatchInputIssueCode::MissingRequired,
+            ironclaw_host_api::dispatch::DispatchInputIssueCode::MissingRequired,
         )
         .expected("cron or once");
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
             safe_summary: Some("trigger_create input failed validation".to_string()),
-            detail: Some(ironclaw_host_api::DispatchFailureDetail::InvalidInput {
-                issues: vec![issue.clone()],
-            }),
+            detail: Some(
+                ironclaw_host_api::dispatch::DispatchFailureDetail::InvalidInput {
+                    issues: vec![issue.clone()],
+                },
+            ),
         };
 
         let failure = failure_from(
@@ -2433,9 +2455,11 @@ mod tests {
         assert_eq!(failure.kind, FailureKind::InputEncode);
         assert_eq!(
             failure.detail,
-            Some(ironclaw_host_api::DispatchFailureDetail::InvalidInput {
-                issues: vec![issue]
-            })
+            Some(
+                ironclaw_host_api::dispatch::DispatchFailureDetail::InvalidInput {
+                    issues: vec![issue]
+                }
+            )
         );
     }
 
@@ -2549,7 +2573,7 @@ mod tests {
 
     fn build_descriptor_for_manifest(
         manifest_toml: &str,
-    ) -> ironclaw_host_api::CapabilityDescriptor {
+    ) -> ironclaw_host_api::capability::CapabilityDescriptor {
         let manifest = ExtensionManifest::parse(
             manifest_toml,
             ManifestSource::InstalledLocal,

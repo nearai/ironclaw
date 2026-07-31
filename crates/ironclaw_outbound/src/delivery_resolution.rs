@@ -242,7 +242,7 @@ impl CommunicationDeliveryResolution {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
     use serde::Serialize;
     use serde::de::DeserializeOwned;
     use serde_json::{from_str, to_string};

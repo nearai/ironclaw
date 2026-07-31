@@ -14,7 +14,7 @@ use ironclaw_conversations::{
 };
 use ironclaw_extension_host::ingress::{InboundAdmission, InboundAdmissionAck, InboundSink};
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_host_api::RebornUserIdentityLookupError;
+use ironclaw_host_api::user_identity::RebornUserIdentityLookupError;
 use ironclaw_product::{
     AuthPromptChallengeKind, BlockedAuthPromptRequest, BlockedAuthPromptSource,
     ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExternalActorRef,
@@ -226,11 +226,11 @@ impl RebornAuthContinuationDispatcher for FailOnceIdempotentFanout {
 struct UnexpectedWorkflow;
 
 #[async_trait::async_trait]
-impl ironclaw_host_api::ChannelInboundProductSurface for UnexpectedWorkflow {
+impl ironclaw_host_api::product_surface::ChannelInboundProductSurface for UnexpectedWorkflow {
     async fn admit_channel_inbound(
         &self,
-        _request: ironclaw_host_api::ChannelInboundSurfaceRequest,
-    ) -> ironclaw_host_api::ChannelInboundSurfaceOutcome {
+        _request: ironclaw_host_api::product_surface::ChannelInboundSurfaceRequest,
+    ) -> ironclaw_host_api::product_surface::ChannelInboundSurfaceOutcome {
         panic!("pairing tests must not reach channel admission");
     }
 }
@@ -331,7 +331,7 @@ fn fixture_with_prefixes(
     ));
     let service = ChannelPairingService::new(ChannelPairingServiceParts {
         tenant_id: tenant,
-        agent_id: ironclaw_host_api::AgentId::new("agent-a").expect("agent"),
+        agent_id: ironclaw_host_api::ids::AgentId::new("agent-a").expect("agent"),
         project_id: None,
         extension_id,
         connection_notices: ChannelConnectionNoticePolicy::generic("Vendor X"),
@@ -532,15 +532,17 @@ async fn recipe_auth_prompt_reuses_the_live_pairing_code_and_connection_recipe()
         TenantId::new("tenant-alpha").expect("tenant"),
         Some(AgentId::new("agent-a").expect("agent")),
         None,
-        ironclaw_host_api::ThreadId::new("thread-pairing-prompt").expect("thread"),
+        ironclaw_host_api::ids::ThreadId::new("thread-pairing-prompt").expect("thread"),
     );
     let run_id = ironclaw_turns::TurnRunId::new();
-    let requirements = [ironclaw_host_api::RuntimeCredentialAuthRequirement {
-        provider: ironclaw_host_api::VendorId::new(EXT).expect("provider"),
-        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::Pairing,
-        requester_extension: ExtensionId::new(EXT).expect("extension"),
-        provider_scopes: Vec::new(),
-    }];
+    let requirements = [
+        ironclaw_host_api::decision::RuntimeCredentialAuthRequirement {
+            provider: ironclaw_host_api::ids::VendorId::new(EXT).expect("provider"),
+            setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::Pairing,
+            requester_extension: ExtensionId::new(EXT).expect("extension"),
+            provider_scopes: Vec::new(),
+        },
+    ];
 
     let first = source
         .auth_prompt_for_blocked_run(BlockedAuthPromptRequest {

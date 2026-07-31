@@ -3,10 +3,18 @@ use ironclaw_auth::{
     CredentialAccountLookupRequest, CredentialAccountSelectionRequest,
 };
 use ironclaw_host_api::{
-    CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
-    ExtensionId, GrantConstraints, InvocationId, MountView, NetworkPolicy, NetworkTargetPattern,
-    Principal, ResourceScope, RunId, RuntimeCredentialAccountSetup, RuntimeKind, TenantId,
-    ThreadId, TrustClass, UserId,
+    action::{NetworkPolicy, NetworkTargetPattern},
+    capability::{
+        CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints, RuntimeCredentialAccountSetup,
+    },
+    ids::{
+        CapabilityGrantId, CapabilityId, ExtensionId, InvocationId, RunId, TenantId, ThreadId,
+        UserId,
+    },
+    mount::MountView,
+    resource::ResourceScope,
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::RuntimeCapabilityOutcome;
 use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef};
@@ -183,7 +191,7 @@ async fn standalone_nearai_runtime_selection_falls_back_to_host_managed_account_
     // agent by design (the #5439 fix).
     let sso_other_project_scope = ResourceScope {
         user_id: UserId::new("sso-user-other-project").expect("user"), // safety: static test user id is valid.
-        project_id: Some(ironclaw_host_api::ProjectId::new("other-project").expect("project")), // safety: static test project id is valid.
+        project_id: Some(ironclaw_host_api::ids::ProjectId::new("other-project").expect("project")), // safety: static test project id is valid.
         thread_id: None,
         ..owner_scope.clone()
     };
@@ -298,7 +306,7 @@ fn execution_context_for_scope<'a>(
         run_id: Some(RunId::new()),
         origin: None,
         invocation_id: resource_scope.invocation_id,
-        correlation_id: ironclaw_host_api::CorrelationId::new(),
+        correlation_id: ironclaw_host_api::ids::CorrelationId::new(),
         process_id: None,
         parent_process_id: None,
         tenant_id: resource_scope.tenant_id.clone(),
@@ -328,7 +336,7 @@ fn webui_gate_resource_scope() -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new("reborn-cli").expect("tenant"), // safety: static test tenant id is valid.
         user_id: UserId::new("3eee560a-7fe5-474c-965a-67cb69df3d04").expect("user"), // safety: static test user id is valid.
-        agent_id: Some(ironclaw_host_api::AgentId::new("reborn-cli-agent").expect("agent")), // safety: static test agent id is valid.
+        agent_id: Some(ironclaw_host_api::ids::AgentId::new("reborn-cli-agent").expect("agent")), // safety: static test agent id is valid.
         project_id: None,
         mission_id: None,
         thread_id: Some(ThreadId::new("80aa051d-7670-5534-a2c5-2c14339e8af7").expect("thread")), // safety: static test thread id is valid.

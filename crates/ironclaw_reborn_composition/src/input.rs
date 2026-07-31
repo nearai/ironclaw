@@ -5,12 +5,12 @@ use std::sync::Arc;
 use ironclaw_auth::{
     AuthProductError, OAuthClientId, OAuthRedirectUri, RebornProductAuthServicePorts,
 };
+use ironclaw_host_api::ids::{AgentId, TenantId};
 use ironclaw_host_api::runtime_policy::ProcessBackendKind;
 use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, SecretMode,
 };
-use ironclaw_host_api::{AgentId, TenantId};
 use ironclaw_host_runtime::TenantSandboxProcessPort;
 use ironclaw_host_runtime::memory_binding::MemoryBindingPolicy;
 #[cfg(any(test, feature = "test-support"))]
@@ -696,7 +696,7 @@ impl RebornHostBindings {
 
     pub fn with_required_runtime_backends(
         mut self,
-        backends: impl IntoIterator<Item = ironclaw_host_api::RuntimeKind>,
+        backends: impl IntoIterator<Item = ironclaw_host_api::runtime::RuntimeKind>,
     ) -> Self {
         self.deployment.required_runtime_backends = backends.into_iter().collect();
         self

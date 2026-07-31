@@ -102,7 +102,7 @@ fn parse_canonical_i64(value: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{AgentId, ProjectId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId};
     use ironclaw_product::AdapterInstallationId;
 
     use super::*;

@@ -2,8 +2,8 @@
 
 use base64::Engine;
 use ironclaw_host_api::{
-    AgentId, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode, ProjectId,
-    TenantId, ThreadId, UserId,
+    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+    product_surface::{ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode},
 };
 use ironclaw_product::{
     ProductCancelReason, ProductCancelRunRequest, ProductCreateThreadRequest,

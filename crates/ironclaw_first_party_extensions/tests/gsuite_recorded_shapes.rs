@@ -16,7 +16,10 @@ use ironclaw_first_party_extensions::{
     GMAIL_REPLY_TO_MESSAGE_CAPABILITY_ID, GMAIL_SEND_MESSAGE_CAPABILITY_ID,
     GMAIL_TRASH_MESSAGE_CAPABILITY_ID,
 };
-use ironclaw_host_api::{NetworkMethod, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse};
+use ironclaw_host_api::{
+    action::NetworkMethod,
+    http::{RuntimeHttpEgressRequest, RuntimeHttpEgressResponse},
+};
 use serde_json::{Value, json};
 use support::*;
 

@@ -67,13 +67,17 @@ use ironclaw_extension_host::extension_ingress::{
 use ironclaw_extension_host::ingress::{
     InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError,
 };
-use ironclaw_host_api::ChannelInboundProductSurface;
-use ironclaw_host_api::ProductSurfaceCaller;
+use ironclaw_host_api::product_surface::ChannelInboundProductSurface;
+use ironclaw_host_api::product_surface::ProductSurfaceCaller;
 use ironclaw_host_api::{
-    CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, CorrelationId, EffectKind,
-    ExecutionContext, ExtensionId, GrantConstraints, InvocationId, InvocationOrigin, MountView,
-    NetworkPolicy, Principal, ProductKind, ResourceEstimate, ResourceScope, RuntimeKind,
-    TrustClass,
+    action::NetworkPolicy,
+    capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
+    ids::{CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ProductKind},
+    invocation::InvocationOrigin,
+    mount::MountView,
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::RuntimeCapabilityOutcome;
 use ironclaw_loop_host::{
@@ -352,7 +356,7 @@ fn delivery_run_services(
         harness.binding.tenant_id.clone(),
         harness.binding.agent_id.clone(),
         harness.binding.project_id.clone(),
-        ironclaw_host_api::ThreadId::new(format!("{extension_id}-itest-channel-notices"))
+        ironclaw_host_api::ids::ThreadId::new(format!("{extension_id}-itest-channel-notices"))
             .expect("notice thread id"),
         harness.binding.subject_user_id.clone(),
     );
@@ -390,7 +394,7 @@ async fn preresolve_vendor_turn_scope(
     non_secret_config: &[(String, String)],
     evidence: &ProtocolAuthEvidence,
     body: &str,
-) -> (TurnScope, ironclaw_host_api::UserId) {
+) -> (TurnScope, ironclaw_host_api::ids::UserId) {
     let outcome = adapter
         .inbound(VerifiedInbound {
             extension_id: adapter_id,
@@ -753,8 +757,9 @@ async fn configure_admin_group(
     // label as the tenant operator. Its ordinary capability executor uses a
     // distinct user to prove caller scoping, so admin ingress must deliberately
     // use the composition owner rather than that executor identity.
-    let operator_user_id = ironclaw_host_api::UserId::new("reborn-e2e-extension-lifecycle-tools")
-        .expect("delivery profile operator user id");
+    let operator_user_id =
+        ironclaw_host_api::ids::UserId::new("reborn-e2e-extension-lifecycle-tools")
+            .expect("delivery profile operator user id");
     let capability_id = CapabilityId::new("builtin.admin_configuration_replace")
         .expect("admin configuration capability id");
     let product_ingress = ExtensionId::new("ironclaw_webui").expect("product ingress id");
@@ -1320,7 +1325,7 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
     assert_eq!(
         vendor_scope
             .explicit_owner_user_id()
-            .map(ironclaw_host_api::UserId::as_str),
+            .map(ironclaw_host_api::ids::UserId::as_str),
         Some("host-user"),
         "the shared Slack route must retain its configured subject account"
     );
@@ -1488,7 +1493,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
             .any(|requirement| matches!(
                 (&requirement.setup, requirement.provider.as_str()),
                 (
-                    ironclaw_host_api::RuntimeCredentialAccountSetup::Pairing,
+                    ironclaw_host_api::capability::RuntimeCredentialAccountSetup::Pairing,
                     "telegram"
                 )
             )),

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_auth::{AuthProductError, AuthProviderId};
-use ironclaw_host_api::{RuntimeCredentialAccountSetup, UserId};
+use ironclaw_host_api::{capability::RuntimeCredentialAccountSetup, ids::UserId};
 use ironclaw_product::{
     ApprovalPromptContextSource, AuthChallengeProvider, AuthChallengeView, BlockedAuthPromptSource,
     PairingAuthChallengeView,
@@ -52,7 +52,7 @@ impl AuthChallengeProvider for RecipeAuthChallengeProvider {
         owner_user_id: &UserId,
         run_id: ironclaw_turns::TurnRunId,
         gate_ref: &str,
-        credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
+        credential_requirements: &[ironclaw_host_api::decision::RuntimeCredentialAuthRequirement],
     ) -> Result<Option<AuthChallengeView>, AuthProductError> {
         if let [requirement] = credential_requirements
             && requirement.setup == RuntimeCredentialAccountSetup::Pairing

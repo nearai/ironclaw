@@ -2,7 +2,18 @@ use std::sync::Arc;
 
 use ironclaw_approvals::*;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    action::Action,
+    approval::ApprovalRequest,
+    ids::{
+        ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ProjectId,
+        TenantId, UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::{ResourceEstimate, ResourceScope},
+    scope::Principal,
+};
 
 #[tokio::test]
 async fn approval_store_marks_pending_request_approved_or_denied_with_scope() {

@@ -13,7 +13,10 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ironclaw_extensions::ResolvedExtensionManifest;
-use ironclaw_host_api::{ChannelIngressDescriptor, ChannelIngressMethod, SecretHandle};
+use ironclaw_host_api::{
+    channel::{ChannelIngressDescriptor, ChannelIngressMethod},
+    ids::SecretHandle,
+};
 use ironclaw_product::{
     ChannelAdapter, ChannelError, InboundOutcome, NormalizedInboundMessage, VerifiedInbound,
 };

@@ -17,7 +17,10 @@
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{ProjectId, TenantId, Timestamp, UserId};
+use ironclaw_host_api::{
+    Timestamp,
+    ids::{ProjectId, TenantId, UserId},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use thiserror::Error;

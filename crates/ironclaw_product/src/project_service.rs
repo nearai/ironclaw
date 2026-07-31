@@ -18,7 +18,7 @@ use crate::{
     RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
 };
 use async_trait::async_trait;
-use ironclaw_host_api::{ProjectId, TenantId, UserId};
+use ironclaw_host_api::ids::{ProjectId, TenantId, UserId};
 use ironclaw_projects::{
     ProjectError, ProjectMemberRecord, ProjectMemberStatus, ProjectRecord, ProjectRepository,
     ProjectRole, ProjectState,

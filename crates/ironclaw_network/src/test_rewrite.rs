@@ -246,7 +246,7 @@ mod tests {
     use std::net::IpAddr;
     use std::sync::Mutex;
 
-    use ironclaw_host_api::NetworkMethod;
+    use ironclaw_host_api::action::NetworkMethod;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;

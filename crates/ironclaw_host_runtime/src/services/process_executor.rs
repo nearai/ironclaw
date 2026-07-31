@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use ironclaw_capabilities::ProcessAuthorizationRemintPort;
-use ironclaw_host_api::{CapabilityDispatcher, RuntimeKind};
+use ironclaw_host_api::{dispatch::CapabilityDispatcher, runtime::RuntimeKind};
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_processes::{
     ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor,
@@ -264,12 +264,18 @@ mod tests {
 
     use ironclaw_host_api::dispatch_test_support::TestDispatcher;
     use ironclaw_host_api::{
-        ActivityId, Actor, AgentId, CapabilityDispatchResult, CapabilityId, CorrelationId,
-        DispatchError, ExtensionId, InvocationId, InvocationOrigin, MountView,
-        ProcessAuthorizedContinuation, ProcessAuthorizedInvocation, ProcessId, ProductKind,
-        ProjectId, ReservationStatus, ResourceEstimate, ResourceReceipt, ResourceReservationId,
-        ResourceScope, ResourceUsage, RuntimeDispatchErrorKind, RuntimeLane, TenantId, ThreadId,
-        UserId,
+        authorized::{ProcessAuthorizedContinuation, ProcessAuthorizedInvocation},
+        dispatch::{CapabilityDispatchResult, DispatchError, RuntimeDispatchErrorKind},
+        ids::{
+            ActivityId, AgentId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ProcessId,
+            ProductKind, ProjectId, ResourceReservationId, TenantId, ThreadId, UserId,
+        },
+        invocation::{Actor, InvocationOrigin},
+        lane::RuntimeLane,
+        mount::MountView,
+        resource::{
+            ReservationStatus, ResourceEstimate, ResourceReceipt, ResourceScope, ResourceUsage,
+        },
     };
     use ironclaw_processes::{ProcessCancellationToken, ProcessRuntimePort, ProcessStart};
     use serde_json::json;

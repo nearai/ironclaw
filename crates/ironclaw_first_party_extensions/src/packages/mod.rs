@@ -13,7 +13,7 @@
 
 use std::borrow::Cow;
 
-use ironclaw_host_api::EffectKind;
+use ironclaw_host_api::capability::EffectKind;
 
 mod github;
 mod gmail;

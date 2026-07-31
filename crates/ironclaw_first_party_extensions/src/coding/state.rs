@@ -122,7 +122,7 @@ pub(super) struct CodingReadScopeKey {
     /// recorded in one run never authorizes edits in a later run even when
     /// the content fingerprint still matches. `None` (non-loop callers) is
     /// its own bucket, never a wildcard.
-    run_id: Option<ironclaw_host_api::RunId>,
+    run_id: Option<ironclaw_host_api::ids::RunId>,
 }
 
 impl CodingReadScopeKey {
@@ -167,7 +167,7 @@ pub(super) fn read_scope_key(request: &CodingCapabilityRequest<'_>) -> CodingRea
 mod tests {
     use std::time::Duration;
 
-    use ironclaw_host_api::RunId;
+    use ironclaw_host_api::ids::RunId;
 
     use super::*;
 

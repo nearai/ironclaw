@@ -15,7 +15,10 @@
 
 use std::path::{Path, PathBuf};
 
-use ironclaw_host_api::{ResourceScope, TenantId, UserId};
+use ironclaw_host_api::{
+    ids::{TenantId, UserId},
+    resource::ResourceScope,
+};
 
 use crate::sandbox_process::key_codec::{digest_hex, encode_parts};
 
@@ -67,7 +70,7 @@ impl RebornSandboxUserKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{AgentId, InvocationId, ProjectId, ThreadId};
+    use ironclaw_host_api::ids::{AgentId, InvocationId, ProjectId, ThreadId};
 
     fn scope(
         tenant: &str,

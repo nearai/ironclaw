@@ -4,7 +4,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{ProductSurfaceCaller, ProductSurfaceError};
+use ironclaw_host_api::product_surface::{ProductSurfaceCaller, ProductSurfaceError};
 use ironclaw_product::{
     OperatorLogsService, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
     RebornLogQueryResponse, normalize_operator_log_context_value,

@@ -4,7 +4,10 @@ use std::{
 };
 
 use ironclaw_host_api::{
-    HostApiError, MountPermissions, MountView, ResourceScope, ScopedPath, VirtualPath,
+    error::HostApiError,
+    mount::{MountPermissions, MountView},
+    path::{ScopedPath, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_observability::live_latency_started_at;
 

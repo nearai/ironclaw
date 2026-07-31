@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::{AcceptedMessageRef, TurnRunId};
+use crate::turn::{AcceptedMessageRef, TurnRunId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;

@@ -3,8 +3,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
-    CapabilityId, DispatchInputIssue, DispatchInputIssueCode, EffectKind, HostApiError,
-    PermissionMode, ResourceUsage, RuntimeDispatchErrorKind,
+    capability::{EffectKind, PermissionMode},
+    dispatch::{DispatchInputIssue, DispatchInputIssueCode, RuntimeDispatchErrorKind},
+    error::HostApiError,
+    ids::CapabilityId,
+    resource::ResourceUsage,
 };
 use ironclaw_outbound::{
     OutboundDeliveryTargetId, RouteCurrentRunFinalReply, RouteCurrentRunFinalReplyError,

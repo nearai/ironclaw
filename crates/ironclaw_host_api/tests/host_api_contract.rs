@@ -1,6 +1,46 @@
 use std::path::PathBuf;
 
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    action::{
+        Action, ExtensionLifecycleOperation, NetworkMethod, NetworkPolicy, NetworkScheme,
+        NetworkTarget, NetworkTargetPattern, SecretUseMode,
+    },
+    approval::InvocationFingerprint,
+    audit::{ActionSummary, AuditEnvelope, AuditStage},
+    capability::{CapabilitySet, EffectKind, RuntimeCredentialAccountSetup},
+    capability_profile::CapabilityProfileSchemaRef,
+    decision::{
+        Decision, DenyReason, Obligation, ObligationKind, Obligations,
+        RuntimeCredentialAuthRequirement,
+    },
+    dispatch::{
+        DispatchError, DispatchFailureKind, DispatchInputIssueCode, RuntimeDispatchErrorKind,
+    },
+    error::HostApiError,
+    host_port::{
+        HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortGrant,
+        HostPortId, HostPortView,
+    },
+    http::{
+        RuntimeCredentialInjection, RuntimeCredentialTarget, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse, RuntimeHttpSaveTarget, RuntimeHttpSavedBody,
+    },
+    ids::{
+        AgentId, CapabilityId, CorrelationId, ExtensionId, InvocationId, PackageId, ProjectId,
+        ResourceReservationId, SecretHandle, SystemServiceId, TenantId, UserId, VendorId,
+    },
+    ingress::{IngressPolicy, IngressRouteDescriptor},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{HostPath, MountAlias, ScopedPath, VirtualPath},
+    product_surface::{ProductSurfaceEventSubscription, ProductSurfaceStreamResponse},
+    resource::{
+        LOCAL_DEFAULT_AGENT_ID, LOCAL_DEFAULT_PROJECT_ID, LOCAL_DEFAULT_TENANT_ID, ResourceCeiling,
+        ResourceEstimate, ResourceScope,
+    },
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
+    trust::{PackageIdentity, PackageSource, RequestedTrustClass},
+};
 use rust_decimal_macros::dec;
 use serde_json::json;
 

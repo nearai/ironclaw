@@ -7,9 +7,11 @@ use ironclaw_filesystem::{
     ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    AgentId, HostPath, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-    ProcessId, ProjectId, ResourceScope, SanitizedFailure, ScopedPath, TenantId, ThreadId,
-    TurnCheckpointId, TurnGateRef, TurnId, TurnRunId, UserId, VirtualPath,
+    ids::{AgentId, InvocationId, ProcessId, ProjectId, TenantId, ThreadId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{HostPath, MountAlias, ScopedPath, VirtualPath},
+    resource::ResourceScope,
+    turn::{SanitizedFailure, TurnCheckpointId, TurnGateRef, TurnId, TurnRunId},
 };
 use ironclaw_processes::{
     CancelProcessRequest, ClaimProcessesRequest, CloseProcessDependencyRequest, FailProcessRequest,

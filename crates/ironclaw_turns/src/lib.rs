@@ -64,7 +64,7 @@ pub use ids::{
     RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId,
     TurnRunnerId,
 };
-pub use ironclaw_host_api::{
+pub use ironclaw_host_api::turn::{
     ModelInvalidOutputDetailReason, SanitizedCancelReason, SanitizedFailure, TurnOwner,
 };
 pub use loop_exit::{

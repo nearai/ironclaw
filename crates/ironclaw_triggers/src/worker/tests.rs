@@ -5,7 +5,10 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
+use ironclaw_host_api::{
+    Timestamp,
+    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+};
 use ironclaw_turns::{TurnRunId, TurnScope};
 
 use super::*;

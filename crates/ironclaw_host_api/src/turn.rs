@@ -7,7 +7,10 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{AgentId, ProjectId, ResourceScope, SYSTEM_RESERVED_ID, TenantId, ThreadId, UserId};
+use crate::{
+    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+    resource::{ResourceScope, SYSTEM_RESERVED_ID},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]

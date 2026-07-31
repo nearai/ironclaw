@@ -37,8 +37,11 @@ use ironclaw_first_party_extensions::{
     WebAccessDispatchError, WebAccessDispatchRequest, WebAccessExecutor,
 };
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, HostApiError, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
-    PackageId, VirtualPath,
+    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    capability::EffectKind,
+    error::HostApiError,
+    ids::{CapabilityId, PackageId},
+    path::VirtualPath,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion, FirstPartyCapabilityError,

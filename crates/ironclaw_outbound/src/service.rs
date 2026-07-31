@@ -272,7 +272,7 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::Utc;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnScope};
 
     use super::*;

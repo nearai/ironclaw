@@ -21,8 +21,10 @@ use std::os::unix::process::CommandExt;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    TenantId, UserId,
+    ids::{TenantId, UserId},
+    product_surface::{
+        ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    },
 };
 use ironclaw_product::{
     OperatorServiceLifecycleService, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
@@ -1016,8 +1018,9 @@ fn required_env(name: &str) -> Result<String, String> {
 #[cfg(test)]
 fn test_operator_identity() -> OperatorIdentity {
     OperatorIdentity {
-        tenant_id: ironclaw_host_api::TenantId::new("tenant-test").expect("test operator tenant"),
-        user_id: ironclaw_host_api::UserId::new("user-test").expect("test operator user"),
+        tenant_id: ironclaw_host_api::ids::TenantId::new("tenant-test")
+            .expect("test operator tenant"),
+        user_id: ironclaw_host_api::ids::UserId::new("user-test").expect("test operator user"),
     }
 }
 
@@ -1836,9 +1839,9 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
         let temp = TempDir::new().expect("tempdir");
         let runner = Arc::new(RecordingRunner::new("inactive"));
         let operator_user_id =
-            ironclaw_host_api::UserId::new("operator-test").expect("operator user");
+            ironclaw_host_api::ids::UserId::new("operator-test").expect("operator user");
         let service = linux_service(&temp, runner.clone()).with_operator_identity(
-            ironclaw_host_api::TenantId::new("tenant-test").expect("operator tenant"),
+            ironclaw_host_api::ids::TenantId::new("tenant-test").expect("operator tenant"),
             operator_user_id,
         );
 
@@ -1861,8 +1864,8 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
         let temp = TempDir::new().expect("tempdir");
         let runner = Arc::new(RecordingRunner::new("inactive"));
         let service = linux_service(&temp, runner.clone()).with_operator_identity(
-            ironclaw_host_api::TenantId::new("other-tenant").expect("operator tenant"),
-            ironclaw_host_api::UserId::new("user-test").expect("operator user"),
+            ironclaw_host_api::ids::TenantId::new("other-tenant").expect("operator tenant"),
+            ironclaw_host_api::ids::UserId::new("user-test").expect("operator user"),
         );
 
         let error = service
@@ -1904,9 +1907,9 @@ env_user_id_var = "CUSTOM_WEBUI_USER_ID"
 
     fn test_caller() -> ProductSurfaceCaller {
         ProductSurfaceCaller::new(
-            ironclaw_host_api::TenantId::new("tenant-test").expect("tenant"),
-            ironclaw_host_api::UserId::new("user-test").expect("user"),
-            Some(ironclaw_host_api::AgentId::new("agent-test").expect("agent")),
+            ironclaw_host_api::ids::TenantId::new("tenant-test").expect("tenant"),
+            ironclaw_host_api::ids::UserId::new("user-test").expect("user"),
+            Some(ironclaw_host_api::ids::AgentId::new("agent-test").expect("agent")),
             None,
         )
     }

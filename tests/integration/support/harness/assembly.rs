@@ -14,9 +14,12 @@ use ironclaw_filesystem::{
     DiskFilesystem, InMemoryBackend, IndexPolicy, MountDescriptor, RootFilesystem, StorageClass,
 };
 use ironclaw_host_api::{
-    CapabilityId, CredentialStageError, EffectKind, ExtensionId, HostPath, MountAlias, MountGrant,
-    MountPermissions, MountView, NetworkPolicy, NetworkScheme, NetworkTargetPattern, PackageId,
-    SecretHandle, VirtualPath,
+    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    capability::EffectKind,
+    dispatch::CredentialStageError,
+    ids::{CapabilityId, ExtensionId, PackageId, SecretHandle},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{HostPath, MountAlias, VirtualPath},
 };
 use ironclaw_host_runtime::{
     BUILTIN_FIRST_PARTY_PROVIDER, CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest,

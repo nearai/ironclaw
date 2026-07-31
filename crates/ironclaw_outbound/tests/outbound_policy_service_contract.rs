@@ -6,8 +6,11 @@ use async_trait::async_trait;
 use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
 use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+};
 use ironclaw_outbound::*;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 

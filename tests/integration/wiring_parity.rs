@@ -33,7 +33,7 @@ mod support;
 
 use std::collections::HashSet;
 
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::harness::HarnessResult;

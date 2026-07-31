@@ -3,7 +3,8 @@ use super::*;
 use crate::{AuthChallengeProvider, AuthChallengeView, AuthPromptChallengeKind};
 use ironclaw_auth::{AuthProviderId, OAuthAuthorizationUrl};
 use ironclaw_host_api::{
-    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, VendorId,
+    capability::RuntimeCredentialAccountSetup, decision::RuntimeCredentialAuthRequirement,
+    ids::VendorId,
 };
 
 struct FakeAuthChallengeProvider {
@@ -692,7 +693,7 @@ async fn product_event_stream_creates_vendor_oauth_prompt_for_runtime_credential
     );
     let credential_requirements = vec![RuntimeCredentialAuthRequirement {
         provider: VendorId::new("vendorco").unwrap(),
-        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+        setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
             scopes: vec!["items:read".to_string()],
         },
         requester_extension: ExtensionId::new("vendorco-tools").unwrap(),

@@ -6,7 +6,10 @@ mod parity_qa_support;
 mod reborn_support;
 mod support;
 
-use ironclaw_host_api::{CapabilityId, NetworkPolicy, NetworkScheme, NetworkTargetPattern};
+use ironclaw_host_api::{
+    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    ids::CapabilityId,
+};
 use ironclaw_host_runtime::HTTP_CAPABILITY_ID;
 use ironclaw_loop_host::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::TurnStatus;

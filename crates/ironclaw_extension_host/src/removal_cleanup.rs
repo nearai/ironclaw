@@ -7,7 +7,9 @@ pub use ironclaw_extensions::{
     ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
     ExtensionRemovalCleanupRequirement,
 };
-use ironclaw_host_api::{ProductSurfaceError, ResourceScope, UserId};
+use ironclaw_host_api::{
+    ids::UserId, product_surface::ProductSurfaceError, resource::ResourceScope,
+};
 use ironclaw_product::ProductSurfaceFailure;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,7 +113,9 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_host_api::{
-        AgentId, InvocationId, ProductSurfaceError, ProjectId, ResourceScope, TenantId, UserId,
+        ids::{AgentId, InvocationId, ProjectId, TenantId, UserId},
+        product_surface::ProductSurfaceError,
+        resource::ResourceScope,
     };
     use ironclaw_product::ProductSurfaceFailure;
 

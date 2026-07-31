@@ -1,6 +1,6 @@
 use axum::Json;
 use axum::extract::{Extension, Path, State};
-use ironclaw_host_api::{ProductSurfaceCaller, ProductSurfaceError};
+use ironclaw_host_api::product_surface::{ProductSurfaceCaller, ProductSurfaceError};
 use ironclaw_product::{RUN_ARTIFACT_VIEW, RebornRunArtifact, RebornRunArtifactRequest};
 use serde::Deserialize;
 
@@ -26,12 +26,14 @@ pub async fn get_run_artifact(
     .map_err(ProductSurfaceError::internal_from)?;
     let surface = state.bind_services(caller);
     let page = surface
-        .query(ironclaw_host_api::ProductSurfaceQueryRequest {
-            view_id: RUN_ARTIFACT_VIEW.id.to_string(),
-            input: params,
-            cursor: None,
-            limit: None,
-        })
+        .query(
+            ironclaw_host_api::product_surface::ProductSurfaceQueryRequest {
+                view_id: RUN_ARTIFACT_VIEW.id.to_string(),
+                input: params,
+                cursor: None,
+                limit: None,
+            },
+        )
         .await?;
     let payload = page
         .items

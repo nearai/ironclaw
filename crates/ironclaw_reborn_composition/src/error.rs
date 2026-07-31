@@ -41,7 +41,7 @@ pub enum RebornBuildError {
     #[error("reborn turn state build failed")]
     Turn(#[from] ironclaw_turns::TurnError),
     #[error("reborn mount view construction failed")]
-    Mount(#[from] ironclaw_host_api::HostApiError),
+    Mount(#[from] ironclaw_host_api::error::HostApiError),
 }
 
 impl From<ironclaw_extension_host::RebornExtensionHostBuildError> for RebornBuildError {
@@ -128,7 +128,7 @@ mod tests {
     fn composition_unexpected_tenant_sandbox_process_port_becomes_invalid_config() {
         let error = RebornBuildError::from(
             crate::RebornCompositionError::UnexpectedTenantSandboxProcessPort {
-                process_backend: ironclaw_host_api::ProcessBackendKind::LocalHost,
+                process_backend: ironclaw_host_api::runtime_policy::ProcessBackendKind::LocalHost,
             },
         );
 

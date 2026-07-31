@@ -32,7 +32,9 @@ use ironclaw_filesystem::{
     ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    AgentId, InvocationId, ProjectId, ResourceScope, ScopedPath, TenantId, UserId,
+    ids::{AgentId, InvocationId, ProjectId, TenantId, UserId},
+    path::ScopedPath,
+    resource::ResourceScope,
 };
 use serde::{Serialize, de::DeserializeOwned};
 

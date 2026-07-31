@@ -40,7 +40,7 @@ use ironclaw_filesystem::{
     CasExpectation, Entry, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind,
     IndexName, IndexSpec, IndexValue, Page, RecordKind, RootFilesystem,
 };
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 
 use crate::chunking::{MemoryChunkWrite, content_bytes_sha256, content_sha256};
 use crate::indexer::{MemoryChunkReplaceOutcome, MemoryDocumentIndexRepository};

@@ -31,7 +31,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use chrono::Duration as ChronoDuration;
 use http_body_util::BodyExt;
-use ironclaw_host_api::TenantId;
+use ironclaw_host_api::ids::TenantId;
 use ironclaw_webui::{
     EmailUserDirectory, GitHubOAuthConfig, GitHubProvider, OAuthProvider, OAuthRouterConfig,
     SignedTokenSessionStore, signed_session_store, webui_v2_auth_router,

@@ -17,7 +17,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use ironclaw_hooks::middleware::HookGateRefFactory;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, Resolution, ResolutionBatch, UserId, sha256_digest_token,
+    approval::sha256_digest_token,
+    ids::{ApprovalRequestId, CapabilityId, UserId},
+    resolution::{Resolution, ResolutionBatch},
 };
 use ironclaw_turns::{
     LoopGateRef,

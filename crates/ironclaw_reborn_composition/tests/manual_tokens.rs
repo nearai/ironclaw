@@ -17,7 +17,10 @@ use ironclaw_auth::{
     RebornAuthContinuationDispatcher, RebornManualTokenError, RebornManualTokenSetupRequest,
     RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse, RebornProductAuthServices,
 };
-use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
+use ironclaw_host_api::{
+    ids::{InvocationId, SecretHandle, UserId},
+    resource::ResourceScope,
+};
 use secrecy::SecretString;
 
 const RAW_TOKEN: &str = "super-secret-manual-token";
@@ -624,7 +627,7 @@ async fn manual_token_service_retries_completed_flow_when_continuation_dispatch_
     let services = RebornProductAuthServices::from_shared(shared.clone(), dispatcher.clone())
         .with_flow_record_source(shared.clone());
     let mut owner = scope("alice");
-    owner.resource.thread_id = Some(ironclaw_host_api::ThreadId::new("thread-retry").unwrap());
+    owner.resource.thread_id = Some(ironclaw_host_api::ids::ThreadId::new("thread-retry").unwrap());
 
     let challenge = services
         .request_manual_token_setup(setup_request(owner.clone()))

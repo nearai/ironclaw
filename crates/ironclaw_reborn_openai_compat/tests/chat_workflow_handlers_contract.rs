@@ -10,7 +10,10 @@ use axum::extract::DefaultBodyLimit;
 use base64::Engine as _;
 use http::Request;
 use http_body_util::BodyExt;
-use ironclaw_host_api::{AgentId, ProductSurface, ProjectId, TenantId, UserId};
+use ironclaw_host_api::{
+    ids::{AgentId, ProjectId, TenantId, UserId},
+    product_surface::ProductSurface,
+};
 use ironclaw_product::{
     AuthRequirement, ProductCommandResultPayload, ProductInboundAck, ProductInboundPayload,
     ProductRejection, ProductRejectionKind, ProtocolAuthEvidence, ProtocolAuthFailure,

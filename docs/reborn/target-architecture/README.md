@@ -1,6 +1,6 @@
 # IronClaw Reborn — Target Crate Architecture (Executive Overview)
 
-**Status:** Proposal, under review · **Baseline:** `origin/main` @ `dde662d5a` (2026-07-29)
+**Status:** Proposal, under review · **Authored against:** `origin/main` @ `dde662d5a` (2026-07-29) · **Refreshed against:** `origin/main` @ `457088c8f` (2026-07-30, post-#6863/#6696/#6691 — see PROPOSAL §2.7)
 **Documents:** this overview · [PROPOSAL.md](PROPOSAL.md) (full evidence-backed specification) · [families/](families/) (one in-depth file per top-level family) · [CHECKLIST.md](CHECKLIST.md) (definition of done) · [PLAN.md](PLAN.md) (how to execute) · [explorer.html](explorer.html) (interactive map + dependency graph — self-contained, open in any browser)
 
 This is the north star for the architecture cleanup: a concrete crate/folder map with explicit security and authority boundaries, so that agents and humans can answer "where does this go?" without archaeology, and so the refactor train has a fixed destination instead of a direction.
@@ -32,7 +32,7 @@ The runtime security mechanisms are preserved — the same checks run in the sam
 
 ## The family map
 
-Ten families under `crates/`, shown with the crates each one holds — enough to get a sense of what lives where. Crate names are shown without their `ironclaw_` prefix. The full contract for every crate (what it owns, what it must never contain, its dependencies) is in that family's spec file, linked below. Naming follows one written rule (PROPOSAL §5.1): a crate is named for what it *is*, never namespaced by its family — the directory does that job. Crates tagged `NEW` exist only in the target; the map shows the steady state (one transitional crate, `run_state`, remains under `kernel/` until its scheduled deletion — PROPOSAL §5).
+Ten families under `crates/`, shown with the crates each one holds — enough to get a sense of what lives where. Crate names are shown without their `ironclaw_` prefix. The full contract for every crate (what it owns, what it must never contain, its dependencies) is in that family's spec file, linked below. Naming follows one written rule (PROPOSAL §5.1): a crate is named for what it *is*, never namespaced by its family — the directory does that job. Crates tagged `NEW` exist only in the target; everything else already exists and moves. The map shows the steady state — **64 packages** (PROPOSAL §5), with no transitional crates left in it since `run_state`'s deletion landed on 2026-07-29.
 
 ```text
 crates/
@@ -47,6 +47,7 @@ crates/
 │
 ├── substrates/                privileged mechanisms the kernel mediates
 │   ├── filesystem             storage fabric: mounts, containment, CAS
+│   ├── libsql_runtime         shared libSQL admission: one read pool, one write lane
 │   ├── secrets                secret custody & one-shot leases
 │   ├── network                egress policy & hardened transport
 │   ├── safety                 scanning & redaction primitives
@@ -129,7 +130,7 @@ tools/                         developer diagnostics & excluded helpers
 
 **[`contracts/`](families/contracts.md).** The shared vocabulary and ports every tier may see: identities and scopes, the capability/decision/approval vocabulary, the sealed `Authorized` witness and dispatch port, and the loop, extension, and product port sets. Nothing here executes, persists, or names a vendor — a contracts crate defines shapes and seals constructors; implementations always live above it.
 
-**[`substrates/`](families/substrates.md).** The privileged mechanisms the kernel mediates: the storage fabric with mount containment and CAS, encrypted secrets with one-shot leases, hardened network policy and egress, safety scanning and redaction, and the tracing macros. Substrates enforce local invariants but never make authority decisions and never hold domain records or product behavior.
+**[`substrates/`](families/substrates.md).** The privileged mechanisms the kernel mediates: the storage fabric with mount containment and CAS, the shared libSQL connection-admission runtime beneath it (one reader pool and exactly one writer lane per database), encrypted secrets with one-shot leases, hardened network policy and egress, safety scanning and redaction, and the tracing macros. Substrates enforce local invariants but never make authority decisions and never hold domain records or product behavior.
 
 **[`events/`](families/events.md).** What already happened, kept in three deliberately separate contracts: canonical redacted evidence (vocabulary plus durable backends with fail-closed production profiles), rebuildable read models derived by replay, and transport-neutral streams with admission control. Projections and streams can never write state or become authority, and no transport framing lives here.
 
@@ -180,7 +181,9 @@ Untrusted input becomes **validated** at the listener/verifier (webui middleware
 
 ## What is explicitly *not* decided here
 
-Open PRs stay open: #6691 (composition builders) is directionally identical but not presumed; #6696 (process-journal collapse) gates four mapping rows (`processes` widening, `run_state` deletion, `approvals` widening, `runner`'s scheduler/await-edge shed) — the target is valid whether or not it lands. Ten genuinely open decisions (prompt-envelope/safety unification, trust's inert signed-registry path, the three-OAuth-stacks question, openai-compat-as-extension, the `reborn_` rename batch, and more) are listed in PROPOSAL.md §12.10 and in each affected crate spec, not silently resolved. PR #6253 (the interactive architecture explorer) models the superseded 2026-07-17 design note; it should be regenerated against this target or closed, in coordination with its author.
+**Refreshed 2026-07-30.** The three PRs this section used to hedge on have all merged, so the hedging is gone and the target absorbed them: **#6691** (composition builders) landed — composition shed ~8.7k lines to `product`/`loop_host`/`extension_host` and retired the `local_dev` misnomer, so half of the composition eviction inventory is now done rather than planned; **#6696** (process-journal collapse) landed — `run_state` is deleted, `approvals` and `processes` widened as specified, and `turns` shed its store engine; **#6863** landed a new substrates crate, `ironclaw_libsql_runtime`, which the target now includes. Details and the arithmetic are in PROPOSAL.md §2.7.
+
+One thing the merges did **not** settle, and this refresh deliberately does not settle either: #6696's design note said runner's await-edge machinery would be deleted, and it was reworked instead — 2.9k lines of it survive. Whether the process journal's edges can express what that resolver does is a design question for the turn-runner narrowing (PROPOSAL §6.7.3, §12.10), not a bookkeeping fix. Alongside it, ten genuinely open decisions (prompt-envelope/safety unification, trust's inert signed-registry path, the three-OAuth-stacks question, openai-compat-as-extension, and more) are listed in PROPOSAL.md §12.10 and in each affected crate spec, not silently resolved. PR #6253 (the interactive architecture explorer) models the superseded 2026-07-17 design note; it should be regenerated against this target or closed, in coordination with its author — untouched here.
 
 ## How to review
 

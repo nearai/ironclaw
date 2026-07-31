@@ -14,7 +14,8 @@ use ironclaw_auth::{
     TurnRunRef,
 };
 use ironclaw_host_api::{
-    AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+    ids::{AgentId, ExtensionId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
+    resource::ResourceScope,
 };
 use ironclaw_product::{
     AuthGateRecord, AuthInteractionChallengeView, AuthInteractionDecision,

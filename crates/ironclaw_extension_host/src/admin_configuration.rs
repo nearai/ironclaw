@@ -7,8 +7,11 @@ use async_trait::async_trait;
 use ironclaw_extension_host::{AdminConfigurationGroupState, AdminConfigurationService};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    InvocationId, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-    ProductSurfaceErrorKind, ResourceScope,
+    ids::InvocationId,
+    product_surface::{
+        ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    },
+    resource::ResourceScope,
 };
 use ironclaw_product::{
     ADMIN_CONFIGURATION_VIEW, RebornAdminConfigurationField, RebornAdminConfigurationGroup,

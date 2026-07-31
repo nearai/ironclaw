@@ -11,7 +11,7 @@ use ironclaw_filesystem::{
     FilesystemError, Filter, IndexSpec, OrderedPage, Page, RecordVersion, RootFilesystem, SeqNo,
     StorageTxn, VersionedEntry,
 };
-use ironclaw_host_api::{HostPath, VirtualPath};
+use ironclaw_host_api::path::{HostPath, VirtualPath};
 
 /// Turn-state scope path for `binding` (isolated by tenant/agent/project/
 /// owner user), with `root_prefix` prepended before `/tenants/...`. Shared by

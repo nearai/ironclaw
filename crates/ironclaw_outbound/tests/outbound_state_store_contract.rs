@@ -14,8 +14,9 @@ use ironclaw_filesystem::{
     RecordVersion, RootFilesystem, ScopedFilesystem, VersionedEntry,
 };
 use ironclaw_host_api::{
-    AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, ThreadId,
-    UserId, VirtualPath,
+    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
 };
 use ironclaw_outbound::*;
 use ironclaw_turns::{ReplyTargetBindingRef, RunOriginAdapter, TurnActor, TurnRunId, TurnScope};
@@ -2470,7 +2471,7 @@ async fn filesystem_outbound_store_writes_tenant_id_indexed_projection() {
     // VirtualPath through the same MountView the store uses, so the raw
     // query targets exactly the bytes the backend stored.
     let deliveries_prefix =
-        ironclaw_host_api::ScopedPath::new("/outbound/deliveries".to_string()).unwrap();
+        ironclaw_host_api::path::ScopedPath::new("/outbound/deliveries".to_string()).unwrap();
     let virtual_prefix = scoped
         .resolve(&scope.to_resource_scope(), &deliveries_prefix)
         .unwrap();
@@ -2516,7 +2517,8 @@ async fn filesystem_outbound_store_writes_tenant_id_indexed_projection() {
         .await
         .expect("persist cleanup snapshot");
     let cleanup_prefix =
-        ironclaw_host_api::ScopedPath::new("/outbound/run-delivery-cleanup".to_string()).unwrap();
+        ironclaw_host_api::path::ScopedPath::new("/outbound/run-delivery-cleanup".to_string())
+            .unwrap();
     let cleanup_virtual_prefix = scoped
         .resolve(&scope.to_resource_scope(), &cleanup_prefix)
         .unwrap();

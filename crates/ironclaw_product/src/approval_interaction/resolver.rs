@@ -5,7 +5,11 @@ use ironclaw_approvals::{ApprovalRequestStorePort, ApprovalStatus, ApprovalStore
 use ironclaw_approvals::{ApprovalResolutionError, ApprovalResolver, DenyApproval, LeaseApproval};
 use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStorePort};
 use ironclaw_events::AuditSink;
-use ironclaw_host_api::{Action, ApprovalRequestId, CapabilityId, ResourceScope};
+use ironclaw_host_api::{
+    action::Action,
+    ids::{ApprovalRequestId, CapabilityId},
+    resource::ResourceScope,
+};
 
 use super::{ApprovalGateRecord, ApprovalInteractionRejectionKind, approval_rejected};
 use crate::error::ProductSurfaceFailure;
@@ -269,8 +273,11 @@ mod tests {
     use ironclaw_approvals::ApprovalRequestStorePort;
     use ironclaw_authorization::in_memory_backed_capability_lease_store;
     use ironclaw_host_api::{
-        Action, ApprovalRequest, CapabilityId, CorrelationId, InvocationId, Principal,
-        ResourceEstimate, UserId,
+        action::Action,
+        approval::ApprovalRequest,
+        ids::{CapabilityId, CorrelationId, InvocationId, UserId},
+        resource::ResourceEstimate,
+        scope::Principal,
     };
 
     use super::*;
@@ -336,7 +343,7 @@ mod tests {
     }
 
     fn approval_request(
-        invocation_fingerprint: Option<ironclaw_host_api::InvocationFingerprint>,
+        invocation_fingerprint: Option<ironclaw_host_api::approval::InvocationFingerprint>,
     ) -> ApprovalRequest {
         ApprovalRequest {
             id: ApprovalRequestId::new(),

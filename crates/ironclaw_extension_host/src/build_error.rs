@@ -5,5 +5,5 @@ pub enum RebornExtensionHostBuildError {
     #[error("reborn extension-host filesystem build failed")]
     Filesystem(#[from] ironclaw_filesystem::FilesystemError),
     #[error("reborn extension-host mount view construction failed")]
-    Mount(#[from] ironclaw_host_api::HostApiError),
+    Mount(#[from] ironclaw_host_api::error::HostApiError),
 }

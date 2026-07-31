@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::AuditEnvelope;
+use ironclaw_host_api::audit::AuditEnvelope;
 
 use crate::cursor::{EventCursor, EventLogEntry, EventReplay, EventStreamKey, ReadScope};
 use crate::error::EventError;

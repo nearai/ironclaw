@@ -17,14 +17,16 @@ use ironclaw_host_api::product_adapter::{
     TargetCandidate, TargetQuery, VerifiedInbound, render_channel_auth_prompt,
 };
 use ironclaw_host_api::{
-    NetworkMethod, RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, SecretHandle,
+    action::NetworkMethod,
+    ids::SecretHandle,
+    tool_adapter::{RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest},
 };
 use serde::Deserialize;
 
 use crate::delivery::{SlackDeliveryFailureKind, slack_error_kind};
 use crate::mrkdwn::{render_slack_mrkdwn, slack_text_chunks};
 use crate::payload::{
-    SLACK_API_HOST, SlackInboundEvent, SlackPayloadParseError, normalize_slack_event,
+    SLACK_API_HOST, SlackInboundEvent, SlackPayloadParseError, normalize_slack_inbound,
 };
 
 /// The administrator-configuration handle carrying the bot token (manifest data; the
@@ -45,7 +47,9 @@ impl ChannelAdapter for SlackChannelAdapter {
                     reason: format!("invalid installation id: {error}"),
                 }
             })?;
-        match normalize_slack_event(request.body, &installation_id).map_err(parse_error)? {
+        match normalize_slack_inbound(request.body, request.headers, &installation_id)
+            .map_err(parse_error)?
+        {
             SlackInboundEvent::UrlVerification { challenge } => {
                 Ok(InboundOutcome::Respond(ImmediateResponse {
                     status: 200,
@@ -53,6 +57,11 @@ impl ChannelAdapter for SlackChannelAdapter {
                     body: challenge.into_bytes(),
                 }))
             }
+            SlackInboundEvent::SslCheck => Ok(InboundOutcome::Respond(ImmediateResponse {
+                status: 200,
+                content_type: None,
+                body: Vec::new(),
+            })),
             SlackInboundEvent::Ignore => Ok(InboundOutcome::Ignore),
             SlackInboundEvent::Message(message) => Ok(InboundOutcome::Messages(vec![*message])),
         }
@@ -403,12 +412,23 @@ mod tests {
     use super::*;
 
     fn inbound(body: &[u8]) -> Result<InboundOutcome, ChannelError> {
+        inbound_with_headers(body, &[])
+    }
+
+    fn inbound_with_headers(
+        body: &[u8],
+        headers: &[(&str, &str)],
+    ) -> Result<InboundOutcome, ChannelError> {
+        let owned_headers: Vec<(String, String)> = headers
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
         SlackChannelAdapter.inbound(VerifiedInbound {
             extension_id: "slack",
             installation_id: "install_alpha",
             config: &[],
             body,
-            headers: &[],
+            headers: &owned_headers,
         })
     }
 
@@ -563,13 +583,171 @@ mod tests {
         ));
     }
 
+    // ── native slash-command form transport (PR-3) ──────────────────────────
+
+    const SLASH_FORM_HEADERS: &[(&str, &str)] =
+        &[("content-type", "application/x-www-form-urlencoded")];
+
+    #[test]
+    fn slash_dm_command_normalizes_with_status_text_and_direct_chat_trigger() {
+        let outcome = inbound_with_headers(
+            b"command=%2Fironclaw&text=status&channel_id=D123&channel_name=directmessage&user_id=U123&team_id=T1&trigger_id=111.222.abc",
+            SLASH_FORM_HEADERS,
+        )
+        .expect("slash command parses");
+        let InboundOutcome::Messages(messages) = outcome else {
+            panic!("expected Messages");
+        };
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert_eq!(message.text, "/status");
+        assert_eq!(message.trigger, ProductTriggerReason::DirectChat);
+        assert_eq!(message.actor.id(), "U123");
+        assert_eq!(
+            message.event_id.as_str(),
+            "slack-install_alpha-slash-111.222.abc"
+        );
+    }
+
+    #[test]
+    fn slash_dispatcher_args_join_with_spaces() {
+        let outcome = inbound_with_headers(
+            b"command=%2Fironclaw&text=model+set-provider+openai&channel_id=D123&channel_name=directmessage&user_id=U123&trigger_id=111.222.arg",
+            SLASH_FORM_HEADERS,
+        )
+        .expect("slash command parses");
+        let InboundOutcome::Messages(messages) = outcome else {
+            panic!("expected Messages");
+        };
+        assert_eq!(messages[0].text, "/model set-provider openai");
+    }
+
+    #[test]
+    fn slash_defensive_strip_avoids_double_slash() {
+        let outcome = inbound_with_headers(
+            b"command=%2Fironclaw&text=%2Fstatus&channel_id=D123&channel_name=directmessage&user_id=U123&trigger_id=111.222.strip",
+            SLASH_FORM_HEADERS,
+        )
+        .expect("slash command parses");
+        let InboundOutcome::Messages(messages) = outcome else {
+            panic!("expected Messages");
+        };
+        assert_eq!(
+            messages[0].text, "/status",
+            "must not double the leading slash"
+        );
+    }
+
+    #[test]
+    fn slash_bare_and_help_map_to_help() {
+        for body in [
+            b"command=%2Fironclaw&text=&channel_id=D123&channel_name=directmessage&user_id=U123&trigger_id=111.222.bare".as_slice(),
+            b"command=%2Fironclaw&text=help&channel_id=D123&channel_name=directmessage&user_id=U123&trigger_id=111.222.help".as_slice(),
+        ] {
+            let outcome =
+                inbound_with_headers(body, SLASH_FORM_HEADERS).expect("slash command parses");
+            let InboundOutcome::Messages(messages) = outcome else {
+                panic!("expected Messages");
+            };
+            assert_eq!(messages[0].text, "/help");
+        }
+    }
+
+    #[test]
+    fn slash_non_dm_channel_maps_to_bot_command_trigger() {
+        let outcome = inbound_with_headers(
+            b"command=%2Fironclaw&text=status&channel_id=C777&channel_name=general&user_id=U123&trigger_id=111.222.pub",
+            SLASH_FORM_HEADERS,
+        )
+        .expect("slash command parses");
+        let InboundOutcome::Messages(messages) = outcome else {
+            panic!("expected Messages");
+        };
+        assert_eq!(messages[0].trigger, ProductTriggerReason::BotCommand);
+    }
+
+    #[test]
+    fn slash_foreign_command_name_is_passed_through_verbatim() {
+        let outcome = inbound_with_headers(
+            b"command=%2Fsomethingelse&text=hi&channel_id=D123&channel_name=directmessage&user_id=U123&trigger_id=111.222.foreign",
+            SLASH_FORM_HEADERS,
+        )
+        .expect("slash command parses");
+        let InboundOutcome::Messages(messages) = outcome else {
+            panic!("expected Messages");
+        };
+        assert_eq!(messages[0].text, "/somethingelse hi");
+    }
+
+    #[test]
+    fn slash_ssl_check_probe_gets_immediate_empty_200() {
+        let outcome = inbound_with_headers(
+            b"ssl_check=1&token=deprecated-verification-token",
+            SLASH_FORM_HEADERS,
+        )
+        .expect("ssl_check probe parses");
+        let InboundOutcome::Respond(response) = outcome else {
+            panic!("expected Respond");
+        };
+        assert_eq!(response.status, 200);
+        assert!(response.body.is_empty());
+    }
+
+    #[test]
+    fn slash_malformed_form_missing_user_id_is_typed_parse_error() {
+        let result = inbound_with_headers(
+            b"command=%2Fironclaw&text=status&channel_id=D123&channel_name=directmessage&trigger_id=111.222.bad",
+            SLASH_FORM_HEADERS,
+        );
+        assert!(matches!(result, Err(ChannelError::Parse { .. })));
+    }
+
+    #[test]
+    fn json_body_still_normalizes_through_the_header_aware_helper() {
+        // Same two existing JSON scenarios, driven through the new
+        // header-aware entry point — byte-identical outcomes.
+        let challenge = inbound_with_headers(
+            br#"{"type":"url_verification","challenge":"challenge-token"}"#,
+            &[("content-type", "application/json")],
+        )
+        .expect("challenge parses");
+        let InboundOutcome::Respond(response) = challenge else {
+            panic!("expected Respond");
+        };
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"challenge-token");
+
+        let dm = inbound_with_headers(
+            br#"{
+                "type": "event_callback",
+                "event_id": "Ev123",
+                "team_id": "T-A",
+                "event": {
+                    "type": "message",
+                    "user": "U123",
+                    "channel": "D123",
+                    "channel_type": "im",
+                    "text": "hello there",
+                    "ts": "1710000000.000100"
+                }
+            }"#,
+            &[],
+        )
+        .expect("dm parses with no content-type header");
+        let InboundOutcome::Messages(messages) = dm else {
+            panic!("expected Messages");
+        };
+        assert_eq!(messages[0].text, "hello there");
+        assert_eq!(messages[0].trigger, ProductTriggerReason::DirectChat);
+    }
+
     // ── deliver() (delivery coordinator cutover, extension-runtime P5) ──────
 
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
     use ironclaw_host_api::product_adapter::{OutboundPart, PartDeliveryOutcome};
-    use ironclaw_host_api::{
+    use ironclaw_host_api::tool_adapter::{
         RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
     };
 

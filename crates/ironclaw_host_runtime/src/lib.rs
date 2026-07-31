@@ -26,11 +26,14 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, CorrelationId,
-    DispatchFailureDetail, ExecutionContext, ExtensionId, FailureFate, FailureKind, ProcessId,
-    ResourceEstimate, ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeKind,
-    SecretHandle,
+    decision::RuntimeCredentialAuthRequirement,
+    dispatch::{CapabilityDisplayOutputPreview, DispatchFailureDetail},
+    ids::{ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, ProcessId, SecretHandle},
+    resource::{ResourceEstimate, ResourceScope, ResourceUsage},
+    result_meta::{FailureFate, FailureKind},
+    runtime::RuntimeKind,
     runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
+    scope::ExecutionContext,
 };
 use ironclaw_trust::TrustDecision;
 use serde_json::Value;
@@ -705,7 +708,7 @@ pub fn capability_failure_disposition(kind: FailureKind) -> CapabilityFailureDis
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum RuntimeWorkId {
-    Invocation(ironclaw_host_api::InvocationId),
+    Invocation(ironclaw_host_api::ids::InvocationId),
     Process(ProcessId),
     Gate(RuntimeGateId),
 }
@@ -955,7 +958,9 @@ impl HostRuntimeError {
 #[cfg(test)]
 mod unsupported_operation_default_tests {
     use super::*;
-    use ironclaw_host_api::{CapabilitySet, MountView, TrustClass, UserId};
+    use ironclaw_host_api::{
+        capability::CapabilitySet, ids::UserId, mount::MountView, runtime::TrustClass,
+    };
 
     /// A `HostRuntime` that implements only the required methods, so every
     /// optional operation falls through to the trait's default body.

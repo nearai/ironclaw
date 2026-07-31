@@ -21,8 +21,29 @@ use ironclaw_events::{
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
-use ironclaw_host_api::FailureKind;
-use ironclaw_host_api::*;
+use ironclaw_host_api::result_meta::FailureKind;
+use ironclaw_host_api::{
+    action::{Action, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    approval::ApprovalRequest,
+    capability::{
+        CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
+    },
+    decision::{Decision, Obligation, Obligations},
+    host_port::HostPortCatalog,
+    http::{
+        RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+    },
+    ids::{
+        ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId,
+        InvocationId, PackageId, RunId, SecretHandle, TenantId, UserId,
+    },
+    mount::MountView,
+    path::VirtualPath,
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CapabilitySurfacePolicy, CapabilitySurfaceVersion, HostRuntime,
     HostRuntimeServices, RuntimeCapabilityOutcome, RuntimeStatusRequest, SurfaceKind,

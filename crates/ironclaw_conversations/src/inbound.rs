@@ -424,9 +424,9 @@ fn trusted_inbound_request_from_trigger(
 enum BindingResolutionPolicy {
     Untrusted,
     Trusted {
-        trusted_agent_id: Option<ironclaw_host_api::AgentId>,
-        trusted_project_id: Option<ironclaw_host_api::ProjectId>,
-        trusted_owner_user_id: Option<ironclaw_host_api::UserId>,
+        trusted_agent_id: Option<ironclaw_host_api::ids::AgentId>,
+        trusted_project_id: Option<ironclaw_host_api::ids::ProjectId>,
+        trusted_owner_user_id: Option<ironclaw_host_api::ids::UserId>,
         kind: TrustedInboundKind,
     },
 }
@@ -534,7 +534,7 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_triggers::{
         TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
         TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerFire, TriggerFireIdentity, TriggerId,

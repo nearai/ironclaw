@@ -51,7 +51,7 @@ const MODULE_CACHE_CAPACITY: NonZeroUsize = match NonZeroUsize::new(128) {
 /// Runtime-visible request for a hook WASM module.
 #[derive(Debug)]
 pub struct WasmHookModuleRequest<'a> {
-    pub extension_id: &'a ironclaw_host_api::ExtensionId,
+    pub extension_id: &'a ironclaw_host_api::ids::ExtensionId,
     pub extension_version: &'a str,
     pub hook_local_id: &'a HookLocalId,
     pub kind: HookManifestKind,

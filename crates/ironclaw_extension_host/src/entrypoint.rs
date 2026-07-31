@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use ironclaw_extensions::{CapabilityVisibility, ResolvedExtensionManifest};
-use ironclaw_host_api::ToolAdapter;
+use ironclaw_host_api::tool_adapter::ToolAdapter;
 use ironclaw_product::ChannelAdapter;
 
 /// The bound behavior of one extension: the adapters it implements. Auth

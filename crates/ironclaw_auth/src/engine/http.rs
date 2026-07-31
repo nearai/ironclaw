@@ -3,8 +3,11 @@
 //! to the endpoint's host, caps the response body, and never logs bodies.
 
 use ironclaw_host_api::{
-    CapabilityId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, ResourceScope,
-    RuntimeCredentialInjection, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
+    action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    http::{RuntimeCredentialInjection, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse},
+    ids::CapabilityId,
+    resource::ResourceScope,
+    runtime::RuntimeKind,
 };
 use secrecy::{ExposeSecret, SecretString};
 
@@ -174,7 +177,7 @@ pub(super) fn basic_auth_header(
     )
 }
 
-fn map_egress_error(error: ironclaw_host_api::RuntimeHttpEgressError) -> AuthProductError {
+fn map_egress_error(error: ironclaw_host_api::http::RuntimeHttpEgressError) -> AuthProductError {
     tracing::debug!(
         egress_reason = error.stable_runtime_reason(),
         "auth engine vendor egress failed"

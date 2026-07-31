@@ -17,7 +17,10 @@ use chrono::{SecondsFormat, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
 use ironclaw_common::{AutomationName, AutomationNameError};
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
+use ironclaw_host_api::{
+    Timestamp,
+    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+};
 use ironclaw_turns::TurnRunId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -29,7 +32,7 @@ mod postgres;
 mod trusted_submit;
 mod worker;
 
-pub use ironclaw_host_api::OutboundDeliveryTargetId as TriggerDeliveryTargetId;
+pub use ironclaw_host_api::outbound::OutboundDeliveryTargetId as TriggerDeliveryTargetId;
 pub use trusted_submit::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerMaterializedPrompt,

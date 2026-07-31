@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExtensionId, ProviderToolName, ResourceEstimate, RuntimeKind,
+    capability::EffectKind,
+    ids::{CapabilityId, ExtensionId, ProviderToolName},
+    resource::ResourceEstimate,
+    runtime::RuntimeKind,
 };
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView, ConcurrencyHint,

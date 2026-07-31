@@ -475,14 +475,14 @@ impl LoopCapabilityPort for ForbiddenResumeHost {
     async fn invoke_capability(
         &self,
         _request: LoopRequest,
-    ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
+    ) -> Result<ironclaw_host_api::resolution::Resolution, AgentLoopHostError> {
         Err(self.forbidden_call("invoke_capability"))
     }
 
     async fn invoke_capability_batch(
         &self,
         _request: LoopRequestBatch,
-    ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
+    ) -> Result<ironclaw_host_api::resolution::ResolutionBatch, AgentLoopHostError> {
         Err(self.forbidden_call("invoke_capability_batch"))
     }
 }

@@ -1,6 +1,6 @@
 //! Context for the `before_capability` hook point.
 
-use ironclaw_host_api::{ExtensionId, TenantId};
+use ironclaw_host_api::ids::{ExtensionId, TenantId};
 use rust_decimal::Decimal;
 use std::str::FromStr;
 

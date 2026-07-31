@@ -23,7 +23,16 @@ use std::sync::Arc;
 use ironclaw_authorization::{GrantAuthorizer, in_memory_backed_capability_lease_store};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::DiskFilesystem;
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    capability::{CapabilitySet, EffectKind},
+    host_port::HostPortCatalog,
+    ids::{CapabilityId, ExtensionId, PackageId, SecretHandle, UserId},
+    mount::MountView,
+    path::VirtualPath,
+    resource::ResourceEstimate,
+    runtime::{RuntimeKind, TrustClass},
+    scope::ExecutionContext,
+};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeError, HostRuntimeServices,
     RuntimeCapabilityOutcome,

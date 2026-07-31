@@ -19,8 +19,9 @@ use ironclaw_conversations::{
 };
 use ironclaw_filesystem::{CasExpectation, InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, UserId,
-    VirtualPath,
+    ids::{AgentId, ProjectId, TenantId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
 };
 
 /// Wrap a `RootFilesystem` backend in a `ScopedFilesystem` exposing the

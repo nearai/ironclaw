@@ -8,7 +8,7 @@
 //! and the other doesn't.
 
 use axum::http::Method;
-use ironclaw_host_api::NetworkMethod;
+use ironclaw_host_api::action::NetworkMethod;
 
 /// Map the host-api network method enum onto axum's `http::Method`.
 pub(crate) fn network_method_to_axum(method: NetworkMethod) -> Method {

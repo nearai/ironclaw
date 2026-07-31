@@ -32,7 +32,7 @@ fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts:
         model:DefaultModelStrategy(primary_or_fallback_index),\
         batch:DefaultBatchPolicyStrategy(exclusive_sequential),\
         gate:DefaultGateHandlingStrategy(block),\
-        recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts={model_availability_attempts},availability=retry_then_observe,stale_request=iteration_retry_then_observe,output_truncated=observe_then_continue,unauthorized=abort,checkpoint_rejected=abort,transcript_write_failed=abort),\
+        recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts={model_availability_attempts},availability=retry_then_observe,stale_request=iteration_retry_then_observe,output_truncated=observe_then_continue,unauthorized=user_visible_terminal,checkpoint_rejected=abort,transcript_write_failed=user_visible_terminal),\
         reply_admission:DefaultReplyAdmissionStrategy(reject_empty_and_provider_transcript_artifacts),\
         stop:DefaultStopConditionStrategy(window=5,repeat=3,failure_run=3,rejected_reply=invalid_model_output),\
         drain:DefaultInputDrainStrategy(steering=true,followup=true),\
@@ -46,8 +46,8 @@ fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts:
 /// Update this digest when the default family composition, planner behavior, or
 /// identity schema changes in a replay-relevant way.
 pub const DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0x21, 0x2b, 0x40, 0x1d, 0x92, 0xc7, 0x3c, 0xf4, 0x5f, 0x7e, 0xa7, 0xa0, 0xa2, 0x4a, 0x62, 0x25,
-    0x79, 0xce, 0x07, 0xbd, 0x6c, 0x81, 0x51, 0x0d, 0xd9, 0xc2, 0x0f, 0x0f, 0x37, 0x73, 0x55, 0x92,
+    0xca, 0xbb, 0x66, 0x61, 0xe4, 0xfd, 0xb4, 0x81, 0x12, 0x15, 0xc9, 0xde, 0x1d, 0x18, 0x68, 0xc3,
+    0x58, 0xf7, 0x9e, 0x51, 0xa7, 0x91, 0xd5, 0x75, 0xde, 0xe3, 0x7f, 0x96, 0x25, 0xbc, 0xf1, 0xda,
 ]);
 
 /// The default loop family: the text-tool-use baseline.

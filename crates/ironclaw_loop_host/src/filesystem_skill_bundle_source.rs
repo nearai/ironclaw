@@ -5,7 +5,7 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{ResourceScope, ScopedPath, TenantId};
+use ironclaw_host_api::{ids::TenantId, path::ScopedPath, resource::ResourceScope};
 use ironclaw_skills::{
     INSTALL_METADATA_FILE_NAME, InstalledSkillMetadata, MAX_INSTALL_METADATA_BYTES,
     MAX_PROMPT_FILE_SIZE, SkillTrust, parse_skill_md,
@@ -535,8 +535,9 @@ mod tests {
         RecordVersion, RootFilesystem,
     };
     use ironclaw_host_api::{
-        AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId,
-        ThreadId, UserId, VirtualPath,
+        ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
     };
     use ironclaw_turns::{
         RunProfileResolutionRequest, RunProfileResolver, TurnActor, TurnId, TurnRunId, TurnScope,

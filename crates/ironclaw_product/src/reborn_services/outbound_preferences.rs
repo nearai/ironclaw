@@ -321,7 +321,7 @@ fn map_outbound_repository_error(error: OutboundError) -> ProductSurfaceError {
 mod tests {
     use std::{collections::HashMap, sync::Mutex};
 
-    use ironclaw_host_api::{TenantId, UserId};
+    use ironclaw_host_api::ids::{TenantId, UserId};
     use ironclaw_outbound::{
         CommunicationModality, CommunicationPreferenceRepository, CommunicationPreferenceVersion,
         DeliveryDefaultScope, DeliveryTargetCapabilities, MutableOutboundDeliveryTargetRegistry,

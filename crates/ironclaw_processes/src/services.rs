@@ -20,7 +20,10 @@ use async_trait::async_trait;
 use futures::FutureExt;
 use ironclaw_events::sanitize_error_kind;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{ProcessId, ResourceReservation, ResourceScope};
+use ironclaw_host_api::{
+    ids::ProcessId,
+    resource::{ResourceReservation, ResourceScope},
+};
 
 use crate::cancellation::ProcessCancellationRegistry;
 use crate::capability_process::{

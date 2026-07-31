@@ -7,7 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use serde::{Deserialize, Serialize};
 
 use crate::run_profile::instruction_bundle::InstructionBundleFingerprint;
@@ -351,7 +351,7 @@ pub trait LoopModelPort: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
 
     use super::*;
     use crate::run_profile::snapshot::ResolvedRunProfile;

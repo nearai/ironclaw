@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_loop_host::CapabilityAllowSet;
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_runner::runtime::ToolDisclosureMode;
@@ -54,7 +54,7 @@ impl RebornIntegrationGroupBuilder {
     pub fn with_bound_memory_provider(
         mut self,
         provider: std::sync::Arc<dyn ironclaw_memory::MemoryService>,
-        lifecycle: ironclaw_host_api::MemoryDescriptor,
+        lifecycle: ironclaw_host_api::memory::MemoryDescriptor,
     ) -> Self {
         self.bound_memory = Some((provider, lifecycle));
         self
@@ -198,6 +198,21 @@ impl RebornIntegrationGroupBuilder {
     /// whole-turn recovery scenario. Production defaults remain unchanged.
     pub fn with_iteration_limit_for_test(mut self, limit: std::num::NonZeroU32) -> Self {
         self.planned_default_iteration_limit = Some(limit);
+        self
+    }
+
+    /// Reject final assistant transcript writes at the runtime port while
+    /// leaving the real filesystem service in place for inbound messages and
+    /// read-back assertions.
+    pub fn fail_append_finalized_assistant_message_for_test(mut self) -> Self {
+        self.fail_append_finalized_assistant_message = true;
+        self
+    }
+
+    /// Reject tool-result transcript writes after the capability has completed,
+    /// while retaining the real capability path and thread read-back service.
+    pub fn fail_append_tool_result_reference_for_test(mut self) -> Self {
+        self.fail_append_tool_result_reference = true;
         self
     }
 

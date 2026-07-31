@@ -1,11 +1,15 @@
 use std::sync::{Arc, Mutex};
 
 use ironclaw_host_api::{
-    CapabilityHostHttpRequest, CapabilityId, InvocationId, NetworkMethod, NetworkPolicy,
-    NetworkScheme, NetworkTargetPattern, ProjectId, ResourceScope, RuntimeCredentialInjection,
-    RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TenantId,
-    UserId,
+    action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    http::{
+        CapabilityHostHttpRequest, RuntimeCredentialInjection, RuntimeCredentialSource,
+        RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError,
+        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    },
+    ids::{CapabilityId, InvocationId, ProjectId, SecretHandle, TenantId, UserId},
+    resource::ResourceScope,
+    runtime::RuntimeKind,
 };
 use ironclaw_scripts::ScriptRuntimeHttpAdapter;
 

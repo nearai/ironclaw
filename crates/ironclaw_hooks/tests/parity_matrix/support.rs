@@ -13,7 +13,7 @@ use ironclaw_hooks::predicate_state::{
     InMemoryPredicateStateBackend, InvocationKey, PredicateBackendError, PredicateEventId,
     PredicateStateBackend, ValueKey,
 };
-use ironclaw_host_api::TenantId;
+use ironclaw_host_api::ids::TenantId;
 use rust_decimal::Decimal;
 
 // ---------------------------------------------------------------------------

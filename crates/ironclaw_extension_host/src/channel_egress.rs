@@ -13,9 +13,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_extension_host::egress::{ApprovedChannelEgress, ChannelEgressTransport};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, InvocationId, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
-    ResourceScope, RestrictedEgressError, RestrictedEgressResponse, RuntimeHttpEgressReasonCode,
-    RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, TrustClass,
+    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    http::{RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest},
+    ids::{CapabilityId, ExtensionId, InvocationId, SecretHandle},
+    resource::ResourceScope,
+    runtime::{RuntimeKind, TrustClass},
+    tool_adapter::{RestrictedEgressError, RestrictedEgressResponse},
 };
 use ironclaw_host_runtime::{
     HostRuntimeCredentialMaterial, HostRuntimeHttpEgressPort, HostRuntimeHttpEgressRequest,
@@ -332,7 +335,7 @@ impl ChannelEgressTransport for HostRuntimeChannelEgressTransport {
 }
 
 fn map_runtime_http_error(
-    error: ironclaw_host_api::RuntimeHttpEgressError,
+    error: ironclaw_host_api::http::RuntimeHttpEgressError,
 ) -> RestrictedEgressError {
     match error.reason_code() {
         RuntimeHttpEgressReasonCode::PolicyDenied | RuntimeHttpEgressReasonCode::RequestDenied => {
@@ -362,7 +365,11 @@ mod tests {
     use ironclaw_extension_host::egress::{ApprovedChannelCredential, ApprovedChannelEgress};
     use ironclaw_extensions::ExtensionRegistry;
     use ironclaw_filesystem::DiskFilesystem;
-    use ironclaw_host_api::{InvocationId, NetworkMethod, RuntimeCredentialTarget, UserId};
+    use ironclaw_host_api::{
+        action::NetworkMethod,
+        http::RuntimeCredentialTarget,
+        ids::{InvocationId, UserId},
+    };
     use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
     use ironclaw_network::{
         NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,

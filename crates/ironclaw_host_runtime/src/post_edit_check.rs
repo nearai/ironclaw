@@ -36,7 +36,10 @@ use std::{
     time::Duration,
 };
 
-use ironclaw_host_api::{MountGrant, MountView, ResourceScope};
+use ironclaw_host_api::{
+    mount::{MountGrant, MountView},
+    resource::ResourceScope,
+};
 use serde_json::{Value, json};
 
 use crate::{CommandExecutionRequest, RuntimeProcessError, RuntimeProcessPort};
@@ -381,7 +384,9 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use ironclaw_host_api::{
-        InvocationId, MountAlias, MountGrant, MountPermissions, UserId, VirtualPath,
+        ids::{InvocationId, UserId},
+        mount::{MountGrant, MountPermissions},
+        path::{MountAlias, VirtualPath},
     };
 
     use crate::{CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError};

@@ -76,7 +76,7 @@ impl GenericTriggeredRunDeliveryHook {
     async fn route_extension(
         &self,
         scope: &TurnScope,
-        creator: &ironclaw_host_api::UserId,
+        creator: &ironclaw_host_api::ids::UserId,
         per_trigger_target: Option<&ReplyTargetBindingRef>,
     ) -> Result<(String, Arc<dyn PreferenceTargetCodec>), String> {
         let codecs = self.assembly.active_preference_codecs();
@@ -146,7 +146,7 @@ impl GenericTriggeredRunDeliveryHook {
     async fn stored_preference_target(
         &self,
         scope: &TurnScope,
-        creator: &ironclaw_host_api::UserId,
+        creator: &ironclaw_host_api::ids::UserId,
     ) -> Result<Option<ReplyTargetBindingRef>, String> {
         let key = CommunicationPreferenceKey {
             scope: DeliveryDefaultScope::personal(scope.tenant_id.clone(), creator.clone()),

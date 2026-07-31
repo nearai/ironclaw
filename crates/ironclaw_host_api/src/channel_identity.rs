@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::{AdapterInstallationId, UserId};
+use crate::{ids::UserId, product_adapter::AdapterInstallationId};
 
 /// One extension's connection scope: the adapter installation the bindings
 /// key under plus the identity claim values a proven vendor identity must

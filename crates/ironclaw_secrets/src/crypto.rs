@@ -12,7 +12,7 @@ use hkdf::Hkdf;
 use secrecy::{ExposeSecret, SecretString};
 use sha2::Sha256;
 
-use ironclaw_host_api::{ResourceScope, SecretHandle};
+use ironclaw_host_api::{ids::SecretHandle, resource::ResourceScope};
 
 use crate::SecretError;
 use crate::legacy_store::DecryptedSecret;

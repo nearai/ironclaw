@@ -1,4 +1,4 @@
-use ironclaw_host_api::{NetworkScheme, NetworkTarget};
+use ironclaw_host_api::action::{NetworkScheme, NetworkTarget};
 use std::borrow::Cow;
 use thiserror::Error;
 

@@ -5,7 +5,7 @@
 
 use super::*;
 
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
 use ironclaw_turns::test_support::{in_memory_agent_turn_runtime, in_memory_loop_checkpoint_store};
 use ironclaw_turns::{
     InMemoryRunProfileResolver, RunProfileResolver, TurnId, TurnRunId, TurnScope,
