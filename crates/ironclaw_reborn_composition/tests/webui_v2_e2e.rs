@@ -1880,51 +1880,54 @@ async fn webui_v2_google_drive_oauth_setup_coalesces_operation_scopes() {
 /// could not read the resulting thread's timeline.
 #[tokio::test]
 async fn untrusted_request_body_cannot_inject_system_scope() {
-    let harness = build_harness().await;
-    let sentinel = "\u{1f}SYSTEM\u{1f}";
+    Box::pin(async {
+        let harness = build_harness().await;
+        let sentinel = "\u{1f}SYSTEM\u{1f}";
 
-    let malicious = json!({
-        "client_action_id": "inject-scope-1",
-        "tenant_id": sentinel,
-        "user_id": sentinel,
-        "scope": { "tenant_id": sentinel, "user_id": sentinel },
-    });
-    let create = harness
-        .router
-        .clone()
-        .oneshot(bearer_post("/api/webchat/v2/threads", malicious))
-        .await
-        .expect("create oneshot");
-    assert_eq!(
-        create.status(),
-        StatusCode::OK,
-        "injected scope fields must be ignored (unknown fields), not honored or errored"
-    );
-    let body = read_json(create).await;
-    let thread_id = body["thread"]["thread_id"]
-        .as_str()
-        .expect("thread_id")
-        .to_string();
+        let malicious = json!({
+            "client_action_id": "inject-scope-1",
+            "tenant_id": sentinel,
+            "user_id": sentinel,
+            "scope": { "tenant_id": sentinel, "user_id": sentinel },
+        });
+        let create = harness
+            .router
+            .clone()
+            .oneshot(bearer_post("/api/webchat/v2/threads", malicious))
+            .await
+            .expect("create oneshot");
+        assert_eq!(
+            create.status(),
+            StatusCode::OK,
+            "injected scope fields must be ignored (unknown fields), not honored or errored"
+        );
+        let body = read_json(create).await;
+        let thread_id = body["thread"]["thread_id"]
+            .as_str()
+            .expect("thread_id")
+            .to_string();
 
-    let timeline = harness
-        .router
-        .clone()
-        .oneshot(bearer_get(&format!(
-            "/api/webchat/v2/threads/{thread_id}/timeline"
-        )))
-        .await
-        .expect("timeline oneshot");
-    assert_eq!(
-        timeline.status(),
-        StatusCode::OK,
-        "the thread must belong to the authenticated caller — the body could not set scope"
-    );
+        let timeline = harness
+            .router
+            .clone()
+            .oneshot(bearer_get(&format!(
+                "/api/webchat/v2/threads/{thread_id}/timeline"
+            )))
+            .await
+            .expect("timeline oneshot");
+        assert_eq!(
+            timeline.status(),
+            StatusCode::OK,
+            "the thread must belong to the authenticated caller — the body could not set scope"
+        );
 
-    harness
-        .runtime
-        .shutdown()
-        .await
-        .expect("runtime shutdown clean");
+        harness
+            .runtime
+            .shutdown()
+            .await
+            .expect("runtime shutdown clean");
+    })
+    .await;
 }
 
 // ─── operator LLM-config smoke (issue #4673) ──────────────────────────
