@@ -30,7 +30,7 @@ Skills pass through four stages before injection:
 
 <Steps>
   <Step title="Gate">
-    Skills declare prerequisites in `requires.bins`, `requires.env`, and `requires.config`. These fields are parsed but are not enforced during selection. All installed skills proceed to scoring regardless of their declared requirements.
+    Skills with `auto_activate = false` are excluded before scoring. Skills with `auto_activate = true` (the default) proceed to scoring. Explicit `$name` and `/name` mentions bypass this gate entirely — they activate regardless of the `auto_activate` flag.
   </Step>
 
   <Step title="Score">
@@ -41,7 +41,7 @@ Skills pass through four stages before injection:
     Set `regex_activation_enabled = false` under `[skills]` in your config to disable regex pattern auto-activation. Keyword/tag activation and explicit skill mentions, such as `$my-skill` or `/my-skill`, still inject skills.
 
     <Warning>
-    A skill without an `activation` block scores zero on every message and is never injected.
+    A skill without any activation criteria (keywords, tags, or patterns) always scores zero during automatic selection, but can still be activated by explicit `$name` or `/name` mentions.
     </Warning>
 
     ```yaml
