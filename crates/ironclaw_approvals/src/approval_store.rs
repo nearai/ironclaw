@@ -18,8 +18,12 @@ use ironclaw_filesystem::{
     ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{
-    ApprovalRequest, ApprovalRequestId, GateRecord, GateRef, HostApiError, ResourceScope,
-    ScopedPath,
+    approval::ApprovalRequest,
+    error::HostApiError,
+    gate_record::GateRecord,
+    ids::{ApprovalRequestId, GateRef},
+    path::ScopedPath,
+    resource::ResourceScope,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -129,7 +133,7 @@ pub trait ApprovalRequestStorePort: Send + Sync {
 /// Durable store for the model-visible [`GateRecord`] a pending gate renders
 /// from (arch-simplification §5.2.9).
 ///
-/// A [`Resolution`](ironclaw_host_api::Resolution) control-plane arm carries only
+/// A [`Resolution`](ironclaw_host_api::resolution::Resolution) control-plane arm carries only
 /// an opaque [`GateRef`]; the content the loop renders the pending gate from —
 /// the auth gate's credential requirements (G3), the dependent-run staged result
 /// handle (G2), the redacted summary — lives in the referenced [`GateRecord`].
@@ -585,7 +589,7 @@ fn scoped_path(raw: &str) -> Result<ScopedPath, ApprovalStoreError> {
 
 /// Join a leaf segment onto a [`ScopedPath`] prefix. Mirrors the engine /
 /// processes / secrets / outbound stores' `join_scoped` helper: `list_dir`
-/// returns post-resolution [`VirtualPath`](ironclaw_host_api::VirtualPath)s,
+/// returns post-resolution [`VirtualPath`](ironclaw_host_api::path::VirtualPath)s,
 /// but the follow-up `get` must run through the `ScopedFilesystem` so the
 /// per-op ACL is enforced — so callers strip the leaf name and rejoin it
 /// onto the original `ScopedPath` prefix.

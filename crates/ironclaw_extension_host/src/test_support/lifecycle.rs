@@ -18,9 +18,17 @@ use ironclaw_filesystem::{
     Fault, FaultInjecting, InMemoryBackend, RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    Action, CapabilityDescriptor, CapabilityId, CredentialStageError, Decision, ExecutionContext,
-    ExtensionHostAssemblyConfig, FailureKind, MountAlias, MountGrant, MountPermissions, MountView,
-    Obligations, Principal, ResourceEstimate, ResourceScope, ResourceUsage, VendorId, VirtualPath,
+    action::Action,
+    capability::CapabilityDescriptor,
+    decision::{Decision, Obligations},
+    dispatch::CredentialStageError,
+    extension::ExtensionHostAssemblyConfig,
+    ids::{CapabilityId, VendorId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::{ResourceEstimate, ResourceScope, ResourceUsage},
+    result_meta::FailureKind,
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityError, FirstPartyCapabilityHandler,
@@ -85,7 +93,7 @@ pub async fn build_lifecycle_test_services(
     network_http_egress: Option<Arc<dyn ironclaw_network::NetworkHttpEgress>>,
     google_oauth_configured: bool,
 ) -> ExtensionLifecycleTestServices {
-    let owner_user_id = ironclaw_host_api::UserId::new(owner_id).expect("valid owner id");
+    let owner_user_id = ironclaw_host_api::ids::UserId::new(owner_id).expect("valid owner id");
     let filesystem = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
     let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
     let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
@@ -275,7 +283,7 @@ pub async fn build_lifecycle_test_services(
         .with_persistent_approval_policies(persistent_approval_policies);
 
     let skill_management = ironclaw_skills::build_scoped_skill_management_port(
-        ironclaw_host_api::UserId::new(owner_id).expect("valid owner id"),
+        ironclaw_host_api::ids::UserId::new(owner_id).expect("valid owner id"),
         Arc::clone(&filesystem),
     );
     let mut lifecycle_service =
@@ -386,16 +394,16 @@ pub fn lifecycle_product_context(
 
 pub fn webui_gate_resource_scope_for_owner(owner_id: &str) -> ResourceScope {
     ResourceScope {
-        tenant_id: ironclaw_host_api::TenantId::new("reborn-cli").expect("tenant"),
-        user_id: ironclaw_host_api::UserId::new(owner_id).expect("user"),
-        agent_id: Some(ironclaw_host_api::AgentId::new("reborn-cli-agent").expect("agent")),
+        tenant_id: ironclaw_host_api::ids::TenantId::new("reborn-cli").expect("tenant"),
+        user_id: ironclaw_host_api::ids::UserId::new(owner_id).expect("user"),
+        agent_id: Some(ironclaw_host_api::ids::AgentId::new("reborn-cli-agent").expect("agent")),
         project_id: None,
         mission_id: None,
         thread_id: Some(
-            ironclaw_host_api::ThreadId::new("80aa051d-7670-5534-a2c5-2c14339e8af7")
+            ironclaw_host_api::ids::ThreadId::new("80aa051d-7670-5534-a2c5-2c14339e8af7")
                 .expect("thread"),
         ),
-        invocation_id: ironclaw_host_api::InvocationId::new(),
+        invocation_id: ironclaw_host_api::ids::InvocationId::new(),
     }
 }
 
@@ -413,7 +421,7 @@ fn one_shot_lease_approval_from_context(
         .clone();
     LeaseApproval {
         issued_by: Principal::HostRuntime,
-        constraints: ironclaw_host_api::GrantConstraints {
+        constraints: ironclaw_host_api::capability::GrantConstraints {
             max_invocations: Some(1),
             ..constraints
         },
@@ -519,7 +527,7 @@ impl ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer
 
 fn register_bundled_first_party_handlers_for_lifecycle_tests(
     registry: &mut FirstPartyCapabilityRegistry,
-) -> Result<(), ironclaw_host_api::HostApiError> {
+) -> Result<(), ironclaw_host_api::error::HostApiError> {
     let handler = Arc::new(NoopFirstPartyHandler);
     registry.insert_handler(
         CapabilityId::new(ironclaw_first_party_extensions::FIRST_PARTY_WEB_SEARCH_CAPABILITY_ID)?,

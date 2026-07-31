@@ -17,7 +17,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use chrono::Duration as ChronoDuration;
 use http_body_util::BodyExt;
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::ids::{TenantId, UserId};
 use ironclaw_webui::{
     CliTokenLoginConfig, EnvBearerAuthenticator, SessionAuthenticator, SignedTokenSessionStore,
     build_cli_token_login, signed_session_store,

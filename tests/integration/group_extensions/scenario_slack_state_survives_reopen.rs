@@ -46,7 +46,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // reconstruct. One reopen serves both probes, so the positive read and
     // its non-vacuity control (a user that never connected) see the same
     // reconstructed store.
-    let stranger = ironclaw_host_api::UserId::new("reopen-probe-stranger")
+    let stranger = ironclaw_host_api::ids::UserId::new("reopen-probe-stranger")
         .map_err(|error| error.to_string())?;
     let bindings = slack
         .active_identity_bindings_after_reopen("slack", &storage_root, &[&actor, &stranger])

@@ -21,7 +21,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use chrono::Duration as ChronoDuration;
 use http_body_util::BodyExt;
-use ironclaw_host_api::TenantId;
+use ironclaw_host_api::ids::TenantId;
 use ironclaw_webui::{
     EmailUserDirectory, OAuthError, OAuthProvider, OAuthProviderName, OAuthRouterConfig,
     OAuthUserProfile, SignedTokenSessionStore, signed_session_store, webui_v2_auth_router,
@@ -1105,7 +1105,7 @@ async fn callback_when_profile_fetch_fails_redirects_exchange_failed() {
 mod user_directory_branches {
     use super::*;
     use async_trait::async_trait;
-    use ironclaw_host_api::UserId;
+    use ironclaw_host_api::ids::UserId;
     use ironclaw_webui::{UserDirectory, UserDirectoryError};
 
     struct AlwaysUnknown;

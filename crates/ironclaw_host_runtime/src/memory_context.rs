@@ -19,7 +19,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CorrelationId, InvocationId, MemoryDescriptor, MemoryLifecycleHook, ResourceScope,
+    ids::{CorrelationId, InvocationId},
+    memory::{MemoryDescriptor, MemoryLifecycleHook},
+    resource::ResourceScope,
 };
 use ironclaw_memory::{
     MemoryContextProfileId, MemoryInvocation, MemoryService, MemoryServiceContextRequest,

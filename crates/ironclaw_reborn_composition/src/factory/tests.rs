@@ -11,14 +11,22 @@ use ironclaw_filesystem::FilesystemError;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
-    ExtensionId, FailureKind, GrantConstraints, InvocationId, MountAlias, MountGrant,
-    MountPermissions, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal,
-    ResourceEstimate, ResourceScope, ResourceUsage, RunId, RuntimeKind, ScopedPath, SecretHandle,
-    TenantId, TrustClass, UserId, VirtualPath,
+    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
+    ids::{
+        CapabilityGrantId, CapabilityId, ExtensionId, InvocationId, RunId, SecretHandle, TenantId,
+        UserId,
+    },
+    mount::{MountGrant, MountPermissions},
+    path::{MountAlias, ScopedPath, VirtualPath},
+    resource::{ResourceEstimate, ResourceScope, ResourceUsage},
+    result_meta::FailureKind,
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_api::{
-    RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource, VendorId,
+    capability::{RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource},
+    ids::VendorId,
 };
 use ironclaw_host_runtime::{
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
@@ -38,7 +46,7 @@ use crate::{
 };
 use ironclaw_extension_host::ExtensionActivationMode;
 use ironclaw_extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress;
-use ironclaw_host_api::InstallationState;
+use ironclaw_host_api::state::InstallationState;
 
 #[test]
 fn libsql_build_resource_governor_guard_requires_singleton_authority() {
@@ -114,15 +122,15 @@ async fn production_libsql_event_log_uses_the_composition_runtime_writer_lane() 
             builtin_first_party_trust_policy().expect("builtin trust policy"),
         ))
         .with_runtime_policy(EffectiveRuntimePolicy {
-            deployment: ironclaw_host_api::DeploymentMode::HostedMultiTenant,
-            requested_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
-            resolved_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+            deployment: ironclaw_host_api::runtime_policy::DeploymentMode::HostedMultiTenant,
+            requested_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
+            resolved_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
             filesystem_backend: FilesystemBackendKind::TenantWorkspace,
             process_backend: ProcessBackendKind::None,
-            network_mode: ironclaw_host_api::NetworkMode::Brokered,
+            network_mode: ironclaw_host_api::runtime_policy::NetworkMode::Brokered,
             secret_mode: SecretMode::TenantBroker,
             approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
-            audit_mode: ironclaw_host_api::AuditMode::Standard,
+            audit_mode: ironclaw_host_api::runtime_policy::AuditMode::Standard,
         }),
     )
     .await
@@ -370,14 +378,14 @@ async fn trigger_delivery_target_validation_resolves_through_the_outbound_regist
         }
     }
 
-    let scope = ironclaw_host_api::ResourceScope {
+    let scope = ironclaw_host_api::resource::ResourceScope {
         tenant_id: TenantId::new("registry-validation-tenant").expect("tenant"),
         user_id: UserId::new("registry-validation-user").expect("user"),
         agent_id: None,
         project_id: None,
         mission_id: None,
         thread_id: None,
-        invocation_id: ironclaw_host_api::InvocationId::new(),
+        invocation_id: ironclaw_host_api::ids::InvocationId::new(),
     };
     let target = ironclaw_triggers::TriggerDeliveryTargetId::new("slack:personal-dm:T1:me")
         .expect("target id");
@@ -871,7 +879,7 @@ async fn standalone_default_product_auth_preserves_manual_token_across_rebuilds(
         AuthSurface::Callback,
     );
     let mut scope = scope;
-    scope.resource.thread_id = Some(ironclaw_host_api::ThreadId::new("auth-thread").unwrap());
+    scope.resource.thread_id = Some(ironclaw_host_api::ids::ThreadId::new("auth-thread").unwrap());
 
     let challenge = product_auth
         .request_manual_token_setup(ironclaw_auth::RebornManualTokenSetupRequest::new(
@@ -1564,8 +1572,8 @@ fn nearai_bootstrap_input(owner: &str, root: PathBuf, api_key: &str) -> RebornHo
 fn hosted_single_tenant_nearai_mcp_bootstrap_scope_uses_runtime_identity() {
     let owner = UserId::new("hosted-nearai-owner").expect("owner");
     let identity = RebornLocalRuntimeIdentity {
-        tenant_id: ironclaw_host_api::TenantId::new("hosted-nearai-tenant").expect("tenant"),
-        agent_id: ironclaw_host_api::AgentId::new("hosted-nearai-agent").expect("agent"),
+        tenant_id: ironclaw_host_api::ids::TenantId::new("hosted-nearai-tenant").expect("tenant"),
+        agent_id: ironclaw_host_api::ids::AgentId::new("hosted-nearai-agent").expect("agent"),
     };
 
     let scope = configured_runtime_owner_scope(owner.clone(), &identity);
@@ -1581,7 +1589,7 @@ fn runtime_owner_scope_uses_configured_runtime_identity_for_turn_state() {
     let owner = UserId::new("configured-owner").expect("owner");
     let identity = RebornLocalRuntimeIdentity {
         tenant_id: TenantId::new("configured-tenant").expect("tenant"),
-        agent_id: ironclaw_host_api::AgentId::new("configured-agent").expect("agent"),
+        agent_id: ironclaw_host_api::ids::AgentId::new("configured-agent").expect("agent"),
     };
     let scope = configured_runtime_owner_scope(owner.clone(), &identity);
 
@@ -1629,7 +1637,7 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
         LibSqlRootFilesystem::new(Arc::clone(&db)).expect("filesystem runtime");
     let owner = UserId::new("configured-owner").expect("owner");
     let tenant = TenantId::new("configured-tenant").expect("tenant");
-    let agent = ironclaw_host_api::AgentId::new("configured-agent").expect("agent");
+    let agent = ironclaw_host_api::ids::AgentId::new("configured-agent").expect("agent");
     let services = build_runtime_substrate(
         crate::test_support::libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
@@ -1645,15 +1653,15 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
             builtin_first_party_trust_policy().expect("builtin trust policy"),
         ))
         .with_runtime_policy(EffectiveRuntimePolicy {
-            deployment: ironclaw_host_api::DeploymentMode::HostedMultiTenant,
-            requested_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
-            resolved_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+            deployment: ironclaw_host_api::runtime_policy::DeploymentMode::HostedMultiTenant,
+            requested_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
+            resolved_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
             filesystem_backend: FilesystemBackendKind::TenantWorkspace,
             process_backend: ProcessBackendKind::None,
-            network_mode: ironclaw_host_api::NetworkMode::Brokered,
+            network_mode: ironclaw_host_api::runtime_policy::NetworkMode::Brokered,
             secret_mode: SecretMode::TenantBroker,
             approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
-            audit_mode: ironclaw_host_api::AuditMode::Standard,
+            audit_mode: ironclaw_host_api::runtime_policy::AuditMode::Standard,
         }),
     )
     .await
@@ -1673,7 +1681,7 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
         tenant,
         Some(agent),
         None,
-        ironclaw_host_api::ThreadId::new("configured-thread").expect("thread"),
+        ironclaw_host_api::ids::ThreadId::new("configured-thread").expect("thread"),
         Some(owner.clone()),
     );
     let submit = ironclaw_turns::SubmitTurnRequest {
@@ -1744,15 +1752,15 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
             builtin_first_party_trust_policy().expect("builtin trust policy"),
         ))
         .with_runtime_policy(EffectiveRuntimePolicy {
-            deployment: ironclaw_host_api::DeploymentMode::HostedMultiTenant,
-            requested_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
-            resolved_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+            deployment: ironclaw_host_api::runtime_policy::DeploymentMode::HostedMultiTenant,
+            requested_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
+            resolved_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
             filesystem_backend: FilesystemBackendKind::TenantWorkspace,
             process_backend: ProcessBackendKind::None,
-            network_mode: ironclaw_host_api::NetworkMode::Brokered,
+            network_mode: ironclaw_host_api::runtime_policy::NetworkMode::Brokered,
             secret_mode: SecretMode::TenantBroker,
             approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
-            audit_mode: ironclaw_host_api::AuditMode::Standard,
+            audit_mode: ironclaw_host_api::runtime_policy::AuditMode::Standard,
         }),
     )
     .await
@@ -1765,7 +1773,7 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
         default_tenant,
         None,
         None,
-        ironclaw_host_api::ThreadId::new("default-thread").expect("thread"),
+        ironclaw_host_api::ids::ThreadId::new("default-thread").expect("thread"),
         Some(owner.clone()),
     );
     let submit = ironclaw_turns::SubmitTurnRequest {
@@ -1864,15 +1872,15 @@ async fn production_libsql_builder_rejects_invalid_owner_id_at_composition_bound
             builtin_first_party_trust_policy().expect("builtin trust policy"),
         ))
         .with_runtime_policy(EffectiveRuntimePolicy {
-            deployment: ironclaw_host_api::DeploymentMode::HostedMultiTenant,
-            requested_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
-            resolved_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+            deployment: ironclaw_host_api::runtime_policy::DeploymentMode::HostedMultiTenant,
+            requested_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
+            resolved_profile: ironclaw_host_api::runtime_policy::RuntimeProfile::HostedSafe,
             filesystem_backend: FilesystemBackendKind::TenantWorkspace,
             process_backend: ProcessBackendKind::None,
-            network_mode: ironclaw_host_api::NetworkMode::Brokered,
+            network_mode: ironclaw_host_api::runtime_policy::NetworkMode::Brokered,
             secret_mode: SecretMode::TenantBroker,
             approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
-            audit_mode: ironclaw_host_api::AuditMode::Standard,
+            audit_mode: ironclaw_host_api::runtime_policy::AuditMode::Standard,
         }),
     )
     .await;
@@ -2131,9 +2139,9 @@ async fn standalone_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential
         .local_runtime_for_test()
         .expect("local runtime")
         .extension_management;
-    let removal_scope = ironclaw_host_api::ResourceScope::local_default(
-        ironclaw_host_api::UserId::new(owner).expect("valid user"),
-        ironclaw_host_api::InvocationId::new(),
+    let removal_scope = ironclaw_host_api::resource::ResourceScope::local_default(
+        ironclaw_host_api::ids::UserId::new(owner).expect("valid user"),
+        ironclaw_host_api::ids::InvocationId::new(),
     )
     .expect("valid scope");
     extension_management
@@ -2247,13 +2255,13 @@ async fn standalone_services_persist_thread_records_across_rebuilds() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("standalone");
     let scope = ironclaw_threads::ThreadScope {
-        tenant_id: ironclaw_host_api::TenantId::new("persist-tenant").unwrap(),
-        agent_id: ironclaw_host_api::AgentId::new("persist-agent").unwrap(),
+        tenant_id: ironclaw_host_api::ids::TenantId::new("persist-tenant").unwrap(),
+        agent_id: ironclaw_host_api::ids::AgentId::new("persist-agent").unwrap(),
         project_id: None,
-        owner_user_id: Some(ironclaw_host_api::UserId::new("persist-owner").unwrap()),
+        owner_user_id: Some(ironclaw_host_api::ids::UserId::new("persist-owner").unwrap()),
         mission_id: None,
     };
-    let thread_id = ironclaw_host_api::ThreadId::new("persisted-thread").unwrap();
+    let thread_id = ironclaw_host_api::ids::ThreadId::new("persisted-thread").unwrap();
 
     let services = build_runtime_substrate(crate::deployment::local_filesystem_build_input(
         "persist-owner",
@@ -2589,10 +2597,10 @@ fn builtin_first_party_package_declares_skill_management_tools() {
         TRIGGER_LIST_CAPABILITY_ID,
         TRIGGER_REMOVE_CAPABILITY_ID,
     ] {
-        assert!(registry.contains_handler(&ironclaw_host_api::CapabilityId::new(id).unwrap()));
+        assert!(registry.contains_handler(&ironclaw_host_api::ids::CapabilityId::new(id).unwrap()));
     }
     assert!(!registry.contains_handler(
-        &ironclaw_host_api::CapabilityId::new(SKILL_ACTIVATE_CAPABILITY_ID).unwrap()
+        &ironclaw_host_api::ids::CapabilityId::new(SKILL_ACTIVATE_CAPABILITY_ID).unwrap()
     ));
 }
 
@@ -2832,7 +2840,7 @@ fn web_access_context(capability_id: &str) -> ExecutionContext {
 fn web_access_network_policy() -> NetworkPolicy {
     NetworkPolicy {
         allowed_targets: vec![NetworkTargetPattern {
-            scheme: Some(ironclaw_host_api::NetworkScheme::Https),
+            scheme: Some(ironclaw_host_api::action::NetworkScheme::Https),
             host_pattern: "mcp.exa.ai".to_string(),
             port: None,
         }],
@@ -2885,9 +2893,9 @@ fn capability_grant(
 }
 
 fn skill_mounts() -> MountView {
-    let scope = ironclaw_host_api::ResourceScope::local_default(
+    let scope = ironclaw_host_api::resource::ResourceScope::local_default(
         UserId::new("standalone-test-user").expect("valid user id"),
-        ironclaw_host_api::InvocationId::new(),
+        ironclaw_host_api::ids::InvocationId::new(),
     )
     .expect("valid resource scope");
     crate::runtime_mounts::scoped_skill_management_mount_view(&scope).expect("valid skill mounts")
@@ -3000,10 +3008,10 @@ async fn standalone_outbound_store_durable_shares_one_allocation_across_all_role
 fn slack_identity(
     manifest_path: &str,
     digest: Option<String>,
-) -> ironclaw_host_api::PackageIdentity {
-    ironclaw_host_api::PackageIdentity::new(
-        ironclaw_host_api::PackageId::new("slack").expect("slack package id"),
-        ironclaw_host_api::PackageSource::LocalManifest {
+) -> ironclaw_host_api::trust::PackageIdentity {
+    ironclaw_host_api::trust::PackageIdentity::new(
+        ironclaw_host_api::ids::PackageId::new("slack").expect("slack package id"),
+        ironclaw_host_api::trust::PackageSource::LocalManifest {
             path: manifest_path.to_string(),
         },
         digest,
@@ -3023,7 +3031,7 @@ fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
         .find(|bundle| bundle.id == "slack")
         .expect("slack is in the bundled inventory");
     let expected_digest =
-        ironclaw_host_api::sha256_digest_token(slack_bundle.manifest_toml.as_bytes());
+        ironclaw_host_api::approval::sha256_digest_token(slack_bundle.manifest_toml.as_bytes());
 
     let matching = ironclaw_trust::TrustPolicy::evaluate(
         &policy,
@@ -3032,7 +3040,7 @@ fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
                 "/system/extensions/slack/manifest.toml",
                 Some(expected_digest.clone()),
             ),
-            requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
+            requested_trust: ironclaw_host_api::trust::RequestedTrustClass::FirstPartyRequested,
             requested_authority: Default::default(),
         },
     )
@@ -3054,7 +3062,7 @@ fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
                         .to_string(),
                 ),
             ),
-            requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
+            requested_trust: ironclaw_host_api::trust::RequestedTrustClass::FirstPartyRequested,
             requested_authority: Default::default(),
         },
     )
@@ -3073,7 +3081,7 @@ fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
                 "/system/extensions/slack/other-manifest.toml",
                 Some(expected_digest),
             ),
-            requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
+            requested_trust: ironclaw_host_api::trust::RequestedTrustClass::FirstPartyRequested,
             requested_authority: Default::default(),
         },
     )
@@ -3099,12 +3107,12 @@ fn builtin_first_party_trust_policy_grants_migrated_gmail_via_inventory() {
         .find(|bundle| bundle.id == "gmail")
         .expect("gmail is in the bundled inventory");
     let expected_digest =
-        ironclaw_host_api::sha256_digest_token(gmail_bundle.manifest_toml.as_bytes());
+        ironclaw_host_api::approval::sha256_digest_token(gmail_bundle.manifest_toml.as_bytes());
 
     let gmail_identity = |digest: Option<String>| {
-        ironclaw_host_api::PackageIdentity::new(
-            ironclaw_host_api::PackageId::new("gmail").expect("gmail package id"),
-            ironclaw_host_api::PackageSource::LocalManifest {
+        ironclaw_host_api::trust::PackageIdentity::new(
+            ironclaw_host_api::ids::PackageId::new("gmail").expect("gmail package id"),
+            ironclaw_host_api::trust::PackageSource::LocalManifest {
                 path: "/system/extensions/gmail/manifest.toml".to_string(),
             },
             digest,
@@ -3116,7 +3124,7 @@ fn builtin_first_party_trust_policy_grants_migrated_gmail_via_inventory() {
         &policy,
         &ironclaw_trust::TrustPolicyInput {
             identity: gmail_identity(Some(expected_digest.clone())),
-            requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
+            requested_trust: ironclaw_host_api::trust::RequestedTrustClass::FirstPartyRequested,
             requested_authority: Default::default(),
         },
     )
@@ -3134,7 +3142,7 @@ fn builtin_first_party_trust_policy_grants_migrated_gmail_via_inventory() {
                 "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
                     .to_string(),
             )),
-            requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
+            requested_trust: ironclaw_host_api::trust::RequestedTrustClass::FirstPartyRequested,
             requested_authority: Default::default(),
         },
     )
@@ -3158,7 +3166,7 @@ async fn completed_lifecycle_activation_continuation_installs_the_extension() {
         OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash, ProviderCallbackOutcome,
         ProviderScope,
     };
-    use ironclaw_host_api::SecretHandle;
+    use ironclaw_host_api::ids::SecretHandle;
 
     fn fake_digest(value: &str) -> String {
         format!(
@@ -3181,9 +3189,9 @@ async fn completed_lifecycle_activation_continuation_installs_the_extension() {
     let product_auth = Arc::clone(&services.product_auth);
     let user = UserId::new(owner).expect("owner user id");
     let scope = AuthProductScope::new(
-        ironclaw_host_api::ResourceScope::local_default(
+        ironclaw_host_api::resource::ResourceScope::local_default(
             user.clone(),
-            ironclaw_host_api::InvocationId::new(),
+            ironclaw_host_api::ids::InvocationId::new(),
         )
         .expect("owner scope"),
         AuthSurface::Api,
@@ -3374,7 +3382,7 @@ fn pairing_account_setup_descriptor(
 ) -> ironclaw_product::ExtensionAccountSetupDescriptor {
     ironclaw_product::ExtensionAccountSetupDescriptor {
         extension_id: ExtensionId::new(extension_id).expect("extension id"),
-        auth_requirement: ironclaw_host_api::RuntimeCredentialAuthRequirement {
+        auth_requirement: ironclaw_host_api::decision::RuntimeCredentialAuthRequirement {
             provider: VendorId::new(extension_id).expect("provider id"),
             setup: RuntimeCredentialAccountSetup::Pairing,
             requester_extension: ExtensionId::new(extension_id).expect("requester extension id"),

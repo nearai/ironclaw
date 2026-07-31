@@ -13,7 +13,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::{
+use crate::tool_adapter::{
     RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
 };
 use async_trait::async_trait;
@@ -170,6 +170,12 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
                         "conformance: messages normalized from odd input must satisfy bounds",
                     );
                 }
+            }
+            Ok(InboundOutcome::BatchFragment(fragment)) => {
+                conformance_value(
+                    fragment.validate(),
+                    "conformance: batch fragments normalized from odd input must satisfy bounds",
+                );
             }
             Ok(InboundOutcome::Ignore) | Err(_) => {}
         }

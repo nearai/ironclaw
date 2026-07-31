@@ -11,8 +11,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    Action, ApprovalRequestId, CapabilityId, CorrelationId, HostApiError, NetworkTargetPattern,
-    Principal, ResourceEstimate, ResourceScope, ScopedPath, Timestamp,
+    Timestamp,
+    action::{Action, NetworkTargetPattern},
+    error::HostApiError,
+    ids::{ApprovalRequestId, CapabilityId, CorrelationId},
+    path::ScopedPath,
+    resource::{ResourceEstimate, ResourceScope},
+    scope::Principal,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

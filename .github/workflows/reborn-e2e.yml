@@ -50,6 +50,7 @@ on:
       - "crates/ironclaw_*/**"
       - "docs/reborn/**"
       - "scripts/reborn-e2e-rust.sh"
+      - "scripts/ci/*hermetic*"
       - "tests/e2e/**"
       - "build.rs"
       - "providers.json"
@@ -70,6 +71,7 @@ env:
   # schedule text, which are exactly the values that shift with TZ/locale.
   TZ: "UTC"
   LANG: "C.UTF-8"
+  IRONCLAW_E2E_EMULATE_SLACK_CHANNEL_BEARER: "emulate-slack-channel-token"
 
 jobs:
   changes:
@@ -98,7 +100,7 @@ jobs:
 
           # Keep this pattern in sync with the push `paths:` filter in the
           # `on:` block above.
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_[^/]+/|docs/reborn/|scripts/reborn-e2e-rust\.sh$|tests/e2e/|build\.rs$|providers\.json$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/reborn-e2e\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_[^/]+/|docs/reborn/|scripts/reborn-e2e-rust\.sh$|scripts/ci/[^/]*hermetic[^/]*$|tests/e2e/|build\.rs$|providers\.json$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/reborn-e2e\.yml$)'; then
             echo "has_e2e_scope=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_e2e_scope=false" >> "$GITHUB_OUTPUT"
@@ -137,14 +139,19 @@ jobs:
       - name: Run deterministic Reborn Rust gate
         env:
           CARGO_TEST_ARGS: "-- --nocapture"
-        run: scripts/reborn-e2e-rust.sh ${{ matrix.group }}
+        run: >-
+          scripts/ci/run-hermetic-deterministic-suite.sh
+          rust-e2e
+          ${{ matrix.group }}
 
   webui-v2-smoke:
     name: Reborn WebUI v2 smoke
     needs: changes
     if: needs.changes.outputs.has_e2e_scope == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    env:
+      IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -154,6 +161,9 @@ jobs:
           # continue to use github.sha and test the synthesized merge commit.
           ref: ${{ inputs.ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || github.sha }}
           persist-credentials: false
+
+      - name: Configure isolated Playwright browser path
+        run: echo "PLAYWRIGHT_BROWSERS_PATH=${RUNNER_TEMP}/ms-playwright" >> "$GITHUB_ENV"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -232,7 +242,7 @@ jobs:
       - name: Cache Playwright browsers
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: ~/.cache/ms-playwright
+          path: ${{ runner.temp }}/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('tests/e2e/pyproject.toml') }}
           restore-keys: ${{ runner.os }}-playwright-
       - name: Install E2E dependencies
@@ -243,6 +253,8 @@ jobs:
 
       - name: Validate product-surface evidence contracts
         run: >-
+          scripts/ci/run-hermetic-deterministic-suite.sh
+          command
           pytest
           tests/e2e/scenarios/test_product_surface_coverage.py
           tests/e2e/scenarios/test_provider_capability_inventory.py
@@ -275,6 +287,8 @@ jobs:
 
       - name: Run Reborn WebUI v2 smoke
         run: >-
+          scripts/ci/run-hermetic-deterministic-suite.sh
+          command
           pytest
           tests/e2e/scenarios/test_reborn_webui_v2_smoke.py
           tests/e2e/scenarios/test_reborn_webui_v2_sso.py
@@ -285,6 +299,8 @@ jobs:
         env:
           IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
         run: >-
+          scripts/ci/run-hermetic-deterministic-suite.sh
+          command
           pytest
           tests/e2e/scenarios/test_provider_capability_inventory.py
           tests/e2e/scenarios/test_journey_coverage.py
@@ -305,6 +321,8 @@ jobs:
           IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
           IRONCLAW_JOURNEY_ORDER: reverse
         run: >-
+          scripts/ci/run-hermetic-deterministic-suite.sh
+          command
           pytest
           tests/e2e/scenarios/test_reborn_qa_trace_full_path.py::test_mutating_qa_journeys_replay_in_reverse_against_shared_provider_world
           -v
@@ -330,7 +348,8 @@ jobs:
           echo "replaying ${#journeys[@]} journeys alone"
           for journey in "${journeys[@]}"; do
             echo "::group::alone: $journey"
-            pytest tests/e2e/scenarios/test_reborn_qa_trace_full_path.py \
+            scripts/ci/run-hermetic-deterministic-suite.sh command \
+              pytest tests/e2e/scenarios/test_reborn_qa_trace_full_path.py \
               -k "$journey and not isolated" \
               -v --timeout=120
             echo "::endgroup::"
@@ -345,7 +364,8 @@ jobs:
             echo "No Reborn Responses API E2E tests selected"
             exit 1
           fi
-          pytest "${responses_tests[@]}" -v --timeout=120
+          scripts/ci/run-hermetic-deterministic-suite.sh command \
+            pytest "${responses_tests[@]}" -v --timeout=120
 
       - name: Package live-canary binary
         id: live_canary_binary
@@ -391,6 +411,8 @@ jobs:
     if: needs.changes.outputs.has_e2e_scope == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -441,7 +463,13 @@ jobs:
           pip install -e .
 
       - name: Run Reborn black-box smoke
-        run: pytest tests/e2e/scenarios/test_reborn_blackbox_smoke.py -v --timeout=120
+        run: >-
+          scripts/ci/run-hermetic-deterministic-suite.sh
+          command
+          pytest
+          tests/e2e/scenarios/test_reborn_blackbox_smoke.py
+          -v
+          --timeout=120
 
   reborn-e2e:
     name: Reborn E2E

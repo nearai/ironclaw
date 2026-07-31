@@ -478,6 +478,29 @@ async fn model_cancelled_returns_cancelled_without_retry() {
     assert_eq!(host.model_requests().len(), 1);
 }
 
+#[tokio::test]
+async fn transcript_finalize_cancelled_propagates_cancelled_without_retry() {
+    let host = MockHost::new(vec![reply_response()])
+        .fail_transcript_with(AgentLoopHostErrorKind::Cancelled);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let result = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await;
+
+    assert!(matches!(result, Err(AgentLoopExecutorError::Cancelled)));
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "transcript cancellation must not trigger another model call"
+    );
+    assert!(
+        host.finalized_assistant_messages().is_empty(),
+        "a cancelled transcript write must not fabricate a finalized reply"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn cancellation_during_internal_error_backoff_wakes_the_sleep() {
     // Internal-error backoffs run up to 60s per attempt; a cancel request must
@@ -539,7 +562,7 @@ async fn cancellation_after_retry_prompt_rebuild_skips_second_model_call() {
 #[tokio::test]
 async fn capability_cancelled_returns_cancelled_exit_without_retry() {
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_host_api::ResolutionBatch {
+        ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::failed(
                 FailureKind::Cancelled,
                 "capability cancelled".to_string(),
@@ -668,7 +691,7 @@ async fn cancellation_after_before_side_effect_checkpoint_skips_capability_call(
 async fn cancellation_after_capability_batch_preserves_completed_result() {
     let result_ref = LoopResultRef::new("result:late-cancel").expect("valid");
     let host = MockHost::new(vec![calls_response()])
-        .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 result_ref.clone(),
                 "completed before cancellation".to_string(),

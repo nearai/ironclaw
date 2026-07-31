@@ -7,7 +7,12 @@ use crate::{
     SyntheticCapabilityHandler, SyntheticCapabilityInvocation,
 };
 use async_trait::async_trait;
-use ironclaw_host_api::{DispatchInputIssueCode, FailureKind, InvocationId, Resolution, UserId};
+use ironclaw_host_api::{
+    dispatch::DispatchInputIssueCode,
+    ids::{InvocationId, UserId},
+    resolution::Resolution,
+    result_meta::FailureKind,
+};
 use ironclaw_threads::{
     MessageKind, MessageStatus, ReadToolResultRecordRequest, SessionThreadError,
     SessionThreadService, TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadHistoryRequest, ThreadScope,
@@ -92,7 +97,10 @@ fn replay_payload_filesystem() -> Result<
     Arc<ironclaw_filesystem::ScopedFilesystem<ironclaw_filesystem::InMemoryBackend>>,
     AgentLoopHostError,
 > {
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
 
     let invalid_mount = || {
         AgentLoopHostError::new(

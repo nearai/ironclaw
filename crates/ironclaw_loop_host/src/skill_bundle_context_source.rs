@@ -195,7 +195,7 @@ mod tests {
     use crate::{
         SkillBundleDescriptor, SkillFilePath, skill_context::build_skill_instruction_snippets,
     };
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
 
     async fn run_context() -> LoopRunContext {
         let scope = TurnScope::new(

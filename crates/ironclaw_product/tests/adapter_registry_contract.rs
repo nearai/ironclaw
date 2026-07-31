@@ -8,7 +8,11 @@ use ironclaw_extensions::{
     InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle, VirtualPath};
+use ironclaw_host_api::{
+    host_port::HostPortCatalog,
+    ids::{ExtensionId, SecretHandle},
+    path::VirtualPath,
+};
 use ironclaw_product::adapter_registry::{
     ManifestHash, parse_product_adapter_manifest_record, product_adapter_sections,
     register_product_adapter_host_api_contract,
@@ -173,7 +177,7 @@ prompt_doc_ref = "prompts/do.md"
     let plain_manifest = ExtensionManifestRecord::from_toml(
         plain_raw,
         ManifestSource::HostBundled,
-        &ironclaw_host_api::HostPortCatalog::empty(),
+        &ironclaw_host_api::host_port::HostPortCatalog::empty(),
         Some(manifest_hash("sha256:plain")),
         &contracts,
         None,

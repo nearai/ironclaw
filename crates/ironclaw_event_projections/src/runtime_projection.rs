@@ -3,7 +3,7 @@ use std::{cmp::Ordering, collections::HashMap};
 use ironclaw_events::{
     EventLogEntry, RuntimeEvent, RuntimeEventKind, sanitize_error_kind, sanitize_error_summary,
 };
-use ironclaw_host_api::InvocationId;
+use ironclaw_host_api::ids::InvocationId;
 
 use crate::{
     CapabilityActivityProjection, CapabilityActivityStatus, RunProjectionStatus,

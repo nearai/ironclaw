@@ -11,7 +11,10 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityId, FailureKind, Resolution, ResolutionBatch, RuntimeKind, TenantId, ThreadId,
+    ids::{CapabilityId, TenantId, ThreadId},
+    resolution::{Resolution, ResolutionBatch},
+    result_meta::FailureKind,
+    runtime::RuntimeKind,
 };
 use ironclaw_turns::{
     AgentLoopDriverDescriptor, LoopFailureKind, LoopGateRef, LoopMessageRef, LoopResultRef,

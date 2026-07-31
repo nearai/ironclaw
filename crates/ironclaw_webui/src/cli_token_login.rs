@@ -30,8 +30,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use chrono::Duration as ChronoDuration;
-use ironclaw_host_api::NetworkMethod;
-use ironclaw_host_api::TenantId;
+use ironclaw_host_api::action::NetworkMethod;
+use ironclaw_host_api::ids::TenantId;
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
     IngressJustification, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
@@ -187,7 +187,7 @@ fn public_policy(body_limit: BodyLimitPolicy, max_requests: std::num::NonZeroU32
         auth: IngressAuthPolicy::Public {
             justification: login_justification(),
         },
-        scope_source: ironclaw_host_api::IngressScopeSource::PublicRoute,
+        scope_source: ironclaw_host_api::ingress::IngressScopeSource::PublicRoute,
         body_limit,
         rate_limit: RateLimitPolicy::Limited {
             scope: RateLimitScope::PerIp,

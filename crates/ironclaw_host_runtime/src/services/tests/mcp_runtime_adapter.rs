@@ -2,8 +2,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    DispatchError, ExtensionId, ResourceEstimate, RuntimeCredentialAuthRequirement, RuntimeKind,
-    VendorId,
+    decision::RuntimeCredentialAuthRequirement,
+    dispatch::DispatchError,
+    ids::{ExtensionId, VendorId},
+    resource::ResourceEstimate,
+    runtime::RuntimeKind,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
 use serde_json::json;
@@ -14,7 +17,7 @@ use super::*;
 async fn mcp_adapter_maps_executor_auth_required_to_dispatch_auth_required() {
     let requirement = RuntimeCredentialAuthRequirement {
         provider: VendorId::new("github").unwrap(),
-        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+        setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
             scopes: vec!["repo".to_string()],
         },
         requester_extension: ExtensionId::new("mcp").unwrap(),

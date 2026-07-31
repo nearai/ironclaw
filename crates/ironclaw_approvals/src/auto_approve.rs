@@ -25,8 +25,13 @@ use ironclaw_filesystem::{
     ScopedFilesystem, VersionedEntry,
 };
 use ironclaw_host_api::{
-    HostApiError, Principal, ResourceScope, ScopedPath, TenantId, Timestamp, UserId,
-    sha256_digest_token,
+    Timestamp,
+    approval::sha256_digest_token,
+    error::HostApiError,
+    ids::{TenantId, UserId},
+    path::ScopedPath,
+    resource::ResourceScope,
+    scope::Principal,
 };
 use serde::{Deserialize, Serialize};
 
@@ -268,7 +273,7 @@ fn resource_scope_for_key(key: &AutoApproveSettingKey) -> ResourceScope {
         project_id: None,
         mission_id: None,
         thread_id: None,
-        invocation_id: ironclaw_host_api::InvocationId::new(),
+        invocation_id: ironclaw_host_api::ids::InvocationId::new(),
     }
 }
 
@@ -300,7 +305,9 @@ mod tests {
         ContentType, Entry, InMemoryBackend, RecordVersion, ScopedFilesystem,
     };
     use ironclaw_host_api::{
-        AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, VirtualPath,
+        ids::{AgentId, ProjectId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
     };
 
     use super::*;
@@ -313,7 +320,7 @@ mod tests {
             project_id: project.map(|id| ProjectId::new(id).unwrap()),
             mission_id: None,
             thread_id: None,
-            invocation_id: ironclaw_host_api::InvocationId::new(),
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         }
     }
 

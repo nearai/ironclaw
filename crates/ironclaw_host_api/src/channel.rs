@@ -8,12 +8,15 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    HostApiError, IngressVerificationRecipe, NetworkScheme, RecipeValidationError, SecretHandle,
-    VendorId,
+    action::NetworkScheme,
+    error::HostApiError,
+    ids::{SecretHandle, VendorId},
+    recipe::{IngressVerificationRecipe, RecipeValidationError},
 };
 
 const MAX_CHANNEL_COMMANDS: usize = 32;
 const MAX_CHANNEL_COMMAND_NAME_BYTES: usize = 64;
+const MAX_CHANNEL_COMMAND_PREFIX_BYTES: usize = 32;
 
 /// How external conversations map to IronClaw conversations
 /// (`docs/reborn/extension-runtime/overview.md` §3). The host WebUI's
@@ -144,6 +147,14 @@ impl ChannelDescriptor {
             }
             seen_commands.push(command);
         }
+        if let Some(prefix) = &self.presentation.command_prefix
+            && (prefix.is_empty()
+                || !prefix.starts_with('/')
+                || prefix.len() > MAX_CHANNEL_COMMAND_PREFIX_BYTES
+                || prefix.chars().any(char::is_control))
+        {
+            return Err(ChannelDescriptorError::InvalidCommandPrefix);
+        }
         if self.inbound && self.ingress.is_none() {
             return Err(ChannelDescriptorError::InboundWithoutIngress);
         }
@@ -172,19 +183,19 @@ impl ChannelDescriptor {
                     });
                 }
                 let well_formed = match injection {
-                    crate::RuntimeCredentialTarget::Header { name, .. } => {
-                        crate::valid_http_field_name(name)
+                    crate::http::RuntimeCredentialTarget::Header { name, .. } => {
+                        crate::http::valid_http_field_name(name)
                     }
-                    crate::RuntimeCredentialTarget::QueryParam { name } => {
+                    crate::http::RuntimeCredentialTarget::QueryParam { name } => {
                         !name.trim().is_empty() && !name.contains(char::is_whitespace)
                     }
-                    crate::RuntimeCredentialTarget::PathPlaceholder { placeholder } => {
+                    crate::http::RuntimeCredentialTarget::PathPlaceholder { placeholder } => {
                         !placeholder.is_empty()
                             && placeholder
                                 .chars()
                                 .all(|c| c.is_ascii_alphanumeric() || c == '_')
                     }
-                    crate::RuntimeCredentialTarget::BodyJsonPointer { pointer } => {
+                    crate::http::RuntimeCredentialTarget::BodyJsonPointer { pointer, .. } => {
                         pointer.starts_with('/')
                     }
                 };
@@ -204,6 +215,36 @@ impl ChannelDescriptor {
                     });
                 }
                 seen_body_handles.push(body_credential.handle.as_str());
+            }
+            for path in egress.paths.iter().chain(&egress.path_prefixes) {
+                if !valid_egress_path_constraint(path, egress.injection.as_ref()) {
+                    return Err(ChannelDescriptorError::InvalidEgressConstraint {
+                        host: egress.host.clone(),
+                    });
+                }
+            }
+            // A prefix must end on a segment boundary. Without this, prefix
+            // matching is a raw byte comparison, so a declaration like
+            // `/file/bot{token}` would also authorize `/file/bot{token}Evil/…`
+            // — a sibling path the manifest author never allowed on this
+            // pinned host + credential.
+            for prefix in &egress.path_prefixes {
+                if !prefix.ends_with('/') {
+                    return Err(ChannelDescriptorError::InvalidEgressConstraint {
+                        host: egress.host.clone(),
+                    });
+                }
+            }
+            if egress
+                .request_body_limit_bytes
+                .is_some_and(|limit| limit > MAX_CHANNEL_EGRESS_TRANSFER_BYTES)
+                || egress
+                    .response_body_limit_bytes
+                    .is_some_and(|limit| limit == 0 || limit > MAX_CHANNEL_EGRESS_TRANSFER_BYTES)
+            {
+                return Err(ChannelDescriptorError::InvalidEgressConstraint {
+                    host: egress.host.clone(),
+                });
             }
         }
         Ok(())
@@ -356,7 +397,7 @@ pub struct ChannelEgressDescriptor {
     #[serde(default = "default_https")]
     pub scheme: NetworkScheme,
     pub host: String,
-    pub methods: Vec<crate::NetworkMethod>,
+    pub methods: Vec<crate::action::NetworkMethod>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_handle: Option<SecretHandle>,
     /// How the host injects the declared credential into vendor requests.
@@ -365,7 +406,7 @@ pub struct ChannelEgressDescriptor {
     /// path (the adapter writes `{placeholder}` into the path; the host
     /// substitutes the secret — bytes never reach the adapter).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub injection: Option<crate::RuntimeCredentialTarget>,
+    pub injection: Option<crate::http::RuntimeCredentialTarget>,
     /// Body credentials the host may inject for this target: each entry binds
     /// a secret handle to the RFC 6901 JSON pointer where its resolved value
     /// is inserted in the request's JSON body (e.g. a vendor
@@ -375,6 +416,58 @@ pub struct ChannelEgressDescriptor {
     /// means no body credential may be injected for this target.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub body_credentials: Vec<ChannelBodyCredentialDescriptor>,
+    /// Exact URL paths this target permits. Empty preserves the legacy
+    /// host+method-only policy; first-party manifests should declare paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    /// URL path prefixes this target permits for provider-generated suffixes
+    /// such as file download paths. Prefix matching is explicit and distinct
+    /// from exact [`Self::paths`] matching.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path_prefixes: Vec<String>,
+    /// Maximum request body size for this target. `None` preserves the
+    /// pre-v3-declaration behavior; declared limits are enforced both before
+    /// approval and after host-side credential injection, before I/O.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_limit_bytes: Option<u64>,
+    /// Maximum response body size for this target. The channel host also
+    /// clamps declarations to its global safety ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body_limit_bytes: Option<u64>,
+}
+
+/// Maximum request or response body bound a channel manifest may request.
+/// This is an authority ceiling, not the default; each target may declare a
+/// narrower value.
+pub const MAX_CHANNEL_EGRESS_TRANSFER_BYTES: u64 = 10 * 1024 * 1024;
+
+fn valid_egress_path_constraint(
+    path: &str,
+    injection: Option<&crate::http::RuntimeCredentialTarget>,
+) -> bool {
+    if path.is_empty()
+        || path.len() > 2_048
+        || !path.starts_with('/')
+        || path.starts_with("//")
+        || path.contains("://")
+        || path.contains(['?', '#', '\\', '%'])
+        || path.chars().any(|character| character.is_control())
+        || path.split('/').any(|segment| matches!(segment, "." | ".."))
+        || !path.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(character, '/' | '.' | '_' | '-' | '{' | '}')
+        })
+    {
+        return false;
+    }
+    match injection {
+        Some(crate::http::RuntimeCredentialTarget::PathPlaceholder { placeholder }) => {
+            let marker = format!("{{{placeholder}}}");
+            let without_marker = path.replace(&marker, "");
+            !without_marker.contains(['{', '}'])
+        }
+        _ => !path.contains(['{', '}']),
+    }
 }
 
 /// One declared body-credential binding on a channel egress target.
@@ -402,6 +495,13 @@ pub struct ChannelPresentation {
     pub supports_threads: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_message_chars: Option<u32>,
+    /// Optional per-command display prefix a channel adapter renders before
+    /// each declared command name in user-visible help text (e.g. a channel
+    /// whose native command namespace requires an app-scoped dispatcher
+    /// prefix: `"/ironclaw "` + `model` -> `/ironclaw model`). `None`
+    /// renders the bare `/{name}` form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_prefix: Option<String>,
 }
 
 /// Structural channel-descriptor failures (path context added by the
@@ -416,6 +516,10 @@ pub enum ChannelDescriptorError {
         "channel commands must contain at most 32 unique tokens of at most 64 bytes using lowercase ASCII letters, digits, '-', or '_'"
     )]
     InvalidCommands,
+    #[error(
+        "channel presentation command_prefix must be non-empty, start with '/', contain no control characters, and be at most 32 bytes"
+    )]
+    InvalidCommandPrefix,
     #[error("an inbound channel must declare [channel.ingress]")]
     InboundWithoutIngress,
     #[error("[channel.connection] requires inbound = true")]
@@ -438,6 +542,8 @@ pub enum ChannelDescriptorError {
     InvalidEgressInjection { host: String },
     #[error("egress host `{host}` must be a literal, non-empty host (no wildcards)")]
     WildcardOrEmptyEgressHost { host: String },
+    #[error("egress target `{host}` declares an invalid path or transfer bound")]
+    InvalidEgressConstraint { host: String },
 }
 
 #[cfg(test)]
@@ -547,6 +653,60 @@ max_message_chars = 40000
         }
     }
 
+    fn channel_toml_with_command_prefix(prefix_toml_value: &str) -> String {
+        documented_channel_toml().replace(
+            "max_message_chars = 40000\n",
+            &format!("max_message_chars = 40000\ncommand_prefix = {prefix_toml_value}\n"),
+        )
+    }
+
+    #[test]
+    fn command_prefix_is_optional_and_round_trips() {
+        let absent: ChannelDescriptor = toml::from_str(documented_channel_toml()).unwrap();
+        assert_eq!(absent.presentation.command_prefix, None);
+        absent.validate().unwrap();
+
+        let declared: ChannelDescriptor =
+            toml::from_str(&channel_toml_with_command_prefix("\"/ironclaw \"")).unwrap();
+        assert_eq!(
+            declared.presentation.command_prefix.as_deref(),
+            Some("/ironclaw ")
+        );
+        declared.validate().unwrap();
+
+        let json = serde_json::to_string(&declared).unwrap();
+        let round_trip: ChannelDescriptor = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            round_trip.presentation.command_prefix.as_deref(),
+            Some("/ironclaw ")
+        );
+
+        // Unset stays unset on the wire too (skip_serializing_if).
+        let absent_json = serde_json::to_string(&absent).unwrap();
+        assert!(
+            !absent_json.contains("command_prefix"),
+            "unset command_prefix must not appear on the wire: {absent_json}"
+        );
+    }
+
+    #[test]
+    fn command_prefix_validation_rejects_malformed_shapes() {
+        for bad in [
+            "\"\"".to_string(),
+            "\"ironclaw \"".to_string(),
+            "\"/control\t\"".to_string(),
+            format!("\"/{}\"", "a".repeat(32)),
+        ] {
+            let channel: ChannelDescriptor =
+                toml::from_str(&channel_toml_with_command_prefix(&bad)).unwrap();
+            assert_eq!(
+                channel.validate().unwrap_err(),
+                ChannelDescriptorError::InvalidCommandPrefix,
+                "expected invalid command_prefix: {bad}"
+            );
+        }
+    }
+
     #[test]
     fn channel_descriptor_parses_the_documented_shape() {
         let channel: ChannelDescriptor = toml::from_str(documented_channel_toml()).unwrap();
@@ -639,7 +799,7 @@ max_message_chars = 40000
         channel.validate().unwrap();
         assert!(matches!(
             channel.egress[0].injection,
-            Some(crate::RuntimeCredentialTarget::PathPlaceholder { .. })
+            Some(crate::http::RuntimeCredentialTarget::PathPlaceholder { .. })
         ));
 
         // Header injection stays expressible explicitly too.
@@ -696,6 +856,63 @@ max_message_chars = 40000
             channel.validate().unwrap_err(),
             ChannelDescriptorError::WildcardOrEmptyEgressHost { .. }
         ));
+    }
+
+    #[test]
+    fn egress_paths_and_transfer_bounds_parse_and_validate() {
+        let toml = documented_channel_toml().replace(
+            "credential_handle = \"vendor_bot_token\"",
+            "credential_handle = \"vendor_bot_token\"\ninjection = { type = \"path_placeholder\", placeholder = \"token\" }\npaths = [\"/bot{token}/getFile\"]\npath_prefixes = [\"/file/bot{token}/\"]\nrequest_body_limit_bytes = 65536\nresponse_body_limit_bytes = 5242880",
+        );
+        let channel: ChannelDescriptor = toml::from_str(&toml).unwrap();
+        channel.validate().unwrap();
+        let target = &channel.egress[0];
+        assert_eq!(target.paths, vec!["/bot{token}/getFile"]);
+        assert_eq!(target.path_prefixes, vec!["/file/bot{token}/"]);
+        assert_eq!(target.request_body_limit_bytes, Some(65_536));
+        assert_eq!(target.response_body_limit_bytes, Some(5 * 1024 * 1024));
+    }
+
+    /// A prefix without a trailing `/` does not end on a segment boundary, so
+    /// prefix matching would authorize any sibling sharing its bytes. Reject
+    /// the declaration rather than rely on every matcher to compensate.
+    #[test]
+    fn egress_path_prefix_without_a_segment_boundary_is_rejected() {
+        let toml = documented_channel_toml().replace(
+            "credential_handle = \"vendor_bot_token\"",
+            "credential_handle = \"vendor_bot_token\"\ninjection = { type = \"path_placeholder\", placeholder = \"token\" }\npath_prefixes = [\"/file/bot{token}\"]",
+        );
+        let channel: ChannelDescriptor = toml::from_str(&toml).unwrap();
+        assert!(matches!(
+            channel.validate(),
+            Err(ChannelDescriptorError::InvalidEgressConstraint { .. })
+        ));
+    }
+
+    #[test]
+    fn malformed_egress_paths_and_transfer_bounds_fail_closed() {
+        for declaration in [
+            "paths = [\"https://evil.example/file\"]",
+            "paths = [\"/a/../secret\"]",
+            "path_prefixes = [\"//evil.example/\"]",
+            "path_prefixes = [\"/file\\\\escape\"]",
+            "request_body_limit_bytes = 10485761",
+            "response_body_limit_bytes = 10485761",
+            "response_body_limit_bytes = 0",
+        ] {
+            let toml = documented_channel_toml().replace(
+                "credential_handle = \"vendor_bot_token\"",
+                &format!("credential_handle = \"vendor_bot_token\"\n{declaration}"),
+            );
+            let channel: ChannelDescriptor = toml::from_str(&toml).unwrap();
+            assert!(
+                matches!(
+                    channel.validate().unwrap_err(),
+                    ChannelDescriptorError::InvalidEgressConstraint { .. }
+                ),
+                "expected rejection for {declaration}"
+            );
+        }
     }
 
     #[test]

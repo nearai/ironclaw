@@ -1,5 +1,8 @@
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
+use ironclaw_host_api::{
+    Timestamp,
+    ids::{AgentId, ProjectId, TenantId, UserId},
+};
 use ironclaw_turns::ReplyTargetBindingRef;
 use serde::{Deserialize, Serialize};
 
@@ -221,7 +224,7 @@ pub trait CommunicationPreferenceRepository: Send + Sync {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 
     use super::*;
 

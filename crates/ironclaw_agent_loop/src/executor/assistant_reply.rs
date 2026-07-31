@@ -4,8 +4,8 @@ use ironclaw_turns::run_profile::{AssistantReply, FinalizeAssistantMessage, Loop
 use crate::{state::LoopExecutionState, strategies::TurnSummary};
 
 use super::{
-    AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage, StageContext,
-    TurnCompletedStep,
+    AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, StageContext,
+    TurnCompletedStep, transcript_host_error,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -39,9 +39,7 @@ impl ExecutorStage<AssistantReplyInput> for AssistantReplyStage {
             .host
             .finalize_assistant_message(FinalizeAssistantMessage { reply: input.reply })
             .await
-            .map_err(|_| AgentLoopExecutorError::HostUnavailable {
-                stage: HostStage::Transcript,
-            })?;
+            .map_err(transcript_host_error)?;
         state.assistant_refs.push(reply_ref.clone());
         state.recent_output_token_counts.push(output_tokens);
         // NOTE: cumulative model usage is accumulated once per model response in

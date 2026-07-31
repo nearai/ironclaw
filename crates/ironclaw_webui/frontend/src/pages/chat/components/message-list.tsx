@@ -129,6 +129,7 @@ export function MessageList({
   activeRunId,
   logsPath,
   pending = false,
+  commands,
   children,
 }) {
   const t = useT();
@@ -400,6 +401,7 @@ export function MessageList({
                 onRetry={onRetryMessage}
                 threadId={threadId}
                 activeRunId={activeRunId}
+                commands={commands}
               />)
         )}
         {children}

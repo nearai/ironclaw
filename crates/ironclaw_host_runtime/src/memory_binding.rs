@@ -23,7 +23,7 @@
 //! binding is permitted at all). The provider is immutable for the runtime's
 //! lifetime — there is no runtime swap.
 
-use ironclaw_host_api::{ExtensionId, HostApiError};
+use ironclaw_host_api::{error::HostApiError, ids::ExtensionId};
 use thiserror::Error;
 
 use crate::memory_native_extension::NATIVE_MEMORY_EXTENSION_ID;

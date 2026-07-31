@@ -101,12 +101,17 @@ pub use ironclaw_auth::{
 };
 pub use ironclaw_auth::{CredentialAccount, CredentialAccountSelectionRequest};
 pub use ironclaw_host_api::{
-    CapabilityId, HostApiError, NetworkScheme, NetworkTargetPattern, RuntimeCredentialRequirement,
-    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind,
-    SecretHandle,
+    action::{NetworkScheme, NetworkTargetPattern},
+    capability::{RuntimeCredentialRequirement, RuntimeCredentialRequirementSource},
+    dispatch::RuntimeDispatchErrorKind,
+    error::HostApiError,
+    http::RuntimeCredentialTarget,
+    ids::{CapabilityId, SecretHandle},
 };
 pub use ironclaw_host_api::{
-    ExtensionId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, VendorId,
+    capability::RuntimeCredentialAccountSetup,
+    decision::RuntimeCredentialAuthRequirement,
+    ids::{ExtensionId, VendorId},
 };
 pub use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -161,7 +166,7 @@ pub use deployment::{
 #[cfg(any(test, feature = "test-support"))]
 pub use deployment::{local_filesystem_build_input, local_filesystem_build_input_with_profile};
 pub use ironclaw_extension_host::provider_identity::ProviderIdentityActorResolver;
-pub use ironclaw_host_api::{
+pub use ironclaw_host_api::user_identity::{
     RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
     RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
     RebornUserIdentityBindingStore, RebornUserIdentityLookup, RebornUserIdentityLookupError,
@@ -216,7 +221,8 @@ pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
 /// host-identity facade.
 pub mod host_api {
     pub use ironclaw_host_api::{
-        AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+        ids::{AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId},
+        resource::ResourceScope,
     };
 }
 
@@ -246,10 +252,12 @@ pub use ironclaw_reborn_identity::{
 /// Gated so it ships zero bytes in production binaries.
 #[cfg(any(test, feature = "test-support"))]
 pub fn open_reborn_identity_resolver(
-    tenant_id: &ironclaw_host_api::TenantId,
+    tenant_id: &ironclaw_host_api::ids::TenantId,
 ) -> std::sync::Arc<dyn RebornIdentityResolver> {
     use ironclaw_host_api::{
-        AgentId, MountAlias, MountGrant, MountPermissions, MountView, UserId, VirtualPath,
+        ids::{AgentId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
     };
 
     let root = std::sync::Arc::new(ironclaw_filesystem::InMemoryBackend::default());
@@ -360,9 +368,11 @@ use ironclaw_authorization::CapabilityLeaseError;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::ProcessBackendKind;
+use ironclaw_host_api::runtime_policy::ProcessBackendKind;
 use ironclaw_host_api::{
-    MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
@@ -423,13 +433,13 @@ const SYSTEM_SUBROOTS: [&str; 3] = ["/system/settings", "/system/extensions", "/
 /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
 ///
 /// The system sentinel scope (see
-/// [`ironclaw_host_api::ResourceScope::system`]) routes records under
+/// [`ironclaw_host_api::resource::ResourceScope::system`]) routes records under
 /// `/tenants/__system__/users/__system__/<alias>`. Production code uses
 /// it for process-global records whose paths already encode per-tenant
 /// identity (event-log stream keys, conversation singleton state).
 pub fn invocation_mount_view(
     scope: &ResourceScope,
-) -> Result<MountView, ironclaw_host_api::HostApiError> {
+) -> Result<MountView, ironclaw_host_api::error::HostApiError> {
     invocation_mount_view_for_segments(
         resource_scope_path_segment(scope.tenant_id.as_str()),
         resource_scope_path_segment(scope.user_id.as_str()),
@@ -437,7 +447,7 @@ pub fn invocation_mount_view(
 }
 
 pub(crate) fn resource_scope_path_segment(value: &str) -> &str {
-    if value == ironclaw_host_api::SYSTEM_RESERVED_ID {
+    if value == ironclaw_host_api::resource::SYSTEM_RESERVED_ID {
         "__system__"
     } else {
         value
@@ -447,7 +457,7 @@ pub(crate) fn resource_scope_path_segment(value: &str) -> &str {
 fn invocation_mount_view_for_segments(
     tenant_id: &str,
     user_id: &str,
-) -> Result<MountView, ironclaw_host_api::HostApiError> {
+) -> Result<MountView, ironclaw_host_api::error::HostApiError> {
     let tenant_user_prefix = format!("/tenants/{tenant_id}/users/{user_id}");
     let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 3);
     for alias in PER_USER_ALIASES {
@@ -587,7 +597,7 @@ pub enum RebornCompositionError {
     )]
     MissingSecretMasterKey,
     #[error("reborn mount view construction failed: {0}")]
-    Mount(#[from] ironclaw_host_api::HostApiError),
+    Mount(#[from] ironclaw_host_api::error::HostApiError),
     #[error("reborn filesystem substrate failed: {0}")]
     Filesystem(#[from] ironclaw_filesystem::FilesystemError),
     #[error("reborn resource governor substrate failed: {0}")]
@@ -677,7 +687,8 @@ mod mount_view_tests {
     use super::*;
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation, InMemoryBackend};
     use ironclaw_host_api::{
-        AgentId, InvocationId, MissionId, ProjectId, ScopedPath, TenantId, ThreadId, UserId,
+        ids::{AgentId, InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId},
+        path::ScopedPath,
     };
 
     fn sample_scope() -> ResourceScope {
@@ -920,7 +931,9 @@ mod two_tenant_isolation_tests {
     //! resolver back into production wiring trips this test directly.
     use super::*;
     use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId};
+    use ironclaw_host_api::ids::{
+        AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId,
+    };
     use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStorePort, SecretsCrypto};
     use secrecy::ExposeSecret;
 
@@ -997,7 +1010,9 @@ mod gate_record_production_mount_tests {
     use ironclaw_approvals::{GateRecordStore, GateRecordStorePort};
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        GateRecord, GateRef, InvocationId, ProjectId, SafeSummary, TenantId, UserId,
+        gate_record::GateRecord,
+        ids::{GateRef, InvocationId, ProjectId, TenantId, UserId},
+        safe_summary::SafeSummary,
     };
 
     fn scope(tenant: &str, user: &str) -> ResourceScope {

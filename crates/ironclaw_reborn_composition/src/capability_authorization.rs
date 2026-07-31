@@ -16,8 +16,11 @@ use ironclaw_approvals::{
 };
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, InvocationId, Principal, ResourceScope,
+    capability::EffectKind,
+    ids::{CapabilityId, InvocationId},
+    resource::ResourceScope,
     runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy},
+    scope::Principal,
 };
 use ironclaw_runtime_policy::MinimalApprovalBypass;
 use tokio::sync::Notify;

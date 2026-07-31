@@ -1,6 +1,7 @@
 use ironclaw_host_api::{
-    AgentId, AuditEnvelope, MissionId, ProcessId, ProjectId, ResourceScope, TenantId, ThreadId,
-    UserId,
+    audit::AuditEnvelope,
+    ids::{AgentId, MissionId, ProcessId, ProjectId, TenantId, ThreadId, UserId},
+    resource::ResourceScope,
 };
 use serde::{Deserialize, Serialize};
 

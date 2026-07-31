@@ -9,7 +9,7 @@
 //! authority site.
 
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
-use ironclaw_host_api::{CapabilityId, PackageSource};
+use ironclaw_host_api::{ids::CapabilityId, trust::PackageSource};
 use ironclaw_trust::{TrustDecision, TrustPolicy, TrustPolicyInput};
 use tracing::debug;
 
@@ -116,7 +116,9 @@ fn local_manifest_source(package: &ExtensionPackage) -> PackageSource {
 mod tests {
     use super::*;
     use ironclaw_extensions::{ExtensionManifest, ManifestSource};
-    use ironclaw_host_api::{HostPortCatalog, VirtualPath, sha256_digest_token};
+    use ironclaw_host_api::{
+        approval::sha256_digest_token, host_port::HostPortCatalog, path::VirtualPath,
+    };
 
     // Relocated from `ironclaw_host_runtime::production` alongside the trust
     // evaluation this crate now owns (§5.3.2/§9): the local-manifest trust

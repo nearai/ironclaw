@@ -29,7 +29,11 @@
 //! a profile that changes status is classified as its new status rather than
 //! silently keeping the old expectation.
 
-use ironclaw_host_api::{CapabilityId, DispatchError, FailureFate, FailureKind};
+use ironclaw_host_api::{
+    dispatch::DispatchError,
+    ids::CapabilityId,
+    result_meta::{FailureFate, FailureKind},
+};
 
 use super::wasm_guest_dispatch_error;
 

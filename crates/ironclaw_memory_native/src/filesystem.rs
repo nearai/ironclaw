@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use ironclaw_filesystem::{
     DirEntry, FileStat, FileType, FilesystemError, FilesystemOperation, RootFilesystem,
 };
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 
 use crate::backend::{MemoryBackend, MemoryContext};
 use crate::chunking::{content_bytes_sha256, content_sha256};

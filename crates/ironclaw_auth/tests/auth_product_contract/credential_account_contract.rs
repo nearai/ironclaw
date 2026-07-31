@@ -1,6 +1,6 @@
 use crate::common::*;
 use ironclaw_auth::CredentialAccountRecordSource;
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::ids::ThreadId;
 
 #[tokio::test]
 async fn credential_setup_updates_only_explicit_authorized_account() {

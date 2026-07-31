@@ -6,8 +6,9 @@ use ironclaw_filesystem::{
     CasExpectation, Entry, InMemoryBackend, IndexKey, RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, ScopedPath, TenantId,
-    ThreadId, UserId, VirtualPath,
+    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, ScopedPath, VirtualPath},
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendFinalizedAssistantMessageRequest,

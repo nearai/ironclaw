@@ -5,7 +5,7 @@
 //! only neutral IDs, records, and store/lookup traits. Product routing and
 //! concrete persistence live in owning service crates.
 
-use crate::{AdapterInstallationId, UserId};
+use crate::{ids::UserId, product_adapter::AdapterInstallationId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebornIdentityProviderId(String);

@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 
 use crate::runtime_input::{
     TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
@@ -537,8 +537,9 @@ mod tests {
         #[tokio::test]
         async fn real_identity_store_membership_backs_fire_access() {
             use ironclaw_host_api::{
-                AgentId as HostAgentId, MountAlias, MountGrant, MountPermissions, MountView,
-                UserId as HostUserId, VirtualPath,
+                ids::{AgentId as HostAgentId, UserId as HostUserId},
+                mount::{MountGrant, MountPermissions, MountView},
+                path::{MountAlias, VirtualPath},
             };
             use ironclaw_reborn_identity::{
                 ExternalSubjectId, ProviderKind, RebornIdentityResolver, RebornIdentityStore,

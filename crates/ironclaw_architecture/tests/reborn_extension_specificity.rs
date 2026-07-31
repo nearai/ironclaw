@@ -1421,6 +1421,37 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
 ];
 
+/// WS0 baseline for the extension-specificity allowlist (target-architecture
+/// epic #3773, workstream #6920): the number of `(path, term)` pairs measured
+/// **on this checkout**, not copied from the design docs.
+///
+/// Measured 2026-07-30 against `origin/main` @ `ae0989c37` by counting the
+/// entries of `ALLOWLIST` above (`ALLOWLIST.len()`, printed by the ratchet
+/// below on failure).
+///
+/// PROPOSAL §11.2.8 shrinks this list to the §8.1 rule-4 set and CHECKLIST
+/// WS12 wants it empty. The staleness half of that discipline already lives in
+/// the gate above (an entry that no longer matches fails); this ceiling is the
+/// other half — the list cannot *grow* untracked either. Lower it in the same
+/// PR that deletes entries so the new floor is locked in.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 130;
+
+/// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
+#[test]
+fn reborn_extension_specificity_allowlist_ratchets_down_only() {
+    assert!(
+        ALLOWLIST.len() <= WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE,
+        "extension-specificity ALLOWLIST grew to {} entries (WS0 baseline {}): this list is \
+         shrink-only (PROPOSAL §11.2.8). Degenericize the code — route on a manifest-declared \
+         capability instead of naming the vendor — rather than allowlisting a new pair. If the \
+         owner has approved a deliberate carve-out, raise \
+         WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE in the same PR with the rationale in the \
+         PR body.",
+        ALLOWLIST.len(),
+        WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE
+    );
+}
+
 /// One `(relative path, matched term)` scanner hit.
 type HitEntry = (String, String);
 
@@ -1464,7 +1495,8 @@ fn reborn_generic_code_names_no_concrete_extension() {
     if !new_violations.is_empty() {
         failures.push(format!(
             "concrete extension names in generic code (fix the code, or — for pre-existing \
-             debt only — add the exact entries below to ALLOWLIST):\n{}",
+             debt only — add the exact entries below to ALLOWLIST, which also requires raising \
+             WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE, a reviewed decision):\n{}",
             new_violations
                 .iter()
                 .map(|(path, term)| format!("    (\"{path}\", \"{term}\"),"))

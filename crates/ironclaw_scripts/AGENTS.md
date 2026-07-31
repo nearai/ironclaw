@@ -13,9 +13,9 @@
 
 - The script runtime lane over host-mediated filesystem/events/resources/dispatcher/HTTP, currently:
 - Runtime + executor: `ScriptRuntime`, the `ScriptExecutor` trait, and `ScriptRuntimeConfig`.
-- Execution request/result types: `ScriptInvocation`, `ScriptExecutionRequest`, `ScriptExecutionResult` (result field is the shared `ironclaw_host_api::CapabilityHostResult`); `ScriptError`.
+- Execution request/result types: `ScriptInvocation`, `ScriptExecutionRequest`, `ScriptExecutionResult` (result field is the shared `ironclaw_host_api::resource::CapabilityHostResult`); `ScriptError`.
 - Backend abstraction: the `ScriptBackend` trait + `DockerScriptBackend`, with normalized `ScriptBackendRequest` / `ScriptBackendOutput` (output parsing).
-- Host-mediated HTTP: `ScriptRuntimeHttpAdapter` and the shared `ironclaw_host_api::CapabilityHostHttpRequest` / `ScriptHostHttpResponse` / `ScriptHostHttpError`.
+- Host-mediated HTTP: `ScriptRuntimeHttpAdapter` and the shared `ironclaw_host_api::http::CapabilityHostHttpRequest` / `ScriptHostHttpResponse` / `ScriptHostHttpError`.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here

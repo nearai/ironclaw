@@ -10,7 +10,7 @@
 //! 3. Maps every error through [`WebUiV2HttpError`] so the wire shape stays
 //!    redacted and stable.
 //!
-//! [`ProductSurface`]: ironclaw_host_api::ProductSurface
+//! [`ProductSurface`]: ironclaw_host_api::product_surface::ProductSurface
 
 // arch-exempt: large_file, ProductSurface service-collapse routes stay in the existing WebUI handler table until the WebUI route split lands, plan #5985
 
@@ -49,7 +49,8 @@ use ironclaw_product::{
     OPERATOR_CONFIG_SET_KEY_COMMAND, OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW,
     OPERATOR_LOGS_VIEW, OPERATOR_SERVICE_LIFECYCLE_COMMAND, OPERATOR_SETUP_RUN_CAPABILITY,
     OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
-    OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_VIEW, PROJECT_CREATE_COMMAND,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_VIEW,
+    PRODUCT_COMMAND_EXECUTE_COMMAND, PRODUCT_COMMAND_LIST_COMMAND, PROJECT_CREATE_COMMAND,
     PROJECT_DELETE_CAPABILITY, PROJECT_FS_LIST_VIEW, PROJECT_FS_READ_COMMAND, PROJECT_FS_STAT_VIEW,
     PROJECT_MEMBER_ADD_CAPABILITY, PROJECT_MEMBER_REMOVE_CAPABILITY,
     PROJECT_MEMBER_UPDATE_CAPABILITY, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY,
@@ -105,15 +106,20 @@ use serde::{Deserialize, Serialize};
 
 use ironclaw_host_api::turn::IdempotencyKey;
 use ironclaw_host_api::{
-    ActivityId, Blocked, FailureKind, LifecyclePublicState, ProductSurface, ProductSurfaceCaller,
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    ProductSurfaceValidationCode, Resolution, SecretHandle, ThreadId, UserId,
+    ids::{ActivityId, SecretHandle, ThreadId, UserId},
+    product_surface::{
+        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+        ProductSurfaceErrorKind, ProductSurfaceValidationCode,
+    },
+    resolution::{Blocked, Resolution},
+    result_meta::FailureKind,
+    state::LifecyclePublicState,
 };
 use uuid::Uuid;
 
 use crate::webui_v2::error::WebUiV2HttpError;
 use crate::webui_v2::router::{WebUiV2Capabilities, WebUiV2State};
-use crate::webui_v2::schema::WebChatV2EventFrame;
+use crate::webui_v2::schema::{WebChatV2Event, WebChatV2EventFrame};
 use crate::webui_v2::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
 
 // Session bootstrap must stay cheap and non-blocking: this flag only tunes
@@ -293,8 +299,10 @@ async fn read_admin_user_secret(
     user_id: UserId,
     handle: String,
 ) -> Result<ironclaw_product::AdminUserSecretMeta, WebUiV2HttpError> {
-    let surface =
-        ironclaw_host_api::BoundProductSurface::new(std::sync::Arc::clone(services), caller);
+    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(
+        std::sync::Arc::clone(services),
+        caller,
+    );
     let response = ADMIN_USER_SECRETS_VIEW
         .query_on(&surface, RebornAdminUserRequest { user_id }, None)
         .await?;
@@ -704,7 +712,7 @@ pub struct FsBrowseQuery {
     pub path: Option<String>,
     /// Optional project to browse, authorized by the product-workflow service.
     #[serde(default)]
-    pub project_id: Option<ironclaw_host_api::ProjectId>,
+    pub project_id: Option<ironclaw_host_api::ids::ProjectId>,
 }
 
 /// `GET /api/webchat/v2/fs/mounts`
@@ -1017,8 +1025,10 @@ async fn read_project_member(
     project_id: String,
     user_id: String,
 ) -> Result<RebornProjectMemberInfo, WebUiV2HttpError> {
-    let surface =
-        ironclaw_host_api::BoundProductSurface::new(std::sync::Arc::clone(services), caller);
+    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(
+        std::sync::Arc::clone(services),
+        caller,
+    );
     let response = PROJECT_MEMBERS_VIEW
         .query_on(&surface, RebornListMembersRequest { project_id }, None)
         .await?;
@@ -1107,9 +1117,8 @@ pub async fn get_attachment(
     Ok((StatusCode::OK, headers, attachment.bytes).into_response())
 }
 
-/// SSE polling cadence for `stream_events`. The service only exposes a
-/// drain-style read; once the backlog is flushed the handler waits this
-/// long before checking for newly arrived events.
+/// SSE polling cadence for product surfaces that expose only the legacy
+/// drain-style read. Subscription-capable surfaces bypass this fallback.
 const SSE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Upper bound for idle `stream_events` polling. A browser tab with no
@@ -1118,8 +1127,8 @@ const SSE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// hosted Postgres.
 const SSE_IDLE_POLL_MAX_INTERVAL: Duration = Duration::from_secs(3);
 
-/// SSE keep-alive cadence. axum emits an SSE comment line every interval
-/// to keep proxies from closing the idle connection.
+/// SSE keep-alive cadence. Axum emits a comment line for proxies, and the
+/// subscription path emits a typed frame for browser application code.
 const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
 /// HTTP header the browser's `EventSource` sends on auto-reconnect to
@@ -1159,7 +1168,7 @@ fn sse_poll_interval_for_idle_polls(idle_polls: u32) -> Duration {
 /// documented on [`ProductSurface::stream_events`].
 ///
 /// [`WebChatV2EventFrame`]: crate::webui_v2::schema::WebChatV2EventFrame
-/// [`ProductSurface::stream_events`]: ironclaw_host_api::ProductSurface::stream_events
+/// [`ProductSurface::stream_events`]: ironclaw_host_api::product_surface::ProductSurface::stream_events
 /// [`SSE_MAX_LIFETIME`]: crate::webui_v2::sse_capacity::SSE_MAX_LIFETIME
 pub async fn stream_events(
     State(state): State<WebUiV2State>,
@@ -1304,6 +1313,12 @@ fn sse_error_event(error: ProductSurfaceError) -> Event {
     }
 }
 
+fn sse_keep_alive_event() -> Event {
+    Event::default()
+        .event(WebChatV2Event::KeepAlive.event_name())
+        .data(r#"{"type":"keep_alive"}"#)
+}
+
 fn build_sse_stream(
     services: std::sync::Arc<dyn ProductSurface>,
     caller: ProductSurfaceCaller,
@@ -1319,7 +1334,7 @@ fn build_sse_stream(
         let mut slot_guard = slot;
         let started_at = tokio::time::Instant::now();
         let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
-        let surface = ironclaw_host_api::BoundProductSurface::new(services, caller);
+        let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(services, caller);
 
         let mut idle_polls = 0_u32;
         loop {
@@ -1337,7 +1352,7 @@ fn build_sse_stream(
                 _ = slot_guard.cancelled() => return,
                 result = tokio::time::timeout(
                     remaining,
-                    surface.stream_events(ironclaw_host_api::ProductSurfaceStreamRequest {
+                    surface.stream_events(ironclaw_host_api::product_surface::ProductSurfaceStreamRequest {
                         stream_id: Some(thread_id.clone()),
                         after_cursor: after_cursor
                             .as_ref()
@@ -1359,7 +1374,8 @@ fn build_sse_stream(
                     );
                     return;
                 }
-                Ok(Ok(response)) => {
+                Ok(Ok(mut response)) => {
+                    let subscription = response.subscription.take();
                     let events = match decode_product_outbound_events(response.events) {
                         Ok(events) => events,
                         Err(error) => {
@@ -1376,11 +1392,63 @@ fn build_sse_stream(
                             yield Ok(event);
                         }
                     }
+                    if let Some(subscription) = subscription {
+                        loop {
+                            let remaining =
+                                SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+                            if remaining.is_zero() {
+                                return;
+                            }
+                            let next = tokio::select! {
+                                biased;
+                                _ = slot_guard.cancelled() => return,
+                                result = tokio::time::timeout(
+                                    remaining,
+                                    subscription.next(),
+                                ) => result,
+                                _ = tokio::time::sleep(SSE_KEEPALIVE_INTERVAL) => {
+                                    // Axum's comment keep-alive keeps proxies
+                                    // open, but parser packages do not surface
+                                    // comments to the browser watchdog. Emit a
+                                    // typed application frame as liveness proof
+                                    // while the projection is legitimately idle.
+                                    yield Ok(sse_keep_alive_event());
+                                    continue;
+                                }
+                            };
+                            let response = match next {
+                                Ok(Some(Ok(response))) => response,
+                                Ok(Some(Err(error))) => {
+                                    yield Ok(sse_error_event(error));
+                                    return;
+                                }
+                                Ok(None) => return,
+                                Err(_) => {
+                                    tracing::debug!(
+                                        target = "ironclaw_webui_v2::sse",
+                                        "stream_events subscription pending past SSE_MAX_LIFETIME; closing stream"
+                                    );
+                                    return;
+                                }
+                            };
+                            let events = match decode_product_outbound_events(response.events) {
+                                Ok(events) => events,
+                                Err(error) => {
+                                    yield Ok(sse_error_event(error));
+                                    return;
+                                }
+                            };
+                            for envelope in events {
+                                if let Some(event) = webchat_sse_event_from_envelope(envelope) {
+                                    yield Ok(event);
+                                }
+                            }
+                        }
+                    }
                     if had_events {
-                        // The production projection service waits on its live
-                        // subscription when no new item is replayable. Re-enter
-                        // it immediately after delivering a batch so assistant
-                        // text deltas are not delayed by the idle poll cadence.
+                        // Drain-only compatibility surfaces may have another
+                        // buffered batch ready. Re-enter immediately after
+                        // delivery before applying the idle poll cadence.
                         idle_polls = 0;
                         continue;
                     }
@@ -1532,6 +1600,46 @@ pub struct ListThreadsQuery {
     pub candidate_thread_id: Option<String>,
     #[serde(default)]
     pub needs_approval: bool,
+}
+
+/// `GET /api/webchat/v2/commands`
+pub async fn list_commands(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<ironclaw_product::RebornProductCommandListResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        PRODUCT_COMMAND_LIST_COMMAND,
+        EmptyProductCommandInput {},
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExecuteCommandBody {
+    pub text: String,
+}
+
+/// `POST /api/webchat/v2/threads/:thread_id/commands`
+pub async fn execute_command(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(thread_id): Path<String>,
+    Json(body): Json<ExecuteCommandBody>,
+) -> Result<Json<ironclaw_product::RebornExecuteProductCommandResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        PRODUCT_COMMAND_EXECUTE_COMMAND,
+        ironclaw_product::RebornExecuteProductCommandRequest {
+            thread_id,
+            text: body.text,
+        },
+    )
+    .await?;
+    Ok(Json(response))
 }
 
 /// `GET /api/webchat/v2/automations`
@@ -2662,8 +2770,10 @@ async fn invoke_product_capability_with_activity_id<T>(
 where
     T: Serialize,
 {
-    let surface =
-        ironclaw_host_api::BoundProductSurface::new(std::sync::Arc::clone(services), caller);
+    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(
+        std::sync::Arc::clone(services),
+        caller,
+    );
     capability.invoke_on(&surface, input, activity_id).await
 }
 
@@ -2679,8 +2789,10 @@ where
 {
     let input_value = serde_json::to_value(&input).map_err(ProductSurfaceError::internal_from)?;
     let activity_id = product_surface_activity_id(&caller, command.id, &input_value)?;
-    let surface =
-        ironclaw_host_api::BoundProductSurface::new(std::sync::Arc::clone(services), caller);
+    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(
+        std::sync::Arc::clone(services),
+        caller,
+    );
     command.invoke_on(&surface, input, activity_id).await
 }
 
@@ -2832,15 +2944,19 @@ async fn query_product_page(
     caller: ProductSurfaceCaller,
     query: RebornViewQuery,
 ) -> Result<RebornViewPage, ProductSurfaceError> {
-    let surface =
-        ironclaw_host_api::BoundProductSurface::new(std::sync::Arc::clone(services), caller);
+    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(
+        std::sync::Arc::clone(services),
+        caller,
+    );
     let page = surface
-        .query(ironclaw_host_api::ProductSurfaceQueryRequest {
-            view_id: query.view_id,
-            input: query.params,
-            cursor: query.cursor,
-            limit: None,
-        })
+        .query(
+            ironclaw_host_api::product_surface::ProductSurfaceQueryRequest {
+                view_id: query.view_id,
+                input: query.params,
+                cursor: query.cursor,
+                limit: None,
+            },
+        )
         .await?;
     let payload = page
         .items
@@ -3847,7 +3963,7 @@ async fn ws_drain_loop(
     let mut slot_guard = slot;
     let started_at = tokio::time::Instant::now();
     let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
-    let surface = ironclaw_host_api::BoundProductSurface::new(services, caller);
+    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(services, caller);
 
     let mut idle_polls = 0_u32;
     loop {
@@ -3857,12 +3973,14 @@ async fn ws_drain_loop(
                 ws_send_with_timeout(&mut socket, None, std::time::Duration::from_millis(0)).await;
             return;
         }
-        let service_call = surface.stream_events(ironclaw_host_api::ProductSurfaceStreamRequest {
-            stream_id: Some(thread_id.clone()),
-            after_cursor: after_cursor
-                .as_ref()
-                .map(|cursor| cursor.as_str().to_string()),
-        });
+        let service_call = surface.stream_events(
+            ironclaw_host_api::product_surface::ProductSurfaceStreamRequest {
+                stream_id: Some(thread_id.clone()),
+                after_cursor: after_cursor
+                    .as_ref()
+                    .map(|cursor| cursor.as_str().to_string()),
+            },
+        );
         let outcome = tokio::select! {
             biased;
             _ = slot_guard.cancelled() => {

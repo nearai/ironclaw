@@ -16,8 +16,8 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use ironclaw_host_api::CapabilityId;
-use ironclaw_host_api::{NetworkPolicy, NetworkScheme, NetworkTargetPattern};
+use ironclaw_host_api::action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern};
+use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, HTTP_CAPABILITY_ID, JSON_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
     TIME_CAPABILITY_ID,

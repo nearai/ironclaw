@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_turns::{
     TurnRunId,
     run_profile::{
@@ -240,7 +240,7 @@ pub fn subagent_run_id_from_context(run_context: &LoopRunContext) -> TurnRunId {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::CapabilityId;
+    use ironclaw_host_api::ids::CapabilityId;
     use ironclaw_turns::run_profile::{LoopInlineMessageRole, LoopModelCapabilityView};
     use std::collections::BTreeSet;
     use tracing_test::traced_test;

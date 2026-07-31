@@ -527,11 +527,12 @@ pub(super) async fn build_backend_production(
             Arc::clone(&stores.filesystem),
             Arc::clone(&stores.secret_credentials.crypto),
         ));
-    let project_agent_id = ironclaw_host_api::AgentId::new("reborn-projects").map_err(|error| {
-        RebornBuildError::InvalidConfig {
-            reason: format!("invalid project agent id: {error}"),
-        }
-    })?;
+    let project_agent_id =
+        ironclaw_host_api::ids::AgentId::new("reborn-projects").map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("invalid project agent id: {error}"),
+            }
+        })?;
     let project_repository: Arc<dyn ProjectRepository> =
         Arc::new(ironclaw_projects::FilesystemProjectRepository::new(
             Arc::clone(&stores.scoped_filesystem),
@@ -817,7 +818,7 @@ pub(super) async fn build_backend_production(
     let mut admin_configuration_consumers = std::collections::BTreeMap::new();
     for usage in &admin_configuration_uses {
         let extension_id =
-            ironclaw_host_api::ExtensionId::new(usage.package_id.clone()).map_err(|error| {
+            ironclaw_host_api::ids::ExtensionId::new(usage.package_id.clone()).map_err(|error| {
                 RebornBuildError::InvalidConfig {
                     reason: format!(
                         "administrator configuration consumer `{}` has an invalid extension id: {error}",
@@ -1082,6 +1083,13 @@ pub(super) async fn build_backend_production(
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("outbound preferences handler is invalid: {error}"),
         })?;
+    ironclaw_host_runtime::register_reply_attachment_first_party_handler(
+        &mut first_party_registry,
+        Arc::clone(&outbound_stores.reply_attachment_intents),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("reply attachment handler is invalid: {error}"),
+    })?;
     insert_skill_auto_activate_handler(
         &mut first_party_registry,
         Arc::clone(&skill_auto_activate_learned),
@@ -1195,6 +1203,7 @@ pub(super) async fn build_backend_production(
         outbound_delivery_targets: Arc::clone(&outbound_delivery_targets),
         skill_auto_activate_learned: Arc::clone(&skill_auto_activate_learned),
         outbound_state: outbound_stores.outbound_state,
+        reply_attachment_intents: outbound_stores.reply_attachment_intents,
         delivered_gate_routes: outbound_stores.delivered_gate_routes,
         triggered_run_delivery: outbound_stores.triggered_run_delivery,
         process_gate_query_source,

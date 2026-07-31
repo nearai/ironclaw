@@ -15,7 +15,7 @@
 //! destroyed 17 names — and with them every remediation hint the model could
 //! have acted on.
 //!
-//! They are now one closed `ironclaw_host_api::FailureKind` plus projection
+//! They are now one closed `ironclaw_host_api::result_meta::FailureKind` plus projection
 //! functions (`fate()`, retry-category, wire tag, HTTP status). Every
 //! projection is a wildcard-free exhaustive match beside the single
 //! definition, so a new kind cannot compile until each consumer classifies it.
@@ -188,7 +188,7 @@ fn reborn_code_never_redeclares_the_failure_vocabulary() {
     assert!(
         hits.is_empty(),
         "the retired failure vocabulary is back in live code — one closed \
-         `ironclaw_host_api::FailureKind` plus projections is the single \
+         `ironclaw_host_api::result_meta::FailureKind` plus projections is the single \
          definition (#6284); a second spelling drifts from it, and the drift \
          is where recoverability dies:\n{}",
         hits.join("\n")

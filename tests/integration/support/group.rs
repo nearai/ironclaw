@@ -56,7 +56,7 @@ use std::time::Duration;
 
 use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_filesystem::CompositeRootFilesystem;
-use ironclaw_host_api::{ResourceScope, UserId};
+use ironclaw_host_api::{ids::UserId, resource::ResourceScope};
 use ironclaw_llm::testing::{provider_chain_over, provider_chain_over_with_fallback};
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_host::{
@@ -109,7 +109,7 @@ use super::builder::{
     apply_hermetic_env, binding_request, build_storage_composite, scoped_processes_fs_composite,
     thread_scope_from_binding,
 };
-use super::doubles::RecordingSecurityAuditSink;
+use super::doubles::{FailingTranscriptWriteThreadService, RecordingSecurityAuditSink};
 use super::harness::{
     EmptyIdentityContextSource, HarnessCapabilityMode, HarnessCapabilityRecorder,
     HostRuntimeCapabilityHarness, RecordingTestCapabilityPort,
@@ -124,7 +124,7 @@ use super::scope_gateway::ScopeRegistryGateway;
 use super::scripted_provider::{
     ErrLlm, ErrLlmKind, FallbackProviderCallProbe, ModelProviderCallProbe, ParkingModelGate,
     RecoverableModelFailureScript, SCRIPTED_FALLBACK_MODEL_NAME, SCRIPTED_MODEL_NAME,
-    parking_trace_llm, recoverable_failure_trace_llm, scripted_fallback_vendor_pair,
+    parking_trace_llm, recording_llm, recoverable_failure_trace_llm, scripted_fallback_vendor_pair,
     scripted_trace_llm,
 };
 use super::session_thread::RebornThreadHarness;
@@ -371,6 +371,29 @@ impl GroupCapability {
         }
     }
 
+    /// Return the same reply-attachment intent port used by a
+    /// production-composed built-in handler. The planned runtime finalizer
+    /// must seal that exact store; lightweight backends without composed
+    /// Reborn services retain the prior isolated in-memory test store.
+    pub(crate) fn reply_attachment_intent_port(
+        &self,
+    ) -> Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort> {
+        let fresh_store = || {
+            Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store())
+                as Arc<dyn ironclaw_outbound::ReplyAttachmentIntentPort>
+        };
+        match self {
+            Self::HostRuntime(harness) => harness
+                .reborn_services_for_test()
+                .and_then(|runtime| runtime.outbound_delivery_stores_for_test())
+                .map(|(_, _, _, reply_attachment_intents)| reply_attachment_intents)
+                .unwrap_or_else(fresh_store),
+            Self::Recording | Self::RecordingNoProgress | Self::RecordingRecoverablePortError => {
+                fresh_store()
+            }
+        }
+    }
+
     /// E-DURABLE core: assert `extension_id` is present in a FRESHLY reopened
     /// `ExtensionInstallationStorePort` at this backend's on-disk `storage_root`
     /// (a handle independent of the live `Arc`) — proving the install
@@ -457,6 +480,8 @@ impl RebornIntegrationGroup {
             runner_lease_ttl_override: None,
             lease_recovery_interval_override: None,
             planned_default_iteration_limit: None,
+            fail_append_finalized_assistant_message: false,
+            fail_append_tool_result_reference: false,
             real_gate_dispatch_services: false,
             channel_connection: None,
             bound_memory: None,
@@ -625,6 +650,7 @@ impl RebornIntegrationGroup {
             replies: Vec::new(),
             actor_id: None,
             model_mode: ThreadModelMode::Normal,
+            record_model_calls: false,
             model_override: None,
         }
     }
@@ -821,6 +847,10 @@ pub struct RebornIntegrationGroupBuilder {
     lease_recovery_interval_override: Option<Duration>,
     /// Test-only override for the canonical loop's default iteration limit.
     planned_default_iteration_limit: Option<std::num::NonZeroU32>,
+    /// Test-only runtime seam that rejects final assistant transcript writes.
+    fail_append_finalized_assistant_message: bool,
+    /// Test-only runtime seam that rejects tool-result transcript writes.
+    fail_append_tool_result_reference: bool,
     /// When `true`, wire the REAL approval/auth interaction services into
     /// every thread's `DefaultProductSurface` (see
     /// `with_real_gate_dispatch_services`). Default `false` (every workflow
@@ -841,7 +871,7 @@ pub struct RebornIntegrationGroupBuilder {
     /// wires. Default `None` (no memory consumers, today's behavior).
     bound_memory: Option<(
         Arc<dyn ironclaw_memory::MemoryService>,
-        ironclaw_host_api::MemoryDescriptor,
+        ironclaw_host_api::memory::MemoryDescriptor,
     )>,
 }
 
@@ -1059,6 +1089,22 @@ impl RebornIntegrationGroupBuilder {
             ironclaw_reborn_composition::test_support::build_user_profile_source_for_test(
                 capability_recorder.profile_filesystem(),
             );
+        let mut runtime_thread_service =
+            group_thread_harness.service.clone() as Arc<dyn SessionThreadService>;
+        if self.fail_append_finalized_assistant_message {
+            runtime_thread_service = Arc::new(
+                FailingTranscriptWriteThreadService::append_finalized_assistant_message(
+                    runtime_thread_service,
+                ),
+            );
+        }
+        if self.fail_append_tool_result_reference {
+            runtime_thread_service = Arc::new(
+                FailingTranscriptWriteThreadService::append_tool_result_reference(
+                    runtime_thread_service,
+                ),
+            );
+        }
 
         // --- C-BUDGET: production budget accountant (wiring-liveness only) -----
         // Build the SAME `GovernorBackedAccountant` production composes, via the
@@ -1125,9 +1171,10 @@ impl RebornIntegrationGroupBuilder {
                 }),
                 None => Arc::clone(&user_profile_source),
             };
+        let reply_attachment_intent_port = capability.reply_attachment_intent_port();
         let parts = DefaultPlannedRuntimeParts {
             process_system: process_system.clone(),
-            thread_service: group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
+            thread_service: runtime_thread_service,
             thread_scope: group_thread_scope,
             model_gateway,
             loop_checkpoint_store,
@@ -1223,6 +1270,7 @@ impl RebornIntegrationGroupBuilder {
             attachment_read_port: capability_recorder
                 .attachment_test_support()
                 .map(|support| support.read_port),
+            reply_attachment_intent_port: Some(reply_attachment_intent_port),
             // §5.2.9 render-from-record: the SAME durable gate-record store this
             // group's capability port persists `GateRecord::Auth` into, so the
             // turn executor re-reads an auth block's `credential_requirements`
@@ -1316,6 +1364,8 @@ pub struct RebornThreadBuilder<'g> {
     replies: Vec<RebornScriptedReply>,
     actor_id: Option<String>,
     model_mode: ThreadModelMode,
+    /// Additive raw-provider call recording for this thread.
+    record_model_calls: bool,
     /// C-ATTACH seam: overrides `LlmModelProfileRoute.model_override` (the same
     /// production model-pin field, `model_gateway.rs:160-162`). `None` keeps the
     /// prior behavior (scripted model id, not a vision pattern, so image parts
@@ -1367,6 +1417,11 @@ impl<'g> RebornThreadBuilder<'g> {
 
     pub(crate) fn model_mode(mut self, mode: ThreadModelMode) -> Self {
         self.model_mode = mode;
+        self
+    }
+
+    pub(crate) fn record_model_calls_for_test(mut self, record: bool) -> Self {
+        self.record_model_calls = record;
         self
     }
 
@@ -1506,9 +1561,19 @@ impl<'g> RebornThreadBuilder<'g> {
                     Some(probe),
                 )
             }
-            ThreadModelMode::Failing(kind) => (Arc::new(ErrLlm::new(kind)), None, None, None),
+            ThreadModelMode::Failing(kind) => {
+                let (provider, probe) = ErrLlm::new(kind);
+                (Arc::new(provider), Some(probe), None, None)
+            }
             ThreadModelMode::Normal => (scripted_llm.clone(), None, None, None),
         };
+        let (raw, model_provider_call_probe) =
+            if self.record_model_calls && model_provider_call_probe.is_none() {
+                let (provider, probe) = recording_llm(raw);
+                (Arc::new(provider) as Arc<dyn LlmProvider>, Some(probe))
+            } else {
+                (raw, model_provider_call_probe)
+            };
         let session = create_session_manager(SessionConfig {
             session_path: shared
                 .turn_root

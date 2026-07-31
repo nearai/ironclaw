@@ -21,7 +21,7 @@ use ironclaw_hooks::predicate_state::{
     InvocationKey, MAX_KEYS_PER_TENANT, MAX_SAMPLES_PER_KEY, PredicateEventId,
     PredicateStateBackend, ValueKey,
 };
-use ironclaw_host_api::TenantId;
+use ironclaw_host_api::ids::TenantId;
 use rust_decimal::Decimal;
 
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

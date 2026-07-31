@@ -2,12 +2,12 @@
 
 import json
 import os
-import tomllib
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TypeVar
 from urllib.parse import urlparse
 
+import tomllib
 from journey_types import (
     CargoEvidence,
     DeliveryAddressEvidence,
@@ -19,8 +19,10 @@ from journey_types import (
     ObservableAssertion,
     ProductJourneyCase,
     ProviderJourneyCase,
+    ProviderJourneyReplayFacts,
     ProviderWorld,
     PytestEvidence,
+    SlackChannelFixture,
 )
 from provider_capability_inventory import EMULATE_SUPPORTED_TOOLS
 
@@ -118,6 +120,18 @@ _REPEAT_AFTER_RESET = {
     "qa_5d_slack_strategy_doc_answer",
     "qa_10f_slack_mention_encoding",
 }
+_PROVIDER_REPLAY_FACTS = {
+    "qa_7c_slack_bug_logger_routine": ProviderJourneyReplayFacts(
+        google_spreadsheet_id="sheet_reborn_bug_tracker"
+    ),
+    "qa_7e_slack_bug_sheet_delivery": ProviderJourneyReplayFacts(
+        google_spreadsheet_id="sheet_reborn_bug_tracker"
+    ),
+    "qa_10e_slack_error_honesty": ProviderJourneyReplayFacts(
+        slack_channel=SlackChannelFixture.MISSING,
+        expected_capability_failure="channel_not_found",
+    ),
+}
 
 _PYTEST_PROVIDER_EVIDENCE = PytestEvidence(
     source="tests/e2e/scenarios/test_reborn_qa_trace_full_path.py",
@@ -162,6 +176,7 @@ def _provider_journey_cases() -> tuple[ProviderJourneyCase, ...]:
     excluded = set(manifest["no_model_cases"])
     excluded.update(manifest.get("quarantined_model_cases", []))
     cases = []
+    consumed_replay_facts = set()
     for case_id in manifest["selected_cases"]:
         if case_id in excluded:
             continue
@@ -170,6 +185,8 @@ def _provider_journey_cases() -> tuple[ProviderJourneyCase, ...]:
         calls = _tool_calls(trace)
         if not any(call["name"] in EMULATE_SUPPORTED_TOOLS for call in calls):
             continue
+        if case_id in _PROVIDER_REPLAY_FACTS:
+            consumed_replay_facts.add(case_id)
         cases.append(
             ProviderJourneyCase(
                 case_id=case_id,
@@ -185,6 +202,9 @@ def _provider_journey_cases() -> tuple[ProviderJourneyCase, ...]:
                     ObservableAssertion.PROVIDER_READBACK,
                 ),
                 evidence=_PYTEST_PROVIDER_EVIDENCE,
+                replay=_PROVIDER_REPLAY_FACTS.get(
+                    case_id, ProviderJourneyReplayFacts()
+                ),
                 repeat_after_reset=case_id in _REPEAT_AFTER_RESET,
                 live_evidence=LiveEvidence(
                     workflow=".github/workflows/live-canary.yml",
@@ -194,6 +214,10 @@ def _provider_journey_cases() -> tuple[ProviderJourneyCase, ...]:
                 ),
             )
         )
+    assert consumed_replay_facts == set(_PROVIDER_REPLAY_FACTS), (
+        "replay facts declared for unknown provider journey cases: "
+        f"{sorted(set(_PROVIDER_REPLAY_FACTS) - consumed_replay_facts)}"
+    )
     return tuple(cases)
 
 

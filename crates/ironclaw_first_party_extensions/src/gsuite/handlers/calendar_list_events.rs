@@ -1,7 +1,9 @@
 use std::{borrow::Cow, collections::HashMap, sync::Arc};
 
 use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
-use ironclaw_host_api::{NetworkMethod, RuntimeDispatchErrorKind, RuntimeHttpEgressResponse};
+use ironclaw_host_api::{
+    action::NetworkMethod, dispatch::RuntimeDispatchErrorKind, http::RuntimeHttpEgressResponse,
+};
 use serde_json::{Value, json};
 
 use crate::gsuite::credential::GoogleCredential;
@@ -285,7 +287,7 @@ enum CalendarIdResolution {
     },
     AuthExpired,
     DiscoveryFailed {
-        response: ironclaw_host_api::RuntimeHttpEgressResponse,
+        response: ironclaw_host_api::http::RuntimeHttpEgressResponse,
     },
 }
 
@@ -498,12 +500,12 @@ fn synthesized_json_response(
     body: Value,
     request_bytes: u64,
     redaction_applied: bool,
-) -> Result<ironclaw_host_api::RuntimeHttpEgressResponse, GsuiteDispatchError> {
+) -> Result<ironclaw_host_api::http::RuntimeHttpEgressResponse, GsuiteDispatchError> {
     let body = serde_json::to_vec(&body).map_err(|error| {
         tracing::debug!(?error, "failed to serialize synthesized GSuite response");
         GsuiteDispatchError::new(RuntimeDispatchErrorKind::OutputDecode)
     })?;
-    Ok(ironclaw_host_api::RuntimeHttpEgressResponse {
+    Ok(ironclaw_host_api::http::RuntimeHttpEgressResponse {
         status: 200,
         headers: Vec::new(),
         request_bytes,

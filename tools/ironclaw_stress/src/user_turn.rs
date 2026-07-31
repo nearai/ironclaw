@@ -11,9 +11,12 @@ use std::{
 use chrono::Utc;
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    CapabilityId, HostApiError, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-    ProcessId, ResourceReservation, ResourceReservationId, ResourceScope, ThreadId, TurnGateRef,
-    VirtualPath,
+    error::HostApiError,
+    ids::{CapabilityId, InvocationId, ProcessId, ResourceReservationId, ThreadId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::{ResourceReservation, ResourceScope},
+    turn::TurnGateRef,
 };
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, LlmError, LlmProvider, SessionManager,

@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ExtensionId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, UserId, VendorId,
+    capability::RuntimeCredentialAccountSetup,
+    decision::RuntimeCredentialAuthRequirement,
+    ids::{ExtensionId, UserId, VendorId},
 };
 use ironclaw_product::{
     AccountConnectionStatusError, AccountConnectionStatusSource, ChannelConnectionNoticePolicy,

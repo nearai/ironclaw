@@ -30,8 +30,12 @@ pub use crypto::{
     secret_record_aad, validate_master_key_material,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, ExtensionId, InvocationId, NetworkMethod, ProjectId, ResourceScope,
-    SecretHandle, TenantId, Timestamp, UserId,
+    Timestamp,
+    action::NetworkMethod,
+    ids::{
+        AgentId, CapabilityId, ExtensionId, InvocationId, ProjectId, SecretHandle, TenantId, UserId,
+    },
+    resource::ResourceScope,
 };
 pub use legacy_store::SecretError;
 pub use secrecy::SecretString as SecretMaterial;
@@ -1169,8 +1173,12 @@ pub trait SecretStorePort: Send + Sync {
 mod tests {
     use chrono::Utc;
     use ironclaw_host_api::{
-        CapabilityId, ExtensionId, InvocationId, MissionId, NetworkMethod, ProjectId,
-        ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
+        action::NetworkMethod,
+        ids::{
+            CapabilityId, ExtensionId, InvocationId, MissionId, ProjectId, SecretHandle, TenantId,
+            ThreadId, UserId,
+        },
+        resource::ResourceScope,
     };
     use serde_json::json;
 

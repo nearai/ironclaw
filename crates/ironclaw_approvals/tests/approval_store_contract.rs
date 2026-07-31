@@ -11,7 +11,18 @@ use ironclaw_filesystem::{
     DirEntry, DiskFilesystem, FileStat, FilesystemError, FilesystemOperation, InMemoryBackend,
     RootFilesystem, ScopedFilesystem,
 };
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    action::Action,
+    approval::ApprovalRequest,
+    ids::{
+        AgentId, ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, InvocationId,
+        ProjectId, TenantId, UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{HostPath, MountAlias, VirtualPath},
+    resource::{ResourceEstimate, ResourceScope},
+    scope::Principal,
+};
 
 #[tokio::test]
 async fn filesystem_approval_request_store_persists_pending_requests_under_approvals_alias() {

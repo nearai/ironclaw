@@ -28,9 +28,11 @@ use ironclaw_first_party_extensions::{
     gsuite_resource_profile,
 };
 use ironclaw_host_api::{
-    ExtensionId, InvocationId, NetworkMethod, NetworkScheme,
-    RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED, ResourceScope, RuntimeDispatchErrorKind,
-    RuntimeHttpEgressError, SecretHandle, UserId,
+    action::{NetworkMethod, NetworkScheme},
+    dispatch::RuntimeDispatchErrorKind,
+    http::{RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED, RuntimeHttpEgressError},
+    ids::{ExtensionId, InvocationId, SecretHandle, UserId},
+    resource::ResourceScope,
 };
 use serde_json::json;
 use support::*;
@@ -1375,7 +1377,7 @@ async fn gsuite_handler_fails_before_egress_when_scope_is_missing() {
 
     assert_eq!(
         error.kind(),
-        ironclaw_host_api::RuntimeDispatchErrorKind::Client
+        ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::Client
     );
     assert!(egress.requests().is_empty());
 }
@@ -1461,7 +1463,7 @@ async fn gsuite_handler_fails_before_egress_when_account_is_not_configured() {
 
     assert_eq!(
         error.kind(),
-        ironclaw_host_api::RuntimeDispatchErrorKind::Client
+        ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::Client
     );
     assert!(egress.requests().is_empty());
 }
@@ -1489,7 +1491,7 @@ async fn gsuite_handler_fails_before_egress_when_access_secret_is_missing() {
 
     assert_eq!(
         error.kind(),
-        ironclaw_host_api::RuntimeDispatchErrorKind::Client
+        ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::Client
     );
     assert_eq!(
         error.reason(),
@@ -1515,7 +1517,7 @@ async fn gsuite_handler_rejects_missing_required_input() {
 
     assert_eq!(
         error.kind(),
-        ironclaw_host_api::RuntimeDispatchErrorKind::InputEncode
+        ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::InputEncode
     );
 }
 
@@ -1537,7 +1539,7 @@ async fn calendar_id_default_does_not_swallow_invalid_type() {
 
     assert_eq!(
         error.kind(),
-        ironclaw_host_api::RuntimeDispatchErrorKind::InputEncode
+        ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::InputEncode
     );
 }
 

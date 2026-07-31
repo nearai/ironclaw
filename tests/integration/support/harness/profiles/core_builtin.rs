@@ -18,8 +18,12 @@ use super::super::{
     standalone_host_runtime_with_real_egress_pipeline, workspace_mounts,
 };
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExtensionId, MountAlias, MountGrant, MountPermissions, MountView,
-    NetworkPolicy, RuntimeKind, UserId, VirtualPath,
+    action::NetworkPolicy,
+    capability::EffectKind,
+    ids::{CapabilityId, ExtensionId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    runtime::RuntimeKind,
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, HTTP_CAPABILITY_ID,

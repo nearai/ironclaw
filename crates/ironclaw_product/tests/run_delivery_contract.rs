@@ -5,7 +5,7 @@
 //! The channel-level regression net (the vendor e2e scenarios through the
 //! real ingress mount) re-points onto these components at the cutover.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,7 +13,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    attachment::WorkspaceFile,
+    ids::{AgentId, TenantId, ThreadId, UserId},
+    path::ScopedPath,
+};
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
     DeliveredGateRouteStore, DeliveryDefaultScope, OutboundStateStore, OutboundStateStorePort,
@@ -35,9 +39,12 @@ use ironclaw_product::{
     PreferenceTargetCodec, ResolvedChannelDelivery, RunDeliveryObserver, RunDeliveryServices,
     RunDeliverySettings, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
 };
+use ironclaw_product::{
+    ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsStat,
+};
 use ironclaw_threads::{
-    AppendFinalizedAssistantMessageRequest, EnsureThreadRequest, InMemorySessionThreadService,
-    MessageContent, SessionThreadService, ThreadScope,
+    AppendFinalizedAssistantMessageRequest, AttachmentKind, AttachmentRef, EnsureThreadRequest,
+    InMemorySessionThreadService, MessageContent, SessionThreadService, ThreadScope,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
@@ -242,7 +249,7 @@ impl ChannelAdapter for RecordingChannelAdapter {
     async fn deliver(
         &self,
         envelope: OutboundEnvelope,
-        _egress: &dyn ironclaw_host_api::RestrictedEgress,
+        _egress: &dyn ironclaw_host_api::tool_adapter::RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError> {
         self.envelopes
             .lock()
@@ -277,13 +284,15 @@ impl ChannelAdapter for RecordingChannelAdapter {
 struct DenyAllEgress;
 
 #[async_trait]
-impl ironclaw_host_api::RestrictedEgress for DenyAllEgress {
+impl ironclaw_host_api::tool_adapter::RestrictedEgress for DenyAllEgress {
     async fn send(
         &self,
-        _request: ironclaw_host_api::RestrictedEgressRequest,
-    ) -> Result<ironclaw_host_api::RestrictedEgressResponse, ironclaw_host_api::RestrictedEgressError>
-    {
-        Err(ironclaw_host_api::RestrictedEgressError::PolicyDenied)
+        _request: ironclaw_host_api::tool_adapter::RestrictedEgressRequest,
+    ) -> Result<
+        ironclaw_host_api::tool_adapter::RestrictedEgressResponse,
+        ironclaw_host_api::tool_adapter::RestrictedEgressError,
+    > {
+        Err(ironclaw_host_api::tool_adapter::RestrictedEgressError::PolicyDenied)
     }
 }
 
@@ -308,6 +317,74 @@ struct NoStoredReplyContext;
 impl DeliveryReplyContextSource for NoStoredReplyContext {
     async fn reply_context(&self, _: &str, _: &str, _: &str) -> Option<Vec<u8>> {
         None
+    }
+}
+
+#[derive(Default)]
+struct ScriptedProjectFilesystemReader {
+    files: Mutex<HashMap<String, Result<WorkspaceFile, ProjectFsError>>>,
+    reads: Mutex<Vec<String>>,
+}
+
+impl ScriptedProjectFilesystemReader {
+    fn insert_file(&self, path: &str, mime_type: &str, bytes: &[u8]) {
+        self.files.lock().expect("files").insert(
+            path.to_string(),
+            Ok(WorkspaceFile {
+                path: ScopedPath::new(path).expect("scoped workspace path"),
+                filename: path.rsplit('/').next().map(str::to_string),
+                mime_type: mime_type.to_string(),
+                bytes: bytes.to_vec(),
+            }),
+        );
+    }
+}
+
+#[async_trait]
+impl ProjectFilesystemReader for ScriptedProjectFilesystemReader {
+    async fn list_dir(
+        &self,
+        _thread_scope: &ThreadScope,
+        _path: &str,
+    ) -> Result<Vec<ProjectFsEntry>, ProjectFsError> {
+        Err(ProjectFsError::NotADirectory)
+    }
+
+    async fn read_file(
+        &self,
+        _thread_scope: &ThreadScope,
+        path: &str,
+    ) -> Result<WorkspaceFile, ProjectFsError> {
+        self.reads.lock().expect("reads").push(path.to_string());
+        self.files
+            .lock()
+            .expect("files")
+            .get(path)
+            .cloned()
+            .unwrap_or(Err(ProjectFsError::NotFound))
+    }
+
+    async fn stat(
+        &self,
+        _thread_scope: &ThreadScope,
+        path: &str,
+    ) -> Result<ProjectFsStat, ProjectFsError> {
+        match self
+            .files
+            .lock()
+            .expect("files")
+            .get(path)
+            .cloned()
+            .unwrap_or(Err(ProjectFsError::NotFound))
+        {
+            Ok(file) => Ok(ProjectFsStat {
+                path: file.path.as_str().to_string(),
+                kind: ProjectFsEntryKind::File,
+                size_bytes: file.bytes.len() as u64,
+                mime_type: file.mime_type,
+            }),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -531,6 +608,7 @@ struct Harness {
     route_store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     turns: Arc<ScriptedTurnCoordinator>,
     threads: Arc<InMemorySessionThreadService>,
+    project_files: Arc<ScriptedProjectFilesystemReader>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -540,17 +618,19 @@ fn build_harness(
     auth_url: Option<&str>,
     max_wait: Duration,
 ) -> Harness {
-    build_harness_with_commands(states, bind_fails, auth_url, max_wait, &["status"])
+    build_harness_with_commands(states, bind_fails, auth_url, max_wait, &["status"], None)
 }
 
 /// Same as `build_harness`, but with an explicit declared-command set for the
-/// observer's static help text (`build_harness` always enables `["status"]`).
+/// observer's static help text (`build_harness` always enables `["status"]`
+/// with no display prefix).
 fn build_harness_with_commands(
     states: Vec<ScriptedRunState>,
     bind_fails: bool,
     auth_url: Option<&str>,
     max_wait: Duration,
     commands: &[&str],
+    prefix: Option<&str>,
 ) -> Harness {
     build_harness_with_settings(
         states,
@@ -563,6 +643,7 @@ fn build_harness_with_commands(
             max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
         },
         commands,
+        prefix,
     )
 }
 
@@ -573,6 +654,7 @@ fn build_harness_with_settings(
     auth_url: Option<&str>,
     settings: RunDeliverySettings,
     commands: &[&str],
+    prefix: Option<&str>,
 ) -> Harness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
@@ -580,6 +662,7 @@ fn build_harness_with_settings(
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     let threads = Arc::new(InMemorySessionThreadService::default());
+    let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
     let coordinator = Arc::new(DeliveryCoordinator::new(
         Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         Arc::new(StaticResolver {
@@ -601,6 +684,7 @@ fn build_harness_with_settings(
         outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
+        project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
         coordinator,
         extension_id: EXTENSION_ID.to_string(),
         fallback_notice_scope: fallback_scope(),
@@ -619,7 +703,7 @@ fn build_harness_with_settings(
             settings,
             connection_notices.clone(),
         )
-        .with_enabled_commands(commands.iter().copied()),
+        .with_enabled_commands(commands.iter().copied(), prefix),
     );
     Harness {
         observer,
@@ -629,10 +713,20 @@ fn build_harness_with_settings(
         route_store,
         turns,
         threads,
+        project_files,
     }
 }
 
 async fn seed_final_message(threads: &InMemorySessionThreadService, run_id: TurnRunId, text: &str) {
+    seed_final_message_with_attachments(threads, run_id, text, Vec::new()).await;
+}
+
+async fn seed_final_message_with_attachments(
+    threads: &InMemorySessionThreadService,
+    run_id: TurnRunId,
+    text: &str,
+    attachments: Vec<AttachmentRef>,
+) {
     let thread_scope = ThreadScope {
         tenant_id: tenant(),
         agent_id: agent(),
@@ -655,7 +749,7 @@ async fn seed_final_message(threads: &InMemorySessionThreadService, run_id: Turn
             scope: thread_scope,
             thread_id: ThreadId::new("thread-a").expect("thread"),
             turn_run_id: run_id.to_string(),
-            content: MessageContent::text(text),
+            content: MessageContent::with_attachments(text, attachments),
         })
         .await
         .expect("finalized");
@@ -697,6 +791,55 @@ async fn observer_delivers_final_reply_through_the_coordinator() {
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::Delivered
     );
+}
+
+#[tokio::test]
+async fn observer_materializes_finalized_attachment_refs_for_delivery() {
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    let run_id = TurnRunId::new();
+    harness
+        .project_files
+        .insert_file("/workspace/report.txt", "text/plain", b"hello");
+    seed_final_message_with_attachments(
+        &harness.threads,
+        run_id,
+        "report attached",
+        vec![AttachmentRef {
+            id: "reply-attachment-0".to_string(),
+            kind: AttachmentKind::Document,
+            mime_type: "text/plain".to_string(),
+            filename: Some("renamed-report.txt".to_string()),
+            size_bytes: Some(5),
+            storage_key: Some("/workspace/report.txt".to_string()),
+            extracted_text: None,
+        }],
+    )
+    .await;
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-file-final"),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let envelopes = harness.adapter.envelopes();
+    assert_eq!(envelopes.len(), 1);
+    assert!(matches!(
+        envelopes[0].parts.as_slice(),
+        [OutboundPart::Text(text), OutboundPart::File(file)]
+            if text == "report attached"
+                && file.path.as_str() == "/workspace/report.txt"
+                && file.filename.as_deref() == Some("renamed-report.txt")
+                && file.mime_type == "text/plain"
+                && file.bytes == b"hello"
+    ));
 }
 
 #[tokio::test]
@@ -822,6 +965,7 @@ async fn static_command_help_excludes_admin_audience_commands() {
         None,
         Duration::from_secs(5),
         &["model", "status", "extension_configure"],
+        None,
     );
     let command = InboundCommandPayload::new("notacommand", "", ProductTriggerReason::DirectChat)
         .expect("command");
@@ -844,6 +988,40 @@ async fn static_command_help_excludes_admin_audience_commands() {
     assert_eq!(
         harness.adapter.texts(),
         vec!["Available commands:\n/model\n/status".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn static_command_help_renders_with_manifest_declared_prefix() {
+    let harness = build_harness_with_commands(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        false,
+        None,
+        Duration::from_secs(5),
+        &["model", "status"],
+        Some("/ironclaw "),
+    );
+    let command = InboundCommandPayload::new("notacommand", "", ProductTriggerReason::DirectChat)
+        .expect("command");
+    let command_envelope = envelope(
+        ProductInboundPayload::Command(command),
+        "evt-command-invalid-prefixed-help",
+    );
+
+    harness
+        .observer
+        .observe_ack(
+            command_envelope,
+            ProductInboundAck::Rejected(ProductRejection::permanent(
+                ProductRejectionKind::InvalidRequest,
+                "opaque parser or admission detail",
+            )),
+        )
+        .await;
+
+    assert_eq!(
+        harness.adapter.texts(),
+        vec!["Available commands:\n/ironclaw model\n/ironclaw status".to_string()]
     );
 }
 
@@ -974,7 +1152,7 @@ async fn observer_keeps_watching_a_healthy_run_past_the_previous_two_minute_cuto
     let mut states = vec![scripted_state(TurnStatus::Running, None)];
     states.extend(std::iter::repeat_with(|| scripted_state(TurnStatus::Running, None)).take(32));
     states.push(scripted_state(TurnStatus::Completed, None));
-    let harness = build_harness_with_settings(states, false, None, settings, &["status"]);
+    let harness = build_harness_with_settings(states, false, None, settings, &["status"], None);
     let run_id = TurnRunId::new();
     seed_final_message(&harness.threads, run_id, "slow run finished").await;
 
@@ -1494,6 +1672,7 @@ struct TriggeredHarness {
     delivery_store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     turns: Arc<ScriptedTurnCoordinator>,
     threads: Arc<InMemorySessionThreadService>,
+    project_files: Arc<ScriptedProjectFilesystemReader>,
 }
 
 fn build_triggered_harness(
@@ -1509,6 +1688,7 @@ fn build_triggered_harness(
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     let threads = Arc::new(InMemorySessionThreadService::default());
+    let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
     let coordinator = Arc::new(DeliveryCoordinator::new(
         Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         Arc::new(StaticResolver {
@@ -1530,6 +1710,7 @@ fn build_triggered_harness(
         outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
+        project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
         coordinator,
         extension_id: EXTENSION_ID.to_string(),
         fallback_notice_scope: fallback_scope(),
@@ -1564,6 +1745,7 @@ fn build_triggered_harness(
         delivery_store,
         turns,
         threads,
+        project_files,
     }
 }
 
@@ -1658,6 +1840,51 @@ async fn triggered_final_reply_reaches_the_preference_target_with_footer() {
         "dm-creator",
         "delivered to the decoded preference target"
     );
+}
+
+#[tokio::test]
+async fn triggered_final_reply_materializes_workspace_files_before_adapter_delivery() {
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        None,
+        true,
+    );
+    seed_preference(&harness.store).await;
+    harness.project_files.insert_file(
+        "/workspace/trigger.json",
+        "application/json",
+        br#"{"ok":true}"#,
+    );
+    let run_id = TurnRunId::new();
+    seed_final_message_with_attachments(
+        &harness.threads,
+        run_id,
+        "trigger complete: /workspace/trigger.json",
+        vec![AttachmentRef {
+            id: "reply-attachment-0".to_string(),
+            kind: AttachmentKind::Document,
+            mime_type: "application/json".to_string(),
+            filename: Some("trigger.json".to_string()),
+            size_bytes: Some(11),
+            storage_key: Some("/workspace/trigger.json".to_string()),
+            extracted_text: None,
+        }],
+    )
+    .await;
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let envelopes = harness.adapter.envelopes();
+    assert!(matches!(
+        &envelopes[0].parts[1],
+        OutboundPart::File(file)
+            if file.path.as_str() == "/workspace/trigger.json"
+                && file.bytes == br#"{"ok":true}"#
+    ));
 }
 
 #[tokio::test]

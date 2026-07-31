@@ -1,4 +1,4 @@
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::ids::ThreadId;
 use thiserror::Error;
 
 use crate::{MessageStatus, ThreadMessageId};
@@ -71,4 +71,39 @@ pub enum SessionThreadError {
     Deserialization(String),
     #[error("thread backend error: {0}")]
     Backend(String),
+}
+
+impl SessionThreadError {
+    /// Stable, detail-free classification for metrics and scrubbed diagnostics.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::UnknownThread { .. } => "unknown_thread",
+            Self::UnknownMessage { .. } => "unknown_message",
+            Self::ThreadScopeMismatch { .. } => "thread_scope_mismatch",
+            Self::MessageNotDraft { .. } => "message_not_draft",
+            Self::InvalidMessageTransition { .. } => "invalid_message_transition",
+            Self::IdempotentReplayThreadMismatch { .. } => "idempotent_replay_thread_mismatch",
+            Self::IdempotentReplayActorMismatch { .. } => "idempotent_replay_actor_mismatch",
+            Self::InvalidSummaryRange { .. } => "invalid_summary_range",
+            Self::OverlappingSummaryRange { .. } => "overlapping_summary_range",
+            Self::InvalidAttachment(_) => "invalid_attachment",
+            Self::InvalidMessageTimestamp { .. } => "invalid_message_timestamp",
+            Self::GeneratedThreadId(_) => "generated_thread_id",
+            Self::Serialization(_) => "serialization",
+            Self::Deserialization(_) => "deserialization",
+            Self::Backend(_) => "backend",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionThreadError;
+
+    #[test]
+    fn error_kind_name_never_formats_backend_detail() {
+        let error = SessionThreadError::Backend("token sk-secret".to_string());
+        assert_eq!(error.kind_name(), "backend");
+        assert!(!error.kind_name().contains("sk-secret"));
+    }
 }

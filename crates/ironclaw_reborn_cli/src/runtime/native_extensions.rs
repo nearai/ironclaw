@@ -75,9 +75,14 @@ mod tests {
     };
     use ironclaw_extension_host::ingress::{InboundAdmission, InboundSink};
     use ironclaw_host_api::{
-        ChannelInboundClassification, ChannelInboundProductSurface, ChannelInboundSurfaceOutcome,
-        ChannelInboundSurfaceRequest, InboundOutcome, ProductAdapterId, ProductTriggerReason,
-        VerifiedInbound,
+        product_adapter::{
+            ChannelInboundClassification, InboundOutcome, ProductAdapterId, ProductTriggerReason,
+            VerifiedInbound,
+        },
+        product_surface::{
+            ChannelInboundProductSurface, ChannelInboundSurfaceOutcome,
+            ChannelInboundSurfaceRequest,
+        },
     };
     use ironclaw_telegram_extension::TELEGRAM_BOT_USERNAME_CONFIG;
     use serde_json::json;
@@ -199,6 +204,8 @@ mod tests {
                     extension_id: telegram.extension_id.clone(),
                     installation_id: "install_test".to_string(),
                     message,
+                    channel_adapter: Arc::clone(&telegram.adapter),
+                    channel_egress: None,
                 })
                 .await
                 .is_err(),

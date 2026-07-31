@@ -3,7 +3,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{ExtensionId, SecretHandle};
+use ironclaw_host_api::ids::{ExtensionId, SecretHandle};
 
 use crate::{
     AuthChallenge, AuthContinuationEvent, AuthFlowId, AuthFlowManager, AuthFlowRecord,

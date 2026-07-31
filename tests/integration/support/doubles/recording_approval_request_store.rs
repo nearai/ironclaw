@@ -6,7 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{ApprovalRequestId, ResourceScope};
+use ironclaw_host_api::{ids::ApprovalRequestId, resource::ResourceScope};
 
 /// Records `(ApprovalRequestId, ResourceScope)` on `save_pending`, then delegates
 /// every method to the inner store. Synthetic local-dev capabilities (e.g.

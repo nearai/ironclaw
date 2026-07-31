@@ -11,7 +11,10 @@ use super::super::{
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_first_party_extensions::{WEB_GET_CONTENT_CAPABILITY_ID, WEB_SEARCH_CAPABILITY_ID};
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExtensionId, MountPermissions, RuntimeKind, UserId,
+    capability::EffectKind,
+    ids::{CapabilityId, ExtensionId, UserId},
+    mount::MountPermissions,
+    runtime::RuntimeKind,
 };
 
 /// Real capability ids `web_access_tools` registers on the built harness —

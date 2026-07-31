@@ -39,6 +39,7 @@ ironclaw_llm = { path = "../ironclaw_llm", version = "0.1.0", default-features =
 ironclaw_loop_host = { path = "../ironclaw_loop_host", version = "0.1.0" }
 ironclaw_memory = { path = "../ironclaw_memory", version = "0.1.0" }
 ironclaw_observability = { path = "../ironclaw_observability" }
+ironclaw_outbound = { path = "../ironclaw_outbound", version = "0.1.0" }
 ironclaw_processes = { path = "../ironclaw_processes", version = "0.1.0" }
 ironclaw_approvals = { path = "../ironclaw_approvals", version = "0.1.0" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }

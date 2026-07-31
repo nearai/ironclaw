@@ -12,14 +12,23 @@ use deadpool_postgres::tokio_postgres;
 use ironclaw_auth::{OAuthClientId, OAuthRedirectUri};
 use ironclaw_auth::{RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest};
 use ironclaw_host_api::{
-    AuditMode, DeploymentMode, EffectKind, FilesystemBackendKind, NetworkMode, PackageId,
-    ProcessBackendKind, RuntimeKind, RuntimeProfile, SecretMode,
-    runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy},
+    action::NetworkPolicy,
+    capability::{CapabilityGrant, CapabilitySet, GrantConstraints},
+    ids::{CapabilityGrantId, CapabilityId, ExtensionId, RunId, UserId},
+    mount::MountView,
+    resource::ResourceEstimate,
+    result_meta::FailureKind,
+    runtime::TrustClass,
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_api::{
-    CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId,
-    FailureKind, GrantConstraints, MountView, NetworkPolicy, Principal, ResourceEstimate, RunId,
-    TrustClass, UserId,
+    capability::EffectKind,
+    ids::PackageId,
+    runtime::RuntimeKind,
+    runtime_policy::{
+        AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode, ProcessBackendKind,
+        RuntimeProfile, SecretMode, {ApprovalPolicy, EffectiveRuntimePolicy},
+    },
 };
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, RuntimeCapabilityOutcome, SHELL_CAPABILITY_ID,
@@ -756,9 +765,9 @@ async fn standalone_product_auth_entrypoint_redacts_manual_token_submit() {
 
 fn auth_scope(user: &str) -> ironclaw_auth::AuthProductScope {
     ironclaw_auth::AuthProductScope::new(
-        ironclaw_host_api::ResourceScope::local_default(
-            ironclaw_host_api::UserId::new(user).unwrap(),
-            ironclaw_host_api::InvocationId::new(),
+        ironclaw_host_api::resource::ResourceScope::local_default(
+            ironclaw_host_api::ids::UserId::new(user).unwrap(),
+            ironclaw_host_api::ids::InvocationId::new(),
         )
         .unwrap(),
         ironclaw_auth::AuthSurface::Web,

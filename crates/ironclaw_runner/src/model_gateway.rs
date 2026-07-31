@@ -16,7 +16,10 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_common::llm_costs::{default_cost, model_cost};
-use ironclaw_host_api::{CapabilityId, ProviderToolName, sha256_digest_token};
+use ironclaw_host_api::{
+    approval::sha256_digest_token,
+    ids::{CapabilityId, ProviderToolName},
+};
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
     FinishReason, ImageUrl, LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest,

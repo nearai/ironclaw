@@ -1,10 +1,15 @@
 use std::sync::{Arc, Mutex};
 
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
-    ProjectId, ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource,
-    RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TenantId, UserId,
+    action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    http::{
+        RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
+    ids::{CapabilityId, InvocationId, ProjectId, SecretHandle, TenantId, UserId},
+    resource::ResourceScope,
+    runtime::RuntimeKind,
 };
 use ironclaw_wasm::{
     WasmHostError, WasmHostHttp, WasmHttpRequest, WasmRuntimeCredentialProvider,

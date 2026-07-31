@@ -14,7 +14,12 @@ use ironclaw_filesystem::{
     BackendCapabilities, DirEntry, FileStat, FileType, FilesystemError, RecordVersion,
     RootFilesystem, ScopedFilesystem,
 };
-use ironclaw_host_api::{HostApiError, MountView, ResourceScope, ScopedPath, VirtualPath};
+use ironclaw_host_api::{
+    error::HostApiError,
+    mount::MountView,
+    path::{ScopedPath, VirtualPath},
+    resource::ResourceScope,
+};
 
 mod install_bundle;
 #[cfg(test)]

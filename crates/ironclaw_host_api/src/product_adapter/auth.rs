@@ -15,7 +15,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
 use crate::product_adapter::error::ProductAdapterError;
-use crate::{ProtocolAuthFailure, TenantId};
+use crate::{ids::TenantId, product_adapter_error::ProtocolAuthFailure};
 
 /// Host-only seal. Cannot be named or constructed outside this module.
 #[cfg_attr(
@@ -465,7 +465,7 @@ pub fn mark_bearer_token_verified_for_tenant(
 
 #[cfg(test)]
 mod tests {
-    use crate::RedactedString;
+    use crate::product_adapter_error::RedactedString;
 
     use super::*;
 

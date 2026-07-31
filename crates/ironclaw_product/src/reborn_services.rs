@@ -21,7 +21,6 @@ use crate::{
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::future::try_join_all;
-use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{
     AuthFlowStatus, AuthProductScope, AuthProviderId, CredentialAccountId,
     CredentialAccountProjection, CredentialAccountStatus, CredentialAccountUpdateBinding,
@@ -29,12 +28,21 @@ use ironclaw_auth::{
 };
 use ironclaw_common::{AutomationName, AutomationNameError};
 use ironclaw_host_api::{
-    ActivityId, AgentId, CapabilityId, EffectKind, ExtensionId, FailureKind, GrantConstraints,
-    InvocationId, Outcome, OutcomeRefs, PermissionMode, Principal, ProductSurfaceCaller,
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    ProductSurfaceValidationCode, ProjectId, Resolution, ResourceScope, ResultPreviewMeta,
-    ResultProgress, ResultRef, SafeSummary, SecretHandle, TenantId, TerminateHint, ThreadId,
-    ToolVerdict, UserId,
+    attachment::InboundAttachment,
+    capability::{EffectKind, GrantConstraints, PermissionMode},
+    ids::{
+        ActivityId, AgentId, CapabilityId, ExtensionId, InvocationId, ProjectId, ResultRef,
+        SecretHandle, TenantId, ThreadId, UserId,
+    },
+    product_surface::{
+        ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+        ProductSurfaceErrorKind, ProductSurfaceValidationCode,
+    },
+    resolution::{Outcome, OutcomeRefs, Resolution, ResultPreviewMeta, ToolVerdict},
+    resource::ResourceScope,
+    result_meta::{FailureKind, ResultProgress, TerminateHint},
+    safe_summary::SafeSummary,
+    scope::Principal,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, AttachmentRef, EnsureThreadRequest,
@@ -49,22 +57,23 @@ use ironclaw_turns::{
 };
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
 use url::Url;
 use uuid::Uuid;
 
 use crate::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionRejectionKind, AuthInteractionService, CommandResultField, CommandResultView,
-    LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
-    ListPendingApprovalsRequest, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
-    PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID,
-    ProductCancelRunRequest, ProductCreateThreadRequest, ProductGateResolution,
+    AuthInteractionRejectionKind, AuthInteractionService, CommandAudience, CommandResultField,
+    CommandResultView, LifecycleProductContext, LifecycleProductService,
+    LifecycleProductSurfaceContext, ListPendingApprovalsRequest,
+    PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID,
+    PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCancelRunRequest, ProductCommand,
+    ProductCommandDescriptor, ProductCreateThreadRequest, ProductGateResolution,
     ProductInboundCommand, ProductLifecycleCommandInput, ProductListAutomationsRequest,
-    ProductListThreadsRequest, ProductModelCommand, ProductModelCommandInput,
+    ProductListThreadsRequest, ProductModelCommand, ProductModelCommandInput, ProductRejectionKind,
     ProductRenameAutomationRequest, ProductResolveGateRequest, ProductRetryRunRequest,
     ProductStatusCommandInput, ProductSubmitTurnRequest, ProductSurfaceFailure,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ProductTriggerReason, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
     UnsupportedLifecycleProductService,
     approval_interaction::RejectingApprovalInteractionService,
@@ -73,7 +82,9 @@ use crate::{
         DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_reply_target_binding_ref,
         bounded_source_binding_ref,
     },
-    is_approval_gate_ref, is_auth_gate_ref, thread_metadata_is_automation_trigger,
+    declared_command_help_text, is_approval_gate_ref, is_auth_gate_ref,
+    parse_product_slash_command, product_command_descriptors, required_audience,
+    thread_metadata_is_automation_trigger,
 };
 
 mod admin_configuration;
@@ -93,6 +104,7 @@ mod outbound_delivery_capability_surface;
 mod outbound_preferences;
 mod outbound_views;
 mod product_capability_handlers;
+mod product_commands;
 mod project_fs;
 mod projects;
 mod run_artifact;
@@ -120,7 +132,7 @@ pub use admin_users::{
     RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
     RebornAdminUserSecretsListResponse,
 };
-pub use ironclaw_host_api::{
+pub use ironclaw_host_api::product_surface::{
     ChannelInboundProductSurface, ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
     ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
 };
@@ -143,7 +155,7 @@ pub use fs_browse::{
     RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
     RebornFsStatResponse,
 };
-pub use ironclaw_host_api::ChannelConnectStrategy as RebornChannelConnectStrategy;
+pub use ironclaw_host_api::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
 pub use lifecycle_setup::EXTENSION_SETUP_VIEW;
 pub use llm_config::{
     ActiveModelReader, CodexLoginStart, LLM_CONFIG_VIEW, LlmActiveSelection, LlmConfigService,
@@ -195,17 +207,18 @@ pub use types::{
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
     RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
-    RebornChannelConnectAction, RebornCreateThreadResponse, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionCredentialSetup,
-    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingPayload,
-    RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
-    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornExtensionSurface,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornGlobalAutoApproveRequest,
-    RebornGlobalAutoApproveResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornLogEntry, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornChannelConnectAction, RebornCommandRejection, RebornCreateThreadResponse,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExecuteProductCommandRequest,
+    RebornExecuteProductCommandResponse, RebornExtensionActionResponse,
+    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
+    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
+    RebornExtensionSurface, RebornGetRunStateRequest, RebornGetRunStateResponse,
+    RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse, RebornListAutomationsResponse,
+    RebornListThreadsResponse, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
@@ -218,6 +231,7 @@ pub use types::{
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
     RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+    RebornProductCommandInfo, RebornProductCommandListResponse,
     RebornRenameAutomationProductRequest, RebornResolveGateResponse, RebornResumeGateResponse,
     RebornRetryRunResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
     RebornServiceLifecycleResponse, RebornServiceLifecycleState,
@@ -445,6 +459,16 @@ pub const AUTOMATION_DELETE_COMMAND: ProductSurfaceCommandDescriptor<
     RebornAutomationRequest,
     RebornAutomationMutationResponse,
 > = ProductSurfaceCommandDescriptor::new(AUTOMATION_DELETE_COMMAND_ID);
+pub const PRODUCT_COMMAND_LIST_COMMAND_ID: &str = "product.commands.list";
+pub const PRODUCT_COMMAND_LIST_COMMAND: ProductSurfaceCommandDescriptor<
+    EmptyProductCommandInput,
+    RebornProductCommandListResponse,
+> = ProductSurfaceCommandDescriptor::new(PRODUCT_COMMAND_LIST_COMMAND_ID);
+pub const PRODUCT_COMMAND_EXECUTE_COMMAND_ID: &str = "product.commands.execute";
+pub const PRODUCT_COMMAND_EXECUTE_COMMAND: ProductSurfaceCommandDescriptor<
+    RebornExecuteProductCommandRequest,
+    RebornExecuteProductCommandResponse,
+> = ProductSurfaceCommandDescriptor::new(PRODUCT_COMMAND_EXECUTE_COMMAND_ID);
 pub const THREADS_VIEW: ProductView<ProductListThreadsRequest, RebornListThreadsResponse> =
     ProductView::paginated("threads");
 pub const TIMELINE_VIEW: ProductView<RebornTimelineRequest, RebornTimelineResponse> =
@@ -550,6 +574,8 @@ const OPERATOR_LOG_CONTEXT_TRUNCATED_SUFFIX: &str = " ... [truncated]";
 const NOTICE_BLOCKED_APPROVAL: &str = "An approval gate is open on this thread — resolve it (approve or deny) before continuing, then resend your message.";
 const NOTICE_BLOCKED_AUTH: &str = "An authentication gate is open on this thread — complete authentication before continuing, then resend your message.";
 const NOTICE_BUSY_GENERIC: &str = "Ironclaw is still working on a previous message — resend yours once the current task finishes.";
+const PRODUCT_STREAM_FIRST_EVENT_WAIT: Duration = Duration::from_secs(1);
+const PRODUCT_STREAM_ACCESS_REVALIDATION_INTERVAL: Duration = Duration::from_secs(1);
 
 fn command_result_field(label: &str, value: impl Into<String>) -> CommandResultField {
     CommandResultField {
@@ -702,7 +728,7 @@ impl ChannelConnectionService for StaticChannelConnectionService {
     }
 }
 
-pub use ironclaw_host_api::ChannelConfigField as RebornChannelConfigField;
+pub use ironclaw_host_api::package_lifecycle::ChannelConfigField as RebornChannelConfigField;
 
 /// The generic channel-config configure port: per-extension operator config
 /// declared by the extension manifest's channel-config fields. Host
@@ -2215,17 +2241,19 @@ where
 {
     pub async fn invoke_on(
         &self,
-        surface: &ironclaw_host_api::BoundProductSurface,
+        surface: &ironclaw_host_api::product_surface::BoundProductSurface,
         input: Input,
         activity_id: ActivityId,
     ) -> Result<Output, ProductSurfaceError> {
         let input = serde_json::to_value(input).map_err(ProductSurfaceError::internal_from)?;
         let response = surface
-            .invoke(ironclaw_host_api::ProductSurfaceInvokeRequest {
-                operation_id: self.capability_id()?,
-                input,
-                activity_id,
-            })
+            .invoke(
+                ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+                    operation_id: self.capability_id()?,
+                    input,
+                    activity_id,
+                },
+            )
             .await?;
         serde_json::from_value(response.output).map_err(ProductSurfaceError::internal_from)
     }
@@ -2257,7 +2285,7 @@ impl ProductCapabilityDescriptor {
 
     pub async fn invoke_on<T>(
         &self,
-        surface: &ironclaw_host_api::BoundProductSurface,
+        surface: &ironclaw_host_api::product_surface::BoundProductSurface,
         input: T,
         activity_id: ActivityId,
     ) -> Result<Resolution, ProductSurfaceError>
@@ -2266,11 +2294,13 @@ impl ProductCapabilityDescriptor {
     {
         let input = serde_json::to_value(input).map_err(ProductSurfaceError::internal_from)?;
         let response = surface
-            .invoke(ironclaw_host_api::ProductSurfaceInvokeRequest {
-                operation_id: self.capability_id()?,
-                input,
-                activity_id,
-            })
+            .invoke(
+                ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+                    operation_id: self.capability_id()?,
+                    input,
+                    activity_id,
+                },
+            )
             .await?;
         serde_json::from_value(response.output).map_err(ProductSurfaceError::internal_from)
     }
@@ -2284,6 +2314,12 @@ impl ProductCapabilityDescriptor {
 /// used only to disambiguate the storage path; the implementation writes
 /// through the same `MountView` the agent's file tools resolve through, so
 /// landed bytes are readable by `file_read`/`list_dir` in later turns.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AttachmentCleanupReport {
+    pub scanned_batches: usize,
+    pub deleted_batches: usize,
+}
+
 #[async_trait]
 pub trait InboundAttachmentLander: Send + Sync {
     async fn land(
@@ -2292,6 +2328,34 @@ pub trait InboundAttachmentLander: Send + Sync {
         message_id: &str,
         attachments: Vec<InboundAttachment>,
     ) -> Result<Vec<AttachmentRef>, ProductSurfaceError>;
+
+    /// Remove one complete batch previously returned by [`Self::land`].
+    ///
+    /// The inbound workflow calls this only when durable message acceptance
+    /// fails after landing. Implementations must constrain deletion to the
+    /// batch represented by `attachments`; they must never sweep unrelated
+    /// workspace paths.
+    async fn rollback(
+        &self,
+        thread_scope: &ThreadScope,
+        attachments: &[AttachmentRef],
+    ) -> Result<(), ProductSurfaceError>;
+
+    /// Reconcile old committed batches against an exhaustive set of durable
+    /// attachment storage keys for this exact thread scope.
+    ///
+    /// Callers must skip this operation when their reference scan was
+    /// truncated. The complete snapshot may include attachment domains the
+    /// implementation does not own, such as agent-created outbound workspace
+    /// files; implementations ignore those references and fail closed when no
+    /// owned reference proves the snapshot usable. Implementations keep a
+    /// reconciliation window and bounded filesystem scan so recent in-flight
+    /// work and unrelated workspace paths are never removed.
+    async fn cleanup_stale(
+        &self,
+        thread_scope: &ThreadScope,
+        referenced_storage_keys: &[String],
+    ) -> Result<AttachmentCleanupReport, ProductSurfaceError>;
 }
 
 /// Reads a landed attachment's bytes back for the WebUI bytes endpoint. The
@@ -4097,10 +4161,17 @@ where
             .await?;
         // dispatch-exempt: read-only, already-authorized workspace file download
         // through the service's own port — not an in-turn mutating tool call.
-        reader
+        let file = reader
             .read_file(&thread_scope, &request.path)
             .await
-            .map_err(map_project_fs_error)
+            .map_err(map_project_fs_error)?;
+        Ok(ProjectFsFile {
+            path: file.path.as_str().to_string(),
+            filename: file.filename,
+            mime_type: file.mime_type,
+            size_bytes: file.bytes.len() as u64,
+            bytes: file.bytes,
+        })
     }
 
     async fn list_fs_mounts(
@@ -4367,22 +4438,8 @@ where
         caller: ProductSurfaceCaller,
         request: RebornStreamEventsRequest,
     ) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
-        let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
-        let actor = caller.actor();
-        // Ownership probe: the SSE handler calls stream_events once per poll,
-        // so the cheap read_thread probe is used rather than loading the full
-        // transcript. Without it a caller sharing (tenant, agent, project)
-        // could read another user's projection feed by guessing thread_id.
-        // The automation fallback allows the owner of an automation to stream
-        // events for a trigger-fired thread (which is stored under the trigger
-        // creator). The returned scope may contain an explicit owner for
-        // trigger threads.
-        //
-        // Authorization is revalidated on every poll — no caching — so a
-        // caller that loses automation visibility between polls cannot keep
-        // draining the trigger-owned stream.
-        let access = self
-            .resolve_thread_access_for_caller(caller.clone(), caller.turn_scope(thread_id), &actor)
+        let (_, subscription_request) = self
+            .resolve_projection_subscription_request(caller, request)
             .await?;
         let Some(event_stream) = &self.event_stream else {
             return Err(ProductSurfaceError::from_status_kind(
@@ -4392,21 +4449,8 @@ where
                 false,
             ));
         };
-        // Projection identity must be the thread owner, not necessarily the
-        // caller. Turn events and the runtime event stream are keyed under the
-        // identity of the actor that submitted the run (the trigger creator for
-        // trigger threads; the session user for normal threads). The caller
-        // already proved visibility via automation ownership above; using the
-        // caller's id here would filter to the wrong stream/events.
-        //
-        // For normal session threads `explicit_owner_user_id()` is `None` and
-        // we fall back to the caller's id — behaviour is unchanged.
         let events = event_stream
-            .drain(ProjectionSubscriptionRequest {
-                actor: access.run_actor,
-                scope: access.scope,
-                after_cursor: request.after_cursor,
-            })
+            .drain(subscription_request)
             .await
             .map_err(map_projection_error)?;
         Ok(RebornStreamEventsResponse { events })
@@ -4790,7 +4834,7 @@ where
 }
 
 #[async_trait]
-impl<I, V> ironclaw_host_api::ProductSurface for RebornServices<I, V>
+impl<I, V> ironclaw_host_api::product_surface::ProductSurface for RebornServices<I, V>
 where
     I: ProductCapabilityInvoker + Clone + 'static,
     V: RebornViewProvider + Clone + 'static,
@@ -4798,16 +4842,16 @@ where
     async fn invoke(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
     ) -> Result<
-        ironclaw_host_api::ProductSurfaceInvokeResponse,
-        ironclaw_host_api::ProductSurfaceError,
+        ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
     > {
         if let Some(command) =
             product_capability_handlers::ProductCommandHandler::parse(&request.operation_id)
         {
             let output = command.invoke(self, caller, request.input).await?;
-            return Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output });
+            return Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output });
         }
         let output = RebornServices::invoke(
             self,
@@ -4819,17 +4863,19 @@ where
         .await?;
         let output = serde_json::to_value(output).map_err(|error| {
             tracing::error!(%error, "failed to encode product surface invoke response");
-            ironclaw_host_api::ProductSurfaceError::internal()
+            ironclaw_host_api::product_surface::ProductSurfaceError::internal()
         })?;
-        Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
+        Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
     }
 
     async fn query(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ironclaw_host_api::ProductSurfaceError>
-    {
+        request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
+    ) -> Result<
+        ironclaw_host_api::product_surface::ProductSurfaceQueryPage,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
+    > {
         let page = RebornServices::query(
             self,
             caller,
@@ -4840,60 +4886,201 @@ where
             },
         )
         .await?;
-        Ok(ironclaw_host_api::ProductSurfaceQueryPage {
-            items: vec![page.payload],
-            next_cursor: page.next_cursor,
-        })
+        Ok(
+            ironclaw_host_api::product_surface::ProductSurfaceQueryPage {
+                items: vec![page.payload],
+                next_cursor: page.next_cursor,
+            },
+        )
     }
 
     async fn stream_events(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceStreamRequest,
+        request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
     ) -> Result<
-        ironclaw_host_api::ProductSurfaceStreamResponse,
-        ironclaw_host_api::ProductSurfaceError,
+        ironclaw_host_api::product_surface::ProductSurfaceStreamResponse,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
     > {
-        let thread_id = request.stream_id.ok_or_else(|| {
-            ironclaw_host_api::ProductSurfaceError::from_status(
-                ironclaw_host_api::ProductSurfaceErrorCode::InvalidRequest,
-                400,
-                false,
-            )
-        })?;
-        let after_cursor = match request.after_cursor {
-            Some(cursor) => Some(ProjectionCursor::new(cursor).map_err(|_| {
-                ironclaw_host_api::ProductSurfaceError::from_status(
-                    ironclaw_host_api::ProductSurfaceErrorCode::InvalidRequest,
-                    400,
-                    false,
-                )
-            })?),
-            None => None,
-        };
-        let response = RebornServices::stream_events(
-            self,
-            caller,
-            RebornStreamEventsRequest {
-                thread_id,
-                after_cursor,
-            },
-        )
+        let request = decode_product_surface_stream_request(request)?;
+        if self
+            .event_stream
+            .as_ref()
+            .is_some_and(|event_stream| event_stream.supports_subscription())
+        {
+            let subscription =
+                open_product_surface_event_subscription(self, caller, request).await?;
+            return match tokio::time::timeout(PRODUCT_STREAM_FIRST_EVENT_WAIT, subscription.next())
+                .await
+            {
+                Ok(Some(Ok(mut response))) => {
+                    response.subscription = Some(subscription);
+                    Ok(response)
+                }
+                Ok(Some(Err(error))) => Err(error),
+                Ok(None) | Err(_) => Ok(
+                    ironclaw_host_api::product_surface::ProductSurfaceStreamResponse {
+                        events: Vec::new(),
+                        next_cursor: None,
+                        subscription: None,
+                    },
+                ),
+            };
+        }
+        let response = RebornServices::stream_events(self, caller, request).await?;
+        encode_product_surface_stream_response(response)
+    }
+}
+
+async fn open_product_surface_event_subscription<I, V>(
+    services: &RebornServices<I, V>,
+    caller: ProductSurfaceCaller,
+    request: RebornStreamEventsRequest,
+) -> Result<ironclaw_host_api::product_surface::ProductSurfaceEventSubscription, ProductSurfaceError>
+where
+    I: ProductCapabilityInvoker + Clone + 'static,
+    V: RebornViewProvider + Clone + 'static,
+{
+    let (access, subscription_request) = services
+        .resolve_projection_subscription_request(caller.clone(), request)
         .await?;
-        let events = response
-            .events
-            .into_iter()
-            .map(serde_json::to_value)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| {
-                tracing::error!(%error, "failed to encode product surface stream response");
-                ironclaw_host_api::ProductSurfaceError::internal()
-            })?;
-        Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
+    let thread_id = subscription_request.scope.thread_id.clone();
+    let actor = caller.actor();
+    let Some(event_stream) = &services.event_stream else {
+        return Err(ProductSurfaceError::from_status_kind(
+            ProductSurfaceErrorCode::Unavailable,
+            ProductSurfaceErrorKind::ReplayUnavailable,
+            503,
+            false,
+        ));
+    };
+    if !event_stream.supports_subscription() {
+        return Err(ProductSurfaceError::service_unavailable(false));
+    }
+
+    let subscribed_actor = access.run_actor.clone();
+    let subscribed_scope = access.scope.clone();
+    let mut subscription = event_stream
+        .subscribe(subscription_request)
+        .await
+        .map_err(map_projection_error)?;
+    // A single-slot handoff applies backpressure without creating another
+    // burst queue. The underlying projection subscription remains alive
+    // continuously, so live milestones cannot fall between resubscriptions.
+    let (sender, receiver) = mpsc::channel(1);
+    let (access_error_sender, mut access_error_receiver) = mpsc::channel(1);
+    let services = services.clone();
+    let access_caller = caller.clone();
+    let access_thread_id = thread_id.clone();
+    let access_actor = actor.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(PRODUCT_STREAM_ACCESS_REVALIDATION_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // The subscription-open probe is the initial validation. The first
+        // periodic probe should run one interval later, not immediately.
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                _ = access_error_sender.closed() => return,
+                _ = interval.tick() => {}
+            }
+            let revalidated = services
+                .resolve_thread_access_for_caller(
+                    access_caller.clone(),
+                    access_caller.turn_scope(access_thread_id.clone()),
+                    &access_actor,
+                )
+                .await;
+            let error = match revalidated {
+                Ok(access)
+                    if access.run_actor == subscribed_actor && access.scope == subscribed_scope =>
+                {
+                    continue;
+                }
+                Ok(_) => ProductSurfaceError::not_found(),
+                Err(error) => error,
+            };
+            let _ = access_error_sender.send(error).await;
+            return;
+        }
+    });
+    tokio::spawn(async move {
+        loop {
+            // Reserve the one output slot before reading another source
+            // event. A slow browser therefore backpressures this bridge
+            // instead of accumulating another burst queue.
+            let permit = tokio::select! {
+                _ = sender.closed() => return,
+                permit = sender.reserve() => match permit {
+                    Ok(permit) => permit,
+                    Err(_) => return,
+                },
+            };
+            let item = tokio::select! {
+                biased;
+                _ = sender.closed() => return,
+                error = access_error_receiver.recv() => {
+                    permit.send(Err(error.unwrap_or_else(ProductSurfaceError::internal)));
+                    return;
+                }
+                item = subscription.next() => item,
+            };
+            let Some(item) = item else {
+                return;
+            };
+            let response = match item {
+                Ok(event) => encode_product_surface_stream_response(RebornStreamEventsResponse {
+                    events: vec![event],
+                }),
+                Err(error) => Err(map_projection_error(error)),
+            };
+            let stop = response.is_err();
+            permit.send(response);
+            if stop {
+                return;
+            }
+        }
+    });
+    Ok(ironclaw_host_api::product_surface::ProductSurfaceEventSubscription::new(receiver))
+}
+
+fn decode_product_surface_stream_request(
+    request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
+) -> Result<RebornStreamEventsRequest, ProductSurfaceError> {
+    let thread_id = request.stream_id.ok_or_else(|| {
+        ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
+    })?;
+    let after_cursor = match request.after_cursor {
+        Some(cursor) => Some(ProjectionCursor::new(cursor).map_err(|_| {
+            ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
+        })?),
+        None => None,
+    };
+    Ok(RebornStreamEventsRequest {
+        thread_id,
+        after_cursor,
+    })
+}
+
+fn encode_product_surface_stream_response(
+    response: RebornStreamEventsResponse,
+) -> Result<ironclaw_host_api::product_surface::ProductSurfaceStreamResponse, ProductSurfaceError> {
+    let events = response
+        .events
+        .into_iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            tracing::error!(%error, "failed to encode product surface stream response");
+            ProductSurfaceError::internal()
+        })?;
+    Ok(
+        ironclaw_host_api::product_surface::ProductSurfaceStreamResponse {
             events,
             next_cursor: None,
-        })
-    }
+            subscription: None,
+        },
+    )
 }
 
 impl<I, V> RebornServices<I, V>
@@ -5730,6 +5917,30 @@ where
         }
     }
 
+    async fn resolve_projection_subscription_request(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: RebornStreamEventsRequest,
+    ) -> Result<(ResolvedThreadAccess, ProjectionSubscriptionRequest), ProductSurfaceError> {
+        let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
+        let actor = caller.actor();
+        // Use the cheap ownership probe rather than loading the full
+        // transcript. The automation fallback returns the trigger creator's
+        // scope and actor when the caller owns that automation.
+        let access = self
+            .resolve_thread_access_for_caller(caller.clone(), caller.turn_scope(thread_id), &actor)
+            .await?;
+        // Projection identity is the actor that submitted the run, not
+        // necessarily the browser caller. The authorization probe above is
+        // the authority boundary for both one-shot drains and subscriptions.
+        let subscription_request = ProjectionSubscriptionRequest {
+            actor: access.run_actor.clone(),
+            scope: access.scope.clone(),
+            after_cursor: request.after_cursor,
+        };
+        Ok((access, subscription_request))
+    }
+
     fn require_project_filesystem(
         &self,
     ) -> Result<&Arc<dyn ProjectFilesystemReader>, ProductSurfaceError> {
@@ -6262,7 +6473,7 @@ fn parse_credential_account_id(value: &str) -> Result<CredentialAccountId, Produ
 
 fn thread_scope_from_turn_scope(
     scope: &TurnScope,
-    owner_user_id: Option<ironclaw_host_api::UserId>,
+    owner_user_id: Option<ironclaw_host_api::ids::UserId>,
 ) -> Result<ThreadScope, ProductSurfaceError> {
     let Some(agent_id) = scope.agent_id.clone() else {
         return Err(ProductSurfaceError::from_status(
@@ -7013,7 +7224,7 @@ fn generated_thread_id(
             caller
                 .project_id
                 .as_ref()
-                .map(ironclaw_host_api::ProjectId::as_str)
+                .map(ironclaw_host_api::ids::ProjectId::as_str)
                 .unwrap_or("")
         ),
         segment("action", client_action_id.as_str())
