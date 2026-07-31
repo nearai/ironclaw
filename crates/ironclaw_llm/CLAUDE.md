@@ -32,7 +32,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `gemini_oauth.rs` | Gemini OAuth provider (Cloud OAuth credentials → `generativelanguage.googleapis.com`) |
 | `github_copilot.rs` | GitHub Copilot Chat provider (uses dedicated reqwest client, not `RigAdapter`) |
 | `github_copilot_auth.rs` | Copilot session-token exchange and refresh (`CopilotTokenManager`) |
-| `host.rs` | Host-side trait surface: `SessionDb`, `SessionSecrets`, `SessionRenewer`, `SessionKeyPersistor` (binary supplies adapters in `src/llm_host.rs`) |
+| `host.rs` | Host-side trait surface: `SessionDb`, `SessionSecrets`, `SessionRenewer`, `SessionKeyPersistor` (adapters are the composing binary's to supply; none does today — see "Host Trait Surface") |
 | `runtime.rs` | `SwappableLlmProvider` + `LlmReloadHandle` for hot-reloading the provider chain on settings change |
 | `registry.rs` | Provider registry (`ProviderDefinition`, `ProviderProtocol`); resolves backend strings to clients |
 | `resolution.rs` | Full `LlmConfig` resolution for composition roots that select from `providers.json` and need dedicated providers plus the shared provider chain |
@@ -207,7 +207,7 @@ Reborn binary has supplied replacements yet. Re-derive the real implementor set
 with `rg -n "impl (SessionDb|SessionSecrets|SessionRenewer|SessionKeyPersistor) for" crates/`
 before assuming any of these ports is wired.
 
-`NoopSessionRenewer` and `NoopKeyPersistor` are provided for headless / hosted contexts (return errors / no-ops). The binary plugs concrete impls into `SessionManager` at startup.
+`NoopSessionRenewer` and `NoopKeyPersistor` are provided for headless / hosted contexts (return errors / no-ops) and are the only implementations in the tree today. A binary that needs real behavior plugs concrete impls into `SessionManager` at startup; no Reborn binary currently does.
 
 ## Response Cache
 

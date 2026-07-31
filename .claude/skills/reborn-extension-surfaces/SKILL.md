@@ -115,11 +115,11 @@ Re-verify the module list: `grep -n 'ID,' crates/ironclaw_first_party_extensions
    parameterized by (vendor, adapter id, actor kind) — not a per-channel
    resolver (the retired-taxonomy gate hunts the old pattern).
 5. Connect affordance is **derived** (overview §6.4): installation state +
-   `[channel.config]` completeness + the auth account state. The WebUI channels
+   `[channel.connection]` completeness + the auth account state. The WebUI channels
    tab renders every channel surface with the same generic components — there is
    no channel registry to update (frontend helpers:
    `crates/ironclaw_webui/frontend/src/pages/extensions/lib/extensions-schema.ts`,
-   `hasChannelSurface`). Editing `[channel.config]` while `Active` runs an
+   `hasChannelSurface`). Editing `[channel.connection]` while `Active` runs an
    automatic deactivate → reactivate cycle; there is no separate reconfigure
    state or channel-setup activation gate.
 

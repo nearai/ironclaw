@@ -30,15 +30,20 @@ Hooks have **four** trust classes; the framework enforces the differences
 an external source; the fourth is run-scoped only.
 
 - **Builtin** — compiled into IronClaw, identity = crate path + symbol. May
-  produce any decision kind via `BuiltinHookSink`.
+  produce any decision kind: installs through the *privileged* hook traits
+  (`install_builtin_*` takes `Privileged*Hook`), whose sinks
+  (`PrivilegedGateSink` / `PrivilegedMutatorSink`) expose `allow`.
 - **Trusted** — user-placed in `~/.ironclaw/hooks/` or workspace `hooks/`. Cannot
   register at `runtime`-class points (e.g., the inner side of capability
-  attenuation). Uses `TrustedHookSink`.
+  attenuation). Also installs through the *privileged* traits — this tier's
+  restriction is on registration points, not on the sink.
 - **Installed** — extension registry, eventually WASM-hosted. Restricted to
   `Observer` and `Effect` kinds by default; `Gate` and `Mutator` require an
-  explicit per-extension grant. Uses `InstalledHookSink`, which exposes only
-  monotonic-restriction constructors. An `Installed` hook cannot mint
-  `Decision::Allow` — that variant is not reachable from the sink trait.
+  explicit per-extension grant. Installs through the *restricted* traits
+  (`install_installed_*` takes `Restricted*Hook`), whose sinks
+  (`RestrictedGateSink` / `RestrictedMutatorSink`) omit `allow` entirely. An
+  `Installed` hook cannot mint `Decision::Allow` — that method is not on the
+  sink trait.
 - **SelfAuthored** — the agent authors a hook for the current run via
   `SelfAuthoredEvaluator` (typically after user ratification). The sink
   (`SelfAuthoredHookSink`) is monotonic-restriction only: no `Allow`, no
