@@ -108,7 +108,7 @@ impl ProjectService for RebornProjectService {
             };
             projects.push(project_info(record, role));
         }
-        Ok(RebornListProjectsResponse::new(
+        Ok(list_projects_response(
             projects,
             total_projects,
             active_projects,
@@ -377,6 +377,20 @@ fn parse_user_id(value: &str) -> Result<UserId, ProjectServiceError> {
             field: "user_id".to_string(),
         }
     })
+}
+
+fn list_projects_response(
+    projects: Vec<RebornProjectInfo>,
+    total_projects: usize,
+    active_projects: usize,
+    archived_projects: usize,
+) -> RebornListProjectsResponse {
+    RebornListProjectsResponse::new(
+        projects,
+        total_projects,
+        active_projects,
+        archived_projects,
+    )
 }
 
 fn project_info(record: ProjectRecord, role: ProjectRole) -> RebornProjectInfo {
