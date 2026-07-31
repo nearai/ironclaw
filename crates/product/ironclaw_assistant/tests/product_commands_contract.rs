@@ -52,6 +52,19 @@ fn model_command_rejects_set_without_model_name() {
 }
 
 #[test]
+fn model_command_rejects_malformed_set_arguments() {
+    for arguments in ["set gpt-5-mini extra", "set --model gpt-5-mini"] {
+        let payload =
+            InboundCommandPayload::new("model", arguments, ProductTriggerReason::BotCommand)
+                .expect("valid command");
+
+        let rejection = ProductCommand::from_payload(&payload).expect_err("malformed model set");
+
+        assert_eq!(rejection.kind, ProductRejectionKind::InvalidRequest);
+    }
+}
+
+#[test]
 fn model_command_maps_provider_selection_without_cli_shelling_contract() {
     let payload = InboundCommandPayload::new(
         "model",
