@@ -39,10 +39,13 @@ use ironclaw_first_party_extension_ports::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
     SkillActivationSelectorConfig, SkillExecutionAdapter, SkillInjectionMode,
 };
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, IdempotencyKey, LoopGateRef, ReplyTargetBindingRef,
+    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnId, TurnRunId, TurnScope, TurnStatus,
+};
 use ironclaw_host_api::{
     audit::{ActionResultSummary, ActionSummary, AuditEnvelope, AuditStage, DecisionSummary},
     capability::EffectKind,
-    http::RuntimeHttpEgress,
     ids::{
         AgentId, ApprovalRequestId, AuditEventId, CapabilityId, CorrelationId, ExtensionId,
         InvocationId, TenantId, ThreadId, UserId,
@@ -52,6 +55,7 @@ use ironclaw_host_api::{
     resource::ResourceScope,
     scope::Principal,
 };
+use ironclaw_loop_contracts::{LoopHostMilestoneSink, LoopRunContext, RunProfileResolutionRequest};
 use ironclaw_loop_host::{
     AwaitEdgeSettler, AwaitEdgeWriter, CapabilityAllowSet, CapabilityResolveError,
     CapabilitySurfaceProfileResolver, EmptyUserProfileSource, FilesystemSkillBundleSource,
@@ -91,13 +95,9 @@ use ironclaw_threads::{
     SessionThreadService, ThreadHistoryRequest, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, AgentTurnProcessRuntime, AgentTurnSpawnTreeRuntimePort, CancelRunRequest,
-    CancelRunResponse, GetRunStateRequest, IdempotencyKey, LoopGateRef, ReplyTargetBindingRef,
-    RunProfileResolutionRequest, SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnEventProjectionSource, TurnId,
-    TurnRunId, TurnRunState, TurnRunWake, TurnScope, TurnStatus,
-    events::EventCursor,
-    run_profile::{LoopHostMilestoneSink, LoopRunContext},
+    AgentTurnProcessRuntime, AgentTurnSpawnTreeRuntimePort, CancelRunRequest, CancelRunResponse,
+    GetRunStateRequest, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError,
+    TurnEventProjectionSource, TurnRunState, TurnRunWake,
 };
 
 use ironclaw_host_runtime::{HostRuntime, HostRuntimeHttpEgressPort};
@@ -454,12 +454,12 @@ pub enum RebornTurnDriveOutcome {
     Terminal(AssistantReply),
     /// The run parked on a user-resolvable gate (auth/approval/resource) and is
     /// awaiting resolution through the facade. `gate_ref` is required: the
-    /// blocked-reason contract carries a `GateRef` for every such block, so its
+    /// blocked-reason contract carries a `TurnGateRef` for every such block, so its
     /// absence is an invariant violation, not a valid recorder outcome.
     BlockedOnGate {
         run_id: TurnRunId,
         status: TurnStatus,
-        gate_ref: ironclaw_turns::GateRef,
+        gate_ref: ironclaw_host_api::turn::TurnGateRef,
         partial_text: Option<String>,
     },
 }
@@ -563,7 +563,6 @@ pub struct RebornRuntime {
     pub(crate) shared_extension_registry: Arc<SharedExtensionRegistry>,
     pub(crate) skill_auto_activate_learned: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) extension_management: Arc<RebornLocalExtensionManagementPort>,
-    pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
     pub(crate) owner_user_id: UserId,
     pub(crate) extension_filesystem: Arc<CompositeRootFilesystem>,
@@ -658,10 +657,6 @@ impl ironclaw_extension_host::extension_lifecycle_command::RebornExtensionLifecy
         Arc::clone(&self.extension_management)
     }
 
-    fn runtime_http_egress(&self) -> Option<Arc<dyn RuntimeHttpEgress>> {
-        self.runtime_http_egress.clone()
-    }
-
     fn runtime_credential_accounts(
         &self,
     ) -> Arc<dyn ironclaw_auth::RuntimeCredentialAccountSelectionService> {
@@ -718,7 +713,6 @@ pub(crate) struct InteractionServiceTestParts {
     skill_management: Arc<ScopedSkillManagementPort>,
     admin_configuration_resolver: Arc<ComposedExtensionAdminConfigurationResolver>,
     product_auth: Arc<RebornProductAuthServices>,
-    runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     builtin_capability_policy: Arc<BuiltinCapabilityPolicy>,
 }
 
@@ -728,15 +722,15 @@ pub(crate) struct InteractionServiceTestParts {
 /// forwarder above.
 #[cfg(feature = "test-support")]
 pub(crate) fn wrap_result_read_capability_for_test(
-    inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    inner: std::sync::Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
     thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
     fallback_user_id: ironclaw_host_api::ids::UserId,
-    run_context: ironclaw_turns::run_profile::LoopRunContext,
+    run_context: ironclaw_loop_contracts::LoopRunContext,
     input_resolver: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
     result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
 ) -> Result<
-    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    ironclaw_turns::run_profile::AgentLoopHostError,
+    std::sync::Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
+    ironclaw_loop_contracts::AgentLoopHostError,
 > {
     capability_host::wrap_result_read_capability_for_test(
         inner,
@@ -758,8 +752,8 @@ pub(crate) fn wrap_result_read_capability_for_test(
 pub(crate) async fn create_refreshing_capability_port_for_test(
     parts: crate::test_support::RefreshingCapabilityPortTestParts,
 ) -> Result<
-    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    ironclaw_turns::run_profile::AgentLoopHostError,
+    std::sync::Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
+    ironclaw_loop_contracts::AgentLoopHostError,
 > {
     capability_host::create_refreshing_capability_port_for_test(parts).await
 }
@@ -897,10 +891,7 @@ impl RebornRuntime {
     ) -> Result<ironclaw_product::LifecycleProductResponse, ironclaw_product::ProductSurfaceFailure>
     {
         self.extension_management
-            .activate_with_prechecked_credentials_for_test(
-                package_ref,
-                ironclaw_extension_host::ExtensionActivationMode::Static,
-            )
+            .activate_with_prechecked_credentials_for_test(package_ref)
             .await
     }
 
@@ -3129,7 +3120,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // explicit precedence and a `validate()` call instead of being
     // re-read by the wiring helper).
     let model_budget_accountant: Option<
-        Arc<dyn ironclaw_turns::run_profile::LoopModelBudgetAccountant>,
+        Arc<dyn ironclaw_loop_contracts::LoopModelBudgetAccountant>,
     > = match (
         ironclaw_runtime_policy::budget_enforcement(&runtime_policy),
         resolved_cost_table,
@@ -3456,7 +3447,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
     );
 
     let communication_context_provider: Option<
-        Arc<dyn ironclaw_turns::run_profile::CommunicationContextProvider>,
+        Arc<dyn ironclaw_loop_contracts::CommunicationContextProvider>,
     > = match (local_runtime, outbound_preferences_facade.clone()) {
         (Some(local_runtime), Some(outbound_preferences_facade)) => {
             let lifecycle_service =
@@ -3472,7 +3463,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 .with_lifecycle_service(Arc::new(lifecycle_service)),
             )
                 as Arc<
-                    dyn ironclaw_turns::run_profile::CommunicationContextProvider,
+                    dyn ironclaw_loop_contracts::CommunicationContextProvider,
                 >)
         }
         _ => None,
@@ -3709,7 +3700,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 TurnRunId::new(),
                 failure_explanation_profile.clone(),
             ),
-        )) as Arc<dyn ironclaw_turns::run_profile::SystemInferencePort>
+        )) as Arc<dyn ironclaw_loop_contracts::SystemInferencePort>
     });
     let planned_turn_coordinator: Arc<dyn TurnCoordinator> = composition.coordinator.clone();
     let approval_interaction_service: Arc<dyn ApprovalInteractionService> =
@@ -3949,7 +3940,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
             skill_management: Arc::clone(&local_runtime.skill_management),
             admin_configuration_resolver: Arc::clone(&local_runtime.channel_config_service),
             product_auth: Arc::clone(&local_runtime.product_auth),
-            runtime_http_egress: local_runtime.runtime_http_egress.clone(),
             builtin_capability_policy: Arc::clone(builtin_capability_policy),
         },
     );
@@ -4050,7 +4040,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
         shared_extension_registry: services.shared_extension_registry.clone(),
         skill_auto_activate_learned: Arc::clone(&services.skill_auto_activate_learned),
         extension_management: services.extension_management.clone(),
-        runtime_http_egress: services.runtime_http_egress.as_ref().map(Arc::clone),
         host_runtime_http_egress: services.host_runtime_http_egress.clone(),
         owner_user_id: services.owner_user_id.clone(),
         extension_filesystem: services.extension_filesystem.clone(),

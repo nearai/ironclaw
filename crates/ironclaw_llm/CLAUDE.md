@@ -17,7 +17,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `openai_codex_provider.rs` | OpenAI Codex Responses API client (SSE streaming, JWT auth, subscription billing) |
 | `openai_codex_session.rs` | OAuth 2.0 session manager for OpenAI Codex (device code flow, token persistence) |
 | `token_refreshing.rs` | Token-refreshing `LlmProvider` decorator for OpenAI Codex (pre-emptive refresh, zero-cost billing) |
-| `reasoning.rs` | `Reasoning` struct, `ReasoningContext`, `RespondResult`, `ActionPlan`, `ToolSelection`; thinking-tag stripping; `SILENT_REPLY_TOKEN` |
+| `reasoning.rs` | Model-response text cleanup (`clean_response` — thinking-tag stripping) and textual tool-call recovery (`contains_codex_text_tool_call_syntax`, `recover_codex_text_tool_calls_from_tool_names`) |
 | `session.rs` | NEAR AI session token management with disk + DB persistence, OAuth login flow |
 | `circuit_breaker.rs` | Circuit breaker: Closed → Open → HalfOpen state machine |
 | `retry.rs` | Exponential backoff retry wrapper; `is_retryable()` classification |
@@ -261,13 +261,16 @@ call before recovery can advance the ordered chain.
 
 ## reasoning.rs Contents
 
-`reasoning.rs` does **not** contain an `IntentClassifier`. It contains:
-- `Reasoning` struct — the main reasoning engine used by the agent worker; calls `complete_with_tools()` and handles tool dispatch
-- `ReasoningContext` — carries messages, available tools, job description, and metadata into a reasoning call
-- `RespondResult`, `ActionPlan`, `ToolSelection` — output types from the reasoning engine
-- `TokenUsage` — input/output token counts
-- `SILENT_REPLY_TOKEN` (`"NO_REPLY"`) and `is_silent_reply()` — used by the dispatcher to suppress empty responses in group chats
-- Thinking-tag stripping — regex-based removal of `<thinking>`, `<reflection>`, `<scratchpad>`, `<|think|>`, `<final>`, etc. from model responses before returning to the user
+`reasoning.rs` does **not** contain an `IntentClassifier`, and it is **not** a
+reasoning *engine* — the v1 `Reasoning` struct and its planner/evaluator types
+were deleted in the WS8 dead-surface sweep. What survives is a provider-quirk
+cleanup module with exactly three public functions, all consumed by
+`ironclaw_runner`'s model gateway on the live model-response path:
+- `clean_response()` — thinking-tag stripping: regex-based, code-region-aware removal of `<thinking>`, `<reflection>`, `<scratchpad>`, `<|think|>`, `<final>`, tool-call tags, and markdown-fenced/bracket tool-call residue from model responses before they reach the user
+- `contains_codex_text_tool_call_syntax()` — detects Codex textual tool-call syntax (`to=tool.name json\n{…}`) outside code regions
+- `recover_codex_text_tool_calls_from_tool_names()` — recovers those textual calls as structured `ToolCall`s when the name matches an advertised tool
+
+Everything else in the file is private support for those three.
 
 ## Cost table (moved to `ironclaw_common::llm_costs`)
 

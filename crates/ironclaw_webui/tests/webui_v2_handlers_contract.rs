@@ -50,7 +50,8 @@ use ironclaw_product::{
     ADMIN_USER_SET_ROLE_CAPABILITY_ID, ADMIN_USER_SET_STATUS_CAPABILITY_ID,
     ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW, ADMIN_USERS_VIEW, AUTOMATIONS_VIEW,
     AdminUserRecord, AdminUserRole, AdminUserSecretMeta, AdminUserStatus, CodexLoginStart,
-    EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW,
+    EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
+    EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW,
     EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
     EXTENSIONS_VIEW, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW,
     LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
@@ -5486,6 +5487,82 @@ async fn install_extension_invokes_lifecycle_capability_with_body_package_ref() 
     assert_eq!(queries.len(), 2);
     assert_eq!(queries[0].view_id, EXTENSIONS_VIEW.id);
     assert_eq!(queries[1].view_id, EXTENSIONS_VIEW.id);
+}
+
+#[tokio::test]
+async fn register_hosted_mcp_uses_closed_wire_without_extension_readback() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/register-hosted-mcp")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"desired_id":"linear","desired_name":"Linear MCP","endpoint":"https://mcp.linear.app/mcp","auth_selection":{"kind":"oauth","client_profile_id":"linear-default"}}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["success"], true);
+    assert_eq!(body["package_ref"]["id"], "mcp-linear");
+    assert!(body.get("phase").is_none());
+
+    let calls = services.invoke_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].0.as_str(),
+        EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID
+    );
+    assert_eq!(
+        calls[0].1,
+        serde_json::json!({
+            "desired_id": "linear",
+            "desired_name": "Linear MCP",
+            "endpoint": "https://mcp.linear.app/mcp",
+            "auth_selection": { "kind": "oauth", "client_profile_id": "linear-default" },
+        })
+    );
+    assert!(
+        services.view_queries.lock().expect("lock").is_empty(),
+        "registration is admission only and must not read an installation projection"
+    );
+}
+
+#[tokio::test]
+async fn register_hosted_mcp_sanitizes_missing_and_forbidden_fields() {
+    for body in [
+        r#"{"desired_id":"linear","endpoint":"https://mcp.linear.app/mcp"}"#,
+        r#"{"desired_id":"linear","desired_name":"Linear MCP","endpoint":"https://mcp.linear.app/mcp","secrets":{"token":"must-not-cross"}}"#,
+    ] {
+        let services = Arc::new(StubServices::default());
+        let response = router_with(services.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/extensions/register-hosted-mcp")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response_body = read_json(response).await;
+        assert_eq!(response_body["error"], "invalid_request");
+        assert_eq!(response_body["field"], "request");
+        assert_eq!(response_body["validation_code"], "invalid_value");
+        assert!(services.invoke_calls.lock().expect("lock").is_empty());
+        assert!(!response_body.to_string().contains("token"));
+    }
 }
 
 #[tokio::test]

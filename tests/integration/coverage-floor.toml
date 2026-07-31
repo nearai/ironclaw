@@ -92,15 +92,26 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
 name = "ironclaw_turns"
-# LLVM 21 reports 9515 / 11179 = 85.11%; raise #6886's covered-line floor to
-# the branch-aware artifact while recalibrating only the incompatible percent.
+# WS1.2 split this crate: `run_profile/**`, the `LoopExit` DTO half, and the
+# checkpoint payload moved to `ironclaw_loop_contracts` (13,951 of 25,356 source
+# lines). The `floor_covered_lines = 9515` numerator captured at 11,179
+# instrumented lines therefore no longer describes this crate — it is
+# structurally unreachable, not a regression — so this entry drops to a
+# percentage floor for one release. `floor_percent` is retained unchanged rather
+# than weakened: the moved half is contract types with roughly the crate's own
+# coverage profile, so the ratio is the invariant that survives a split and the
+# absolute numerator is the one that cannot.
+#
+# OWED IN THE SAME LANE, from this PR's own merged coverage artifact (the
+# same-PR floor-raise workflow at the top of this file, applied to a split
+# rather than to growth): recapture `floor_covered_lines` +
+# `captured_total_lines` here, and add the matching `[[crate]]` entry for
+# `ironclaw_loop_contracts` so the moved lines regain the ratchet they had
+# under this entry. Both numbers must come from the artifact, never an estimate.
 floor_percent = 85.11
-floor_covered_lines = 9515
 tolerance_percent = 0.5
-tolerance_lines = 20
-captured_total_lines = 11179
-captured_date = "2026-07-30"
-rationale = "Protects generated restart, same-thread admission, retry, and process-projection behavior under LLVM 21 source mapping."
+captured_date = "2026-07-31"
+rationale = "Protects generated restart, same-thread admission, retry, and process-projection behavior under LLVM 21 source mapping. Covered-line numerator pending recapture after the WS1.2 contracts split."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 # Additional critical production crates were captured from this PR's first
@@ -149,11 +160,11 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
 name = "ironclaw_llm"
-floor_percent = 79.92
-floor_covered_lines = 22566
-captured_total_lines = 28235
+floor_percent = 79.22
+floor_covered_lines = 20885
+captured_total_lines = 26364
 captured_date = "2026-07-31"
-rationale = "Provider retry classification and the complete decorator chain are production-critical; recalibrated after current-main covered-code shrinkage."
+rationale = "Provider retry classification and the complete decorator chain are production-critical; recalibrated for #6964's verified-dead `reasoning` deletion (-1871 instrumented lines) — the dead half carried denser test coverage than the crate average, so deleting it with its tests lowered the percentage."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
@@ -198,7 +209,7 @@ floor_percent = 80.55
 floor_covered_lines = 1197
 captured_total_lines = 1486
 captured_date = "2026-07-31"
-rationale = "Durable event envelopes are the typed redacted audit substrate; recalibrated after #6943 removed the dead JSONL implementation and its tests."
+rationale = "Durable event envelopes are the typed redacted audit substrate; recalibrated because #6943's `events::{parse_jsonl, replay_jsonl}` deletion (-59 instrumented lines and their covered code) landed after the previous capture — inherited from main, not caused by #6964."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]

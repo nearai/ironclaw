@@ -6,14 +6,12 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_loop_contracts::{LoopRunContext, PromptMode};
 use ironclaw_loop_host::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostIdentityMessageContent, IdentityApplicability, IdentityFileName, identity_message_ref,
 };
-use ironclaw_turns::{
-    LoopMessageRef,
-    run_profile::{LoopRunContext, PromptMode},
-};
+use ironclaw_turns::LoopMessageRef;
 
 const DEFAULT_SYSTEM_PROMPT_NAME: &str = "SYSTEM.md";
 const DEFAULT_SYSTEM_PROMPT_EMBEDDED: &str = include_str!("../../assets/prompts/default-system.md");
@@ -342,10 +340,10 @@ impl HostIdentityContextSource for DefaultSystemPromptIdentitySource {
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::ids::{TenantId, ThreadId};
-    use ironclaw_turns::{
-        RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
-        run_profile::{InMemoryRunProfileResolver, LoopRunContext},
+    use ironclaw_loop_contracts::{
+        InMemoryRunProfileResolver, LoopRunContext, RunProfileResolutionRequest, RunProfileResolver,
     };
+    use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 
     use super::*;
 

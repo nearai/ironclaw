@@ -17,6 +17,9 @@ use crate::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, IdempotencyKey, TurnActor, TurnGateRef, TurnRunId, TurnScope,
+};
 use ironclaw_host_api::{
     attachment::InboundAttachment,
     ids::{ActivityId, CapabilityId, ThreadId, UserId},
@@ -26,10 +29,7 @@ use ironclaw_host_api::{
     },
     tool_adapter::RestrictedEgress,
 };
-use ironclaw_turns::{
-    AcceptedMessageRef, AdmissionRejectionReason, GateRef, IdempotencyKey, TurnActor, TurnError,
-    TurnErrorCategory, TurnRunId, TurnScope,
-};
+use ironclaw_turns::{AdmissionRejectionReason, TurnError, TurnErrorCategory};
 use sha2::{Digest, Sha256};
 use tracing::debug;
 
@@ -721,7 +721,7 @@ async fn load_delivered_routes_for_envelope(
     // NOT applied: the exact match is authoritative, and the kind filter can
     // only total-drop a validly named generic/legacy gate — it can never
     // disambiguate.  The predicate receives the raw stored gate string directly
-    // — no `GateRef::new` wrap — so routes whose stored string fails validation
+    // — no `TurnGateRef::new` wrap — so routes whose stored string fails validation
     // are not silently dropped before the predicate runs.
     gate_kind_filter: fn(&str) -> bool,
 ) -> Result<Vec<ironclaw_outbound::DeliveredGateRouteRecord>, ProductSurfaceFailure> {
@@ -915,7 +915,7 @@ async fn resolve_via_delivered_approval_route(
     };
     let mut last_stale_error = None;
     for selected in candidates {
-        let gate_ref = match GateRef::new(selected.route.gate_ref.clone()) {
+        let gate_ref = match TurnGateRef::new(selected.route.gate_ref.clone()) {
             Ok(gate_ref) => gate_ref,
             // A malformed stored gate ref is corrupt data, not a resolved gate —
             // surface it rather than silently skipping past it.
@@ -1036,7 +1036,7 @@ async fn resolve_via_delivered_auth_route(
     };
     let mut last_stale_error = None;
     for selected in candidates {
-        let gate_ref = match GateRef::new(selected.route.gate_ref.clone()) {
+        let gate_ref = match TurnGateRef::new(selected.route.gate_ref.clone()) {
             Ok(gate_ref) => gate_ref,
             // A malformed stored gate ref is corrupt data, not a resolved gate.
             Err(_) => {
@@ -1317,7 +1317,7 @@ async fn dispatch_approval_resolution(
     };
     let scope = turn_scope_from_binding(&binding);
     let actor = TurnActor::new(binding.actor_user_id.clone());
-    let gate_ref = GateRef::new(payload.gate_ref.clone()).map_err(|_| {
+    let gate_ref = TurnGateRef::new(payload.gate_ref.clone()).map_err(|_| {
         ProductSurfaceFailure::ApprovalInteractionRejected {
             kind: ApprovalInteractionRejectionKind::InvalidGateRef,
         }
@@ -1484,7 +1484,7 @@ async fn dispatch_auth_resolution(
     };
     let scope = turn_scope_from_binding(&binding);
     let actor = TurnActor::new(binding.actor_user_id.clone());
-    let gate_ref = GateRef::new(payload.auth_request_ref.clone()).map_err(|_| {
+    let gate_ref = TurnGateRef::new(payload.auth_request_ref.clone()).map_err(|_| {
         ProductSurfaceFailure::AuthInteractionRejected {
             kind: AuthInteractionRejectionKind::InvalidGateRef,
         }

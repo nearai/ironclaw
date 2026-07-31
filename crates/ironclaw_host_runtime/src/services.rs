@@ -38,6 +38,7 @@ use ironclaw_host_api::{
         ProcessBackendKind, RuntimeProfile, SecretMode,
     },
 };
+use ironclaw_loop_contracts::RunProfileResolver;
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{
@@ -56,8 +57,7 @@ use ironclaw_secrets::{
 };
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
 use ironclaw_turns::{
-    AgentTurnRuntimePort, DefaultTurnCoordinator, NoopTurnRunWakeNotifier, RunProfileResolver,
-    TurnRunWakeNotifier,
+    AgentTurnRuntimePort, DefaultTurnCoordinator, NoopTurnRunWakeNotifier, TurnRunWakeNotifier,
 };
 use ironclaw_wasm::{
     DenyWasmHostHttp, EmptyWasmRuntimeCredentials, PreparedWitTool, WasmError,

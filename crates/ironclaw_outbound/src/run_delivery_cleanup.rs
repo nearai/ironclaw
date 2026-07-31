@@ -5,7 +5,7 @@
 //! opaque reference plus the sealed run/source identities needed to reopen and
 //! revalidate the route; they never contain message content or credentials.
 
-use ironclaw_turns::{ReplyTargetBindingRef, RunOriginAdapter, TurnRunId, TurnScope};
+use ironclaw_host_api::turn::{ReplyTargetBindingRef, RunOriginAdapter, TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
 
 /// Hard bound for one run/source cleanup snapshot.

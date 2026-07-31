@@ -2,37 +2,27 @@
 //! hosted-MCP behavior. A recipe without `client_credentials` declares that
 //! the vendor's client is discovered and registered dynamically:
 //!
-//! 1. resolve the authorization server (RFC 9728 protected-resource metadata
-//!    when a resource is declared, else the recipe's authorize endpoint
-//!    origin),
+//! 1. resolve the authorization server from RFC 9728 protected-resource
+//!    metadata for the declared canonical resource,
 //! 2. fetch RFC 8414 authorization-server metadata (authorize/token/
 //!    registration endpoints; the recipe's endpoints are static placeholders),
 //! 3. register a client with the static vendor callback as its redirect URI,
 //! 4. persist the registered client and reuse it for every later flow.
 
-use ironclaw_host_api::{ids::SecretHandle, recipe::OAuth2CodeRecipe, resource::ResourceScope};
+use ironclaw_host_api::{ids::SecretHandle, recipe::HttpsEndpoint, resource::ResourceScope};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
-use crate::{AuthProductError, OAuthClientId};
+use crate::{
+    AuthProductError, AuthorizationServerAdmissionMetadata, OAuthClientId,
+    ProtectedResourceAdmissionMetadata,
+};
 
 use super::exchange::EffectiveOAuthClient;
 use super::{AuthEngine, http};
 
 /// Prefix of the per-vendor persisted registered-client handle.
 pub const DCR_CLIENT_HANDLE_PREFIX: &str = "oauth-dcr-client";
-
-#[derive(Debug, Deserialize)]
-struct ProtectedResourceMetadata {
-    authorization_servers: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AuthorizationServerMetadata {
-    authorization_endpoint: String,
-    token_endpoint: String,
-    registration_endpoint: String,
-}
 
 #[derive(Debug, Serialize)]
 struct DcrRegistrationRequest<'a> {
@@ -69,8 +59,8 @@ impl AuthEngine {
         &self,
         scope: &ResourceScope,
         vendor: &str,
-        recipe: &OAuth2CodeRecipe,
         resource: Option<&str>,
+        admitted_protected_resource_metadata_url: Option<&HttpsEndpoint>,
         register_if_missing: bool,
     ) -> Result<EffectiveOAuthClient, AuthProductError> {
         if let Some(stored) = self.load_dcr_client(scope, vendor).await? {
@@ -88,7 +78,12 @@ impl AuthEngine {
             return stored_to_effective(stored);
         }
         let stored = self
-            .discover_and_register(scope, vendor, recipe, resource)
+            .discover_and_register(
+                scope,
+                vendor,
+                resource,
+                admitted_protected_resource_metadata_url,
+            )
             .await?;
         self.persist_dcr_client(scope, vendor, &stored).await?;
         stored_to_effective(stored)
@@ -98,34 +93,36 @@ impl AuthEngine {
         &self,
         scope: &ResourceScope,
         vendor: &str,
-        recipe: &OAuth2CodeRecipe,
         resource: Option<&str>,
+        admitted_protected_resource_metadata_url: Option<&HttpsEndpoint>,
     ) -> Result<StoredDcrClient, AuthProductError> {
         // 1. Resolve the authorization-server issuer.
         let issuer = match resource {
             Some(resource) => {
-                let metadata_url = protected_resource_metadata_url(resource)?;
+                let metadata_url = match admitted_protected_resource_metadata_url {
+                    Some(url) => url.as_str().to_string(),
+                    None => protected_resource_metadata_url(resource)?,
+                };
                 let response = self
                     .execute_vendor_get(scope, &metadata_url, Vec::new())
                     .await?;
                 if !(200..300).contains(&response.status) {
-                    // Fall back to the resource origin as the issuer when the
-                    // server publishes no protected-resource metadata.
-                    origin_of(resource)?
-                } else {
-                    let metadata: ProtectedResourceMetadata =
-                        serde_json::from_slice(&response.body)
-                            .map_err(|_| AuthProductError::BackendUnavailable)?;
-                    let issuer = metadata
-                        .authorization_servers
-                        .first()
-                        .cloned()
-                        .ok_or(AuthProductError::BackendUnavailable)?;
-                    validate_issuer_related_to_resource(resource, &issuer)?;
-                    issuer
+                    // Dynamic registration is opt-in through protected
+                    // resource metadata. Never invent an issuer from the
+                    // resource when the server did not advertise one.
+                    return Err(AuthProductError::MalformedConfig);
                 }
+                let metadata: ProtectedResourceAdmissionMetadata =
+                    serde_json::from_slice(&response.body)
+                        .map_err(|_| AuthProductError::BackendUnavailable)?;
+                if metadata.resource.as_str() != resource
+                    || metadata.authorization_servers.len() != 1
+                {
+                    return Err(AuthProductError::MalformedConfig);
+                }
+                metadata.authorization_servers[0].as_str().to_string()
             }
-            None => origin_of(recipe.authorization_endpoint.as_str())?,
+            None => return Err(AuthProductError::MalformedConfig),
         };
 
         // 2. Authorization-server metadata (RFC 8414).
@@ -137,11 +134,16 @@ impl AuthEngine {
             tracing::debug!(vendor, status = response.status, "AS metadata fetch failed");
             return Err(AuthProductError::BackendUnavailable);
         }
-        let metadata: AuthorizationServerMetadata = serde_json::from_slice(&response.body)
+        let metadata: AuthorizationServerAdmissionMetadata = serde_json::from_slice(&response.body)
             .map_err(|_| AuthProductError::BackendUnavailable)?;
-        validate_endpoint_origin(&metadata.registration_endpoint, &metadata_url)?;
-        http::https_endpoint_host(&metadata.authorization_endpoint)?;
-        http::https_endpoint_host(&metadata.token_endpoint)?;
+        if metadata.issuer.as_str() != issuer {
+            return Err(AuthProductError::MalformedConfig);
+        }
+        let registration_endpoint = metadata
+            .registration_endpoint
+            .as_ref()
+            .ok_or(AuthProductError::MalformedConfig)?;
+        validate_endpoint_origin(registration_endpoint.as_str(), &metadata_url)?;
 
         // 3. Register (RFC 7591) with the static vendor callback.
         let redirect_uri = self.callback_base.redirect_uri_for(vendor)?;
@@ -155,7 +157,7 @@ impl AuthEngine {
         let body =
             serde_json::to_vec(&registration).map_err(|_| AuthProductError::BackendUnavailable)?;
         let response = self
-            .execute_vendor_post_json(scope, &metadata.registration_endpoint, body)
+            .execute_vendor_post_json(scope, registration_endpoint.as_str(), body)
             .await?;
         if !(200..300).contains(&response.status) {
             tracing::warn!(
@@ -174,8 +176,8 @@ impl AuthEngine {
         Ok(StoredDcrClient {
             client_id: registered.client_id,
             client_secret: registered.client_secret,
-            authorization_endpoint: metadata.authorization_endpoint,
-            token_endpoint: metadata.token_endpoint,
+            authorization_endpoint: metadata.authorization_endpoint.as_str().to_string(),
+            token_endpoint: metadata.token_endpoint.as_str().to_string(),
             redirect_uri: redirect_uri.as_str().to_string(),
         })
     }
@@ -232,15 +234,7 @@ fn dcr_client_handle(vendor: &str) -> Result<SecretHandle, AuthProductError> {
         .map_err(|_| AuthProductError::BackendUnavailable)
 }
 
-fn origin_of(url: &str) -> Result<String, AuthProductError> {
-    let parsed = url::Url::parse(url).map_err(|_| AuthProductError::MalformedConfig)?;
-    if parsed.scheme() != "https" {
-        return Err(AuthProductError::MalformedConfig);
-    }
-    Ok(parsed.origin().ascii_serialization())
-}
-
-fn protected_resource_metadata_url(resource: &str) -> Result<String, AuthProductError> {
+pub(crate) fn protected_resource_metadata_url(resource: &str) -> Result<String, AuthProductError> {
     let parsed = url::Url::parse(resource).map_err(|_| AuthProductError::MalformedConfig)?;
     if parsed.scheme() != "https" {
         return Err(AuthProductError::MalformedConfig);
@@ -255,52 +249,24 @@ fn protected_resource_metadata_url(resource: &str) -> Result<String, AuthProduct
     Ok(metadata.to_string())
 }
 
-fn authorization_server_metadata_url(issuer: &str) -> Result<String, AuthProductError> {
+pub(crate) fn authorization_server_metadata_url(issuer: &str) -> Result<String, AuthProductError> {
     let mut metadata = url::Url::parse(issuer).map_err(|_| AuthProductError::BackendUnavailable)?;
     if metadata.scheme() != "https" {
         return Err(AuthProductError::BackendUnavailable);
     }
-    metadata.set_path("/.well-known/oauth-authorization-server");
+    let issuer_path = metadata.path().trim_end_matches('/');
+    metadata.set_path(&format!(
+        "/.well-known/oauth-authorization-server{issuer_path}"
+    ));
     metadata.set_query(None);
     metadata.set_fragment(None);
     Ok(metadata.to_string())
 }
 
-/// The issuer must be origin-bound to the resource: a compromised metadata
-/// document may not redirect registration to an attacker host. Two hosts are
-/// related when they are exactly equal (the only relation IP literals and
-/// single-label hosts can have) or when both resolve to the same Public
-/// Suffix List registrable domain (eTLD+1) — so `auth.example.co.uk` may
-/// vouch for `mcp.example.co.uk`, while `attacker.co.uk` may not. Hosts with
-/// no derivable registrable domain (a bare public suffix, an empty host)
-/// fail closed.
-fn validate_issuer_related_to_resource(
-    resource: &str,
-    issuer: &str,
+pub(crate) fn validate_endpoint_origin(
+    endpoint: &str,
+    expected: &str,
 ) -> Result<(), AuthProductError> {
-    let resource = url::Url::parse(resource).map_err(|_| AuthProductError::BackendUnavailable)?;
-    let issuer = url::Url::parse(issuer).map_err(|_| AuthProductError::BackendUnavailable)?;
-    let related = match (resource.host(), issuer.host()) {
-        (Some(resource_host), Some(issuer_host)) if resource_host == issuer_host => true,
-        (Some(url::Host::Domain(resource_host)), Some(url::Host::Domain(issuer_host))) => {
-            match (
-                psl::domain(resource_host.trim_end_matches('.').as_bytes()),
-                psl::domain(issuer_host.trim_end_matches('.').as_bytes()),
-            ) {
-                (Some(resource_domain), Some(issuer_domain)) => resource_domain == issuer_domain,
-                _ => false,
-            }
-        }
-        _ => false,
-    };
-    if related {
-        Ok(())
-    } else {
-        Err(AuthProductError::BackendUnavailable)
-    }
-}
-
-fn validate_endpoint_origin(endpoint: &str, expected: &str) -> Result<(), AuthProductError> {
     let endpoint = url::Url::parse(endpoint).map_err(|_| AuthProductError::BackendUnavailable)?;
     let expected = url::Url::parse(expected).map_err(|_| AuthProductError::BackendUnavailable)?;
     if endpoint.origin() != expected.origin() {
@@ -323,74 +289,11 @@ mod tests {
             authorization_server_metadata_url("https://auth.example.com").unwrap(),
             "https://auth.example.com/.well-known/oauth-authorization-server"
         );
+        assert_eq!(
+            authorization_server_metadata_url("https://auth.example.com/issuer/path").unwrap(),
+            "https://auth.example.com/.well-known/oauth-authorization-server/issuer/path"
+        );
         assert!(protected_resource_metadata_url("http://mcp.example.com/mcp").is_err());
-    }
-
-    #[test]
-    fn issuer_must_share_resource_registrable_domain() {
-        validate_issuer_related_to_resource(
-            "https://mcp.example.com/mcp",
-            "https://auth.example.com",
-        )
-        .unwrap();
-        assert!(
-            validate_issuer_related_to_resource(
-                "https://mcp.example.com/mcp",
-                "https://attacker.invalid"
-            )
-            .is_err()
-        );
-        // Multi-part public suffixes: `co.uk` is a suffix, not a registrable
-        // domain — an attacker host sharing only the suffix must be rejected
-        // (the PR #6116 security-high finding), while a sibling under the same
-        // registrable domain stays accepted.
-        assert!(
-            validate_issuer_related_to_resource(
-                "https://mcp.example.co.uk/mcp",
-                "https://attacker.co.uk"
-            )
-            .is_err()
-        );
-        validate_issuer_related_to_resource(
-            "https://mcp.example.co.uk/mcp",
-            "https://auth.example.co.uk",
-        )
-        .unwrap();
-        // A bare public suffix has no registrable domain and cannot vouch.
-        assert!(
-            validate_issuer_related_to_resource("https://foo.co.uk/mcp", "https://co.uk").is_err()
-        );
-        // Unrelated registrable domains under the same simple TLD.
-        assert!(
-            validate_issuer_related_to_resource(
-                "https://mcp.example.com/mcp",
-                "https://example.net"
-            )
-            .is_err()
-        );
-        // IP literals relate only by exact host equality.
-        validate_issuer_related_to_resource("https://203.0.113.5/mcp", "https://203.0.113.5")
-            .unwrap();
-        assert!(
-            validate_issuer_related_to_resource("https://203.0.113.5/mcp", "https://203.0.113.6")
-                .is_err()
-        );
-        assert!(
-            validate_issuer_related_to_resource("https://203.0.113.5/mcp", "https://attacker.com")
-                .is_err()
-        );
-        // Single-label hosts relate only by exact host equality.
-        validate_issuer_related_to_resource("https://localhost/mcp", "https://localhost").unwrap();
-        assert!(
-            validate_issuer_related_to_resource("https://localhost/mcp", "https://otherhost")
-                .is_err()
-        );
-        // Malformed issuers fail closed.
-        assert!(
-            validate_issuer_related_to_resource("https://mcp.example.com/mcp", "not a url")
-                .is_err()
-        );
-        assert!(validate_issuer_related_to_resource("https://mcp.example.com/mcp", "").is_err());
     }
 
     #[test]

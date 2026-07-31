@@ -210,7 +210,7 @@ impl ProjectRecord {
         name: impl Into<String>,
         description: impl Into<String>,
     ) -> Result<Self, ProjectError> {
-        let project_id = ProjectId::new(Ulid::new().to_string())
+        let project_id = ProjectId::new(Ulid::generate().to_string())
             .map_err(|error| ProjectError::invalid_record(error.to_string()))?;
         let now = Utc::now();
         let record = Self {

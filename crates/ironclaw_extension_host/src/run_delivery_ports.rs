@@ -9,13 +9,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_auth::{AuthProductError, AuthProviderId};
+use ironclaw_host_api::turn::{TurnGateRef, TurnScope};
 use ironclaw_host_api::{capability::RuntimeCredentialAccountSetup, ids::UserId};
 use ironclaw_product::{
     ApprovalPromptContextSource, AuthChallengeProvider, AuthChallengeView, BlockedAuthPromptSource,
     PairingAuthChallengeView,
 };
 use ironclaw_product::{ApprovalPromptContextView, AuthPromptView, ProductAdapterError};
-use ironclaw_turns::{GateRef, TurnScope};
 
 use ironclaw_product::auth_prompt_view_for_blocked_auth;
 
@@ -48,9 +48,9 @@ impl RecipeAuthChallengeProvider {
 impl AuthChallengeProvider for RecipeAuthChallengeProvider {
     async fn challenge_for_gate(
         &self,
-        scope: &ironclaw_turns::TurnScope,
+        scope: &ironclaw_host_api::turn::TurnScope,
         owner_user_id: &UserId,
-        run_id: ironclaw_turns::TurnRunId,
+        run_id: ironclaw_host_api::turn::TurnRunId,
         gate_ref: &str,
         credential_requirements: &[ironclaw_host_api::decision::RuntimeCredentialAuthRequirement],
     ) -> Result<Option<AuthChallengeView>, AuthProductError> {
@@ -138,7 +138,7 @@ impl ProjectionApprovalPromptContextSource {
 impl ApprovalPromptContextSource for ProjectionApprovalPromptContextSource {
     async fn approval_prompt_context(
         &self,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
         owner_user_id: &UserId,
         scope: &TurnScope,
     ) -> Option<ApprovalPromptContextView> {

@@ -484,8 +484,11 @@ fn default_https() -> NetworkScheme {
     NetworkScheme::Https
 }
 
-/// Presentation facts prompt construction consumes
-/// (`CommunicationPresentationPolicy` derives from this).
+/// Presentation facts prompt construction consumes.
+///
+/// The `ironclaw_llm` policy type that used to derive from this went with the
+/// v1 reasoning engine in the WS8 dead-surface sweep; these facts are the
+/// surviving source of truth.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChannelPresentation {

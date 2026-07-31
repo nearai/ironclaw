@@ -1,4 +1,5 @@
 use super::*;
+use ironclaw_loop_contracts::LoopFailureKind;
 use ironclaw_runner::failure_categories::{
     BUDGET_ACCOUNTING_FAILED_CATEGORY, CHECKPOINT_REJECTED_CATEGORY,
     HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY, HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY,
@@ -9,7 +10,6 @@ use ironclaw_runner::failure_categories::{
     MODEL_STAGE_POLICY_DENIED_CATEGORY, MODEL_STAGE_REQUEST_INVALID_CATEGORY,
     MODEL_STAGE_SCOPE_MISMATCH_CATEGORY, TRANSCRIPT_WRITE_FAILED_CATEGORY,
 };
-use ironclaw_turns::LoopFailureKind;
 
 const GENERIC_FAILURE_SUMMARY: &str = "The run failed before producing a reply. Retry the run, and contact support if it keeps happening.";
 
@@ -1206,7 +1206,12 @@ async fn model_failure_explainer_returns_none_when_gateway_fails() {
 }
 
 fn loop_failure_kind_as_str_values_from_source() -> std::collections::BTreeSet<&'static str> {
-    const SOURCE: &str = include_str!("../../../../ironclaw_turns/src/loop_exit.rs");
+    // WS1.2 moved the `LoopExit` claim vocabulary (and this `impl`) out of the
+    // turn kernel into `ironclaw_loop_contracts`. The scan is a cross-crate
+    // source reach-in — pre-existing §11.2.7 debt that WS2 deletes — so it has
+    // to follow the code; left pointing at the old path it still resolves and
+    // silently matches nothing.
+    const SOURCE: &str = include_str!("../../../../ironclaw_loop_contracts/src/loop_exit.rs");
     source_match_string_values(SOURCE, "impl LoopFailureKind")
 }
 

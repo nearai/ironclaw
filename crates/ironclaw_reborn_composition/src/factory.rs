@@ -166,6 +166,7 @@ use ironclaw_host_runtime::{
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
     builtin_first_party_package_for_process_backend,
 };
+use ironclaw_loop_contracts::InMemoryRunProfileResolver;
 use ironclaw_outbound::{CommunicationPreferenceRepository, ReplyAttachmentIntentPort};
 use ironclaw_outbound::{
     DeliveredGateRouteStore, OutboundStateStorePort, TriggeredRunDeliveryStore,
@@ -194,9 +195,7 @@ use ironclaw_triggers::{
     TriggerRepository,
 };
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
-use ironclaw_turns::{
-    AgentTurnRuntimePort, GetRunStateRequest, InMemoryRunProfileResolver, TurnScope,
-};
+use ironclaw_turns::{AgentTurnRuntimePort, GetRunStateRequest, TurnScope};
 use ironclaw_turns::{ExternalToolCatalog, InMemoryExternalToolCatalog};
 use secrecy::SecretString;
 
@@ -330,7 +329,6 @@ pub(crate) struct RebornRuntimeStores {
         Arc<ironclaw_extension_host::FilesystemChannelDmTargetStore>,
     pub(crate) channel_disconnect_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>>,
-    pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) host_runtime_http_egress: Option<ironclaw_host_runtime::HostRuntimeHttpEgressPort>,
     pub(crate) skill_mounts: MountView,
     pub(crate) memory_mounts: MountView,

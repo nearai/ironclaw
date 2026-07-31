@@ -16,12 +16,14 @@ use ironclaw_conversations::{
     ValidateReplyTargetRequest,
 };
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileId, RunProfileRequest,
+    RunProfileVersion, SourceBindingRef, TurnActor, TurnRunId, TurnScope, TurnStatus,
+};
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
-    ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest,
-    RetryTurnResponse, RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor, TurnCoordinator, TurnError,
-    TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
+    RetryTurnRequest, RetryTurnResponse, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
+    TurnCoordinator, TurnError, TurnRunState,
 };
 
 #[tokio::test]
@@ -3824,7 +3826,7 @@ impl TurnCoordinator for BusyFirstUniqueKeyCoordinator {
             return Err(TurnError::ThreadBusy(ThreadBusy {
                 active_run_id: TurnRunId::new(),
                 status: TurnStatus::Running,
-                event_cursor: ironclaw_turns::events::EventCursor(1),
+                event_cursor: ironclaw_host_api::turn::EventCursor(1),
             }));
         }
         Ok(accepted_response(request))
@@ -3926,12 +3928,12 @@ impl TurnCoordinator for RecordingTurnCoordinator {
 
 fn accepted_response(request: SubmitTurnRequest) -> SubmitTurnResponse {
     SubmitTurnResponse::Accepted {
-        turn_id: ironclaw_turns::TurnId::new(),
+        turn_id: ironclaw_host_api::turn::TurnId::new(),
         run_id: TurnRunId::new(),
         status: TurnStatus::Queued,
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
-        event_cursor: ironclaw_turns::events::EventCursor(1),
+        event_cursor: ironclaw_host_api::turn::EventCursor(1),
         accepted_message_ref: request.accepted_message_ref,
         reply_target_binding_ref: request.reply_target_binding_ref,
     }

@@ -51,6 +51,7 @@ pub mod failure;
 pub mod gate_record;
 pub mod host_port;
 pub mod host_remediation;
+pub mod hosted_mcp;
 pub mod http;
 pub mod ids;
 pub mod ingress;

@@ -4,8 +4,8 @@
 //! the whole file is deleted, its one surviving item gets its own small
 //! module rather than an empty-shell file).
 
+use ironclaw_loop_contracts::sanitize_model_visible_text;
 use ironclaw_threads::ToolResultSafeSummary;
-use ironclaw_turns::run_profile::sanitize_model_visible_text;
 
 /// Wrap untrusted subagent-authored strings in explicit `|||...|||`
 /// delimiters before they enter the capability result store or the parent's

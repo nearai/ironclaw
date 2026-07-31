@@ -22,7 +22,7 @@ async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
 futures = "0.3"
-jsonschema = { version = "0.46", default-features = false }
+jsonschema = { version = "0.49", default-features = false }
 parking_lot = "0.12"
 tracing = "0.1"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
@@ -39,6 +39,7 @@ ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
 ironclaw_skills = { path = "../ironclaw_skills", version = "0.3.0", default-features = false }
 ironclaw_memory = { path = "../ironclaw_memory", version = "0.1.0" }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
+ironclaw_loop_contracts = { path = "../ironclaw_loop_contracts", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 ironclaw_approvals = { path = "../ironclaw_approvals", version = "0.1.0" }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }

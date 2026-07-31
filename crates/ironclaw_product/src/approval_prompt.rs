@@ -6,12 +6,12 @@ use crate::{
 };
 use ironclaw_approvals::ApprovalRequestStorePort;
 use ironclaw_approvals::ApprovalStoreError;
+use ironclaw_host_api::turn::{TurnActor, TurnGateRef, TurnScope};
 use ironclaw_host_api::{
     action::{Action, NetworkMethod, NetworkScheme},
     approval::ApprovalRequest,
     ids::{InvocationId, UserId},
 };
-use ironclaw_turns::{GateRef, TurnActor, TurnScope};
 use thiserror::Error;
 
 use crate::{ApprovalInteractionScope, approval_request_id_from_gate_ref};
@@ -31,7 +31,7 @@ pub struct ApprovalPromptLookupError {
 
 pub async fn approval_prompt_lookup(
     approval_requests: Option<&dyn ApprovalRequestStorePort>,
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
 ) -> Result<ApprovalPromptLookup, ApprovalPromptLookupError> {
@@ -55,7 +55,7 @@ pub async fn approval_prompt_lookup(
 
 pub async fn approval_prompt_context_view(
     approval_requests: Option<&dyn ApprovalRequestStorePort>,
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
     owner_user_id: &UserId,
     turn_scope: &TurnScope,
 ) -> Result<Option<ApprovalPromptContextView>, ApprovalPromptLookupError> {

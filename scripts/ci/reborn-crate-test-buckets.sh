@@ -39,6 +39,7 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_approvals: "agent-runtime",
       ironclaw_capabilities: "agent-runtime",
       ironclaw_host_api: "agent-runtime",
+      ironclaw_loop_contracts: "agent-runtime",
       ironclaw_loop_host: "agent-runtime",
 
       ironclaw_runner: "reborn-core",

@@ -6,19 +6,19 @@ use ironclaw_host_api::{
     ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
     result_meta::FailureKind,
 };
+use ironclaw_loop_contracts::{
+    AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
+    InMemoryRunProfileResolver, LoadCheckpointPayloadRequest, LoopCheckpointKind,
+    LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef, LoopHostMilestoneKind,
+    LoopHostMilestoneSink, LoopProgressEvent, LoopProgressPort, LoopRecoveryClass,
+    LoopRecoveryDisposition, LoopRecoveryStage, LoopRunContext, LoopSafeSummary,
+    RunProfileResolutionRequest, RunProfileResolver, StageCheckpointPayloadRequest,
+    SystemInferenceTaskId,
+};
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::test_support::in_memory_loop_checkpoint_store;
 use ironclaw_turns::{
-    InMemoryRunProfileResolver, LoopCheckpointStateRef, ProcessLoopCheckpointStore,
-    RunProfileResolver, TurnActor, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
-    run_profile::{
-        AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
-        LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopProgressEvent,
-        LoopProgressPort, LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage,
-        LoopRunContext, LoopSafeSummary, RunProfileResolutionRequest,
-        StageCheckpointPayloadRequest, SystemInferenceTaskId,
-    },
+    ProcessLoopCheckpointStore, TurnActor, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
 };
 
 async fn test_run_context() -> LoopRunContext {

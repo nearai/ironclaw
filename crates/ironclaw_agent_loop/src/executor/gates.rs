@@ -1,10 +1,7 @@
 use async_trait::async_trait;
-use ironclaw_turns::{
-    LoopBlocked, LoopExit,
-    run_profile::{
-        CapabilityApprovalResume, CapabilityCallCandidate, CapabilityResultMessage,
-        LoopProgressEvent,
-    },
+use ironclaw_loop_contracts::{
+    CapabilityApprovalResume, CapabilityCallCandidate, CapabilityResultMessage, LoopBlocked,
+    LoopExit, LoopProgressEvent,
 };
 
 use crate::{
@@ -57,17 +54,17 @@ pub(super) struct GateInput {
     pub(super) state: LoopExecutionState,
     pub(super) call: CapabilityCallCandidate,
     pub(super) kind: GateKind,
-    pub(super) gate_ref: ironclaw_turns::LoopGateRef,
+    pub(super) gate_ref: ironclaw_host_api::turn::LoopGateRef,
     pub(super) credential_requirements:
         Vec<ironclaw_host_api::decision::RuntimeCredentialAuthRequirement>,
     pub(super) approval_resume: Option<CapabilityApprovalResume>,
-    pub(super) auth_resume: Option<ironclaw_turns::run_profile::CapabilityAuthResume>,
+    pub(super) auth_resume: Option<ironclaw_loop_contracts::CapabilityAuthResume>,
 }
 
 pub(super) struct AwaitDependentRunGateInput {
     pub(super) state: LoopExecutionState,
     pub(super) call: CapabilityCallCandidate,
-    pub(super) gate_ref: ironclaw_turns::LoopGateRef,
+    pub(super) gate_ref: ironclaw_host_api::turn::LoopGateRef,
     pub(super) resolved_result: CapabilityResultMessage,
 }
 

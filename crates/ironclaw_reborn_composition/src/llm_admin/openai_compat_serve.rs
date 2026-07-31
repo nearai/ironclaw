@@ -12,6 +12,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ironclaw_filesystem::RootFilesystem;
+use ironclaw_host_api::turn::{IdempotencyKey, TurnGateRef, TurnRunId, TurnScope, TurnStatus};
 use ironclaw_host_api::{
     ids::{AgentId, ProjectId, TenantId, ThreadId},
     path::VirtualPath,
@@ -20,6 +21,7 @@ use ironclaw_host_api::{
         ProductSurfaceStreamRequest,
     },
 };
+use ironclaw_loop_contracts::LoopModelUsage;
 use ironclaw_product::{
     LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, RebornTimelineRequest,
     TIMELINE_VIEW,
@@ -56,9 +58,8 @@ use ironclaw_threads::{
     ToolResultReferenceEnvelope,
 };
 use ironclaw_turns::{
-    ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, GateRef, GetRunStateRequest,
-    IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnError,
-    TurnErrorCategory, TurnRunId, TurnScope, TurnStatus, run_profile::LoopModelUsage,
+    ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, GetRunStateRequest,
+    ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnError, TurnErrorCategory,
 };
 use sha2::{Digest, Sha256};
 
@@ -1343,7 +1344,7 @@ fn openai_compat_resume_turn_scope(
 }
 
 fn openai_compat_external_tool_resume_idempotency_key(
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
 ) -> Result<IdempotencyKey, OpenAiCompatHttpError> {
     const PREFIX: &str = "openai-compat-ext-resume-v1";
 

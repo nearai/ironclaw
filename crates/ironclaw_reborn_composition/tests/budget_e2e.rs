@@ -47,6 +47,7 @@ use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
+use ironclaw_loop_contracts::ModelProfileId;
 use ironclaw_loop_host::{ModelCost, ModelCostTable, StaticModelCostTable};
 use ironclaw_reborn_composition::test_support::{BudgetTestGateway, ScriptedReply};
 use ironclaw_reborn_composition::{
@@ -56,7 +57,6 @@ use ironclaw_reborn_composition::{
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::BudgetEvent;
 use ironclaw_turns::TurnStatus;
-use ironclaw_turns::run_profile::ModelProfileId;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 

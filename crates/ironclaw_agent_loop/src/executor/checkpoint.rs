@@ -1,11 +1,9 @@
 use async_trait::async_trait;
-use ironclaw_turns::{
-    LoopGateRef,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CheckpointSchemaId, LoopCheckpointRequest,
-        LoopProgressEvent, LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage,
-        LoopSafeSummary, StageCheckpointPayloadRequest, sanitize_model_visible_text,
-    },
+use ironclaw_host_api::turn::LoopGateRef;
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CheckpointSchemaId, LoopCheckpointRequest,
+    LoopProgressEvent, LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage,
+    LoopSafeSummary, StageCheckpointPayloadRequest, sanitize_model_visible_text,
 };
 
 use crate::state::{CheckpointKind, LoopExecutionState};
@@ -14,7 +12,7 @@ use crate::state::{CheckpointKind, LoopExecutionState};
 use crate::executor::CanonicalAgentLoopExecutor;
 
 #[cfg(test)]
-use ironclaw_turns::run_profile::AgentLoopDriverHost;
+use ironclaw_loop_contracts::AgentLoopDriverHost;
 
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointWrite, ExecutorStage, HostStage,

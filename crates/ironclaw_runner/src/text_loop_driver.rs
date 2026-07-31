@@ -7,16 +7,13 @@
 
 use async_trait::async_trait;
 use ironclaw_agent_loop::executor::HostStage;
-use ironclaw_turns::{
-    LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopFailureKind, LoopMessageRef,
-    RunProfileVersion,
-    run_profile::{
-        AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverHost,
-        AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, AgentLoopHostError,
-        AgentLoopHostErrorKind, FinalizeAssistantMessage, LoopModelRequest,
-        LoopPromptBundleRequest, ParentLoopOutput, PromptMode,
-    },
+use ironclaw_loop_contracts::{
+    AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverHost,
+    AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, AgentLoopHostError,
+    AgentLoopHostErrorKind, FinalizeAssistantMessage, LoopCompleted, LoopCompletionKind, LoopExit,
+    LoopFailureKind, LoopModelRequest, LoopPromptBundleRequest, ParentLoopOutput, PromptMode,
 };
+use ironclaw_turns::{LoopExitId, LoopMessageRef, RunProfileVersion};
 
 use crate::model_failure_mapping::host_stage_failure_category;
 
@@ -296,7 +293,7 @@ mod tests {
 
     fn text_only_context(
         driver: &TextOnlyModelReplyDriver,
-    ) -> ironclaw_turns::run_profile::LoopRunContext {
+    ) -> ironclaw_loop_contracts::LoopRunContext {
         let descriptor = driver.descriptor();
         let mut context = test_run_context("text-only-transcript-failure");
         context.resolved_run_profile.loop_driver = descriptor.clone();

@@ -80,7 +80,7 @@ run_architecture() {
   # Pins docs/reborn/contracts/host-api.md: every recoverable verdict carries
   # an inline model diagnostic, and legacy omissions upgrade explicitly.
   run_lib_test_exact ironclaw_host_api resolution::tests::recoverable_failure_carries_its_model_visible_diagnostic
-  run_lib_test_exact ironclaw_turns run_profile::host::capability::tests::legacy_capability_failure_without_detail_rehydrates_explicit_fallback
+  run_lib_test_exact ironclaw_loop_contracts host::capability::tests::legacy_capability_failure_without_detail_rehydrates_explicit_fallback
   # Pins docs/reborn/contracts/loop-exit.md: retired diagnostic_ref string/null
   # payloads remain readable but the retired field is never written again.
   run_lib_test_exact ironclaw_turns loop_exit::tests::loop_failed_accepts_retired_diagnostic_ref_but_does_not_serialize_it

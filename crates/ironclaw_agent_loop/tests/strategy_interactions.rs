@@ -9,7 +9,7 @@ use ironclaw_agent_loop::{
         ScriptedCapabilityOutcome, ScriptedModelResponse,
     },
 };
-use ironclaw_turns::{LoopExit, LoopFailureKind, run_profile::LoopRunInfoPort};
+use ironclaw_loop_contracts::{LoopExit, LoopFailureKind, LoopRunInfoPort};
 
 #[tokio::test(start_paused = true)]
 async fn gate_blocks_before_recovery_budget_exhausts() {

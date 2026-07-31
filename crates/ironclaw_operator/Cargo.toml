@@ -26,7 +26,7 @@ ironclaw_product = { path = "../ironclaw_product" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
-nix = { version = "0.30", default-features = false, features = ["process"] }
+nix = { version = "0.31", default-features = false, features = ["process"] }
 libc = "0.2"
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }

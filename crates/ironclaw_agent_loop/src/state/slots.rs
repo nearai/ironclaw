@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ironclaw_host_api::ids::CapabilityId;
-use ironclaw_turns::run_profile::CompactionInitiator;
+use ironclaw_loop_contracts::CompactionInitiator;
 
 use super::CapabilityCallSignature;
 

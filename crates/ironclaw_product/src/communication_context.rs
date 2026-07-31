@@ -5,16 +5,13 @@ use crate::{
     LifecycleProductService, LifecycleProductSurfaceContext, OutboundPreferencesProductService,
     RebornOutboundDeliveryTargetStatus,
 };
+use ironclaw_host_api::turn::{TurnActor, TurnScope};
 use ironclaw_host_api::{
     product_surface::ProductSurfaceCaller, state::InstallationState, surface::CapabilitySurfaceKind,
 };
-use ironclaw_turns::{
-    run_profile::{
-        CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
-        ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState,
-        DeliveryTargetSummary,
-    },
-    scope::{TurnActor, TurnScope},
+use ironclaw_loop_contracts::{
+    CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
+    ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
 };
 use tokio::join;
 use tokio::time::timeout;
@@ -239,6 +236,7 @@ mod tests {
         RebornOutboundPreferencesResponse, RebornSetOutboundPreferencesRequest,
     };
     use async_trait::async_trait;
+    use ironclaw_host_api::turn::{TurnActor, TurnScope};
     use ironclaw_host_api::{
         ids::{AgentId, ProjectId, TenantId, UserId},
         product_surface::{
@@ -248,9 +246,8 @@ mod tests {
         state::InstallationState,
         surface::CapabilitySurfaceKind,
     };
-    use ironclaw_turns::{
-        run_profile::{CommunicationContextProvider, ConnectedChannelsState, DeliveryTargetState},
-        scope::{TurnActor, TurnScope},
+    use ironclaw_loop_contracts::{
+        CommunicationContextProvider, ConnectedChannelsState, DeliveryTargetState,
     };
 
     use super::RuntimeCommunicationContextProvider;
@@ -884,14 +881,13 @@ mod tests {
             // Park forever — only an abort interrupts this.
             let never = Notify::new();
             never.notified().await;
-            None::<ironclaw_turns::run_profile::CommunicationRuntimeContext>
+            None::<ironclaw_loop_contracts::CommunicationRuntimeContext>
         });
 
         // Ensure the task is actually running and parked before we drop.
         task_started.notified().await;
 
-        let fetch =
-            ironclaw_turns::run_profile::CommunicationContextFetch::from_handle(handle, false);
+        let fetch = ironclaw_loop_contracts::CommunicationContextFetch::from_handle(handle, false);
         drop(fetch);
 
         // Give tokio's abort machinery time to drop the task future.

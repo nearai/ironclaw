@@ -224,19 +224,19 @@ mod tests {
     #[test]
     fn canonical_list_covers_loop_failure_kinds() {
         for kind in [
-            ironclaw_turns::LoopFailureKind::ModelError,
-            ironclaw_turns::LoopFailureKind::ContextBuildFailed,
-            ironclaw_turns::LoopFailureKind::CapabilityProtocolError,
-            ironclaw_turns::LoopFailureKind::IterationLimit,
-            ironclaw_turns::LoopFailureKind::InvalidModelOutput,
-            ironclaw_turns::LoopFailureKind::CheckpointRejected,
-            ironclaw_turns::LoopFailureKind::CheckpointUnavailable,
-            ironclaw_turns::LoopFailureKind::TranscriptWriteFailed,
-            ironclaw_turns::LoopFailureKind::DriverBug,
-            ironclaw_turns::LoopFailureKind::InterruptedUnexpectedly,
-            ironclaw_turns::LoopFailureKind::NoProgressDetected,
-            ironclaw_turns::LoopFailureKind::PolicyDenied,
-            ironclaw_turns::LoopFailureKind::CompactionUnavailable,
+            ironclaw_loop_contracts::LoopFailureKind::ModelError,
+            ironclaw_loop_contracts::LoopFailureKind::ContextBuildFailed,
+            ironclaw_loop_contracts::LoopFailureKind::CapabilityProtocolError,
+            ironclaw_loop_contracts::LoopFailureKind::IterationLimit,
+            ironclaw_loop_contracts::LoopFailureKind::InvalidModelOutput,
+            ironclaw_loop_contracts::LoopFailureKind::CheckpointRejected,
+            ironclaw_loop_contracts::LoopFailureKind::CheckpointUnavailable,
+            ironclaw_loop_contracts::LoopFailureKind::TranscriptWriteFailed,
+            ironclaw_loop_contracts::LoopFailureKind::DriverBug,
+            ironclaw_loop_contracts::LoopFailureKind::InterruptedUnexpectedly,
+            ironclaw_loop_contracts::LoopFailureKind::NoProgressDetected,
+            ironclaw_loop_contracts::LoopFailureKind::PolicyDenied,
+            ironclaw_loop_contracts::LoopFailureKind::CompactionUnavailable,
         ] {
             assert!(
                 ALL_RUN_FAILURE_CATEGORIES.contains(&kind.as_str()),
