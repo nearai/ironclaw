@@ -447,8 +447,9 @@ pub struct OutcomeRefs {
     pub preview: Option<ModelResultPreview>,
     /// Continuation metadata for a TRUNCATED first-look preview so the model can
     /// read the full result (`result_read`, large results): the referenced ref,
-    /// full byte size, next offset, and JSON-array element count. Empty (all
-    /// `None`) for a complete inline preview or no preview.
+    /// full byte size, next offset, and JSON-array element count. The metadata
+    /// remains present when an unsafe preview is suppressed, so the durable
+    /// source ref stays authoritative without exposing rejected content.
     #[serde(default, skip_serializing_if = "ResultPreviewMeta::is_empty")]
     pub preview_meta: ResultPreviewMeta,
     /// The preserved originating loop result ref, so output the loop staged under
@@ -464,9 +465,9 @@ pub struct OutcomeRefs {
     pub output_digest: Option<OutputDigest>,
 }
 
-/// Continuation metadata for a truncated first-look result preview (§5838). All
-/// fields default to `None` — an empty value means the preview (if any) is the
-/// complete result and needs no `result_read` follow-up.
+/// Continuation metadata for a first-look result preview (§5838). All fields
+/// default to `None`; metadata can remain non-empty when preview content is
+/// suppressed by model-visible safety validation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ResultPreviewMeta {
     /// The result ref the preview is OF. A `result_read` reading ANOTHER result
