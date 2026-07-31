@@ -1480,8 +1480,11 @@ fn child_result_from_outcome(
 fn result_reference_observation_from_outcome(
     outcome: &Outcome,
 ) -> Option<ModelVisibleToolObservation> {
-    let preview = outcome.refs.preview.as_ref()?;
+    let preview = outcome.refs.preview.as_ref();
     let meta = &outcome.refs.preview_meta;
+    if preview.is_none() && meta.is_empty() {
+        return None;
+    }
     // The observation references the preview's OWN result: `preview_meta`'s
     // referenced ref when it differs (a `result_read` presenting another result),
     // else the outcome's own preserved origin.
@@ -1508,7 +1511,7 @@ fn result_reference_observation_from_outcome(
         detail: ToolObservationDetail::ResultReference {
             result_ref,
             byte_len: outcome.refs.byte_len,
-            preview: Some(preview.as_str().to_string()),
+            preview: preview.map(|preview| preview.as_str().to_string()),
             // Continuation metadata for a truncated first-look preview; falls back
             // to the full inline size for a complete preview.
             total_bytes: meta.total_bytes.or(Some(outcome.refs.byte_len)),
