@@ -239,10 +239,33 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     .install(package_ref.clone(), &request.scope.user_id)
                     .await
                     .map_err(lifecycle_error)?;
+                // Pre-check activation requirements (package-declared runtime
+                // credentials PLUS any per-user account-setup requirement,
+                // e.g. Telegram pairing) before attempting activation. Without
+                // this, an extension whose only outstanding requirement is an
+                // account-setup step (not a package-level runtime credential)
+                // sails through `activate_with_credential_gate`'s internal
+                // package-only check straight to Active, never raising the
+                // auth gate.
+                let requirements = self
+                    .extension_management
+                    .activation_credential_requirements(&package_ref, &request.scope.user_id)
+                    .await
+                    .map_err(install_activation_readiness_error)?;
                 let credential_gate = RuntimeExtensionActivationCredentialGate::new(
                     request.scope.clone(),
                     Arc::clone(&self.credential_accounts),
                 );
+                let missing_requirements = credential_gate
+                    .missing_requirements(requirements)
+                    .await
+                    .map_err(credential_stage_error)?;
+                if !missing_requirements.is_empty() {
+                    return Err(FirstPartyCapabilityError::auth_required_for_credentials(
+                        missing_requirements,
+                    )
+                    .with_usage(resource_usage(started)));
+                }
                 match self
                     .extension_management
                     .activate_with_credential_gate(
@@ -265,22 +288,16 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     Ok(activation_response)
                         if activation_response_has_credential_blocker(&activation_response) =>
                     {
-                        let requirements = self
-                            .extension_management
-                            .activation_credential_requirements(
-                                &package_ref,
-                                &request.scope.user_id,
-                            )
-                            .await
-                            .map_err(install_activation_readiness_error)?;
-                        if requirements.is_empty() {
-                            Ok(install_response)
-                        } else {
-                            Err(FirstPartyCapabilityError::auth_required_for_credentials(
-                                requirements,
-                            )
-                            .with_usage(resource_usage(started)))
-                        }
+                        // Requirements the caller must satisfy are gated by the
+                        // pre-check above, before activation runs. A blocker
+                        // that only appears *after* activation is discovered
+                        // state (e.g. a hosted MCP package whose catalog
+                        // preparation could not reach its server), so the
+                        // install reports `setup_needed` and the turn
+                        // completes. Raising an auth gate here instead hangs
+                        // the turn on a requirement the caller was never asked
+                        // for and cannot resolve from this prompt.
+                        Ok(install_response)
                     }
                     Ok(_) => Ok(install_response),
                     Err(error) => install_activation_error(error, install_response),

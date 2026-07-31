@@ -2673,9 +2673,6 @@ pub(crate) async fn ensure_lifecycle_package_registered(
             .await
             .map_err(map_extension_error),
         Some(current) if current == &package => Ok(()),
-        // A non-MCP package could have been installed while we rebuilt it.
-        // Keep the loader-owned runtime manifest data in that package.
-        Some(_) if record.resolved().mcp.is_none() => Ok(()),
         Some(_) => lifecycle.update(package).await.map_err(map_extension_error),
     }
 }
