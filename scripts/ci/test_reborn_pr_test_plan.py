@@ -317,7 +317,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertIn("  webui-v2-test-lanes:", workflow)
         self.assertIn("lane: fast-contracts", workflow)
         self.assertNotIn("\n  blackbox-smoke:", workflow)
-        self.assertIn("max-parallel: 5", workflow)
+        self.assertIn("max-parallel: 6", workflow)
         self.assertIn("reborn-webui-v2-sso-binary-${{", workflow)
         self.assertIn("reborn-webui-v2-binary-${{", workflow)
         self.assertIn("touch target/debug/ironclaw", workflow)
