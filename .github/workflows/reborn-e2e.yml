@@ -47,7 +47,12 @@ on:
     branches:
       - main
     paths:
-      - "crates/ironclaw_*/**"
+      # `crates/**`, not `crates/ironclaw_*/**`: a filter keyed to the flat
+      # crate layout silently stops matching when crates move into family
+      # directories (`crates/<family>/ironclaw_*`, PROPOSAL §5) — every E2E job
+      # skipped, roll-up green, nothing run. Depth-independent by construction.
+      # See docs/reborn/target-architecture/CHECKLIST.md WS10.
+      - "crates/**"
       - "docs/reborn/**"
       - "scripts/reborn-e2e-rust.sh"
       - "scripts/ci/*hermetic*"
@@ -99,8 +104,11 @@ jobs:
           CHANGED_FILES="$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA")"
 
           # Keep this pattern in sync with the push `paths:` filter in the
-          # `on:` block above.
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_[^/]+/|docs/reborn/|scripts/reborn-e2e-rust\.sh$|scripts/ci/[^/]*hermetic[^/]*$|tests/e2e/|build\.rs$|providers\.json$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/reborn-e2e\.yml$)'; then
+          # `on:` block above. `^crates/` is deliberately depth-independent
+          # for the same reason (CHECKLIST WS10); both forms are pinned by
+          # scripts/ci/ws12_workflow_contracts.py, which replays a nested
+          # crate path through this exact regex.
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|docs/reborn/|scripts/reborn-e2e-rust\.sh$|scripts/ci/[^/]*hermetic[^/]*$|tests/e2e/|build\.rs$|providers\.json$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/reborn-e2e\.yml$)'; then
             echo "has_e2e_scope=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_e2e_scope=false" >> "$GITHUB_OUTPUT"

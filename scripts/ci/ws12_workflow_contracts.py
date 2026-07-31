@@ -70,6 +70,66 @@ UNCONDITIONAL_SKIP = re.compile(
     """
 )
 
+# The Reborn E2E workflow decides "is this change in scope?" twice: a `paths:`
+# glob list for push runs, and a mirrored grep -E in the `changes` job for
+# pull_request/merge_group. Both are path filters, so neither can assert
+# anything about itself — a filter that matches nothing skips every job and the
+# roll-up reports success. That is the WS10 failure mode
+# (docs/reborn/target-architecture/CHECKLIST.md), and it arrives silently the
+# day crates move into family directories.
+#
+# So the pin lives here: extract the `changes`-job regex from the workflow text
+# and replay real paths through it, including a crate nested one level down.
+E2E_WORKFLOW = ".github/workflows/reborn-e2e.yml"
+E2E_SCOPE_REGEX = re.compile(r"grep -Eq '(\^\([^']+\))'")
+E2E_PATHS_GLOB = '- "crates/**"'
+
+# (path, must_be_in_scope)
+E2E_SCOPE_PROBES: tuple[tuple[str, bool], ...] = (
+    ("crates/ironclaw_webui/src/lib.rs", True),
+    # The target-architecture layout. A `crates/ironclaw_[^/]+/` filter misses
+    # every one of these.
+    ("crates/substrates/ironclaw_events/src/lib.rs", True),
+    ("crates/extensions/packages/slack/manifest.toml", True),
+    ("docs/reborn/target-architecture/CHECKLIST.md", True),
+    ("tests/e2e/scenarios/test_reborn_blackbox_smoke.py", True),
+    ("Cargo.toml", True),
+    # Still out of scope: the filter must stay a filter.
+    ("README.md", False),
+    ("docs/plans/whatever.md", False),
+    (".github/workflows/code_style.yml", False),
+    ("src/main.rs", False),
+)
+
+
+def validate_e2e_scope_filters(text: str) -> list[str]:
+    """Return every way the Reborn E2E scope filters could scan nothing."""
+    errors: list[str] = []
+
+    if E2E_PATHS_GLOB not in text:
+        errors.append(
+            f"{E2E_WORKFLOW}: the push `paths:` filter must contain {E2E_PATHS_GLOB} "
+            "so it keeps matching when crates move into family directories"
+        )
+
+    match = E2E_SCOPE_REGEX.search(text)
+    if match is None:
+        errors.append(
+            f"{E2E_WORKFLOW}: could not find the `changes` job scope regex "
+            "(grep -Eq '^(...)') — it is the only scope gate for pull_request and "
+            "merge_group runs and must stay assertable"
+        )
+        return errors
+
+    scope = re.compile(match.group(1))
+    for path, expected in E2E_SCOPE_PROBES:
+        if bool(scope.search(path)) != expected:
+            verdict = "must be in scope" if expected else "must NOT be in scope"
+            errors.append(
+                f"{E2E_WORKFLOW}: scope regex {match.group(1)!r} — {path!r} {verdict}"
+            )
+    return errors
+
 
 def validate_workflow_texts(workflows: dict[str, str]) -> list[str]:
     """Return every missing lane marker; an empty result is the only pass."""
@@ -84,6 +144,9 @@ def validate_workflow_texts(workflows: dict[str, str]) -> list[str]:
         )
         if UNCONDITIONAL_SKIP.search(text):
             errors.append(f"{path}: contains an unconditionally skipped lane")
+    e2e = workflows.get(E2E_WORKFLOW)
+    if e2e is not None:
+        errors.extend(validate_e2e_scope_filters(e2e))
     return errors
 
 

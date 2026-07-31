@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import pathlib
 import statistics
 import subprocess
 import sys
@@ -231,9 +233,41 @@ def tier2(commits: list[dict], now: datetime) -> dict:
 # Tier 3 — codebase health
 # ----------------------------------------------------------------------------
 
-COMPOSITION = "crates/ironclaw_reborn_composition/src"
 V1_SRC = "src"
 CRATES_SRC = "crates"
+
+COMPOSITION_CRATE = "ironclaw_reborn_composition"
+ARCHITECTURE_CRATE = "ironclaw_architecture"
+
+# Tier 3's crate-shaped probes resolve their paths through the crate tree
+# instead of hardcoding `crates/<crate>/src` and `crates/*/src`. Those globs
+# match nothing once crates move into family directories
+# (`crates/<family>/ironclaw_*`, PROPOSAL §5): `find` finds no files, every
+# probe returns 0, and the report renders composition at 0% of a 0-line
+# codebase — a perfect score for a tool that measured nothing.
+# See docs/reborn/target-architecture/CHECKLIST.md WS10.
+sys.path.insert(
+    0,
+    str(pathlib.Path(__file__).resolve().parent / "ci" / "lib"),
+)
+from crate_tree import crate_directories, crate_directory  # noqa: E402
+
+
+def _crate_src_dirs() -> list[str]:
+    """Every existing `<crate>/src` tree — the denominator's exact membership.
+
+    Matches `crates/*/src` on the flat tree (a shell glob only expands to
+    directories that exist, so non-existent `src/` trees are skipped here too).
+    """
+    return [
+        f"{directory}/src"
+        for directory in crate_directories(".")
+        if os.path.isdir(f"{directory}/src")
+    ]
+
+
+def composition_src() -> str:
+    return f"{crate_directory(COMPOSITION_CRATE, '.')}/src"
 
 
 def tree_bytes(commit: str, path: str, suffix: str = ".rs") -> int:
@@ -273,6 +307,10 @@ def count_matches(pattern: str, path: str) -> int:
 def tier3(now: datetime) -> dict:
     res: dict = {}
 
+    # Resolved once, loudly: a missing composition crate raises here rather
+    # than quietly measuring an empty directory.
+    composition = composition_src()
+
     # ---- historical size trend (byte-size index, calibrated to current LOC) ----
     # sample the last commit before each month boundary, back to history start.
     samples = []
@@ -285,15 +323,15 @@ def tier3(now: datetime) -> dict:
         samples.append({
             "months_ago": months_ago,
             "date": cdate,
-            "composition_bytes": tree_bytes(sha, COMPOSITION),
+            "composition_bytes": tree_bytes(sha, composition),
             "v1_src_bytes": tree_bytes(sha, V1_SRC),
             "crates_bytes": tree_bytes(sha, CRATES_SRC),
         })
     samples.sort(key=lambda s: s["date"])
 
     # calibrate bytes->LOC using the current working tree (exact)
-    cur_comp_lines = _exact_lines(COMPOSITION)
-    cur_comp_bytes = tree_bytes("HEAD", COMPOSITION) or 1
+    cur_comp_lines = _exact_lines(composition)
+    cur_comp_bytes = tree_bytes("HEAD", composition) or 1
     bytes_per_line = cur_comp_bytes / cur_comp_lines if cur_comp_lines else 30.0
     for s in samples:
         s["composition_kloc"] = round(s["composition_bytes"] / bytes_per_line / 1000, 1)
@@ -308,19 +346,18 @@ def tier3(now: datetime) -> dict:
     res["size_trend"] = samples
 
     # ---- current-state snapshot ----
-    import glob, os
-    crate_dirs = [d for d in glob.glob("crates/*") if os.path.isdir(d)]
-    res["crate_count"] = len(crate_dirs)
+    res["crate_count"] = len(crate_directories("."))
     res["composition_kloc_now"] = round(cur_comp_lines / 1000, 1)
     res["v1_src_kloc_now"] = round(_exact_lines(V1_SRC) / 1000, 1)
     res["crates_kloc_now"] = round(_exact_lines(CRATES_SRC) / 1000, 1)
 
     # Gate-aligned current share — matches scripts/ci/check-composition-budget.sh
-    # EXACTLY (production LOC, test-only files excluded, crates/*/src denominator).
-    # This is the number the ratchet enforces; the byte-based size_trend below is
-    # a DIFFERENT, coarser measurement (see its label).
-    comp_prod = _prod_lines(COMPOSITION)
-    all_prod = _prod_lines("crates/*/src")
+    # EXACTLY (production LOC, test-only files excluded, every crate's src/ tree
+    # as the denominator). This is the number the ratchet enforces; the
+    # byte-based size_trend below is a DIFFERENT, coarser measurement (see its
+    # label).
+    comp_prod = _prod_lines(composition)
+    all_prod = _prod_lines(*_crate_src_dirs())
     res["composition_share_gate_pct"] = (
         round(100 * comp_prod / all_prod, 2) if all_prod else 0.0
     )
@@ -357,11 +394,14 @@ def tier3(now: datetime) -> dict:
 TEST_FILE_RE = r"(^|/)(tests?\.rs|test_[^/]*\.rs|[^/]*_tests?\.rs)$|/tests/"
 
 
-def _prod_lines(path_glob: str) -> int:
-    """Production LOC of *.rs under path_glob, excluding test-only files —
+def _prod_lines(*paths: str) -> int:
+    """Production LOC of *.rs under `paths`, excluding test-only files —
     the gate's exact numerator/denominator definition."""
+    if not paths:
+        return 0
+    roots = " ".join(f"'{path}'" for path in paths)
     out = sh(
-        f"find {path_glob} -name '*.rs' -type f 2>/dev/null "
+        f"find {roots} -name '*.rs' -type f 2>/dev/null "
         f"| {{ grep -vE \"{TEST_FILE_RE}\" || true; }} "
         f"| tr '\\n' '\\0' | xargs -0 cat 2>/dev/null | wc -l"
     )
@@ -375,7 +415,7 @@ def _governed_pipeline(inner: str) -> str:
     """find composition production files (excl slack/extension_host — the separate
     workstream) piped through `inner` — the exact scope the dispatch ratchet uses."""
     return (
-        f"find {COMPOSITION} -name '*.rs' -type f 2>/dev/null "
+        f"find '{composition_src()}' -name '*.rs' -type f 2>/dev/null "
         f"| {{ grep -vE \"{TEST_FILE_RE}\" || true; }} "
         f"| {{ grep -vE '/(slack|extension_host)/' || true; }} "
         f"| tr '\\n' '\\0' | {{ xargs -0 {inner} 2>/dev/null || true; }}"
@@ -418,9 +458,12 @@ def _files_over(threshold: int) -> list:
 
 
 def _boundary_tests() -> int:
-    f = "crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs"
+    f = (
+        f"{crate_directory(ARCHITECTURE_CRATE, '.')}"
+        "/tests/reborn_dependency_boundaries.rs"
+    )
     # grep -c exits 1 when zero matches — that is a valid 0, not a probe failure.
-    out = sh(f"grep -cE '#\\[test\\]' {f} 2>/dev/null", ok=(0, 1))
+    out = sh(f"grep -cE '#\\[test\\]' '{f}' 2>/dev/null", ok=(0, 1))
     try:
         return int(out.strip() or 0)
     except ValueError:

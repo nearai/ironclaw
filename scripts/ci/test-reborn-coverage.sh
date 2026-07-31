@@ -215,7 +215,12 @@ capture "${merge_sh}" "${tmp_root}/m2_merged.lcov" "${fixtures_dir}/does_not_exi
 assert_exit_code "M2: merge exits non-zero for missing input" 1 "${CAP_RC}"
 assert_contains "M2: merge reports missing input file" "${CAP_ERR}" "input lcov file not found"
 
-# M3: single input with zero matching (crates/ironclaw_*) files -> empty output, exit 0.
+# M3: single input with zero matching workspace-crate files -> fail closed.
+# This used to write an empty tracefile and exit 0. That outcome is
+# indistinguishable from "the crate tree moved and every SF: record now falls
+# outside the filter", which is how coverage goes dark while CI stays green
+# (docs/reborn/target-architecture/CHECKLIST.md WS10). Nothing legitimate
+# produces it: the lanes instrument the whole workspace build.
 cat > "${fixtures_dir}/m3_no_match.lcov" <<'EOF'
 SF:/work/ironclaw/src/other.rs
 DA:1,1
@@ -224,8 +229,72 @@ LH:1
 end_of_record
 EOF
 capture "${merge_sh}" "${tmp_root}/m3_merged.lcov" "${fixtures_dir}/m3_no_match.lcov"
-assert_exit_code "M3: merge exits 0 when nothing matches the crate filter" 0 "${CAP_RC}"
-assert_eq "M3: merge writes an empty tracefile when nothing matches" "" "$(cat "${tmp_root}/m3_merged.lcov")"
+assert_exit_code "M3: merge fails closed when nothing matches the crate filter" 1 "${CAP_RC}"
+assert_contains "M3: merge names the empty-report failure" "${CAP_ERR}" \
+  "no workspace crate source files matched"
+assert_eq "M3: merge writes no tracefile when nothing matches" "absent" \
+  "$([ -e "${tmp_root}/m3_merged.lcov" ] && echo present || echo absent)"
+
+# M5: third-party sources whose own path contains `crates/` are NOT workspace
+# crates and must stay out of the report (the vendored-`crates/` trap that a
+# naive `crates/<anything>/` pattern would fall into).
+cat > "${fixtures_dir}/m5_vendored.lcov" <<'EOF'
+SF:/home/runner/.cargo/registry/src/index.crates.io-1949cf8c/wasmtime-46.0.1/crates/wasmtime/src/lib.rs
+DA:1,9
+LF:1
+LH:1
+end_of_record
+SF:/work/ironclaw/crates/ironclaw_runner/src/runtime.rs
+DA:1,3
+LF:1
+LH:1
+end_of_record
+EOF
+capture "${merge_sh}" "${tmp_root}/m5_merged.lcov" "${fixtures_dir}/m5_vendored.lcov"
+assert_exit_code "M5: merge exits 0 with one workspace file present" 0 "${CAP_RC}"
+m5_merged_body="$(cat "${tmp_root}/m5_merged.lcov")"
+assert_contains "M5: merge keeps the workspace crate source" "${m5_merged_body}" \
+  "crates/ironclaw_runner/src/runtime.rs"
+assert_not_contains "M5: merge drops a vendored crate that ships its own crates/ dir" \
+  "${m5_merged_body}" "wasmtime"
+
+# M6: the crate filter follows the tree, it is not keyed to `crates/ironclaw_*`.
+# A repo whose crates live in family directories (the target-architecture
+# layout) still merges; the same tracefile against a repo root with no crate
+# tree at all fails closed instead of reporting an empty success.
+m6_root="${tmp_root}/m6_nested_repo"
+mkdir -p "${m6_root}/crates/substrates/ironclaw_events/src"
+printf '[package]\nname = "ironclaw_events"\n' \
+  > "${m6_root}/crates/substrates/ironclaw_events/Cargo.toml"
+# 20 more crate directories so the discovery floor is satisfied by a realistic
+# tree rather than by a single fixture crate.
+for i in $(seq 1 20); do
+  mkdir -p "${m6_root}/crates/domains/ironclaw_filler_${i}/src"
+  printf '[package]\nname = "ironclaw_filler_%s"\n' "${i}" \
+    > "${m6_root}/crates/domains/ironclaw_filler_${i}/Cargo.toml"
+done
+cat > "${fixtures_dir}/m6_nested.lcov" <<'EOF'
+SF:/work/ironclaw/crates/substrates/ironclaw_events/src/lib.rs
+DA:1,4
+DA:2,0
+LF:2
+LH:1
+end_of_record
+EOF
+capture env IRONCLAW_REPO_ROOT="${m6_root}" \
+  "${merge_sh}" "${tmp_root}/m6_merged.lcov" "${fixtures_dir}/m6_nested.lcov"
+assert_exit_code "M6: merge finds a crate nested under a family directory" 0 "${CAP_RC}"
+assert_contains "M6: merged output keeps the nested crate source" \
+  "$(cat "${tmp_root}/m6_merged.lcov")" \
+  "SF:/work/ironclaw/crates/substrates/ironclaw_events/src/lib.rs"
+
+m6_empty_root="${tmp_root}/m6_no_crate_tree"
+mkdir -p "${m6_empty_root}"
+capture env IRONCLAW_REPO_ROOT="${m6_empty_root}" \
+  "${merge_sh}" "${tmp_root}/m6_empty_merged.lcov" "${fixtures_dir}/m6_nested.lcov"
+assert_exit_code "M6: merge fails closed when the crate tree is missing" 1 "${CAP_RC}"
+assert_contains "M6: merge names the missing crate tree" "${CAP_ERR}" \
+  "crate discovery cannot run"
 
 # M4: separate cargo-llvm-cov reports without trailing newlines remain
 # separate records. This is the shape consumed by the crate-bucket workflow;
