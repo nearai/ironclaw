@@ -175,13 +175,15 @@ reason = "Struct field declaration; only the GateRef -> TurnGateRef type name ch
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
-[[exemption]]
-path = "crates/ironclaw_turns/src/run_profile/runtime_context.rs"
-lines = [575, 576]
-owner = "@nearai/reborn"
-reason = "Function parameter declarations repointed from the crate's own prelude to ironclaw_host_api::turn. Not executable, so the file contributes no instrumented lines."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-10-31"
+# WS1.1 carried an exemption here for
+# `crates/ironclaw_turns/src/run_profile/runtime_context.rs` lines 575-576
+# (function parameter declarations repointed to `ironclaw_host_api::turn`).
+# WS1.2 moved that file to `crates/ironclaw_loop_contracts/src/runtime_context.rs`
+# and the entry was DELETED rather than repointed, because those lines are no
+# longer changed lines: WS1.1 merged, so they are baseline on main, and this
+# PR's own diff pairs the file as a 99%-similarity rename whose only changed
+# lines are import statements. Repointing would have re-exempted lines the gate
+# no longer flags. Verified with the gate's own diff invocation, not by reading.
 
 [[exemption]]
 path = "crates/ironclaw_turns/src/status.rs"
