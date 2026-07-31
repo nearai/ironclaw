@@ -37,6 +37,19 @@ of a port declared here (§6.1.4's rule applies family-wide — the
 `PreferenceTargetCodec` implementations live in the Slack and Telegram packages,
 which is the point).
 
+## Why none of these traits is sealed
+
+`ironclaw_agent_loop::planner` is the workspace's sealed-strategy template: a
+private `sealed::Sealed` supertrait with a closed impl list, so no crate outside
+the owner can add a variant of a *strategy* the host must reason about
+exhaustively. **The opposite is true here.** Every trait in this crate exists to
+be implemented outside it — `PreferenceTargetCodec` by the channel packages,
+`Extension` and the `ChannelIdentity*` hooks by extension implementations and
+their hosts. Sealing them would forbid exactly the extensibility the unified
+extension model is built on, so it is not an omission: a trait added here is
+open by default, and one that genuinely needs a closed impl set is a sign it
+belongs in an owner crate instead.
+
 ## Dependencies
 
 `ironclaw_host_api` and nothing else internal. No framework, driver, or runtime
