@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use ironclaw_extensions::{
     ExtensionManifestRecord, ExtensionPackage, ManifestSource, PackageDefinitionRetention,
-    PackageRootBinding, PreparationRequirement,
+    PackageRootBinding,
 };
 use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
@@ -289,11 +289,10 @@ effects = ["network", "use_secret"]
         resolved,
         Some(manifest_hash),
     )
-    .map(|record| {
-        record
-            .with_initial_preparation(PreparationRequirement::Required)
-            .with_definition_retention(PackageDefinitionRetention::RetainInCatalog)
-    })
+    // The seed declares no model-visible capability — those arrive from
+    // discovery — so "not resolved yet" is already readable from the package
+    // itself and needs no stored flag alongside it.
+    .map(|record| record.with_definition_retention(PackageDefinitionRetention::RetainInCatalog))
     .map_err(map_extension_installation_error)
 }
 

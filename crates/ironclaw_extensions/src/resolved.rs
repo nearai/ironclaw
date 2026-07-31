@@ -84,10 +84,6 @@ pub struct ResolvedExtensionManifest {
     /// `root: Option<VirtualPath>` wire is private to `WireManifestRecord`.
     #[serde(default)]
     pub root_binding: PackageRootBinding,
-    /// Whether a fresh installation can activate immediately or must first
-    /// pass through the composed preparation strategy.
-    #[serde(default)]
-    pub initial_preparation: PreparationRequirement,
     /// Present iff the manifest declares `[mcp]` (v3 hosted MCP servers).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<ResolvedMcpDeclaration>,
@@ -117,14 +113,6 @@ pub struct ResolvedExtensionManifest {
     pub section_surfaces: Vec<ResolvedSectionSurface>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<HookSectionEntryV2>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PreparationRequirement {
-    #[default]
-    Ready,
-    Required,
 }
 
 /// A hosted-MCP server declaration (`[mcp]`): the proxied server whose
@@ -189,6 +177,24 @@ pub struct ResolvedSectionSurface {
 }
 
 impl ResolvedExtensionManifest {
+    /// Whether this manifest declares any capability the model can call.
+    ///
+    /// This is the derived "the package's capabilities are resolved" signal.
+    /// A package whose capabilities are supplied by a later runtime step
+    /// declares none until that step completes, so it publishes nothing —
+    /// which is the whole of its "not ready" meaning. Deriving it from the
+    /// package replaces a stored readiness flag that every installation had
+    /// to carry and that generic lifecycle code read for *every* extension.
+    ///
+    /// `tools` alone is the wrong test: it also holds host-internal entries
+    /// that are never model-visible (see the field's own contract), so it is
+    /// non-empty even for a package that publishes nothing.
+    pub fn has_model_visible_capabilities(&self) -> bool {
+        self.tools
+            .iter()
+            .any(|tool| matches!(tool.visibility, crate::v2::CapabilityVisibility::Model))
+    }
+
     pub fn package_root_binding(&self) -> &PackageRootBinding {
         &self.root_binding
     }
@@ -239,7 +245,6 @@ impl ResolvedExtensionManifest {
             // Parsing precedes package materialization. Only the designated
             // legacy loader may resolve this compatibility state.
             root_binding: PackageRootBinding::FabricateOnLoad,
-            initial_preparation: PreparationRequirement::Ready,
             mcp: None,
             tools: manifest.capabilities.clone(),
             channel: None,

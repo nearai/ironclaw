@@ -118,11 +118,15 @@ pub async fn boot_installation_records(
         else {
             continue;
         };
-        if manifest_record.initial_preparation()
-            == ironclaw_extensions::PreparationRequirement::Required
-        {
-            continue;
-        }
+        // Every durable enabled installation stages into the host; whether a
+        // package has anything to publish is a property of its own declared
+        // capabilities, derived where the tool adapter is actually bound
+        // (`CompositionExtensionLoader::load`'s `declares_tools`), not a
+        // separate flag read here. A package that has not yet resolved a real
+        // capability set stages and attempts activation like any other
+        // record; the binding-rule check downstream fails that specific
+        // activation closed (no publish) without this boot list needing to
+        // know why.
         records.push(boot_installation_record(
             installation.installation_id().as_str(),
             &extension_id,
@@ -327,15 +331,21 @@ impl ExtensionLoader for CompositionExtensionLoader {
             .to_internal(source)
             .map_err(|error| load_error(format!("resolved contract rebuild failed: {error}")))?;
         let declares_channel = ctx.resolved.channel.is_some();
-        // Mirrors `check_binding`'s own declared-tools test (entrypoint.rs):
-        // a resolved contract with no `[[tools]]` and no `[mcp]` declares no
-        // tool surface at all. A package in that shape (e.g. a channel-only
-        // first-party extension) has nothing to bind, so the
-        // lane binder must not be asked to produce an adapter for it — the
-        // lane binder always succeeds with a (possibly empty-routed) tool
-        // adapter, which would then fail the binding-rule check with
-        // `UndeclaredToolAdapter` even though nothing is actually bound.
-        let declares_tools = !ctx.resolved.tools.is_empty() || ctx.resolved.mcp.is_some();
+        // Pure capability count, mirroring `check_binding`'s own
+        // declared-tools test (entrypoint.rs) — the two must stay in
+        // lockstep or activation fails the binding-rule check before
+        // publish. A resolved contract with a genuinely empty declared-tool
+        // list has no tool surface at all (e.g. a channel-only first-party
+        // extension); the lane binder must not be asked to produce an
+        // adapter for it, since the lane binder always succeeds with a
+        // (possibly empty-routed) tool adapter, which would then fail the
+        // binding-rule check with `UndeclaredToolAdapter` even though
+        // nothing is actually bound. A package whose only declared tool is
+        // an internal, never-model-visible connection-management entry
+        // still counts as declaring tools by this same count — that
+        // package's model-visible catalog readiness is validated
+        // separately, downstream, at the binding-rule check.
+        let declares_tools = !ctx.resolved.tools.is_empty();
 
         if let ironclaw_extensions::ExtensionRuntimeV2::FirstParty { service } =
             &ctx.resolved.runtime
@@ -442,10 +452,10 @@ pub(crate) fn rebuild_package_from_resolved(
             // persists an EMPTY dynamic-schema map while its manifest still
             // carries the discovery-placeholder capability. That is a
             // legitimate pre-discovery state, not a persistence defect: the
-            // rebuilt in-memory package is never published for callable
-            // dispatch until `PreparationRequirement::Ready` (`install`'s
-            // `visible_capability_ids` gating stays empty until then), so a
-            // placeholder null-schema descriptor is safe here — mirrors the
+            // rebuilt in-memory package declares no model-visible capability
+            // until that later step records one, so it is never published for
+            // callable dispatch and a placeholder null-schema descriptor is
+            // safe here — mirrors the
             // Materialized branch's `!schemas.is_empty()` gate above and
             // `hosted_mcp_manifest::available_package`'s tolerant
             // construction for the same not-yet-discovered state. Fail

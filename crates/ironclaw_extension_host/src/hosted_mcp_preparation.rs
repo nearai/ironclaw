@@ -1,8 +1,9 @@
 //! Hosted MCP package-definition admission and installation preparation.
 //!
-//! The generic lifecycle sees only `PreparationRequirement::Required` and
-//! calls [`HostedMcpPreparationService::prepare_if_pending`]. OAuth metadata,
-//! discovery, and catalog safety remain private to this concrete strategy.
+//! The generic lifecycle knows nothing about discovery: it calls
+//! [`HostedMcpPreparationService::prepare_if_pending`] and reads readiness off
+//! the package itself. OAuth metadata, discovery, and catalog safety remain
+//! private to this concrete strategy.
 
 use std::sync::Arc;
 
@@ -133,8 +134,10 @@ impl HostedMcpPreparationService {
                 .await
                 .map_err(crate::product_lifecycle::map_extension_installation_error)?
                 .ok_or_else(crate::hosted_mcp_manifest::name_unavailable)?;
-            let best_effort = manifest.initial_preparation()
-                == ironclaw_extensions::PreparationRequirement::Ready;
+            // A package that already publishes something model-visible is not
+            // waiting on discovery to become usable: any discovery run for it
+            // is a refresh, so failure must stay non-fatal.
+            let best_effort = manifest.resolved().has_model_visible_capabilities();
             if best_effort && manifest.resolved().mcp.is_none() {
                 // No `[mcp]` declaration at all: nothing to discover, ever.
                 self.sync_lifecycle_package(&extension_id).await?;
@@ -362,19 +365,17 @@ impl HostedMcpPreparationService {
             finalized_resolved,
             manifest.manifest_hash().cloned(),
         )
-        .map(|record| {
-            record
-                .with_initial_preparation(ironclaw_extensions::PreparationRequirement::Ready)
-                .with_definition_retention(manifest.definition_retention())
-        })
+        // The finalized record carries the discovered model-visible
+        // capabilities, so it reads as resolved without a stored flag.
+        .map(|record| record.with_definition_retention(manifest.definition_retention()))
         .map_err(crate::product_lifecycle::map_extension_installation_error)?;
         if best_effort {
-            // `finalize_preparation` asserts a `Required` -> `Ready` pending
-            // lease (`take_v2_preparation_lease` rejects any installation
-            // whose persisted `initial_preparation` isn't already
-            // `Required`). A best-effort refresh runs on a package that is
-            // already `Ready`, so there is no pending lease to finalize —
-            // persist the refreshed catalog as a plain upsert instead.
+            // `finalize_preparation` asserts a pending lease
+            // (`take_v2_preparation_lease` rejects any installation that is
+            // not awaiting its first resolution). A best-effort refresh runs
+            // on a package that already publishes capabilities, so there is
+            // no pending lease to finalize — persist the refreshed catalog as
+            // a plain upsert instead.
             //
             // `installation` predates the unlocked discovery call, and this
             // upsert writes with `CasExpectation::Any`, so a concurrent

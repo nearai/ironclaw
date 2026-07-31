@@ -189,16 +189,38 @@ impl AuthRecipeResolver for SnapshotAuthRecipeResolver {
         requester_extension: Option<&ExtensionId>,
         vendor: &str,
     ) -> Option<ResolvedVendorAuthRecipe> {
-        let requester_extension = requester_extension?;
+        // The scope ceiling for a vendor is the UNION across every installed
+        // extension that uses it — not just the requesting extension's own
+        // declaration.
+        //
+        // Several extensions can share one credential account for a vendor,
+        // and that account stores a single scope set which each exchange
+        // *replaces* rather than merges. Resolving a narrower, per-extension
+        // ceiling therefore clamps the granted scopes to the requester's own
+        // and overwrites every sibling's — so completing setup for one
+        // extension silently strips the scopes of the ones already connected,
+        // and they fall back to reporting that setup is still needed.
         let snapshot = self.watch.current();
-        if let Some(extension) = snapshot.extension(requester_extension.as_str())
-            && let Some(recipe) = recipe_for_manifest(&extension.resolved, vendor)
-        {
-            return Some(recipe);
+        let manifests: Vec<Arc<ResolvedExtensionManifest>> = snapshot
+            .extension_ids()
+            .into_iter()
+            .filter_map(|id| snapshot.extension(&id))
+            .map(|extension| Arc::clone(&extension.resolved))
+            .collect();
+        match unified_vendor_recipes(manifests.iter().map(Arc::as_ref)) {
+            Ok(recipes) => {
+                if let Some(recipe) = recipes.into_iter().find(|recipe| recipe.vendor == vendor) {
+                    return Some(recipe);
+                }
+            }
+            Err(conflict) => {
+                // Activation-time conflict checks should have prevented this;
+                // fail closed for the conflicting vendor, still allow the
+                // fallback catalog to answer.
+                tracing::warn!(%conflict, "active snapshot carries conflicting vendor recipes");
+            }
         }
-        self.fallback
-            .resolve(Some(requester_extension), vendor)
-            .await
+        self.fallback.resolve(requester_extension, vendor).await
     }
 }
 
@@ -236,7 +258,6 @@ mod tests {
                 service: format!("{extension}/v1"),
             },
             root_binding: ironclaw_extensions::PackageRootBinding::FabricateOnLoad,
-            initial_preparation: ironclaw_extensions::PreparationRequirement::Ready,
             mcp: None,
             tools: Vec::new(),
             channel: None,

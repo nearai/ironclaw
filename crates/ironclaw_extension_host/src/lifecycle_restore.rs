@@ -73,19 +73,30 @@ pub async fn restore_extension_lifecycle_state(
         if available.source != ManifestSource::UserRegistered {
             materialize_available_extension(filesystem.as_ref(), &available).await?;
         }
-        let still_pending = stored_manifest.as_ref().is_some_and(|manifest| {
-            manifest.initial_preparation() == ironclaw_extensions::PreparationRequirement::Required
-        });
+        // Derived from the package itself, not a separate persisted flag: a
+        // registration whose package does not yet publish any model-visible
+        // capability or channel/hook surface has nothing to serve. Enabling
+        // it now would mark it durably active before its setup — whatever
+        // form that setup takes for this registration kind — has produced
+        // anything to activate. Once a later restore or live preparation
+        // pass rebuilds the package with a real surface, this same check
+        // passes and the installation enables normally.
+        let has_visible_capabilities =
+            !package_visible_capability_ids(&available.package).is_empty();
+        let has_activatable_surface = has_visible_capabilities
+            || available.resolved_manifest.channel.is_some()
+            || !available.resolved_manifest.hooks.is_empty();
         {
             let mut lifecycle = lifecycle_service.lock().await;
             lifecycle
                 .install(available.package.clone())
                 .await
                 .map_err(map_extension_error)?;
-            if still_pending {
+            if !has_activatable_surface {
                 tracing::debug!(
                     extension_id = installation.extension_id().as_str(),
-                    "registered pending extension installation during offline restore without enabling it"
+                    "registered extension installation has no activatable capability or \
+                     channel surface yet during offline restore; not enabling"
                 );
                 continue;
             }
@@ -251,29 +262,12 @@ pub fn prepare_install(
         &contracts,
         Some(manifest_hash.clone()),
     )?
-    // "Required" means nothing model-visible until discovery succeeds — a
-    // package carrying only a host-internal `mcp_server` template.
-    // `mcp.is_some()` alone is the wrong test: a bundled provider may ship a
-    // static model-visible tool and must activate without discovery. The
-    // visible-capability exemption only applies to a genuine hosted-MCP
-    // package (manifest runtime `Mcp`, per the v3 `[mcp]`/`[runtime]`
-    // exclusivity in `ironclaw_extensions::v3`): a package whose tools come
-    // from an unrelated runtime (e.g. a wasm capability provider) is not
-    // exempted from discovery just because it happens to also carry an
-    // `[mcp]` declaration.
-    .with_initial_preparation(
-        if available.resolved_manifest.mcp.is_some()
-            && (package_visible_capability_ids(&available.package).is_empty()
-                || !matches!(
-                    available.resolved_manifest.runtime,
-                    ironclaw_extensions::ExtensionRuntimeV2::Mcp { .. }
-                ))
-        {
-            ironclaw_extensions::PreparationRequirement::Required
-        } else {
-            ironclaw_extensions::PreparationRequirement::Ready
-        },
-    )
+    // Install records no readiness verdict. "Nothing model-visible yet" is
+    // read from the package itself
+    // (`ResolvedExtensionManifest::has_model_visible_capabilities`), so a
+    // package whose capabilities arrive from a later runtime step needs no
+    // stored flag — and, more importantly, a package that never has such a
+    // step is never asked the question.
     .with_removal_cleanup_requirements(available.cleanup_requirements.clone());
     let manifest_record = match retained_definition {
         Some(retained)

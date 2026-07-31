@@ -1,6 +1,6 @@
 // arch-exempt: large_file, shared extension removal convergence and compatibility tests, plan #6329
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     sync::{Arc, Weak},
 };
 
@@ -12,8 +12,7 @@ use ironclaw_auth::{
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionError, ExtensionInstallation, ExtensionInstallationError,
     ExtensionInstallationId, ExtensionLifecycleService, ExtensionManifestRecord, ExtensionPackage,
-    InstallationOwner, MembershipDeactivation, PreparationRequirement,
-    canonicalize_installation_rows,
+    InstallationOwner, MembershipDeactivation, canonicalize_installation_rows,
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
@@ -636,13 +635,6 @@ impl ExtensionLifecycleManager {
             // this caller — same masking as search/list (#5459 P1).
             .filter(|installation| installation.owner().visible_to(caller));
         let activation_errors = self.installation_activation_errors().await?;
-        let preparation = match installation.as_ref() {
-            Some(installation) => {
-                self.persisted_initial_preparation(installation.extension_id())
-                    .await?
-            }
-            None => PreparationRequirement::Ready,
-        };
         // A not-installed package has no installation state; `install_scope`
         // (`None` below) is the not-installed signal, so the neutral `Installed`
         // here is never read as a resting state for an uninstalled package.
@@ -651,7 +643,6 @@ impl ExtensionLifecycleManager {
             .map(|installation| {
                 installation_state_for_installation(
                     installation,
-                    preparation,
                     activation_errors.contains_key(installation.extension_id().as_str()),
                 )
             })
@@ -791,26 +782,6 @@ impl ExtensionLifecycleManager {
         }
     }
 
-    /// Reads the persisted initial preparation requirement for an installed
-    /// extension. This is the source of truth for readiness — the in-memory
-    /// catalog is only re-extended for `ManifestSource::UserRegistered`, so a
-    /// bundled hosted-MCP package that finished discovery updates the store
-    /// but not the catalog entry. `project` and `activate_inner` already read
-    /// through this store path; `installed_summaries` must match or it shows
-    /// `Installed` forever for packages the other two correctly show `Active`.
-    async fn persisted_initial_preparation(
-        &self,
-        extension_id: &ExtensionId,
-    ) -> Result<PreparationRequirement, ProductSurfaceFailure> {
-        Ok(self
-            .installation_store
-            .get_manifest(extension_id)
-            .await
-            .map_err(map_extension_installation_error)?
-            .map(|manifest| manifest.initial_preparation())
-            .unwrap_or(PreparationRequirement::Ready))
-    }
-
     async fn installed_summaries(
         &self,
         caller: &UserId,
@@ -821,19 +792,6 @@ impl ExtensionLifecycleManager {
             .await
             .map_err(map_extension_installation_error)?;
         let activation_errors = self.installation_activation_errors().await?;
-        let preparation_by_extension: BTreeMap<ExtensionId, PreparationRequirement> = self
-            .installation_store
-            .list_manifests()
-            .await
-            .map_err(map_extension_installation_error)?
-            .into_iter()
-            .map(|manifest| {
-                (
-                    manifest.extension_id().clone(),
-                    manifest.initial_preparation(),
-                )
-            })
-            .collect();
         let mut summaries = Vec::with_capacity(installations.len());
         for installation in installations {
             // #5459 P1: a caller's list is tenant-shared entries plus their
@@ -855,18 +813,10 @@ impl ExtensionLifecycleManager {
                 };
                 available
             };
-            // silent-ok: an id with no persisted manifest was never registered as
-            // preparation-gated, so `Ready` is the same default the per-row
-            // `persisted_initial_preparation` read returns for a missing manifest.
-            let preparation = preparation_by_extension
-                .get(installation.extension_id())
-                .copied()
-                .unwrap_or(PreparationRequirement::Ready);
             summaries.push(LifecycleInstalledExtensionSummary {
                 summary: available.summary(),
                 phase: installation_state_for_installation(
                     &installation,
-                    preparation,
                     activation_errors.contains_key(installation.extension_id().as_str()),
                 ),
                 install_scope: Some(install_scope_for_owner(installation.owner())),
@@ -1186,7 +1136,7 @@ impl ExtensionLifecycleManager {
             .get_installation(&installation_id)
             .await
             .map_err(map_extension_installation_error)?;
-        let preparation_ready = match existing {
+        match existing {
             // The id is already installed: the policy decision authorizes the
             // caller (tenant rows and non-member shapes error here), and the
             // store's membership operation performs the single-row join —
@@ -1195,9 +1145,6 @@ impl ExtensionLifecycleManager {
             // already registered, materialized, and (if enabled) published,
             // so there is nothing to compensate.
             Some(existing) => {
-                let preparation_ready = self
-                    .manifest_preparation_ready(existing.extension_id())
-                    .await?;
                 decide_install_on_existing(
                     &available.package.id,
                     existing.owner(),
@@ -1210,32 +1157,21 @@ impl ExtensionLifecycleManager {
                     .activate_membership(&installation_id, caller)
                     .await
                     .map_err(map_extension_installation_error)?;
-                preparation_ready
             }
             None => {
                 self.install_fresh_locked(&available, caller).await?;
-                // `install_fresh_locked` registers and materializes the
-                // package but does not run discovery: preparation happens
-                // later via `prepare_if_pending` / `activate_with_credential_gate`.
-                // Derive readiness from the persisted manifest exactly like
-                // the existing-install branch above, so a
-                // `PreparationRequirement::Required` package does not report
-                // its (not-yet-discovered) capabilities as visible.
-                self.manifest_preparation_ready(&available.package.id)
-                    .await?
             }
-        };
+        }
 
-        // A hosted MCP Pending aggregate contains only its registration seed.
-        // Its placeholder capability declarations are not callable catalog
-        // entries and must never be projected as visible tools.
-        let visible_capability_ids = if preparation_ready {
-            visible_capability_ids(&available)
-                .map(|id| id.as_str().to_string())
-                .collect()
-        } else {
-            Vec::new()
-        };
+        // A package whose capabilities have not been discovered yet declares
+        // none, so this is already empty for it — no separate readiness flag
+        // is needed to suppress "placeholder" tools, because there are none
+        // to suppress. Discovery, where a package's runtime declares it,
+        // runs later from `activate_with_credential_gate` and republishes
+        // the package with its live capability set.
+        let visible_capability_ids = visible_capability_ids(&available)
+            .map(|id| id.as_str().to_string())
+            .collect();
 
         Ok(response_with_payload(
             Some(package_ref.clone()),
@@ -1249,24 +1185,6 @@ impl ExtensionLifecycleManager {
                 ),
             },
         ))
-    }
-
-    /// Whether `extension_id`'s persisted manifest reports discovery as
-    /// already complete. A missing manifest is treated as ready (nothing to
-    /// wait on); this mirrors the existing-install branch of `install` so
-    /// both the existing- and fresh-install paths derive
-    /// `preparation_ready` identically instead of the fresh path assuming
-    /// readiness that discovery has not yet produced.
-    async fn manifest_preparation_ready(
-        &self,
-        extension_id: &ExtensionId,
-    ) -> Result<bool, ProductSurfaceFailure> {
-        Ok(self
-            .installation_store
-            .get_manifest(extension_id)
-            .await
-            .map_err(map_extension_installation_error)?
-            .is_none_or(|manifest| manifest.initial_preparation() == PreparationRequirement::Ready))
     }
 
     /// First install of an id: register the lifecycle package, materialize
@@ -1384,22 +1302,6 @@ impl ExtensionLifecycleManager {
             .load_installation(&extension_id, &installation_id)
             .await?;
         ensure_caller_may_operate(&installation, caller)?;
-        let preparation = self.persisted_initial_preparation(&extension_id).await?;
-        if preparation == PreparationRequirement::Required {
-            let mut response = response_with_payload(
-                Some(package_ref),
-                InstallationState::Installed,
-                LifecycleProductPayload::ExtensionActivate {
-                    activated: false,
-                    visible_capability_ids: Vec::new(),
-                    connection_required: None,
-                },
-            );
-            response.message = Some(
-                "Hosted MCP catalog preparation or account setup is still required.".to_string(),
-            );
-            return Ok(response);
-        }
         ensure_caller_may_mutate_tenant_installation(
             &installation,
             caller,
@@ -2638,20 +2540,23 @@ pub(crate) async fn ensure_lifecycle_package_registered(
                 extension_id.as_str()
             ),
         })?;
-    // This repair path exists for hosted MCP discovery, whose refreshed tool
-    // catalog is persisted in the resolved contract. Preserve only packages
-    // whose loader supplied a runtime-only inbound adapter; other first-party
-    // packages still need the durable-contract rebuild to refresh credentials.
+    // This repair path rebuilds the in-memory package from the durable
+    // resolved contract, so a runtime step that persisted a refreshed
+    // capability catalog becomes visible to the registry.
+    //
+    // Skip packages whose loader supplied a runtime-only inbound adapter: that
+    // adapter is not represented in the durable contract, so rebuilding one of
+    // these would drop it. Every other package needs the rebuild to pick up
+    // refreshed capabilities and credentials.
     let current_package = lifecycle_service
         .lock()
         .await
         .registry()
         .get_extension(extension_id)
         .cloned();
-    if record.resolved().mcp.is_none()
-        && current_package
-            .as_ref()
-            .is_some_and(package_declares_inbound_product_adapter)
+    if current_package
+        .as_ref()
+        .is_some_and(package_declares_inbound_product_adapter)
     {
         return Ok(());
     }
@@ -2932,18 +2837,19 @@ fn installation_state_for_activation(
     }
 }
 
+/// Installation state for a durable installation record.
+///
+/// A package whose capabilities have not been resolved yet carries no
+/// capabilities, so it publishes no tools — see `declares_tools`. That is
+/// the whole of its "not ready" meaning, and it is derived from the package
+/// rather than stored as a separate flag every extension has to carry. A
+/// stored flag here was read for *every* installation, which is how a
+/// package with nothing left to discover could still be pinned out of
+/// `Active`.
 fn installation_state_for_installation(
     installation: &ExtensionInstallation,
-    preparation: PreparationRequirement,
     has_last_error: bool,
 ) -> InstallationState {
-    if preparation == PreparationRequirement::Required {
-        return if has_last_error {
-            InstallationState::Failed
-        } else {
-            InstallationState::Installed
-        };
-    }
     installation_state_for_activation(installation.activation_state(), has_last_error)
 }
 
@@ -2953,11 +2859,7 @@ async fn search_installation_phase(
     credential_gate: Option<&dyn ExtensionActivationCredentialGate>,
     has_last_error: bool,
 ) -> Result<InstallationState, ProductSurfaceFailure> {
-    let phase = installation_state_for_installation(
-        installation,
-        extension.resolved_manifest.initial_preparation,
-        has_last_error,
-    );
+    let phase = installation_state_for_installation(installation, has_last_error);
     if phase == InstallationState::Active
         && !package_runtime_credential_auth_requirements(&extension.package).is_empty()
         && !search_credentials_configured(extension, credential_gate).await?
@@ -3175,7 +3077,6 @@ fn compensation_failure(
 mod tests {
     use std::sync::Arc;
 
-    use ironclaw_extensions::ResolvedMcpDeclaration;
     use ironclaw_extensions::{
         ExtensionInstallationStore, ExtensionInstallationStorePort as _, ExtensionLifecycleService,
         ExtensionManifest, ExtensionManifestRecord, ExtensionRegistry, HostApiContractRegistry,
@@ -3183,7 +3084,6 @@ mod tests {
     };
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        capability::{EffectKind, PermissionMode},
         host_port::HostPortCatalog,
         ids::{InvocationId, UserId},
         path::VirtualPath,
@@ -3717,32 +3617,214 @@ output_schema_ref = "schemas/run.output.json"
             .expect("bundle import completes");
     }
 
-    /// Fresh install of a package whose manifest requires discovery
-    /// (`PreparationRequirement::Required`, e.g. a hosted MCP package before
-    /// its tools are discovered) must not report its statically-declared
-    /// Model-visibility capabilities as visible: `install_fresh_locked` does
-    /// not run discovery, so those ids are not yet callable. Before the fix,
-    /// the fresh-install (`None`) branch of `install` hardcoded
-    /// `preparation_ready = true` regardless of the manifest, leaking the
-    /// capability id into the response. This pins the fix that derives
-    /// `preparation_ready` from the persisted manifest on both branches.
+    /// A package that declares nothing model-visible publishes nothing —
+    /// derived from the package's own manifest rather than a stored
+    /// readiness flag. `fixture_host_internal_only_extension_package` below
+    /// mirrors the shape every `[mcp]` package carries before discovery
+    /// completes: `v3.rs` synthesizes a `{id}.mcp_server` capability with
+    /// `CapabilityVisibility::HostInternal` for every hosted-MCP package, so
+    /// `resolved_manifest.tools` is never empty even pre-discovery. Only the
+    /// manifest's per-capability `visibility` distinguishes "nothing to
+    /// publish yet" from "nothing declared" — `visible_capability_ids`
+    /// (`available_extensions.rs`) filters `package.manifest.capabilities`
+    /// by `CapabilityVisibility::Model`, not `resolved.tools`. This test
+    /// pins that filter as read by the `install` caller: a future edit that
+    /// swaps it for a raw read of `resolved.tools`, or that widens the
+    /// filter to include `HostInternal`, would leak the host-internal-only
+    /// capability id into `visible_capability_ids` here.
     #[tokio::test]
-    async fn fresh_install_with_required_preparation_reports_no_visible_capabilities() {
-        let mut package = fixture_extension_package();
-        // Declares `fixture.search` (Model visibility) already; make
-        // preparation `Required` so discovery has not yet run.
-        let mut resolved = (*package.resolved_manifest).clone();
-        resolved.mcp = Some(ResolvedMcpDeclaration {
-            server: "https://mcp.example.com/rpc".to_string(),
-            namespace: "fixture".to_string(),
-            max_tools: 64,
-            default_permission: PermissionMode::Ask,
-            effects: vec![EffectKind::Network],
-            credential_handles: Vec::new(),
-            dynamic_input_schemas: Default::default(),
-            registration_auth: ironclaw_host_api::hosted_mcp::HostedMcpAuthSelection::NoAuth,
+    async fn install_reports_no_visible_capabilities_for_host_internal_only_package() {
+        let package = fixture_host_internal_only_extension_package();
+        let catalog = AvailableExtensionCatalog::from_packages(vec![package]);
+        let filesystem = Arc::new(InMemoryBackend::new());
+        let installation_store = Arc::new(
+            ExtensionInstallationStore::load_at(
+                filesystem.clone(),
+                VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
+                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+                crate::product_extension_host_api_contract_registry().expect("host contracts"),
+            )
+            .await
+            .expect("installation store"),
+        );
+        let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let active_extensions = ActiveExtensionPublisher::new(
+            Arc::clone(&active_registry),
+            Arc::new(
+                HostTrustPolicy::new(vec![Box::new(ironclaw_trust::AdminConfig::new())])
+                    .expect("trust policy"),
+            ),
+            Arc::new(InvalidationBus::new()),
+        );
+        let owner = UserId::new("lifecycle-owner").expect("valid owner");
+        let manager = ExtensionLifecycleManager::new(ExtensionLifecycleManagerDependencies {
+            filesystem,
+            catalog,
+            installation_store,
+            lifecycle_service,
+            active_extensions,
+            credential_cleanup: None,
+            tenant_operator_user_id: owner.clone(),
+            hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies {
+                runtime_ports: None,
+                catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
         });
-        package.resolved_manifest = Arc::new(resolved);
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture_host_internal")
+                .expect("package ref");
+
+        let response = manager
+            .install(package_ref, &owner)
+            .await
+            .expect("install succeeds");
+
+        match response.payload {
+            Some(LifecycleProductPayload::ExtensionInstall {
+                installed,
+                visible_capability_ids,
+                ..
+            }) => {
+                assert!(installed);
+                assert!(
+                    visible_capability_ids.is_empty(),
+                    "a package declaring only a host-internal capability must publish no \
+                     model-visible tools, got {visible_capability_ids:?}"
+                );
+            }
+            other => panic!("expected ExtensionInstall payload, got {other:?}"),
+        }
+    }
+
+    /// A first-party package that never declares `[mcp]` has no discovery
+    /// step at all, so no registration/discovery concept may ever hold it
+    /// below `Active` — the shape of the regression reported against gmail:
+    /// a readiness state owned by the hosted-MCP path leaked into the
+    /// generic phase computation every extension went through, including
+    /// ones with nothing to discover. Drives `install` ->
+    /// `activate_with_prechecked_credentials_for_user_for_test` -> `project`
+    /// through the production caller. Before the fix, this path additionally
+    /// read a stored `PreparationRequirement`; if that (or an equivalent
+    /// gate) were reintroduced with a default that isn't unconditionally
+    /// "ready" for a plain package, `activate`'s `activated` flag would flip
+    /// to `false` and phase would drop to `Installed`, exactly like the
+    /// removed early-return this test stands in for.
+    #[tokio::test]
+    async fn non_mcp_first_party_package_reaches_active_ungated_by_discovery() {
+        let package = fixture_extension_package();
+        let catalog = AvailableExtensionCatalog::from_packages(vec![package]);
+        let filesystem = Arc::new(InMemoryBackend::new());
+        let installation_store = Arc::new(
+            ExtensionInstallationStore::load_at(
+                filesystem.clone(),
+                VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
+                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+                crate::product_extension_host_api_contract_registry().expect("host contracts"),
+            )
+            .await
+            .expect("installation store"),
+        );
+        let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let active_extensions = ActiveExtensionPublisher::new(
+            Arc::clone(&active_registry),
+            Arc::new(
+                HostTrustPolicy::new(vec![Box::new(ironclaw_trust::AdminConfig::new())])
+                    .expect("trust policy"),
+            ),
+            Arc::new(InvalidationBus::new()),
+        );
+        let owner = UserId::new("gmail-shaped-owner").expect("valid owner");
+        let manager = ExtensionLifecycleManager::new(ExtensionLifecycleManagerDependencies {
+            filesystem,
+            catalog,
+            installation_store,
+            lifecycle_service,
+            active_extensions,
+            credential_cleanup: None,
+            tenant_operator_user_id: owner.clone(),
+            hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies {
+                runtime_ports: None,
+                catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
+        });
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("package ref");
+
+        let install_response = manager
+            .install(package_ref.clone(), &owner)
+            .await
+            .expect("fresh install succeeds");
+        match install_response.payload {
+            Some(LifecycleProductPayload::ExtensionInstall {
+                installed,
+                visible_capability_ids,
+                ..
+            }) => {
+                assert!(installed);
+                assert!(
+                    !visible_capability_ids.is_empty(),
+                    "a plain first-party package's declared model-visible capabilities must \
+                     not be suppressed"
+                );
+            }
+            other => panic!("expected ExtensionInstall payload, got {other:?}"),
+        }
+
+        let activate_response = manager
+            .activate_with_prechecked_credentials_for_user_for_test(package_ref.clone(), &owner)
+            .await
+            .expect("activation reaches Active — there is no discovery step to wait on");
+        assert_eq!(
+            activate_response.phase,
+            InstallationState::Active,
+            "a non-mcp package has no discovery step, so activation must not report anything \
+             short of Active"
+        );
+        match activate_response.payload {
+            Some(LifecycleProductPayload::ExtensionActivate { activated, .. }) => {
+                assert!(
+                    activated,
+                    "a non-mcp package must activate immediately instead of being held back \
+                     as though discovery were pending"
+                );
+            }
+            other => panic!("expected ExtensionActivate payload, got {other:?}"),
+        }
+
+        let project_response = manager
+            .project(package_ref, &owner)
+            .await
+            .expect("project succeeds");
+        assert_eq!(
+            project_response.phase,
+            InstallationState::Active,
+            "project must not hold a non-mcp package below Active"
+        );
+    }
+
+    /// `installed_summaries` (backing `list_installed`) must read the same
+    /// durable installation state as `project` and `activate_inner` — both
+    /// derive phase solely from the installation row's activation state, so
+    /// once activation flips it to `Enabled`, `list_installed` must show
+    /// `Active` exactly like `project` does for the same installation.
+    /// Before the fix, `installed_summaries` derived phase from a separate,
+    /// catalog-sourced readiness flag that `project` did not consult, so the
+    /// two could disagree after activation completed.
+    #[tokio::test]
+    async fn list_installed_matches_project_after_activation_completes() {
+        let package = fixture_extension_package();
         let catalog = AvailableExtensionCatalog::from_packages(vec![package]);
         let filesystem = Arc::new(InMemoryBackend::new());
         let installation_store = Arc::new(
@@ -3787,139 +3869,14 @@ output_schema_ref = "schemas/run.output.json"
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("package ref");
 
-        let response = manager
-            .install(package_ref, &owner)
-            .await
-            .expect("fresh install succeeds");
-
-        match response.payload {
-            Some(LifecycleProductPayload::ExtensionInstall {
-                installed,
-                visible_capability_ids,
-                ..
-            }) => {
-                assert!(installed);
-                assert!(
-                    visible_capability_ids.is_empty(),
-                    "preparation-required fresh install must not report visible capabilities \
-                     before discovery runs, got {visible_capability_ids:?}"
-                );
-            }
-            other => panic!("expected ExtensionInstall payload, got {other:?}"),
-        }
-    }
-
-    /// `installed_summaries` (backing `list_installed`) must read the same
-    /// persisted-store preparation state as `project` and `activate_inner`,
-    /// not the in-memory catalog's original `resolved_manifest`. The catalog
-    /// entry is only re-extended for `ManifestSource::UserRegistered`, so a
-    /// `HostBundled` hosted-MCP package whose discovery finishes after
-    /// install (store manifest flips to `Ready`, activation state flips to
-    /// `Enabled`) must show `Active` in `list_installed`, exactly like
-    /// `project` already does for the same installation. Before the fix,
-    /// `installed_summaries` kept reading the catalog's stale `Required`
-    /// entry and reported `Installed` forever.
-    #[tokio::test]
-    async fn list_installed_matches_project_after_persisted_discovery_completes() {
-        let mut package = fixture_extension_package();
-        let mut resolved = (*package.resolved_manifest).clone();
-        resolved.mcp = Some(ResolvedMcpDeclaration {
-            server: "https://mcp.example.com/rpc".to_string(),
-            namespace: "fixture".to_string(),
-            max_tools: 64,
-            default_permission: PermissionMode::Ask,
-            effects: vec![EffectKind::Network],
-            credential_handles: Vec::new(),
-            dynamic_input_schemas: Default::default(),
-            registration_auth: ironclaw_host_api::hosted_mcp::HostedMcpAuthSelection::NoAuth,
-        });
-        // The catalog snapshot reflects "discovery not run yet", matching
-        // what a real hosted-MCP catalog entry shows before discovery.
-        resolved.initial_preparation = PreparationRequirement::Required;
-        package.resolved_manifest = Arc::new(resolved);
-        let extension_id = package.package.id.clone();
-        let catalog = AvailableExtensionCatalog::from_packages(vec![package]);
-        let filesystem = Arc::new(InMemoryBackend::new());
-        let installation_store = Arc::new(
-            ExtensionInstallationStore::load_at(
-                filesystem.clone(),
-                VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
-                ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
-                crate::product_extension_host_api_contract_registry().expect("host contracts"),
-            )
-            .await
-            .expect("installation store"),
-        );
-        let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
-            ExtensionRegistry::new(),
-        )));
-        let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
-        let active_extensions = ActiveExtensionPublisher::new(
-            Arc::clone(&active_registry),
-            Arc::new(
-                HostTrustPolicy::new(vec![Box::new(ironclaw_trust::AdminConfig::new())])
-                    .expect("trust policy"),
-            ),
-            Arc::new(InvalidationBus::new()),
-        );
-        let owner = UserId::new("lifecycle-owner").expect("valid owner");
-        let manager = ExtensionLifecycleManager::new(ExtensionLifecycleManagerDependencies {
-            filesystem,
-            catalog,
-            installation_store: installation_store.clone(),
-            lifecycle_service,
-            active_extensions,
-            credential_cleanup: None,
-            tenant_operator_user_id: owner.clone(),
-            hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies {
-                runtime_ports: None,
-                catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
-                    ironclaw_safety::Sanitizer::new(),
-                )),
-                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
-            },
-        });
-        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
-            .expect("package ref");
-
         manager
             .install(package_ref.clone(), &owner)
             .await
             .expect("fresh install succeeds");
-
-        // Simulate discovery completing exactly as
-        // `HostedMcpPreparationService::prepare_if_pending` does in
-        // production: the persisted store manifest flips to `Ready` via a
-        // store write, while the in-memory catalog entry (built above with
-        // `Required`) is never touched.
-        let installation = installation_store
-            .list_installations()
-            .await
-            .expect("list installations")
-            .into_iter()
-            .find(|installation| installation.extension_id() == &extension_id)
-            .expect("fixture installation present");
-        let persisted_manifest = installation_store
-            .get_manifest(&extension_id)
-            .await
-            .expect("get manifest")
-            .expect("manifest persisted at install");
-        assert_eq!(
-            persisted_manifest.initial_preparation(),
-            PreparationRequirement::Required,
-            "sanity: fresh install of an mcp-declared package persists Required"
-        );
-        let ready_manifest =
-            persisted_manifest.with_initial_preparation(PreparationRequirement::Ready);
-        installation_store
-            .upsert_manifest_and_installation(ready_manifest, installation)
-            .await
-            .expect("persist discovered-ready manifest");
-
         manager
             .activate_with_prechecked_credentials_for_test(package_ref.clone())
             .await
-            .expect("activate succeeds now that preparation is ready");
+            .expect("activate succeeds");
 
         let project_response = manager
             .project(package_ref.clone(), &owner)
@@ -3928,7 +3885,7 @@ output_schema_ref = "schemas/run.output.json"
         assert_eq!(
             project_response.phase,
             InstallationState::Active,
-            "project must read the persisted Ready manifest"
+            "project must report Active once activation completes"
         );
 
         let list_response = manager
@@ -3946,7 +3903,7 @@ output_schema_ref = "schemas/run.output.json"
         assert_eq!(
             fixture_summary.phase,
             InstallationState::Active,
-            "list_installed must match project's phase instead of the stale catalog entry"
+            "list_installed must match project's phase"
         );
     }
 
@@ -4016,6 +3973,96 @@ output_schema_ref = "schemas/search.output.json"
         AvailableExtensionPackage {
             package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
                 .expect("fixture package ref"),
+            manifest_toml: manifest_toml.to_string(),
+            resolved_manifest,
+            source: ManifestSource::HostBundled,
+            package,
+            cleanup_requirements: Vec::new(),
+            surface_kinds: Vec::new(),
+            channel_directions: None,
+            channel_presentation: None,
+            assets: vec![
+                AvailableExtensionAsset {
+                    path: "manifest.toml".to_string(),
+                    content: AvailableExtensionAssetContent::Bytes(
+                        manifest_toml.as_bytes().to_vec(),
+                    ),
+                },
+                AvailableExtensionAsset {
+                    path: "wasm/fixture.wasm".to_string(),
+                    content: AvailableExtensionAssetContent::Bytes(b"\0asm\x01\0\0\0".to_vec()),
+                },
+            ],
+            onboarding_override: None,
+            oauth_setup_override: None,
+            search_aliases: Vec::new(),
+        }
+    }
+
+    /// Like `fixture_extension_package`, but its only declared capability is
+    /// `HostInternal` — mirroring the synthesized `{id}.mcp_server`
+    /// discovery-template capability every `[mcp]` package carries before
+    /// its `tools/list` discovery runs (`v3.rs`). It declares nothing
+    /// `Model`-visible, so `resolved_manifest.tools` is non-empty while
+    /// `visible_capability_ids` must still report an empty set.
+    fn fixture_host_internal_only_extension_package() -> AvailableExtensionPackage {
+        let manifest_toml = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "fixture_host_internal"
+name = "Host-internal-only Fixture Extension"
+version = "0.1.0"
+description = "Lifecycle fixture extension declaring only a host-internal capability"
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/fixture.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "fixture_host_internal.mcp_server"
+description = "Hosted connection capability (discovery template; never model-visible)"
+effects = ["network"]
+default_permission = "ask"
+visibility = "host_internal"
+input_schema_ref = "schemas/fixture_host_internal/dynamic/mcp_server.input.v1.json"
+"#;
+        let contracts = capability_provider_contracts();
+        let manifest = ExtensionManifest::parse(
+            manifest_toml,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+            &contracts,
+        )
+        .expect("host-internal-only fixture manifest");
+        let root =
+            VirtualPath::new("/system/extensions/fixture_host_internal").expect("extension root");
+        let resolved_manifest = Arc::new(
+            ExtensionManifestRecord::from_toml(
+                manifest_toml,
+                ManifestSource::HostBundled,
+                &HostPortCatalog::empty(),
+                None,
+                &contracts,
+                Some(root.clone()),
+            )
+            .expect("resolved host-internal-only fixture manifest")
+            .resolved()
+            .clone(),
+        );
+        let package = ExtensionPackage::from_manifest_toml(manifest, root, manifest_toml)
+            .expect("host-internal-only fixture package");
+        AvailableExtensionPackage {
+            package_ref: LifecyclePackageRef::new(
+                LifecyclePackageKind::Extension,
+                "fixture_host_internal",
+            )
+            .expect("fixture package ref"),
             manifest_toml: manifest_toml.to_string(),
             resolved_manifest,
             source: ManifestSource::HostBundled,

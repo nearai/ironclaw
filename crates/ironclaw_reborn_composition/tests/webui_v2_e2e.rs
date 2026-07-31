@@ -689,69 +689,84 @@ async fn build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
     authenticated_user_id: &str,
     google_oauth_backend: Option<OAuthClientConfig>,
 ) -> Harness {
-    let mut build_input =
-        ironclaw_reborn_composition::local_filesystem_build_input(runtime_owner_id, storage_root)
-            .with_runtime_policy(policy)
-            .with_bundled_first_party_for_test();
-    if let Some(google_oauth_backend) = google_oauth_backend {
-        build_input = build_input
-            .with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_oauth_backend);
-    }
-    let input = RebornRuntimeInput::from_build_input(build_input)
-        .with_identity(RebornRuntimeIdentity {
-            tenant_id: TENANT.to_string(),
-            agent_id: AGENT.to_string(),
-            source_binding_id: "e2e-source".to_string(),
-            reply_target_binding_id: "e2e-reply".to_string(),
-        })
-        .with_poll_settings(PollSettings {
-            interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(10),
-        })
-        .with_model_gateway_override(gateway);
+    // Every test in this file awaits this builder, so without the box the
+    // whole `build_reborn_runtime` composition state machine is inlined into
+    // each test's future and sits on the 2 MiB test-thread stack alongside
+    // the test's own locals. Debug builds do not collapse that nesting, and
+    // the combined frame has already overflowed the stack twice as the
+    // composition graph grew. Boxing here moves the composition future to the
+    // heap once, for every caller.
+    Box::pin(async move {
+        let mut build_input = ironclaw_reborn_composition::local_filesystem_build_input(
+            runtime_owner_id,
+            storage_root,
+        )
+        .with_runtime_policy(policy)
+        .with_bundled_first_party_for_test();
+        if let Some(google_oauth_backend) = google_oauth_backend {
+            build_input = build_input
+                .with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_oauth_backend);
+        }
+        let input = RebornRuntimeInput::from_build_input(build_input)
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: TENANT.to_string(),
+                agent_id: AGENT.to_string(),
+                source_binding_id: "e2e-source".to_string(),
+                reply_target_binding_id: "e2e-reply".to_string(),
+            })
+            .with_poll_settings(PollSettings {
+                interval: Duration::from_millis(10),
+                max_total: Duration::from_secs(10),
+            })
+            .with_model_gateway_override(gateway);
 
-    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    // The Tools-settings global auto-approve switch is authoritative for
-    // first-party tool dispatch; enable it for the e2e dispatch scope so
-    // scripted tool calls complete instead of parking on the per-tool approval
-    // gate (which would otherwise leave the turn without an assistant reply).
-    runtime
-        .standalone_auto_approve_settings_for_test()
-        .expect("standalone exposes auto-approve settings for test")
-        .set(ironclaw_approvals::AutoApproveSettingInput {
-            updated_by: ironclaw_host_api::scope::Principal::User(UserId::new(USER).expect("user")),
-            scope: ResourceScope {
-                tenant_id: TenantId::new(TENANT).expect("tenant"),
-                user_id: UserId::new(USER).expect("user"),
-                agent_id: Some(AgentId::new(AGENT).expect("agent")),
-                project_id: None,
-                mission_id: None,
-                thread_id: None,
-                invocation_id: InvocationId::new(),
-            },
-            enabled: true,
-        })
-        .await
-        .expect("enable global auto-approve for e2e dispatch");
-    let bundle = runtime.product_surface(None).expect("product surface");
-    let config = WebuiServeConfig::new(
-        TenantId::new(TENANT).expect("tenant"),
-        Arc::new(ValidTokenForUser::new(authenticated_user_id)),
-        // CORS allowlist is unused in oneshot tests (no Origin header
-        // is set), but the WebuiServeConfig constructor rejects an
-        // empty Vec to keep production deployments fail-closed. Any
-        // throwaway origin satisfies the type without affecting these
-        // tests.
-        vec![HeaderValue::from_static("http://localhost:0")],
-    )
-    .with_default_agent_id(AgentId::new(AGENT).expect("agent"));
-    let router = webui_v2_app(bundle.clone(), config).expect("webui v2 app");
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        // The Tools-settings global auto-approve switch is authoritative for
+        // first-party tool dispatch; enable it for the e2e dispatch scope so
+        // scripted tool calls complete instead of parking on the per-tool
+        // approval gate (which would otherwise leave the turn without an
+        // assistant reply).
+        runtime
+            .standalone_auto_approve_settings_for_test()
+            .expect("standalone exposes auto-approve settings for test")
+            .set(ironclaw_approvals::AutoApproveSettingInput {
+                updated_by: ironclaw_host_api::scope::Principal::User(
+                    UserId::new(USER).expect("user"),
+                ),
+                scope: ResourceScope {
+                    tenant_id: TenantId::new(TENANT).expect("tenant"),
+                    user_id: UserId::new(USER).expect("user"),
+                    agent_id: Some(AgentId::new(AGENT).expect("agent")),
+                    project_id: None,
+                    mission_id: None,
+                    thread_id: None,
+                    invocation_id: InvocationId::new(),
+                },
+                enabled: true,
+            })
+            .await
+            .expect("enable global auto-approve for e2e dispatch");
+        let bundle = runtime.product_surface(None).expect("product surface");
+        let config = WebuiServeConfig::new(
+            TenantId::new(TENANT).expect("tenant"),
+            Arc::new(ValidTokenForUser::new(authenticated_user_id)),
+            // CORS allowlist is unused in oneshot tests (no Origin header
+            // is set), but the WebuiServeConfig constructor rejects an
+            // empty Vec to keep production deployments fail-closed. Any
+            // throwaway origin satisfies the type without affecting these
+            // tests.
+            vec![HeaderValue::from_static("http://localhost:0")],
+        )
+        .with_default_agent_id(AgentId::new(AGENT).expect("agent"));
+        let router = webui_v2_app(bundle.clone(), config).expect("webui v2 app");
 
-    Harness {
-        runtime,
-        router,
-        _root: root,
-    }
+        Harness {
+            runtime,
+            router,
+            _root: root,
+        }
+    })
+    .await
 }
 
 async fn build_two_user_harness(

@@ -241,7 +241,8 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     .map_err(lifecycle_error)?;
                 // Pre-check activation requirements (package-declared runtime
                 // credentials PLUS any per-user account-setup requirement,
-                // e.g. Telegram pairing) before attempting activation. Without
+                // e.g. a channel pairing step) before attempting activation.
+                // Without
                 // this, an extension whose only outstanding requirement is an
                 // account-setup step (not a package-level runtime credential)
                 // sails through `activate_with_credential_gate`'s internal
@@ -252,20 +253,13 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     .activation_credential_requirements(&package_ref, &request.scope.user_id)
                     .await
                     .map_err(install_activation_readiness_error)?;
-                let credential_gate = RuntimeExtensionActivationCredentialGate::new(
-                    request.scope.clone(),
-                    Arc::clone(&self.credential_accounts),
-                );
-                let missing_requirements = credential_gate
-                    .missing_requirements(requirements)
-                    .await
-                    .map_err(credential_stage_error)?;
-                if !missing_requirements.is_empty() {
-                    return Err(FirstPartyCapabilityError::auth_required_for_credentials(
-                        missing_requirements,
-                    )
-                    .with_usage(resource_usage(started)));
-                }
+                let credential_gate = activation_credential_gate(
+                    &request.scope,
+                    &self.credential_accounts,
+                    requirements,
+                    started,
+                )
+                .await?;
                 match self
                     .extension_management
                     .activate_with_credential_gate(
@@ -311,20 +305,13 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     .activation_credential_requirements(&package_ref, &request.scope.user_id)
                     .await
                     .map_err(lifecycle_error)?;
-                let credential_gate = RuntimeExtensionActivationCredentialGate::new(
-                    request.scope.clone(),
-                    Arc::clone(&self.credential_accounts),
-                );
-                let missing_requirements = credential_gate
-                    .missing_requirements(requirements)
-                    .await
-                    .map_err(credential_stage_error)?;
-                if !missing_requirements.is_empty() {
-                    return Err(FirstPartyCapabilityError::auth_required_for_credentials(
-                        missing_requirements,
-                    )
-                    .with_usage(resource_usage(started)));
-                }
+                let credential_gate = activation_credential_gate(
+                    &request.scope,
+                    &self.credential_accounts,
+                    requirements,
+                    started,
+                )
+                .await?;
                 self.extension_management
                     .activate_with_credential_gate(
                         package_ref,
@@ -536,6 +523,40 @@ fn install_activation_error(
         }
         error => Err(lifecycle_error(error)),
     }
+}
+
+/// Build the activation credential gate, refusing to proceed while the caller
+/// still has unmet requirements.
+///
+/// Both the install and activate capability arms must pre-check this *before*
+/// activation. `activate_with_credential_gate`'s own check only considers
+/// package-declared runtime credentials, so an extension whose only
+/// outstanding requirement is a per-user account setup would otherwise reach
+/// Active without ever raising the auth gate.
+///
+/// The two arms differ only in how they map the requirements-fetch error, so
+/// each fetches its own `requirements` and shares everything after it.
+async fn activation_credential_gate(
+    scope: &ironclaw_host_api::resource::ResourceScope,
+    credential_accounts: &Arc<dyn RuntimeCredentialAccountSelectionService>,
+    requirements: Vec<ironclaw_host_api::decision::RuntimeCredentialAuthRequirement>,
+    started: Instant,
+) -> Result<RuntimeExtensionActivationCredentialGate, FirstPartyCapabilityError> {
+    let credential_gate = RuntimeExtensionActivationCredentialGate::new(
+        scope.clone(),
+        Arc::clone(credential_accounts),
+    );
+    let missing_requirements = credential_gate
+        .missing_requirements(requirements)
+        .await
+        .map_err(credential_stage_error)?;
+    if !missing_requirements.is_empty() {
+        return Err(
+            FirstPartyCapabilityError::auth_required_for_credentials(missing_requirements)
+                .with_usage(resource_usage(started)),
+        );
+    }
+    Ok(credential_gate)
 }
 
 fn resource_usage(started: Instant) -> ResourceUsage {

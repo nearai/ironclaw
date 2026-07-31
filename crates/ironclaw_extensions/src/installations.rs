@@ -24,7 +24,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::resolved::{PackageRootBinding, PreparationRequirement, ResolvedExtensionManifest};
+use crate::resolved::{PackageRootBinding, ResolvedExtensionManifest};
 use crate::{ExtensionManifestV2, HostApiContractRegistry, ManifestSource, ManifestV2Error};
 use crate::{PackageDefinitionAdmissionOutcome, PackageDefinitionRetention};
 
@@ -279,11 +279,6 @@ impl ExtensionManifestRecord {
         self
     }
 
-    pub fn with_initial_preparation(mut self, preparation: PreparationRequirement) -> Self {
-        self.resolved.initial_preparation = preparation;
-        self
-    }
-
     pub fn with_definition_retention(mut self, retention: PackageDefinitionRetention) -> Self {
         self.definition_retention = retention;
         self
@@ -312,10 +307,6 @@ impl ExtensionManifestRecord {
 
     pub fn removal_cleanup_requirements(&self) -> &[ExtensionRemovalCleanupRequirement] {
         &self.removal_cleanup_requirements
-    }
-
-    pub fn initial_preparation(&self) -> PreparationRequirement {
-        self.resolved.initial_preparation
     }
 
     pub fn definition_retention(&self) -> PackageDefinitionRetention {
@@ -1958,9 +1949,12 @@ impl ExtensionInstallationStore {
                             installation_id,
                         });
                     }
-                    if record.manifest.resolved.as_ref().is_none_or(|resolved| {
-                        resolved.initial_preparation != PreparationRequirement::Required
-                    }) || record.incarnation_id.as_ref() != Some(&incarnation_id)
+                    if record
+                        .manifest
+                        .resolved
+                        .as_ref()
+                        .is_none_or(|resolved| resolved.has_model_visible_capabilities())
+                        || record.incarnation_id.as_ref() != Some(&incarnation_id)
                         || record.manifest_ref() != expected_manifest_ref
                     {
                         return Err(
@@ -2025,16 +2019,18 @@ impl ExtensionInstallationStore {
                         })?
                         .id
                         .clone();
-                    let finalized_is_ready =
-                        finalized_wire.resolved.as_ref().is_some_and(|resolved| {
-                            resolved.initial_preparation == PreparationRequirement::Ready
-                        });
+                    let finalized_is_ready = finalized_wire
+                        .resolved
+                        .as_ref()
+                        .is_some_and(|resolved| resolved.has_model_visible_capabilities());
                     if record.installation_id != installation_id
                         || record.extension_id != finalized_extension_id
                         || !lease_matches
-                        || record.manifest.resolved.as_ref().is_none_or(|resolved| {
-                            resolved.initial_preparation != PreparationRequirement::Required
-                        })
+                        || record
+                            .manifest
+                            .resolved
+                            .as_ref()
+                            .is_none_or(|resolved| resolved.has_model_visible_capabilities())
                         || record.incarnation_id.as_ref() != Some(&incarnation_id)
                         || record.manifest_ref() != expected_manifest_ref
                         || !finalized_is_ready
@@ -2104,8 +2100,8 @@ impl ExtensionInstallationStore {
                         || record.manifest.source != next_wire.source
                         || current_resolved.root_binding != next_resolved.root_binding
                         || !lease_matches
-                        || current_resolved.initial_preparation != PreparationRequirement::Required
-                        || next_resolved.initial_preparation != PreparationRequirement::Required
+                        || current_resolved.has_model_visible_capabilities()
+                        || next_resolved.has_model_visible_capabilities()
                         || record.incarnation_id.as_ref() != Some(&incarnation_id)
                         || record.manifest_ref() != expected_manifest_ref
                     {
@@ -3540,8 +3536,8 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
             .as_ref()
             .ok_or_else(|| invalid_installation_error("checkpoint manifest was not resolved"))?;
         if !current.is_visible()
-            || current_resolved.initial_preparation != PreparationRequirement::Required
-            || next_resolved.initial_preparation != PreparationRequirement::Required
+            || current_resolved.has_model_visible_capabilities()
+            || next_resolved.has_model_visible_capabilities()
             || current.incarnation_id.as_ref() != Some(incarnation_id)
             || current.manifest_ref() != *expected_pending_manifest_ref
             || current.extension_id != next_resolved.id
@@ -4712,9 +4708,21 @@ mod tests {
         .expect("pending installation")
     }
 
+    /// A "not yet discovered" manifest: declares no capabilities, matching
+    /// the CAS guards in `take_v2_preparation_lease` / `finish_v2_preparation`
+    /// / `finish_v2_preparation_checkpoint`, which treat an empty `tools` list
+    /// as the pending-discovery state.
     fn pending_manifest_record(extension_id: &str, hash: Option<&str>) -> ExtensionManifestRecord {
-        manifest_record(extension_id, hash)
-            .with_initial_preparation(PreparationRequirement::Required)
+        let record = manifest_record(extension_id, hash);
+        let mut resolved = record.resolved().clone();
+        resolved.tools = Vec::new();
+        ExtensionManifestRecord::from_resolved(
+            record.raw_toml(),
+            record.manifest().source,
+            resolved,
+            record.manifest_hash().cloned(),
+        )
+        .expect("pending manifest record")
     }
 
     #[test]
@@ -4741,7 +4749,6 @@ mod tests {
     async fn package_definition_admission_is_immutable_and_exactly_idempotent() {
         let store = installation_store().await;
         let record = manifest_record("registered", Some("hash-one"))
-            .with_initial_preparation(PreparationRequirement::Required)
             .with_definition_retention(PackageDefinitionRetention::RetainInCatalog);
 
         assert_eq!(
@@ -4767,12 +4774,8 @@ mod tests {
         );
         let conflicts = [
             manifest_record("registered", Some("hash-two"))
-                .with_initial_preparation(PreparationRequirement::Required)
                 .with_definition_retention(PackageDefinitionRetention::RetainInCatalog),
-            manifest_record("registered", Some("hash-one"))
-                .with_definition_retention(PackageDefinitionRetention::RetainInCatalog),
-            manifest_record("registered", Some("hash-one"))
-                .with_initial_preparation(PreparationRequirement::Required),
+            manifest_record("registered", Some("hash-one")),
             ExtensionManifestRecord::from_resolved(
                 format!("{}\n# byte drift", record.raw_toml()),
                 record.manifest().source,

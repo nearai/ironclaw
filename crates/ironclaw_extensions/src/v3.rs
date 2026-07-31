@@ -609,7 +609,6 @@ pub(crate) fn parse_v3(
         // Parsing precedes package materialization. The manifest-record
         // boundary replaces this for materialized and remote-only packages.
         root_binding: PackageRootBinding::FabricateOnLoad,
-        initial_preparation: crate::PreparationRequirement::Ready,
         mcp: mcp.map(|mcp| ResolvedMcpDeclaration {
             server: mcp.server.as_str().to_string(),
             namespace: mcp.namespace,
