@@ -173,6 +173,7 @@ where
             kind: request.kind,
             status: AuthFlowStatus::AwaitingUser,
             provider: request.provider,
+            requester_extension: request.requester_extension,
             challenge: Some(request.challenge),
             continuation: request.continuation,
             credential_account_id: None,

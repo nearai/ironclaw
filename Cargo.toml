@@ -362,6 +362,10 @@ name = "reborn_integration_mcp"
 path = "tests/integration/mcp.rs"
 
 [[test]]
+name = "reborn_integration_hosted_mcp_registration"
+path = "tests/integration/hosted_mcp_registration.rs"
+
+[[test]]
 name = "reborn_integration_oauth_connect"
 path = "tests/integration/auth/oauth_connect.rs"
 

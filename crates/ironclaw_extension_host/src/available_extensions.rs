@@ -160,6 +160,7 @@ impl AvailableExtensionPackage {
                 ManifestSource::HostBundled => LifecycleExtensionSource::HostBundled,
                 ManifestSource::InstalledLocal => LifecycleExtensionSource::Installed,
                 ManifestSource::RegistryInstalled => LifecycleExtensionSource::Registry,
+                ManifestSource::UserRegistered => LifecycleExtensionSource::Installed,
             },
             runtime_kind: runtime_kind(&self.package.manifest.runtime),
             surface_kinds: self.surface_kinds.clone(),
@@ -434,13 +435,13 @@ impl AvailableExtensionCatalog {
         })?;
         let mut resolved = Vec::new();
         for package in &catalog.packages {
-            let record = ExtensionManifestRecord::from_toml(
+            let record = ExtensionManifestRecord::from_toml_with_root_binding(
                 &package.manifest_toml,
                 ManifestSource::HostBundled,
                 &host_ports,
                 None,
                 &contracts,
-                Some(package.package.root.clone()),
+                package.package.root_binding.clone(),
             )
             .map_err(|error| ProductSurfaceFailure::InvalidBindingRequest {
                 reason: format!(
@@ -775,13 +776,13 @@ fn bundled_extension_package(
             reason: format!("host API contracts rejected bundled {label} extension: {error}"),
         }
     })?;
-    let record = ExtensionManifestRecord::from_toml(
+    let record = ExtensionManifestRecord::from_toml_with_root_binding(
         manifest_toml,
         ManifestSource::HostBundled,
         &host_ports,
         None,
         &contracts,
-        Some(root.clone()),
+        ironclaw_extensions::PackageRootBinding::Materialized(root.clone()),
     )
     .map_err(|error| ProductSurfaceFailure::InvalidBindingRequest {
         reason: format!("bundled {label} extension manifest is invalid: {error}"),
@@ -1099,13 +1100,13 @@ where
             reason: format!("available extension manifest is not UTF-8: {error}"),
         }
     })?;
-    let record = ExtensionManifestRecord::from_toml(
+    let record = ExtensionManifestRecord::from_toml_with_root_binding(
         manifest_toml,
         stamp,
         host_ports,
         None,
         contracts,
-        Some(entry.path.clone()),
+        ironclaw_extensions::PackageRootBinding::Materialized(entry.path.clone()),
     )
     .map_err(map_binding_error)?;
     let surface_kinds = surface_kinds_from_manifest_record(&record, entry.name.as_str())?;
@@ -1125,7 +1126,8 @@ where
     // remove -> available -> reinstall flow with
     // "failed to read available extension asset"; and cataloging only
     // manifest + wasm module would lose schemas/prompt docs on reinstall.
-    let assets = inline_extension_dir_assets(fs, &package.root).await?;
+    let root = package.materialized_root().map_err(map_binding_error)?;
+    let assets = inline_extension_dir_assets(fs, root).await?;
     Ok(Some(AvailableExtensionPackage {
         package_ref: LifecyclePackageRef::new(
             LifecyclePackageKind::Extension,

@@ -9,7 +9,7 @@
 //! authority site.
 
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
-use ironclaw_host_api::{ids::CapabilityId, trust::PackageSource};
+use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_trust::{TrustDecision, TrustPolicy, TrustPolicyInput};
 use tracing::debug;
 
@@ -75,7 +75,7 @@ pub(crate) fn evaluate_invocation_trust(
     if package_descriptor != descriptor {
         return Err(TrustEvaluationError::ConflictingPackageDescriptor);
     }
-    let input = trust_policy_input_for_local_manifest(package)?;
+    let input = trust_policy_input_for_package(package)?;
     trust_policy.evaluate(&input).map_err(|error| {
         // The kernel→host mapping collapses this to `Policy`; log the bound
         // `TrustError` so the underlying policy refusal is recoverable
@@ -85,12 +85,15 @@ pub(crate) fn evaluate_invocation_trust(
     })
 }
 
-fn trust_policy_input_for_local_manifest(
+fn trust_policy_input_for_package(
     package: &ExtensionPackage,
 ) -> Result<TrustPolicyInput, TrustEvaluationError> {
     package
         .trust_policy_input(
-            local_manifest_source(package),
+            package.trust_policy_source().map_err(|error| {
+                debug!(%error, "could not derive trust policy source from package");
+                TrustEvaluationError::TrustInput
+            })?,
             package.manifest_digest(),
             None,
         )
@@ -103,21 +106,13 @@ fn trust_policy_input_for_local_manifest(
         })
 }
 
-fn local_manifest_source(package: &ExtensionPackage) -> PackageSource {
-    PackageSource::LocalManifest {
-        path: format!(
-            "{}/manifest.toml",
-            package.root.as_str().trim_end_matches('/')
-        ),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use ironclaw_extensions::{ExtensionManifest, ManifestSource};
     use ironclaw_host_api::{
         approval::sha256_digest_token, host_port::HostPortCatalog, path::VirtualPath,
+        trust::PackageSource,
     };
 
     // Relocated from `ironclaw_host_runtime::production` alongside the trust
@@ -180,7 +175,7 @@ output_schema_ref = "schemas/test.output.json"
         )
         .unwrap();
 
-        let input = trust_policy_input_for_local_manifest(&package).unwrap();
+        let input = trust_policy_input_for_package(&package).unwrap();
 
         assert_eq!(
             input.identity.source,

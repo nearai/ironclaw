@@ -16,7 +16,12 @@ layer = "products"
 [features]
 # Lightweight in-crate test fakes (fixtures, scripted adapters) reused by
 # downstream integration tests. Zero-byte in production.
-test-support = ["dep:ironclaw_first_party_extensions", "ironclaw_auth/test-support"]
+test-support = [
+    "dep:ironclaw_first_party_extensions",
+    "ironclaw_auth/test-support",
+    "ironclaw_filesystem/test-support",
+    "ironclaw_processes/test-support",
+]
 # Dormant marker for the two moved test modules that still require composition
 # runtime-substrate fixtures. Keep disabled until those tests are rewritten over
 # extension-host-local fakes.
@@ -33,6 +38,7 @@ ironclaw_auth = { path = "../ironclaw_auth" }
 ironclaw_approvals = { path = "../ironclaw_approvals" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
+ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
@@ -111,3 +117,6 @@ name = "admin_configuration_store_contract"
 
 [[test]]
 name = "admin_configuration_service_contract"
+
+[[test]]
+name = "lifecycle_restore_contract"

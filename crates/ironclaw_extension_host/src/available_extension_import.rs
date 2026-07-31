@@ -201,13 +201,13 @@ fn extension_package_from_files(
     // binary-compiled packages may claim the HostBundled trust/runtime tier.
     // The extension id (and so the package root) is only known once the
     // manifest is parsed, so this first pass carries no root.
-    let record = ExtensionManifestRecord::from_toml(
+    let record = ExtensionManifestRecord::from_toml_with_root_binding(
         manifest_toml,
         source,
         &host_ports,
         None,
         &contracts,
-        None,
+        ironclaw_extensions::PackageRootBinding::FabricateOnLoad,
     )
     .map_err(map_binding_error)?;
     let runtime_kind = record.manifest().runtime.kind();
@@ -229,7 +229,8 @@ fn extension_package_from_files(
     // the TOML (REC-2: `from_resolved` rebuilds from the already-validated
     // contract).
     let mut resolved_with_root = record.resolved().clone();
-    resolved_with_root.root = Some(root.clone());
+    resolved_with_root.root_binding =
+        ironclaw_extensions::PackageRootBinding::Materialized(root.clone());
     let record = ExtensionManifestRecord::from_resolved(
         record.raw_toml(),
         source,
@@ -681,8 +682,10 @@ prompt_doc_ref = "prompts/run.md"
         // then rebuild via `from_resolved` with the id-derived root) must
         // survive onto the resolved contract, not just `package.package.root`.
         assert_eq!(
-            package.resolved_manifest.root,
-            Some(VirtualPath::new("/system/extensions/uploaded-tool").unwrap())
+            package.resolved_manifest.root_binding,
+            ironclaw_extensions::PackageRootBinding::Materialized(
+                VirtualPath::new("/system/extensions/uploaded-tool").unwrap()
+            )
         );
     }
 

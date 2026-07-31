@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::{
     channel::ChannelPresentation,
     error::HostApiError,
+    hosted_mcp::RegisterHostedMcpRequest,
     state::{InstallationState, LifecyclePublicState},
     surface::CapabilitySurfaceKind,
 };
@@ -149,6 +150,9 @@ impl LifecycleReadinessBlocker {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum LifecycleProductAction {
+    ExtensionRegisterHostedMcp {
+        request: RegisterHostedMcpRequest,
+    },
     ExtensionSearch {
         query: String,
     },
@@ -186,6 +190,9 @@ pub enum LifecycleProductAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleCommandKind {
+    /// Kept only so `LifecycleProductAction::command_kind()` stays total; deliberately absent from `ALL`.
+    /// Not reachable as a chat command — registration is WebUI-only via `EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY`.
+    ExtensionRegisterHostedMcp,
     ExtensionSearch,
     ExtensionList,
     ExtensionInstall,
@@ -214,6 +221,7 @@ impl LifecycleCommandKind {
 
     pub const fn command_name(self) -> &'static str {
         match self {
+            Self::ExtensionRegisterHostedMcp => "extension_register_hosted_mcp",
             Self::ExtensionSearch => "extension_search",
             Self::ExtensionList => "extension_list",
             Self::ExtensionInstall => "extension_install",
@@ -238,6 +246,9 @@ impl LifecycleCommandKind {
 impl LifecycleProductAction {
     pub fn command_kind(&self) -> LifecycleCommandKind {
         match self {
+            Self::ExtensionRegisterHostedMcp { .. } => {
+                LifecycleCommandKind::ExtensionRegisterHostedMcp
+            }
             Self::ExtensionSearch { .. } => LifecycleCommandKind::ExtensionSearch,
             Self::ExtensionList => LifecycleCommandKind::ExtensionList,
             Self::ExtensionInstall { .. } => LifecycleCommandKind::ExtensionInstall,
@@ -265,9 +276,10 @@ impl LifecycleProductAction {
             | Self::ExtensionConfigure { package_ref, .. }
             | Self::ExtensionRemove { package_ref }
             | Self::SkillRemove { package_ref } => Some(package_ref),
-            Self::ExtensionSearch { .. } | Self::SkillSearch { .. } | Self::SkillInstall { .. } => {
-                None
-            }
+            Self::ExtensionRegisterHostedMcp { .. }
+            | Self::ExtensionSearch { .. }
+            | Self::SkillSearch { .. }
+            | Self::SkillInstall { .. } => None,
             Self::ExtensionList => None,
         }
     }

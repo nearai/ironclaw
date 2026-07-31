@@ -300,6 +300,7 @@ jobs:
           pytest
           tests/e2e/scenarios/test_reborn_webui_v2_smoke.py
           tests/e2e/scenarios/test_reborn_webui_v2_sso.py
+          tests/e2e/scenarios/test_reborn_webui_v2_custom_mcp.py
           -v
           --timeout=120
 

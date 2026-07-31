@@ -3572,7 +3572,6 @@ dependencies = [
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_secrets",
- "psl",
  "rand 0.10.2",
  "secrecy",
  "serde",
@@ -3738,6 +3737,7 @@ dependencies = [
  "ironclaw_auth",
  "ironclaw_authorization",
  "ironclaw_capabilities",
+ "ironclaw_common",
  "ironclaw_conversations",
  "ironclaw_extensions",
  "ironclaw_filesystem",
@@ -3802,6 +3802,7 @@ dependencies = [
  "tokio-postgres",
  "toml 1.1.3+spec-1.1.0",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -6465,21 +6466,6 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
-
-[[package]]
-name = "psl"
-version = "2.1.223"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0dedad316e05de220cbf3fd8bfb69f3df8755dde2d7d479211827b595168a93"
-dependencies = [
- "psl-types",
-]
-
-[[package]]
-name = "psl-types"
-version = "2.0.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 
 [[package]]
 name = "ptr_meta"

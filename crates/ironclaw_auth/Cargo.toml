@@ -37,7 +37,6 @@ ironclaw_secrets = { path = "../ironclaw_secrets" }
 # needs real eTLD+1 resolution (naive label-splitting treats every `*.co.uk`
 # as one registrable domain — the PR #6116 security-high finding). Static data
 # baked into the binary; no runtime list fetch or I/O.
-psl = "2"
 secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

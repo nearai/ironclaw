@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ironclaw_extensions::{
-    ExtensionPackage, ExtensionRuntime, ManifestSource, SharedExtensionRegistry,
+    ExtensionPackage, ExtensionRuntime, SharedExtensionRegistry, is_hosted_http_mcp_package,
 };
 use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
@@ -44,7 +44,7 @@ impl RegistryMcpEgressPlanner {
         &self,
         provider: &ExtensionId,
         capability_id: &CapabilityId,
-        endpoint: &HostedMcpEndpoint,
+        endpoint: &HostedMcpEgressEndpoint,
     ) -> Vec<RuntimeCredentialInjection> {
         self.registry
             .snapshot()
@@ -68,7 +68,7 @@ impl RegistryMcpEgressPlanner {
             .unwrap_or_default()
     }
 
-    fn provider_endpoint(&self, provider: &ExtensionId) -> Option<HostedMcpEndpoint> {
+    fn provider_endpoint(&self, provider: &ExtensionId) -> Option<HostedMcpEgressEndpoint> {
         let registry = self.registry.snapshot();
         registry
             .get_extension(provider)
@@ -95,7 +95,7 @@ impl McpHostHttpEgressPlanner for RegistryMcpEgressPlanner {
             // Must match the bundled manifest's network policy
             // (deny_private_ip_ranges: true) or the dispatcher rejects the
             // request.
-            network_policy: hosted_mcp_network_policy(&endpoint),
+            network_policy: hosted_mcp_network_policy_for_endpoint(&endpoint),
             credential_injections,
             response_body_limit: Some(MCP_RESPONSE_BODY_LIMIT),
             timeout_ms: Some(MCP_TIMEOUT_MS),
@@ -104,19 +104,19 @@ impl McpHostHttpEgressPlanner for RegistryMcpEgressPlanner {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HostedMcpEndpoint {
+pub struct HostedMcpEgressEndpoint {
     host_pattern: String,
     port: Option<u16>,
     path: String,
+    query: Option<String>,
 }
 
-impl HostedMcpEndpoint {
+impl HostedMcpEgressEndpoint {
     fn parse(url: &str) -> Option<Self> {
         let parsed = url::Url::parse(url).ok()?;
         if parsed.scheme() != "https"
             || !parsed.username().is_empty()
             || parsed.password().is_some()
-            || parsed.query().is_some()
             || parsed.fragment().is_some()
         {
             return None;
@@ -125,6 +125,7 @@ impl HostedMcpEndpoint {
             host_pattern: parsed.host_str()?.to_ascii_lowercase(),
             port: parsed.port(),
             path: normalize_mcp_path(parsed.path()),
+            query: parsed.query().map(str::to_string),
         })
     }
 
@@ -139,8 +140,8 @@ impl HostedMcpEndpoint {
     }
 }
 
-pub fn hosted_http_mcp_endpoint(package: &ExtensionPackage) -> Option<HostedMcpEndpoint> {
-    if package.manifest.source != ManifestSource::HostBundled {
+pub fn hosted_http_mcp_endpoint(package: &ExtensionPackage) -> Option<HostedMcpEgressEndpoint> {
+    if !is_hosted_http_mcp_package(package) {
         return None;
     }
     let ExtensionRuntime::Mcp {
@@ -155,13 +156,13 @@ pub fn hosted_http_mcp_endpoint(package: &ExtensionPackage) -> Option<HostedMcpE
     if transport != "http" || !args.is_empty() {
         return None;
     }
-    HostedMcpEndpoint::parse(url)
+    HostedMcpEgressEndpoint::parse(url)
 }
 
 /// Returns `true` only when `url` has scheme `https`, a host that
 /// case-insensitively matches `endpoint.host_pattern`, and a path that
 /// (ignoring trailing slashes) matches `endpoint.path`.
-fn hosted_mcp_url_allowed(url: &str, endpoint: &HostedMcpEndpoint) -> bool {
+fn hosted_mcp_url_allowed(url: &str, endpoint: &HostedMcpEgressEndpoint) -> bool {
     endpoint.matches_url(url)
 }
 
@@ -174,7 +175,15 @@ fn normalize_mcp_path(path: &str) -> String {
     }
 }
 
-fn hosted_mcp_network_policy(endpoint: &HostedMcpEndpoint) -> NetworkPolicy {
+/// Canonical hosted-MCP egress policy for a package with a valid hosted HTTP
+/// endpoint. Callers retain ownership of their own missing/invalid-package
+/// error mapping.
+pub(crate) fn hosted_mcp_network_policy(package: &ExtensionPackage) -> Option<NetworkPolicy> {
+    hosted_http_mcp_endpoint(package)
+        .map(|endpoint| hosted_mcp_network_policy_for_endpoint(&endpoint))
+}
+
+fn hosted_mcp_network_policy_for_endpoint(endpoint: &HostedMcpEgressEndpoint) -> NetworkPolicy {
     NetworkPolicy {
         allowed_targets: vec![NetworkTargetPattern {
             scheme: Some(NetworkScheme::Https),
@@ -218,7 +227,7 @@ mod tests {
         let planner = RegistryMcpEgressPlanner::new(registry);
         let provider = ExtensionId::new("notion").unwrap();
         let capability_id = CapabilityId::new("notion.notion-search").unwrap();
-        let endpoint = HostedMcpEndpoint::parse(NOTION_MCP_URL).unwrap();
+        let endpoint = HostedMcpEgressEndpoint::parse(NOTION_MCP_URL).unwrap();
 
         let injections = planner.credential_injections(&provider, &capability_id, &endpoint);
 
@@ -376,13 +385,13 @@ mod tests {
 
     #[test]
     fn hosted_mcp_url_allowed_accepts_canonical_notion_url() {
-        let endpoint = HostedMcpEndpoint::parse(NOTION_MCP_URL).unwrap();
+        let endpoint = HostedMcpEgressEndpoint::parse(NOTION_MCP_URL).unwrap();
         assert!(hosted_mcp_url_allowed(NOTION_MCP_URL, &endpoint));
     }
 
     #[test]
     fn hosted_mcp_url_allowed_rejects_http_scheme() {
-        let endpoint = HostedMcpEndpoint::parse(NOTION_MCP_URL).unwrap();
+        let endpoint = HostedMcpEgressEndpoint::parse(NOTION_MCP_URL).unwrap();
         assert!(!hosted_mcp_url_allowed(
             "http://mcp.notion.com/mcp",
             &endpoint
@@ -391,7 +400,7 @@ mod tests {
 
     #[test]
     fn hosted_mcp_url_allowed_rejects_wrong_host() {
-        let endpoint = HostedMcpEndpoint::parse(NOTION_MCP_URL).unwrap();
+        let endpoint = HostedMcpEgressEndpoint::parse(NOTION_MCP_URL).unwrap();
         assert!(!hosted_mcp_url_allowed(
             "https://evil.example.com/mcp",
             &endpoint
@@ -400,7 +409,7 @@ mod tests {
 
     #[test]
     fn hosted_mcp_url_allowed_rejects_wrong_path() {
-        let endpoint = HostedMcpEndpoint::parse(NOTION_MCP_URL).unwrap();
+        let endpoint = HostedMcpEgressEndpoint::parse(NOTION_MCP_URL).unwrap();
         assert!(!hosted_mcp_url_allowed(
             "https://mcp.notion.com/other",
             &endpoint
@@ -409,7 +418,7 @@ mod tests {
 
     #[test]
     fn hosted_mcp_url_allowed_accepts_trailing_slash() {
-        let endpoint = HostedMcpEndpoint::parse(NOTION_MCP_URL).unwrap();
+        let endpoint = HostedMcpEgressEndpoint::parse(NOTION_MCP_URL).unwrap();
         assert!(hosted_mcp_url_allowed(
             "https://mcp.notion.com/mcp/",
             &endpoint
@@ -418,7 +427,7 @@ mod tests {
 
     #[test]
     fn hosted_mcp_url_allowed_rejects_extra_url_components() {
-        let endpoint = HostedMcpEndpoint::parse(NOTION_MCP_URL).unwrap();
+        let endpoint = HostedMcpEgressEndpoint::parse(NOTION_MCP_URL).unwrap();
 
         assert!(!hosted_mcp_url_allowed(
             "https://mcp.notion.com/mcp?token=shadow",
@@ -430,6 +439,25 @@ mod tests {
         ));
         assert!(!hosted_mcp_url_allowed(
             "https://user@mcp.notion.com/mcp",
+            &endpoint
+        ));
+    }
+
+    #[test]
+    fn hosted_mcp_url_allowed_preserves_registered_query_exactly() {
+        let endpoint =
+            HostedMcpEgressEndpoint::parse("https://mcp.example.com/mcp?tenant=acme").unwrap();
+
+        assert!(hosted_mcp_url_allowed(
+            "https://mcp.example.com/mcp?tenant=acme",
+            &endpoint
+        ));
+        assert!(!hosted_mcp_url_allowed(
+            "https://mcp.example.com/mcp",
+            &endpoint
+        ));
+        assert!(!hosted_mcp_url_allowed(
+            "https://mcp.example.com/mcp?tenant=other",
             &endpoint
         ));
     }
