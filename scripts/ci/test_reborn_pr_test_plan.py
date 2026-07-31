@@ -305,25 +305,21 @@ class RebornPrTestPlanTests(unittest.TestCase):
 
         for process in (
             "product_build_pid",
-            "emulate_build_pid",
-            "e2e_setup_pid",
-            "webui_pid",
-            "primary_pid",
-            "secondary_pid",
-            "tertiary_pid",
-            "quaternary_pid",
-            "responses_pid",
-            "package_pid",
+            "evidence_setup_pid",
         ):
             with self.subTest(process=process):
                 self.assertIn(f'wait "${{{process}}}" || status=1', workflow)
 
         for shard in range(4):
             with self.subTest(provider_operation_shard=shard):
-                self.assertIn(
-                    f"IRONCLAW_PROVIDER_OPERATION_SHARD={shard}/4",
-                    workflow,
-                )
+                self.assertIn(f'shard: "{shard}/4"', workflow)
+        self.assertIn("  webui-v2-test-lanes:", workflow)
+        self.assertIn("max-parallel: 6", workflow)
+        self.assertIn("reborn-webui-v2-test-binaries-${{", workflow)
+        self.assertIn(
+            'job_result_ok "webui-v2-test-lanes"',
+            workflow,
+        )
 
 
 if __name__ == "__main__":

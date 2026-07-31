@@ -151,9 +151,7 @@ def test_reborn_e2e_generates_and_uploads_the_product_surface_artifact():
     assert "artifacts/product-surface-coverage/" in workflow
     assert "$GITHUB_STEP_SUMMARY" in workflow
     assert 'source_commit="$(git rev-parse HEAD)"' in workflow
-    assert generation_step < workflow.index(
-        "Run WebUI, provider, and Responses API suites"
-    )
+    assert generation_step < workflow.index("  webui-v2-test-lanes:")
     upload_step = workflow[workflow.index("Upload product-surface coverage matrix") :]
     assert "if: always()" in upload_step.split("      - name:", 1)[0]
     assert "if-no-files-found: error" in upload_step.split("      - name:", 1)[0]
