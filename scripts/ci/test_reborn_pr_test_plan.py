@@ -298,6 +298,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "tests/e2e/scenarios/test_reborn_webui_v2_sso.py",
             "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py",
             "tests/e2e/scenarios/test_reborn_qa_trace_replay.py",
+            "tests/e2e/scenarios/test_reborn_blackbox_smoke.py",
             "tests/e2e/reborn_responses_e2e_tests.txt",
         ):
             with self.subTest(suite=suite):
@@ -314,6 +315,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
             with self.subTest(provider_operation_shard=shard):
                 self.assertIn(f'shard: "{shard}/4"', workflow)
         self.assertIn("  webui-v2-test-lanes:", workflow)
+        self.assertIn("lane: fast-contracts", workflow)
+        self.assertNotIn("\n  blackbox-smoke:", workflow)
         self.assertIn("max-parallel: 5", workflow)
         self.assertIn("reborn-webui-v2-sso-binary-${{", workflow)
         self.assertIn("reborn-webui-v2-binary-${{", workflow)
