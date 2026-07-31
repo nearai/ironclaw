@@ -1802,7 +1802,12 @@ async fn root_llm_gateway_bootstraps_nearai_session_token_from_env() {
 
 #[tokio::test]
 async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
-    let _token_guard = RuntimeEnvGuard::set("NEARAI_SESSION_TOKEN", "sess_reborn_mcp_token").await;
+    let _env_guard = RuntimeEnvGuard::with([
+        ("NEARAI_SESSION_TOKEN", Some("sess_reborn_mcp_token")),
+        ("NEARAI_API_KEY", None),
+        ("NEARAI_BASE_URL", Some("https://cloud-api.nearai.example")),
+    ])
+    .await;
     let root = tempfile::tempdir().expect("tempdir");
     let session_dir = tempfile::tempdir().expect("session tempdir");
     let standalone_root = root.path().join("standalone");
