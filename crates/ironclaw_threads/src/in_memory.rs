@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
+use crate::stored_message::serialize_stored_thread_message;
 use crate::summary_artifacts::find_overlapping_summary;
 use crate::title::derive_thread_title;
 use crate::tool_result_records::{
@@ -20,6 +21,7 @@ use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
     AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
+    BoundedThreadMessageSnapshot, BoundedThreadMessages, BoundedThreadMessagesRequest,
     CapabilityDisplayPreviewEnvelope, ContextMessage, ContextMessages, ContextWindow,
     CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
     LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
@@ -832,6 +834,41 @@ impl SessionThreadService for InMemorySessionThreadService {
             messages: history_messages(thread),
             summary_artifacts: history_summary_artifacts(thread),
         })
+    }
+
+    async fn list_thread_messages_bounded(
+        &self,
+        request: BoundedThreadMessagesRequest,
+    ) -> Result<BoundedThreadMessages, SessionThreadError> {
+        let state = self.state.lock().await;
+        let thread = get_thread(&state, &request.scope, &request.thread_id)?;
+        if thread.messages.len() > request.max_messages {
+            return Ok(BoundedThreadMessages::LimitExceeded);
+        }
+        let mut bytes = 0_usize;
+        for message in &thread.messages {
+            bytes = bytes.saturating_add(serialize_stored_thread_message(message)?.len());
+            if bytes > request.max_bytes {
+                return Ok(BoundedThreadMessages::LimitExceeded);
+            }
+        }
+        let message_ids = thread
+            .messages
+            .iter()
+            .map(|message| message.message_id)
+            .collect::<Vec<_>>();
+        Ok(BoundedThreadMessages::Complete(Box::new(
+            BoundedThreadMessageSnapshot {
+                history: ThreadMessageRange {
+                    thread: thread.record.clone(),
+                    messages: history_messages(thread),
+                },
+                context: ContextMessages {
+                    thread_id: request.thread_id,
+                    messages: context_messages_by_id(thread, &message_ids),
+                },
+            },
+        )))
     }
 
     async fn list_thread_messages_range(

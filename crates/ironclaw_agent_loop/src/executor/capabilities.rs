@@ -1473,15 +1473,19 @@ fn child_result_from_outcome(
 /// Rebuild the `ResultReference` model observation from a completed [`Outcome`],
 /// carrying the #5838 first-look inline preview content the model reads without a
 /// follow-up `result_read`. Reconstructed from the channel's real
-/// [`ModelResultPreview`] (`refs.preview`) — the delimiter/JSON-bearing content
-/// that the collapse now preserves (it rode the caption `SafeSummary` before,
-/// which dropped it). `None` when no preview is staged, in which case
-/// `append_capability_result_ref` synthesizes a bare success observation.
+/// [`ModelResultPreview`] (`refs.preview`) and its independent continuation
+/// metadata. Metadata-only observations are reconstructed when preview safety
+/// suppresses the text; `None` is reserved for outcomes with neither preview nor
+/// continuation metadata, where `append_capability_result_ref` synthesizes a bare
+/// success observation.
 fn result_reference_observation_from_outcome(
     outcome: &Outcome,
 ) -> Option<ModelVisibleToolObservation> {
-    let preview = outcome.refs.preview.as_ref()?;
+    let preview = outcome.refs.preview.as_ref();
     let meta = &outcome.refs.preview_meta;
+    if preview.is_none() && meta.is_empty() {
+        return None;
+    }
     // The observation references the preview's OWN result: `preview_meta`'s
     // referenced ref when it differs (a `result_read` presenting another result),
     // else the outcome's own preserved origin.
@@ -1508,7 +1512,7 @@ fn result_reference_observation_from_outcome(
         detail: ToolObservationDetail::ResultReference {
             result_ref,
             byte_len: outcome.refs.byte_len,
-            preview: Some(preview.as_str().to_string()),
+            preview: preview.map(|preview| preview.as_str().to_string()),
             // Continuation metadata for a truncated first-look preview; falls back
             // to the full inline size for a complete preview.
             total_bytes: meta.total_bytes.or(Some(outcome.refs.byte_len)),

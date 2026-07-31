@@ -1265,8 +1265,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_host_api/src/ids.rs", "github"),
     ("crates/ironclaw_host_api/src/surface.rs", "slack"),
     ("crates/ironclaw_loop_host/src/capability_port.rs", "gmail"),
-    ("crates/ironclaw_auth/src/loopback_oauth.rs", "google"),
-    ("crates/ironclaw_auth/src/loopback_oauth.rs", "notion"),
     (
         "crates/ironclaw_outbound/src/delivered_gate_routes.rs",
         "slack",

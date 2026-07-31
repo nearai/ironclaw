@@ -471,7 +471,9 @@ impl RebornIntegrationGroup {
             safety_context: None,
             turn_event_sink: None,
             trace_capture: false,
-            tool_disclosure: None,
+            // General integration groups stay hermetic across production
+            // default changes. Disclosure-specific tests opt into Bridged.
+            tool_disclosure: ToolDisclosureMode::Off,
             narrowed_bridged_allow_set: None,
             budget: false,
             communication_context_provider: None,
@@ -810,13 +812,12 @@ pub struct RebornIntegrationGroupBuilder {
     /// group's one planned runtime, fan-out-composed with the in-memory sink
     /// when both are opted in.
     trace_capture: bool,
-    /// Enabler (b): `Some(ToolDisclosureMode::Bridged)` once
-    /// `.with_tool_disclosure_bridged()` has been called; `None` resolves via
-    /// `ToolDisclosureMode::from_env()` in `into_group` (today's behavior).
-    tool_disclosure: Option<ToolDisclosureMode>,
+    /// Enabler (b): pinned to `Off` for general hermetic tests and changed to
+    /// `Bridged` only by `.with_tool_disclosure_bridged()`.
+    tool_disclosure: ToolDisclosureMode,
     /// #5647 RED-pin seam: opt-in override of the forced `CapabilityAllowSet::All`
     /// for Bridged-mode groups. `None` preserves today's behavior; only
-    /// consumed when `tool_disclosure == Some(Bridged)` (`into_group` fails fast otherwise).
+    /// consumed when `tool_disclosure == Bridged` (`into_group` fails fast otherwise).
     narrowed_bridged_allow_set: Option<CapabilityAllowSet>,
     /// C-BUDGET: when `true`, `into_group` wires the production
     /// `build_default_budget_accountant` (in-memory governor + gate store +
@@ -949,7 +950,7 @@ impl RebornIntegrationGroupBuilder {
         // Harness-seam misuse guard (§7): fail fast instead of a silent no-op
         // if the override is set without Bridged mode also selected.
         if self.narrowed_bridged_allow_set.is_some()
-            && self.tool_disclosure != Some(ToolDisclosureMode::Bridged)
+            && self.tool_disclosure != ToolDisclosureMode::Bridged
         {
             return Err(
                 "with_narrowed_capability_allow_set_for_bridged_test() was set but \
@@ -1005,7 +1006,7 @@ impl RebornIntegrationGroupBuilder {
         // the filter's host-exempt set, so this is production parity, not a
         // bug dodge.
         let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
-            if self.tool_disclosure == Some(ToolDisclosureMode::Bridged) {
+            if self.tool_disclosure == ToolDisclosureMode::Bridged {
                 Arc::new(StaticCapabilitySurfaceProfileResolver {
                     allow_set: self
                         .narrowed_bridged_allow_set
@@ -1199,13 +1200,9 @@ impl RebornIntegrationGroupBuilder {
                 lease_recovery_interval: self
                     .lease_recovery_interval_override
                     .unwrap_or(DefaultPlannedRuntimeConfig::default().lease_recovery_interval),
-                // Enabler (b): explicit builder opt-in wins; otherwise resolve
-                // via `from_env()` exactly like `DefaultPlannedRuntimeConfig`'s
-                // own `Default` impl — never mutate the process env from a
-                // test (see `ToolDisclosureMode::from_env` doc, `apply_hermetic_env`).
-                tool_disclosure: self
-                    .tool_disclosure
-                    .unwrap_or_else(ToolDisclosureMode::from_env),
+                // Enabler (b): test groups are hermetically pinned and never
+                // resolve this production mode from the process environment.
+                tool_disclosure: self.tool_disclosure,
                 // Loop-level counterpart of hermetic `LLM_MAX_RETRIES=0`:
                 // production rides out provider outages for minutes (deep
                 // availability retries with long backoff), which would stall

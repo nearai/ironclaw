@@ -1120,7 +1120,7 @@ registerPack("fr", {
   "admin.users.token": "Jeton",
   "admin.users.jobsCount": "Travaux {count}",
   "admin.users.suspendTitle": "Suspendre l’utilisateur",
-  "admin.users.suspendDesc": "Cela empêchera l’utilisateur de s’authentifier. Continuer ?",
+  "admin.users.suspendDesc": "Cela empêchera « {name} » de s’authentifier. Continuer ?",
   "admin.users.tokenNamePrompt": "Nom du token pour {name} :",
   "admin.users.tokenCreated": "Token créé",
   "admin.users.tokenCreatedDesc": "Copiez‑le maintenant — il ne sera plus affiché.",
@@ -1209,6 +1209,9 @@ registerPack("fr", {
   "logs.entryCount": "{count} entrees",
   "logs.pausedBadge": "● en pause",
   "logs.empty": "En attente d'entrees de journal…",
+  "logs.loadOlder": "Charger les journaux plus anciens",
+  "logs.retentionLimitReached":
+    "Les {count} entrées de journal les plus récentes sont affichées. Mettez les mises à jour en direct en pause ou affinez les filtres pour examiner une plage stable.",
   "common.recent": "Récent",
   "common.searchChats": "Rechercher des discussions...",
   "common.gatewaySession": "Session de passerelle",

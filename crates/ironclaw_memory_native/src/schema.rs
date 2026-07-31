@@ -2,7 +2,8 @@
 
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
 
-use crate::path::{MemoryDocumentPath, memory_error, valid_memory_path};
+use crate::path::{memory_error, valid_memory_path};
+use ironclaw_memory::MemoryDocumentPath;
 
 pub(crate) fn validate_content_against_schema(
     path: &MemoryDocumentPath,

@@ -15,7 +15,7 @@
 // arch-exempt: large_file, ProductSurface service-collapse routes stay in the existing WebUI handler table until the WebUI route split lands, plan #5985
 
 mod run_artifact;
-pub use run_artifact::get_run_artifact;
+pub use run_artifact::{get_run_artifact, get_thread_artifact};
 
 use std::convert::Infallible;
 use std::time::Duration;
@@ -166,6 +166,9 @@ pub struct WebUiV2Features {
     /// `IRONCLAW_REBORN_PROJECTS`, while the surface is still being
     /// finished.
     pub reborn_projects: bool,
+    /// QA-only run and full-thread artifact export surface. Hidden and
+    /// unmounted unless the deployment explicitly opts in.
+    pub regression_artifact_export: bool,
     /// Effective global auto-approve setting for the authenticated caller.
     /// The browser treats it as a bootstrap UI flag and does not inspect the
     /// operator settings payload shape. Settings mutations should update local
@@ -195,6 +198,7 @@ pub async fn get_session(
         capabilities,
         features: WebUiV2Features {
             reborn_projects: state.reborn_projects_enabled(),
+            regression_artifact_export: state.regression_artifact_export_enabled(),
             global_auto_approve,
         },
         attachments: product_attachment_capabilities(),

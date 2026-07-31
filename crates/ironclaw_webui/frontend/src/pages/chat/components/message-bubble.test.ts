@@ -374,9 +374,9 @@ async function renderExpandedActivity(activity, activeRunId: string | null = nul
   }
 }
 
-test("only final assistant replies expose the run artifact download", async () => {
+test("artifact downloads require the deployment gate and a final assistant reply", async () => {
   const { MessageBubble } = await import("./message-bubble");
-  const render = (isFinalReply: boolean) =>
+  const render = (isFinalReply: boolean, enabled = false) =>
     renderToStaticMarkup(
       React.createElement(MessageBubble, {
         message: {
@@ -388,13 +388,20 @@ test("only final assistant replies expose the run artifact download", async () =
           isFinalReply,
         },
         threadId: "thread-1",
+        regressionArtifactExportEnabled: enabled,
       }),
     );
 
-  assert.match(render(true), /data-testid="download-run-artifact"/);
-  assert.doesNotMatch(render(false), /data-testid="download-run-artifact"/);
+  assert.doesNotMatch(render(true), /data-testid="download-run-artifact"/);
+  assert.doesNotMatch(render(true), /data-testid="download-thread-artifact"/);
+  assert.match(render(true, true), /data-testid="download-run-artifact"/);
+  assert.match(render(true, true), /data-testid="download-thread-artifact"/);
+  assert.doesNotMatch(render(false, true), /data-testid="download-run-artifact"/);
+  assert.doesNotMatch(render(false, true), /data-testid="download-thread-artifact"/);
   assert.match(messageBubbleSource, /fetchRunArtifact\(\{/);
+  assert.match(messageBubbleSource, /fetchThreadArtifact\(\{/);
   assert.match(messageBubbleSource, /ironclaw-run-\$\{filenameRunId\}\.json/);
+  assert.match(messageBubbleSource, /ironclaw-thread-\$\{filenameThreadId\}\.json/);
 });
 
 test("markdown body and code blocks inherit readable message sizing", () => {
@@ -541,7 +548,7 @@ test("error bubbles expose structural provider failure metadata", async () => {
   assert.match(html, /data-failure-status="failed"/);
 });
 
-test("message timestamp and actions share a hover-only meta row", () => {
+test("message timestamp and actions share an always-visible meta row", () => {
   assert.match(
     messageBubbleSource,
     /const showActions =[\s\S]*CHAT_MESSAGE_ROLES\.USER[\s\S]*CHAT_MESSAGE_ROLES\.ASSISTANT/,
@@ -554,8 +561,13 @@ test("message timestamp and actions share a hover-only meta row", () => {
   );
   assert.match(
     messageBubbleSource,
-    /mt-1 flex min-h-7 w-max v2-chat-readable-width flex-nowrap items-center gap-3 px-1 text-iron-400 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100/,
-    "timestamp and controls should stay hidden until message hover or focus without being constrained to the bubble width",
+    /mt-1 flex min-h-7 w-max v2-chat-readable-width flex-nowrap items-center gap-3 px-1 text-iron-400/,
+    "timestamp and controls should remain visible without being constrained to the bubble width",
+  );
+  assert.doesNotMatch(
+    messageBubbleSource,
+    /text-iron-400[^"\n]*(?:opacity-0|group-hover:opacity-100|focus-within:opacity-100)/,
+    "message actions should not depend on hover or keyboard focus for visibility",
   );
   assert.match(
     messageBubbleSource,
@@ -570,7 +582,7 @@ test("message timestamp and actions share a hover-only meta row", () => {
   assert.doesNotMatch(
     actionRow,
     />\s*\$\{copied \? "Copied" : "Copy"\}\s*<|>Retry</,
-    "hover controls should use fixed-size icons instead of text that competes with the timestamp",
+    "message controls should use fixed-size icons instead of text that competes with the timestamp",
   );
 });
 

@@ -26,8 +26,10 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // React.lazy (see gateway-layout.tsx / message-bubble.tsx), and their
 // presentation-only field-value helpers moved out of the eager
 // chat-commands.ts into command-result.tsx. What's left (~0.45 KB over the
-// previous 210.0 KB budget) is the composer menu's own necessary weight, so
-// the budget moves up instead.
+// previous 210.0 KB budget) is the composer menu's own necessary weight. React
+// Router 8 and its required React 19.2 upgrade then moved the measured initial
+// route from 211 KB to 213.8 KB gzip, so retain about 1.2 KB of explicit
+// headroom for that supported dependency upgrade.
 // Hosted MCP registration (custom MCP server connect) added ~44
 // `extensions.customMcp*` i18n keys plus 2 `common.*` keys to `en.ts`, the
 // fallback locale pack `i18n.tsx` (~line 36) loads eagerly in `main.tsx` so it
@@ -40,9 +42,10 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // returns (0.39 gzip bytes saved per raw byte cut, down to 0.17) and would
 // require gutting minimal labels like "OAuth" or "Server ID". The remaining
 // growth is ~44 new i18n keys of string content for hosted MCP registration,
-// not new eager code weight, so the budget moves up to cover the measured
-// 211.2 KB with ~0.3 KB of headroom rather than trimming further.
-const CHAT_GZIP_BUDGET = 211_500;
+// not new eager code weight; the 215.0 KB budget above (already raised for the
+// React Router 8 / React 19.2 upgrade) still covers the measured total with
+// headroom to spare, so it is not raised further here.
+const CHAT_GZIP_BUDGET = 215_000;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {

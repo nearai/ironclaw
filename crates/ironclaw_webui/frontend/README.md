@@ -1,8 +1,8 @@
 # WebUI v2 Frontend
 
-This directory owns the WebUI v2 frontend toolchain. Use Node 22 with Corepack
-enabled; the committed `pnpm-lock.yaml` is the source of truth for dependency
-resolution.
+This directory owns the WebUI v2 frontend toolchain. Use Node 22.22 or newer
+within the Node 22 release line with Corepack enabled; the committed
+`pnpm-lock.yaml` is the source of truth for dependency resolution.
 
 ## Commands
 
