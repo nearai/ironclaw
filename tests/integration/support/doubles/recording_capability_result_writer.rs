@@ -18,17 +18,15 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, LoopRunContext,
+    ProviderToolCall,
+};
 use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityWriteResult, LoopCapabilityInputResolver,
     LoopCapabilityResultWriter,
 };
-use ironclaw_turns::{
-    LoopResultRef,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, LoopRunContext,
-        ProviderToolCall,
-    },
-};
+use ironclaw_turns::LoopResultRef;
 
 use super::super::harness::RecordedCapabilityResult;
 

@@ -32,6 +32,7 @@ use ironclaw_filesystem::{
     BackendKind, CompositeRootFilesystem, ContentKind, InMemoryBackend, IndexPolicy,
     RootFilesystem, ScopedFilesystem, StorageClass,
 };
+use ironclaw_host_api::turn::TurnGateRef;
 use ironclaw_host_api::{
     action::{Action, NetworkPolicy},
     capability::{CapabilityGrant, EffectKind, GrantConstraints},
@@ -47,6 +48,10 @@ use ironclaw_host_api::{
     scope::Principal,
 };
 use ironclaw_host_runtime::HostRuntime;
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, LoopCapabilityPort, LoopHostMilestoneSink,
+    LoopRequest, LoopRunContext,
+};
 use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter,
@@ -58,13 +63,6 @@ use ironclaw_reborn_composition::{
     OAuthClientConfig, ProductLiveCapabilityIo, RebornApprovalTestParts, RebornRuntimeInput,
 };
 use ironclaw_trust::EffectiveTrustClass;
-use ironclaw_turns::{
-    GateRef,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, LoopCapabilityPort, LoopHostMilestoneSink,
-        LoopRequest, LoopRunContext,
-    },
-};
 
 pub(crate) use super::doubles::{
     EmptyIdentityContextSource, HarnessCapabilityPortFactory,
@@ -139,7 +137,7 @@ impl HarnessCapabilityMode {
     /// doc (#5886).
     pub(crate) fn into_parts(
         self,
-        milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+        milestone_sink: Arc<ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink>,
         turn_thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
         process_system: ironclaw_runner::runtime::ProcessRuntimeSystem,
         trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
@@ -981,7 +979,7 @@ impl HostRuntimeCapabilityHarness {
 
     pub(crate) fn capability_factory(
         self: &Arc<Self>,
-        milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+        milestone_sink: Arc<ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink>,
         trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
     ) -> Arc<dyn LoopCapabilityPortFactory> {
         Arc::new(HostRuntimeHarnessCapabilityPortFactory {
@@ -1259,7 +1257,10 @@ impl HostRuntimeCapabilityHarness {
         self.workspace_root.join(relative.trim_start_matches('/'))
     }
 
-    pub(crate) async fn approve_standalone_gate(&self, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub(crate) async fn approve_standalone_gate(
+        &self,
+        gate_ref: &TurnGateRef,
+    ) -> HarnessResult<()> {
         let approval_parts = self
             .approval_parts
             .as_ref()
@@ -1307,7 +1308,7 @@ impl HostRuntimeCapabilityHarness {
     /// persisted request to `Denied` (no lease issued) via `ApprovalResolver::deny`.
     /// The caller then resumes the run with `GateResumeDisposition::Denied` so the
     /// executor surfaces a non-retryable authorization failure to the model.
-    pub(crate) async fn deny_standalone_gate(&self, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub(crate) async fn deny_standalone_gate(&self, gate_ref: &TurnGateRef) -> HarnessResult<()> {
         let approval_parts = self
             .approval_parts
             .as_ref()
@@ -1514,7 +1515,7 @@ impl HostRuntimeCapabilityHarness {
     /// never drift from the live approve/deny path. Tests only.
     pub(crate) fn approval_request_scope_for_test(
         &self,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> HarnessResult<(ApprovalRequestId, ResourceScope)> {
         let request_id = approval_request_id_from_gate_ref(gate_ref)?;
         let scope = self
@@ -1687,7 +1688,7 @@ impl HostRuntimeCapabilityHarness {
     pub(crate) async fn create_recording_capability_port(
         self: &Arc<Self>,
         run_context: &LoopRunContext,
-        milestone_sink: &Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+        milestone_sink: &Arc<ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink>,
         trajectory_observer: Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         // C-MULTIUSER: resolve the execution user per run (owner/actor) when
@@ -2160,7 +2161,7 @@ fn host_runtime_harness_error(error: impl std::fmt::Display) -> AgentLoopHostErr
     AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, error.to_string())
 }
 
-fn approval_request_id_from_gate_ref(gate_ref: &GateRef) -> HarnessResult<ApprovalRequestId> {
+fn approval_request_id_from_gate_ref(gate_ref: &TurnGateRef) -> HarnessResult<ApprovalRequestId> {
     const APPROVAL_GATE_PREFIX: &str = "gate:approval-";
     let value = gate_ref
         .as_str()

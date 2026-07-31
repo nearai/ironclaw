@@ -276,7 +276,7 @@ mod tests {
         path::{HostPath, MountAlias, VirtualPath},
         resource::ResourceScope,
     };
-    use ironclaw_turns::run_profile::LoopSafeSummary;
+    use ironclaw_loop_contracts::LoopSafeSummary;
     use serde_json::json;
 
     #[test]

@@ -276,7 +276,7 @@ mod tests {
     use async_trait::async_trait;
     use chrono::Utc;
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-    use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnScope};
+    use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnActor, TurnScope};
 
     use super::*;
     use crate::test_support::in_memory_backed_outbound_state_store;

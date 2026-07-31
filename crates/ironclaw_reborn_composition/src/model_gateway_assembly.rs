@@ -75,8 +75,8 @@ pub(crate) fn wrap_swappable_gateway(
     provider_factory: Option<ironclaw_operator::RebornProviderFactory>,
 ) -> Result<LlmGatewayBundle, RebornRuntimeError> {
     use ironclaw_llm::{LlmProvider, LlmReloadHandle, SwappableLlmProvider};
+    use ironclaw_loop_contracts::ModelProfileId;
     use ironclaw_runner::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
-    use ironclaw_turns::run_profile::ModelProfileId;
 
     let swappable = Arc::new(SwappableLlmProvider::new(raw));
     let reload_handle = Arc::new(LlmReloadHandle::new(Arc::clone(&swappable), None));

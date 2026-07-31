@@ -28,7 +28,7 @@ pub struct RefreshingCapabilityPortTestParts {
     /// Host runtime the assembled port dispatches builtin capabilities
     /// through (harness passes a recording double).
     pub runtime: std::sync::Arc<dyn ironclaw_host_runtime::HostRuntime>,
-    pub run_context: ironclaw_turns::run_profile::LoopRunContext,
+    pub run_context: ironclaw_loop_contracts::LoopRunContext,
     pub fallback_user_id: ironclaw_host_api::ids::UserId,
     pub workspace_mounts: ironclaw_host_api::mount::MountView,
     pub skill_mounts: ironclaw_host_api::mount::MountView,
@@ -40,7 +40,7 @@ pub struct RefreshingCapabilityPortTestParts {
     /// correlation by `call_id` works; never source them independently.
     pub input_resolver: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
     pub result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
-    pub milestone_sink: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopHostMilestoneSink>,
+    pub milestone_sink: std::sync::Arc<dyn ironclaw_loop_contracts::LoopHostMilestoneSink>,
     /// Opaque handle built by
     /// `test_support::build_skill_context_source_for_test`. Wraps
     /// the crate-private `ComposedSelectableSkillContextSource` so it never
@@ -141,8 +141,8 @@ pub fn build_extension_management_for_test(
 pub async fn create_refreshing_capability_port_for_test(
     parts: RefreshingCapabilityPortTestParts,
 ) -> Result<
-    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    ironclaw_turns::run_profile::AgentLoopHostError,
+    std::sync::Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
+    ironclaw_loop_contracts::AgentLoopHostError,
 > {
     crate::runtime::create_refreshing_capability_port_for_test(parts).await
 }

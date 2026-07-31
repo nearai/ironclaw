@@ -47,14 +47,14 @@ pub fn parse_product_adapter_manifest_record(
 ) -> Result<ExtensionManifestRecord, RegistryError> {
     let mut contracts = HostApiContractRegistry::new();
     register_product_adapter_host_api_contract(&mut contracts)?;
-    let record = ExtensionManifestRecord::from_toml(
+    let record = ExtensionManifestRecord::from_toml_with_root_binding(
         raw_toml,
         source,
         host_port_catalog,
         manifest_hash,
         &contracts,
         // Contract-projection helper: no package root is materialized here.
-        None,
+        ironclaw_extensions::PackageRootBinding::FabricateOnLoad,
     )
     .map_err(|error| match error {
         ExtensionInstallationError::Manifest(error) => RegistryError::Manifest(error),

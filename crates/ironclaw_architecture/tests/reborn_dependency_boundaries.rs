@@ -295,9 +295,111 @@ fn reborn_crate_dependency_boundaries_hold() {
             .collect::<Vec<_>>(),
     );
 
+    // PROPOSAL §11.2.3 contracts purity — `ironclaw_loop_contracts`.
+    //
+    // The loop tier's contract crate is the typed membrane between replaceable
+    // loop userland and the turn kernel. Its whole reason to exist is that
+    // `ironclaw_agent_loop` can satisfy "contracts-layer deps only" through it,
+    // so it may name only contracts-layer crates — and, above all, never
+    // `ironclaw_turns`: the direction inverts (the kernel implements and
+    // validates against these contracts, §6.1.4). An allowlist, not a
+    // blocklist, so a future kernel or domain dep cannot slip past a list that
+    // only names today's offenders.
+    let loop_contracts_allowed = [
+        "ironclaw_loop_contracts",
+        "ironclaw_host_api",
+        "ironclaw_common",
+        "ironclaw_prompt_envelope",
+    ];
+    assert_no_normal_workspace_deps(
+        &dependencies,
+        "ironclaw_loop_contracts",
+        workspace_ironclaw_crates(&dependencies)
+            .into_iter()
+            .filter(|name| !loop_contracts_allowed.contains(name))
+            .collect::<Vec<_>>(),
+    );
+
     for rule in boundary_rules() {
         assert_no_normal_workspace_deps(&dependencies, rule.crate_name, rule.forbidden);
     }
+}
+
+/// PROPOSAL §11.2.3, external half: a contracts crate never acquires a
+/// framework, driver, or runtime client. The internal-dep allowlist above
+/// cannot see these — every metadata helper in this file filters to `ironclaw_*`
+/// names — so the denied set is asserted directly against `cargo metadata`.
+///
+/// One documented carve-out: `tokio` is permitted with the `rt` feature only,
+/// for `CommunicationContextFetch::Spawned`, which carries a `JoinHandle` for an
+/// in-flight communication-context fetch. PROPOSAL §11.2.3 phrases the tokio
+/// rule as "beyond `sync`-free usage **where feasible**"; this is the one place
+/// in the crate it is not, and it is pinned here so widening it is a deliberate
+/// edit rather than a drift.
+#[test]
+fn reborn_contracts_crates_hold_no_framework_dependencies() {
+    const DENIED: &[&str] = &[
+        "axum",
+        "deadpool",
+        "deadpool-postgres",
+        "hyper",
+        "libsql",
+        "reqwest",
+        "rusqlite",
+        "sqlx",
+        "tokio-postgres",
+        "tonic",
+        "tower",
+        "tower-http",
+        "wasmtime",
+        "wasmtime-wasi",
+    ];
+    const CONTRACTS_CRATES: &[&str] = &[
+        "ironclaw_common",
+        "ironclaw_host_api",
+        "ironclaw_loop_contracts",
+        "ironclaw_prompt_envelope",
+    ];
+
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+
+    let mut checked = 0_usize;
+    let mut violations = Vec::new();
+    for package in packages {
+        let Some(name) = package["name"].as_str() else {
+            continue;
+        };
+        if !CONTRACTS_CRATES.contains(&name) {
+            continue;
+        }
+        checked += 1;
+        for dependency in package["dependencies"].as_array().into_iter().flatten() {
+            if !is_normal_dependency(dependency) {
+                continue;
+            }
+            let Some(dependency_name) = dependency["name"].as_str() else {
+                continue;
+            };
+            if DENIED.contains(&dependency_name) {
+                violations.push(format!("{name} -> {dependency_name}"));
+            }
+        }
+    }
+
+    assert_eq!(
+        checked,
+        CONTRACTS_CRATES.len(),
+        "every contracts crate must be present in cargo metadata; otherwise this scan is vacuous"
+    );
+    assert!(
+        violations.is_empty(),
+        "contracts-layer crates must not depend on a framework, driver, or runtime client \
+         (PROPOSAL §11.2.3):\n{}",
+        violations.join("\n")
+    );
 }
 
 #[test]
@@ -904,9 +1006,9 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         "crates/ironclaw_safety/src/provider_validation.rs",
         // Host loop/run/thread protocol structs that preserve exact model
         // provider names for tool-result roundtrips and historical replay.
-        // The provider-tool-call DTOs live in the `capability` submodule after
-        // the `host.rs` -> `host/` decomposition.
-        "crates/ironclaw_turns/src/run_profile/host/capability.rs",
+        // The provider-tool-call DTOs live in the `capability` submodule of the
+        // loop-tier contract crate (WS1.2 moved `turns::run_profile/**` there).
+        "crates/ironclaw_loop_contracts/src/host/capability.rs",
         "crates/ironclaw_threads/src/tool_result_reference.rs",
         // Loop support owns capability-id <-> provider-name surface snapshots,
         // synthetic provider tools, provider-call registration, and replay refs.
@@ -2928,6 +3030,28 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
+            // The loop-tier contract stays a leaf of the contracts family. The
+            // allowlist in `reborn_crate_dependency_boundaries_hold` is the
+            // authority; this rule names the edges whose appearance would be
+            // most damaging — above all `ironclaw_turns`, whose dependency runs
+            // the other way — so the failure message says which invariant broke.
+            crate_name: "ironclaw_loop_contracts",
+            forbidden: vec![
+                "ironclaw_agent_loop",
+                "ironclaw_capabilities",
+                "ironclaw_extension_host",
+                "ironclaw_hooks",
+                "ironclaw_host_runtime",
+                "ironclaw_loop_host",
+                "ironclaw_processes",
+                "ironclaw_product",
+                "ironclaw_reborn_composition",
+                "ironclaw_runner",
+                "ironclaw_threads",
+                "ironclaw_turns",
+            ],
+        },
+        BoundaryRule {
             // Shared libSQL runtime owns connection mechanics only. It must
             // remain below every adapter that consumes its read/write lanes.
             crate_name: "ironclaw_libsql_runtime",
@@ -3532,7 +3656,24 @@ struct LayerMatrixException {
 /// number is therefore a ceiling that only ever moves **down**: when a wave
 /// deletes exceptions, lower it in the same PR so the new floor is locked in.
 /// The ratchet below refuses growth; it cannot make the list shrink on its own.
-const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 20;
+///
+/// **20 → 15 (WS1.1, turn-vocabulary completion).** `auth`, `event_streams`,
+/// `outbound`, `triggers`, and `event_projections` reached `ironclaw_turns`
+/// for turn vocabulary only. That vocabulary is now complete in
+/// `ironclaw_host_api::turn`, those five crates import it from there, and
+/// their `ironclaw_turns` dependency is gone — so the five exceptions were not
+/// waived, their edges no longer exist.
+///
+/// **15 → 13 (WS1.2, `ironclaw_loop_contracts` extraction).** `hooks` and
+/// `agent_loop` reached `ironclaw_turns` for the loop-tier port set and the
+/// `LoopExit` claim vocabulary. Both now live in `ironclaw_loop_contracts`,
+/// both crates dropped their `ironclaw_turns` manifest dependency, and
+/// `agent_loop`'s contracts-only rule passes with zero exceptions. The third
+/// `→ turns` entry, `conversations`, did **not** fall: re-verified against the
+/// live tree it is turn *admission* (a `TurnCoordinator` handle and
+/// `submit_turn` call), not vocabulary, so `loop_contracts` cannot dissolve it
+/// — its entry now records that and points at WS5.
+const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 13;
 
 const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
     LayerMatrixException {
@@ -3571,32 +3712,11 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         reason: "runtime process management still depends on resource contracts currently classed with kernel behavior",
     },
     LayerMatrixException {
-        crate_name: "ironclaw_event_projections",
-        dependency_name: "ironclaw_turns",
-        introduced: "2026-07-09",
-        removes_in: "W4.3",
-        reason: "projection state reads turn DTOs that move to turn_contracts if the JIT split fires",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_triggers",
-        dependency_name: "ironclaw_turns",
-        introduced: "2026-07-09",
-        removes_in: "W4.3",
-        reason: "trigger state reads turn DTOs that move to turn_contracts if the JIT split fires",
-    },
-    LayerMatrixException {
         crate_name: "ironclaw_conversations",
         dependency_name: "ironclaw_turns",
         introduced: "2026-07-09",
-        removes_in: "W4.3",
-        reason: "conversation ingress still names turn DTOs that move to turn_contracts if the JIT split fires",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_hooks",
-        dependency_name: "ironclaw_turns",
-        introduced: "2026-07-09",
-        removes_in: "W4.3",
-        reason: "hook payloads still name turn DTOs that move to turn_contracts if the JIT split fires",
+        removes_in: "WS5",
+        reason: "re-verified during WS1.2: this is NOT turn-DTO naming and loop_contracts does not dissolve it. InboundTurnService holds Arc<dyn TurnCoordinator> and calls submit_turn(SubmitTurnRequest), and trusted_trigger classifies TurnError/AdmissionRejectionReason - turn ADMISSION authority, not vocabulary. It clears when the inbound submit orchestration moves to the product tier (PROPOSAL 6.4.2 lists conversations deps as filesystem/host_api/safety/triggers with turn vocabulary via host_api)",
     },
     LayerMatrixException {
         crate_name: "ironclaw_hooks",
@@ -3604,27 +3724,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         introduced: "2026-07-09",
         removes_in: "W6",
         reason: "hooks still reuse the WASM limiter crate before the directory re-layout verifies runtime/substrate placement",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_outbound",
-        dependency_name: "ironclaw_turns",
-        introduced: "2026-07-09",
-        removes_in: "W4.3",
-        reason: "outbound delivery still names turn DTOs that move to turn_contracts if the JIT split fires",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_event_streams",
-        dependency_name: "ironclaw_turns",
-        introduced: "2026-07-09",
-        removes_in: "W4.3",
-        reason: "event stream contracts still name turn DTOs that move to turn_contracts if the JIT split fires",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_agent_loop",
-        dependency_name: "ironclaw_turns",
-        introduced: "2026-07-09",
-        removes_in: "W4.3",
-        reason: "agent_loop still names turn DTOs directly until the turn_contracts JIT split moves the type surface to contracts",
     },
     LayerMatrixException {
         crate_name: "ironclaw_mcp",
@@ -3667,13 +3766,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         introduced: "2026-07-09",
         removes_in: "W7",
         reason: "the runner intentionally composes loop-host adapters until kernel consolidation introduces a neutral dispatch boundary",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_auth",
-        dependency_name: "ironclaw_turns",
-        introduced: "2026-07-23",
-        removes_in: "follow-up: neutral auth/turn gate host API port",
-        reason: "product-auth owns the recipe-driven blocked-gate OAuth flow driver while it still receives TurnScope/TurnRunId from the turn gate prompt seam",
     },
 ];
 

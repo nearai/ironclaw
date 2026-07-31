@@ -1,3 +1,4 @@
+use ironclaw_host_api::hosted_mcp::extract_mcp_auth_metadata_locations;
 use ironclaw_host_api::http::{
     RuntimeHttpEgressError, RuntimeHttpEgressRequest, is_sensitive_runtime_request_header,
     is_sensitive_runtime_response_header,
@@ -131,6 +132,7 @@ pub(super) fn sanitize_runtime_response(
     response: NetworkHttpResponse,
     redaction_values: &[String],
     leak_detector: &LeakDetector,
+    preserve_mcp_auth_metadata: bool,
 ) -> Result<(NetworkHttpResponse, bool), RuntimeHttpEgressError> {
     let NetworkHttpResponse {
         status,
@@ -144,6 +146,18 @@ pub(super) fn sanitize_runtime_response(
     for (name, value) in headers {
         if is_sensitive_runtime_response_header(&name) {
             redaction_applied = true;
+            if preserve_mcp_auth_metadata && name.eq_ignore_ascii_case("www-authenticate") {
+                sanitized_headers.extend(
+                    extract_mcp_auth_metadata_locations(&value)
+                        .into_iter()
+                        .map(|location| {
+                            (
+                                "protected-resource-metadata".to_string(),
+                                location.as_str().to_string(),
+                            )
+                        }),
+                );
+            }
             continue;
         }
         let exact_redacted = redact_exact_values(value, redaction_values);
@@ -323,5 +337,51 @@ mod tests {
             RuntimeHttpEgressError::Request { ref reason, .. }
                 if reason == "credential_leak_blocked"
         ));
+    }
+
+    #[test]
+    fn mcp_response_preserves_only_redacted_oauth_metadata_location() {
+        let response = NetworkHttpResponse {
+            status: 401,
+            headers: vec![(
+                "WWW-Authenticate".to_string(),
+                "Bearer realm=\"OAuth\", resource_metadata=\"https://mcp.notion.com/.well-known/oauth-protected-resource/mcp?access_token=secret\", error=\"invalid_token\"".to_string(),
+            )],
+            body: Vec::new(),
+            usage: ironclaw_network::NetworkUsage::default(),
+        };
+
+        let (sanitized, redacted) =
+            sanitize_runtime_response(response, &[], &LeakDetector::new(), true)
+                .expect("MCP challenge sanitization");
+
+        assert!(redacted);
+        assert_eq!(
+            sanitized.headers,
+            vec![(
+                "protected-resource-metadata".to_string(),
+                "https://mcp.notion.com/.well-known/oauth-protected-resource/mcp".to_string(),
+            )]
+        );
+    }
+
+    #[test]
+    fn non_mcp_response_drops_oauth_challenge_completely() {
+        let response = NetworkHttpResponse {
+            status: 401,
+            headers: vec![(
+                "WWW-Authenticate".to_string(),
+                "Bearer resource_metadata=\"https://mcp.example.test/metadata\"".to_string(),
+            )],
+            body: Vec::new(),
+            usage: ironclaw_network::NetworkUsage::default(),
+        };
+
+        let (sanitized, redacted) =
+            sanitize_runtime_response(response, &[], &LeakDetector::new(), false)
+                .expect("ordinary response sanitization");
+
+        assert!(redacted);
+        assert!(sanitized.headers.is_empty());
     }
 }

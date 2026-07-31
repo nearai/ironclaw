@@ -22,6 +22,7 @@
 - Dispatch port contracts (`dispatch`) and host-port catalog/grant/view types (`host_port`, incl. `HOST_RUNTIME_HTTP_EGRESS_PORT_ID`).
 - Runtime vocabulary `RuntimeKind`/`TrustClass` (`runtime`) and deployment-mode/profile/effective runtime-policy types (`runtime_policy`).
 - Requested-trust vocabulary and `PackageIdentity` (`trust`).
+- The **complete** turn vocabulary (`turn`): typed turn/run/checkpoint/lease/runner ids, the bounded `AcceptedMessageRef`/`SourceBindingRef`/`ReplyTargetBindingRef`/`TurnGateRef`/`IdempotencyKey`/`RunProfileId`/`RunProfileRequest` refs and the `Loop*Ref` family, `TurnScope`/`TurnActor`/`TurnThreadOwner`/`TurnOwner`, `TurnStatus` with its `GateKind`/`BlockedReason` gate correspondence, `EventCursor`, `RunOriginAdapter`, and the sanitized failure/cancel shapes. A crate that only *names* turns depends on this crate, never on `ironclaw_turns`.
 - The crate error type `HostApiError` (`error`) and the canonical `Timestamp` alias.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
@@ -39,6 +40,7 @@
 ## Agent Notes
 
 - Contracts are reached module-qualified: `ironclaw_host_api::scope::ExecutionContext`, `ironclaw_host_api::ids::ExtensionId`. There is no flat prelude and no per-module glob re-export in `lib.rs`; `Timestamp` is the sole crate-root item. When you add a type, put it in the module that owns its vocabulary family and let consumers name that module.
+- `turn::TurnGateRef` and `ids::GateRef` are different types for different jobs. `TurnGateRef` is the loop-facing *routing* ref: a `bounded_ref!` string validated only as non-empty, <= 256 bytes, and control-character-free. Production mints it as `gate:approval-{id}` / `gate:auth-{id}` and predicates like `is_auth_gate_ref` match that prefix, but **the prefix is a convention the type does not enforce** — do not "fix" a caller or fixture that passes an unprefixed value, and do not tighten the constructor without migrating every persisted ref. The prefix-validated family is `LoopGateRef` (`loop_ref!(..., "gate:")`). `ids::GateRef` is a different thing again: an opaque uuid GateRecord *key*. Neither is an alias of the other, and no crate may re-alias one to the other's name.
 - `HostPortGrant` is intentionally a thin scoped-view grant token over `HostPortId`. Do not add attenuation/scope/expiry fields to that wire shape; introduce a distinct scoped/attenuated grant type if that behavior lands later.
 - Keep edits inside this crate unless a contract explicitly requires a neighboring crate change.
 - Prefer caller-level tests when a helper gates dispatch, persistence, network, secrets, approvals, resources, events, or process side effects.

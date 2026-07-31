@@ -6,20 +6,24 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
+use ironclaw_loop_contracts::{LoopBlockedKind, LoopCheckpointKind};
 use ironclaw_loop_host::RunCancellationFactory;
 use ironclaw_threads::{
     MessageKind, MessageStatus, SessionThreadService, ThreadHistory, ThreadHistoryRequest,
     ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
 };
 use ironclaw_turns::{
-    AgentTurnRuntimePort, GetLoopCheckpointRequest, GetRunStateRequest, LoopBlockedKind,
-    LoopCheckpointKind, LoopGateRef, LoopMessageRef, LoopResultRef, TurnError, TurnId, TurnRunId,
-    TurnScope, TurnStatus,
+    AgentTurnRuntimePort, GetLoopCheckpointRequest, GetRunStateRequest, LoopGateRef,
+    LoopMessageRef, LoopResultRef, TurnError, TurnId, TurnRunId, TurnScope, TurnStatus,
 };
 
-pub use ironclaw_turns::loop_exit::{
+// Not re-exported: a `Loop*Port` has exactly one import path, and
+// `LoopExitEvidencePort` belongs to the turn kernel that validates against it
+// (PROPOSAL §11.2.4, pinned by `reborn_loop_port_location_scan`). The evidence
+// requests and the applier travel with it for the same reason — one home each.
+use ironclaw_turns::loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
-    FinalCheckpointEvidenceRequest, LoopExitApplier, LoopExitEvidencePort,
+    FinalCheckpointEvidenceRequest, LoopExitEvidencePort,
 };
 
 /// Strict test/local evidence port. Defaults to distrust everything.

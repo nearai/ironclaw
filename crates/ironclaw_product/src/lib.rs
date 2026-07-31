@@ -169,6 +169,10 @@ pub use inbound_turn::{
     DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
 };
 pub use ironclaw_common::{AutomationName, AutomationNameError, MAX_AUTOMATION_NAME_BYTES};
+#[cfg(any(test, feature = "test-support"))]
+pub use ironclaw_host_api::product_adapter::test_support::fakes::{
+    FakeOutboundDeliverySink, FakeProjectionStream, FakeProtocolHttpEgress, RecordedEgressCall,
+};
 pub use ironclaw_host_api::product_adapter::{
     AdapterInstallationId, ApprovalDecision, ApprovalPromptActionView, ApprovalPromptContextView,
     ApprovalPromptDestinationView, ApprovalPromptDetailView, ApprovalPromptScopeView,
@@ -213,10 +217,6 @@ pub use ironclaw_host_api::product_adapter::{
     mark_request_signature_verified, mark_request_signature_verified_for_tenant,
     mark_session_verified, mark_session_verified_for_tenant, mark_shared_secret_header_verified,
     mark_shared_secret_header_verified_for_tenant,
-};
-#[cfg(any(test, feature = "test-support"))]
-pub use ironclaw_turns::product_adapter::{
-    FakeOutboundDeliverySink, FakeProjectionStream, FakeProtocolHttpEgress, RecordedEgressCall,
 };
 
 pub mod auth {
@@ -301,6 +301,7 @@ pub use reborn_services::{
     ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest, CodexLoginStart,
     EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY,
     EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY, EXTENSION_INSTALL_CAPABILITY_ID,
+    EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY, EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,
     EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY, EXTENSION_REMOVE_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
     EXTENSIONS_VIEW, EmptyProductCommandInput, ExtensionCredentialSetupService,

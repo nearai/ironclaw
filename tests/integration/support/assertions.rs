@@ -19,13 +19,11 @@
 
 use ironclaw_events::{SecurityBoundary, SecurityDecision};
 use ironclaw_host_api::ids::ProcessId;
+use ironclaw_loop_contracts::{LoopHostMilestoneKind, LoopRecoveryClass};
 use ironclaw_processes::ProcessKind;
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::{ResourceAccount, ResourceGovernor, ResourceTally};
-use ironclaw_turns::{
-    TurnEventKind, TurnRunId, TurnRunState,
-    run_profile::{LoopHostMilestoneKind, LoopRecoveryClass},
-};
+use ironclaw_turns::{TurnEventKind, TurnRunId, TurnRunState};
 use rust_decimal::Decimal;
 
 use super::builder::RebornIntegrationHarness;

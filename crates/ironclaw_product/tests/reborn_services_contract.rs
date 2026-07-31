@@ -25,6 +25,11 @@ use ironclaw_auth::{
     AuthAccountLastError, AuthAccountState, CredentialAccountId, CredentialAccountProjection,
     CredentialAccountStatus,
 };
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
+    SanitizedFailure, SourceBindingRef, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope,
+    TurnStatus,
+};
 use ironclaw_host_api::{
     attachment::InboundAttachment,
     product_surface::{
@@ -47,6 +52,7 @@ use ironclaw_host_api::{
     safe_summary::SafeSummary,
     scope::Principal,
 };
+use ironclaw_loop_contracts::{LoopModelRouteSnapshot, LoopModelUsage};
 use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_DELETE_SECRET_CAPABILITY_ID,
     ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
@@ -170,16 +176,12 @@ use ironclaw_threads::{
     ThreadMessageRange, ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
     UpdateToolResultReferenceRequest,
 };
-use ironclaw_turns::run_profile::{LoopModelRouteSnapshot, LoopModelUsage};
 use ironclaw_turns::test_support::in_memory_agent_turn_runtime;
 use ironclaw_turns::{
-    AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
-    CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef, GetRunStateRequest,
-    ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, ResumeTurnResponse,
-    RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion, SanitizedFailure,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCapacityResource,
-    TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState, TurnScope,
-    TurnStatus,
+    AdmissionRejection, AdmissionRejectionReason, CancelRunRequest, CancelRunResponse,
+    DefaultTurnCoordinator, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
+    ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, SubmitTurnRequest, SubmitTurnResponse,
+    TurnCapacityResource, TurnCoordinator, TurnError, TurnOriginKind, TurnRunState,
 };
 use secrecy::SecretString;
 use serde::Serialize;
@@ -366,7 +368,7 @@ struct FakeTurnCoordinator {
     run_state_error: Mutex<Option<TurnError>>,
     run_state_actor: Mutex<Option<TurnActor>>,
     explicit_run_status: Mutex<Option<TurnStatus>>,
-    parked_gate_ref: Mutex<Option<GateRef>>,
+    parked_gate_ref: Mutex<Option<TurnGateRef>>,
     parked_auth_gate: Mutex<bool>,
     parked_approval_gate: Mutex<bool>,
     run_state_failure: Mutex<Option<SanitizedFailure>>,
@@ -424,19 +426,19 @@ impl FakeTurnCoordinator {
     /// parked gate. Needed by tests that exercise `resolve_gate` denied/
     /// cancelled paths now that `RebornServices` verifies the run is parked
     /// on the supplied gate before issuing cancellation.
-    fn set_parked_gate(&self, gate_ref: GateRef) {
+    fn set_parked_gate(&self, gate_ref: TurnGateRef) {
         *self.parked_gate_ref.lock().expect("lock") = Some(gate_ref);
         *self.parked_auth_gate.lock().expect("lock") = false;
         *self.parked_approval_gate.lock().expect("lock") = false;
     }
 
-    fn set_parked_auth_gate(&self, gate_ref: GateRef) {
+    fn set_parked_auth_gate(&self, gate_ref: TurnGateRef) {
         *self.parked_gate_ref.lock().expect("lock") = Some(gate_ref);
         *self.parked_auth_gate.lock().expect("lock") = true;
         *self.parked_approval_gate.lock().expect("lock") = false;
     }
 
-    fn set_parked_approval_gate(&self, gate_ref: GateRef) {
+    fn set_parked_approval_gate(&self, gate_ref: TurnGateRef) {
         *self.parked_gate_ref.lock().expect("lock") = Some(gate_ref);
         *self.parked_auth_gate.lock().expect("lock") = false;
         *self.parked_approval_gate.lock().expect("lock") = true;
@@ -5373,7 +5375,7 @@ async fn resolve_gate_rejects_missing_run_state_actor() {
         coordinator.clone(),
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
+    coordinator.set_parked_gate(TurnGateRef::new("gate-alpha").expect("gate"));
     coordinator.set_run_state_actor(None);
 
     let err = services
@@ -5405,7 +5407,7 @@ async fn resolve_gate_rejects_mismatched_run_state_actor() {
         coordinator.clone(),
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
+    coordinator.set_parked_gate(TurnGateRef::new("gate-alpha").expect("gate"));
     coordinator.set_run_state_actor(Some(turn_actor_for_user("user-beta")));
 
     let err = services
@@ -5437,7 +5439,7 @@ async fn generic_gate_resolution_rejects_blocked_auth_run() {
         coordinator.clone(),
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_auth_gate(GateRef::new("custom-auth-gate").expect("gate"));
+    coordinator.set_parked_auth_gate(TurnGateRef::new("custom-auth-gate").expect("gate"));
 
     let err = services
         .resolve_gate(
@@ -5469,7 +5471,7 @@ async fn blocked_auth_run_routes_non_prefixed_gate_to_auth_interaction_service()
     )
     .with_auth_interactions(auth_interactions.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_auth_gate(GateRef::new("custom-auth-gate").expect("gate"));
+    coordinator.set_parked_auth_gate(TurnGateRef::new("custom-auth-gate").expect("gate"));
 
     let response = services
         .resolve_gate(
@@ -5504,7 +5506,7 @@ async fn blocked_auth_run_with_stale_gate_ref_returns_conflict() {
     )
     .with_auth_interactions(auth_interactions.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_auth_gate(GateRef::new("gate-current").expect("gate"));
+    coordinator.set_parked_auth_gate(TurnGateRef::new("gate-current").expect("gate"));
 
     let err = services
         .resolve_gate(
@@ -5539,7 +5541,7 @@ async fn blocked_approval_run_routes_non_prefixed_gate_to_approval_interaction_s
     )
     .with_approval_interactions(approval_interactions.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_approval_gate(GateRef::new("custom-approval-gate").expect("gate"));
+    coordinator.set_parked_approval_gate(TurnGateRef::new("custom-approval-gate").expect("gate"));
 
     let response = services
         .resolve_gate(
@@ -5577,7 +5579,7 @@ async fn blocked_approval_run_with_stale_gate_ref_returns_conflict() {
     )
     .with_approval_interactions(approval_interactions.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_approval_gate(GateRef::new("gate-current").expect("gate"));
+    coordinator.set_parked_approval_gate(TurnGateRef::new("gate-current").expect("gate"));
 
     let err = services
         .resolve_gate(
@@ -5941,7 +5943,7 @@ async fn denied_gate_resolution_cancels_run() {
         coordinator.clone(),
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
+    coordinator.set_parked_gate(TurnGateRef::new("gate-alpha").expect("gate"));
 
     let response = services
         .resolve_gate(
@@ -6055,7 +6057,7 @@ async fn resolve_gate_rejects_cross_user_access() {
     );
     let alice = caller();
     create_thread_for(&services, alice.clone(), "thread-alice").await;
-    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
+    coordinator.set_parked_gate(TurnGateRef::new("gate-alpha").expect("gate"));
 
     let bob = ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
@@ -6185,7 +6187,7 @@ async fn denied_gate_resolution_with_stale_gate_ref_returns_conflict() {
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
     // The run is parked on `gate-current`, but the browser supplies `gate-stale`.
-    coordinator.set_parked_gate(GateRef::new("gate-current").expect("gate"));
+    coordinator.set_parked_gate(TurnGateRef::new("gate-current").expect("gate"));
 
     let err = services
         .resolve_gate(

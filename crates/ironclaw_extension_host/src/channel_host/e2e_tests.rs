@@ -37,6 +37,10 @@ use ironclaw_extensions::{
     ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
 };
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
+    TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
+};
 use ironclaw_host_api::{
     ids::{
         AgentId, ApprovalRequestId, ExtensionId, InvocationId, ProjectId, TenantId, ThreadId,
@@ -83,10 +87,8 @@ use ironclaw_threads::{
 };
 use ironclaw_triggers::{TriggerFire, TriggerFireIdentity, TriggerId};
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
-    GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-    RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
-    TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
+    SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError, TurnRunState,
 };
 use tower::ServiceExt;
 
@@ -1399,7 +1401,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
         TurnActor::new(user.clone()),
         blocked_run_id,
         TurnStatus::BlockedApproval,
-        Some(GateRef::new(GATE).expect("gate ref")), // safety: static test gate ref is valid.
+        Some(TurnGateRef::new(GATE).expect("gate ref")), // safety: static test gate ref is valid.
         dm_target,
         AcceptedMessageRef::new("slack:triggered-approval").expect("accepted ref"), // safety: static test accepted ref is valid.
     );
@@ -1684,7 +1686,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
         TurnActor::new(user.clone()),
         run_id,
         TurnStatus::BlockedAuth,
-        Some(GateRef::new(AUTH_GATE).expect("auth gate ref")), // safety: static test gate ref is valid.
+        Some(TurnGateRef::new(AUTH_GATE).expect("auth gate ref")), // safety: static test gate ref is valid.
         dm_target,
         AcceptedMessageRef::new("slack:triggered-auth").expect("accepted ref"), // safety: static test accepted ref is valid.
     );
@@ -1817,7 +1819,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
         TurnActor::new(user.clone()),
         run_id,
         TurnStatus::BlockedAuth,
-        Some(GateRef::new(AUTH_GATE).expect("auth gate ref")), // safety: static test gate ref is valid.
+        Some(TurnGateRef::new(AUTH_GATE).expect("auth gate ref")), // safety: static test gate ref is valid.
         dm_target,
         AcceptedMessageRef::new("slack:triggered-auth-not-dm").expect("accepted ref"), // safety: static test accepted ref is valid.
     );
@@ -2967,10 +2969,10 @@ impl TurnCoordinator for RecordingTurnCoordinator {
         };
         let gate_ref = match status {
             TurnStatus::BlockedApproval => {
-                Some(GateRef::new(GATE).expect("gate ref")) // safety: static test gate ref is valid.
+                Some(TurnGateRef::new(GATE).expect("gate ref")) // safety: static test gate ref is valid.
             }
             TurnStatus::BlockedAuth => {
-                Some(GateRef::new(AUTH_GATE).expect("auth gate ref")) // safety: static test gate ref is valid.
+                Some(TurnGateRef::new(AUTH_GATE).expect("auth gate ref")) // safety: static test gate ref is valid.
             }
             _ => None,
         };
@@ -3124,7 +3126,7 @@ fn turn_state(
     actor: TurnActor,
     run_id: TurnRunId,
     status: TurnStatus,
-    gate_ref: Option<GateRef>,
+    gate_ref: Option<TurnGateRef>,
     reply_target_binding_ref: ReplyTargetBindingRef,
     accepted_message_ref: AcceptedMessageRef,
 ) -> TurnRunState {
@@ -3211,7 +3213,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
             approvals: vec![PendingApprovalInteractionView {
                 scope: ApprovalInteractionScope::from_turn(&request.scope, &request.actor),
                 run_id,
-                gate_ref: GateRef::new(GATE).map_err(|err| {
+                gate_ref: TurnGateRef::new(GATE).map_err(|err| {
                     ProductSurfaceFailure::TurnSubmissionRejected {
                         reason: err.to_string(),
                     }
@@ -3252,7 +3254,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
                 }
             })?;
             run.status = TurnStatus::BlockedAuth;
-            run.gate_ref = Some(GateRef::new(AUTH_GATE).expect("auth gate ref")); // safety: static test gate ref is valid.
+            run.gate_ref = Some(TurnGateRef::new(AUTH_GATE).expect("auth gate ref")); // safety: static test gate ref is valid.
             // blocked_run_id stays set — the run is still blocked, now on auth.
             return Ok(ResolveApprovalInteractionResponse::Approved(
                 ResumeTurnResponse {

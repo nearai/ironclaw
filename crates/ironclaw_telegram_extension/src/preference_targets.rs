@@ -8,13 +8,13 @@
 //! belong to; that protocol invariant supplies the personal-DM actor carried
 //! by the ref. Group, supergroup, and channel chat ids are negative.
 
+use ironclaw_host_api::turn::ReplyTargetBindingRef;
 use ironclaw_product::{
     ExternalConversationRef, PreferenceTargetCodec, PreferenceTargetEncodeRequest,
 };
 use ironclaw_telegram_v2_adapter::{
     TelegramReplyTarget, build_reply_target_binding, parse_reply_target,
 };
-use ironclaw_turns::ReplyTargetBindingRef;
 
 /// Telegram's vendor codec for stored outbound preference targets.
 #[derive(Debug, Clone, Copy, Default)]

@@ -5,51 +5,50 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, IdempotencyKey, LoopExitId, LoopGateRef, LoopMessageRef,
+    ReplyTargetBindingRef, RunOriginAdapter, RunProfileRequest, RunProfileVersion,
+    SourceBindingRef, TurnActor, TurnCheckpointId, TurnOwner, TurnRunId, TurnRunnerId, TurnStatus,
+};
 use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
     resolution::{Blocked, Resolution},
     runtime::RuntimeKind,
 };
+use ironclaw_loop_contracts::{
+    AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverHost,
+    AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply, BatchPolicyKind,
+    CapabilityDeniedReasonKind, CapabilityDescriptionTrust, CapabilityDescriptorView,
+    CapabilityInputRef, CapabilityProgress, CapabilitySurfaceVersion, CommunicationRuntimeContext,
+    ConcurrencyHint, ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState,
+    DeliveryTargetSummary, EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
+    InMemoryLoopHostMilestoneSink, InstructionBundleBuilder, InstructionBundleFingerprint,
+    InstructionBundleRequest, InstructionMaterializationStore, InstructionSafetyContext,
+    LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopBlocked, LoopBlockedKind,
+    LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointKind,
+    LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError,
+    LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest, LoopCompactionResponse,
+    LoopCompleted, LoopCompletionKind, LoopContextBundle, LoopContextMessage, LoopContextPort,
+    LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata, LoopDriverId,
+    LoopDriverNoteKind, LoopExit, LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter,
+    LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
+    LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant,
+    LoopModelCapabilityView, LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest,
+    LoopModelMessage, LoopModelPolicyGuard, LoopModelPort, LoopModelProgressSink, LoopModelRequest,
+    LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
+    LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
+    LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopRuntimeContext,
+    LoopSafeSummary, LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput,
+    PromptMode, PromptSkillContextMetadata, SkillTrustLevel, SystemInferenceTaskId,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+};
 use ironclaw_processes::{ClaimProcessesRequest, ProcessKind, ProcessWorkerId};
 use ironclaw_turns::test_support::in_memory_agent_turn_process_system;
 use ironclaw_turns::{
-    AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
-    DefaultTurnCoordinator, IdempotencyKey, LoopBlocked, LoopBlockedKind, LoopCompleted,
-    LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef, ProductTurnContext,
-    ReplyTargetBindingRef, RunOriginAdapter, RunProfileRequest, RunProfileVersion,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
-    TurnCoordinator, TurnOriginKind, TurnOwner, TurnRunId, TurnRunState, TurnRunnerId, TurnStatus,
-    claimed_turn_run_from_process_claim,
-    events::EventCursor,
-    run_profile::{
-        AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
-        BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityDescriptionTrust,
-        CapabilityDescriptorView, CapabilityInputRef, CapabilityProgress, CapabilitySurfaceVersion,
-        CommunicationRuntimeContext, ConcurrencyHint, ConnectedChannelSummary,
-        ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
-        EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
-        HostManagedLoopModelPort, HostManagedLoopPromptPort, InMemoryLoopHostMilestoneSink,
-        InstructionBundleBuilder, InstructionBundleFingerprint, InstructionBundleRequest,
-        InstructionMaterializationStore, InstructionSafetyContext,
-        LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopCancellationPort, LoopCancellationSignal,
-        LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
-        LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
-        LoopCompactionRequest, LoopCompactionResponse, LoopContextBundle, LoopContextMessage,
-        LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata,
-        LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone,
-        LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputAckToken,
-        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
-        LoopModelBudgetAccountant, LoopModelCapabilityView, LoopModelGateway,
-        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard,
-        LoopModelPort, LoopModelProgressSink, LoopModelRequest, LoopModelResponse,
-        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
-        LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRequest,
-        LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopSafeSummary,
-        LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput, PromptMode,
-        PromptSkillContextMetadata, SkillTrustLevel, SystemInferenceTaskId,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
-    },
+    DefaultTurnCoordinator, ProductTurnContext, SubmitTurnRequest, SubmitTurnResponse,
+    TurnCoordinator, TurnOriginKind, TurnRunState, claimed_turn_run_from_process_claim,
 };
+use ironclaw_turns::{HostManagedLoopModelPort, HostManagedLoopPromptPort};
 
 #[test]
 fn loop_compaction_outcome_serializes_and_deserializes_wire_shape() {
@@ -262,7 +261,7 @@ async fn host_managed_model_port_routes_gateway_and_emits_model_milestones() {
     let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let gateway = Arc::new(RecordingLoopModelGateway::default());
     gateway.push_response(Ok(LoopModelResponse {
-        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+        chunks: vec![ironclaw_loop_contracts::ModelStreamChunk {
             safe_text_delta: "safe delta".to_string(),
         }],
         safe_reasoning_deltas: vec![
@@ -326,7 +325,7 @@ async fn host_managed_model_port_returns_response_when_model_started_milestone_f
     let milestone_sink = Arc::new(FailingOnModelStartedMilestoneSink::default());
     let gateway = Arc::new(RecordingLoopModelGateway::default());
     gateway.push_response(Ok(LoopModelResponse {
-        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+        chunks: vec![ironclaw_loop_contracts::ModelStreamChunk {
             safe_text_delta: "safe delta".to_string(),
         }],
         safe_reasoning_deltas: Vec::new(),
@@ -371,7 +370,7 @@ async fn host_managed_model_port_returns_response_when_model_completed_milestone
     let milestone_sink = Arc::new(FailingOnModelCompletedMilestoneSink::default());
     let gateway = Arc::new(RecordingLoopModelGateway::default());
     gateway.push_response(Ok(LoopModelResponse {
-        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+        chunks: vec![ironclaw_loop_contracts::ModelStreamChunk {
             safe_text_delta: "safe delta".to_string(),
         }],
         safe_reasoning_deltas: Vec::new(),
@@ -2879,7 +2878,7 @@ impl AgentLoopDriver for ReplyDriver {
 
     async fn run(
         &self,
-        request: ironclaw_turns::AgentLoopDriverRunRequest,
+        request: ironclaw_loop_contracts::AgentLoopDriverRunRequest,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
     ) -> Result<LoopExit, AgentLoopDriverError> {
         assert_eq!(host.run_context().turn_id, request.turn_id);
@@ -2948,11 +2947,11 @@ impl AgentLoopDriver for ReplyDriver {
 
     async fn resume(
         &self,
-        request: ironclaw_turns::AgentLoopDriverResumeRequest,
+        request: ironclaw_loop_contracts::AgentLoopDriverResumeRequest,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
     ) -> Result<LoopExit, AgentLoopDriverError> {
         self.run(
-            ironclaw_turns::AgentLoopDriverRunRequest {
+            ironclaw_loop_contracts::AgentLoopDriverRunRequest {
                 turn_id: request.turn_id,
                 run_id: request.run_id,
                 resolved_run_profile: request.resolved_run_profile,
@@ -2973,7 +2972,7 @@ impl AgentLoopDriver for CapabilityDriver {
 
     async fn run(
         &self,
-        _request: ironclaw_turns::AgentLoopDriverRunRequest,
+        _request: ironclaw_loop_contracts::AgentLoopDriverRunRequest,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
     ) -> Result<LoopExit, AgentLoopDriverError> {
         let surface = host
@@ -3034,11 +3033,11 @@ impl AgentLoopDriver for CapabilityDriver {
 
     async fn resume(
         &self,
-        request: ironclaw_turns::AgentLoopDriverResumeRequest,
+        request: ironclaw_loop_contracts::AgentLoopDriverResumeRequest,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
     ) -> Result<LoopExit, AgentLoopDriverError> {
         self.run(
-            ironclaw_turns::AgentLoopDriverRunRequest {
+            ironclaw_loop_contracts::AgentLoopDriverRunRequest {
                 turn_id: request.turn_id,
                 run_id: request.run_id,
                 resolved_run_profile: request.resolved_run_profile,
@@ -3395,7 +3394,7 @@ impl RecordingAgentLoopHost {
             .collect()
     }
 
-    fn milestones(&self) -> Vec<ironclaw_turns::run_profile::LoopHostMilestone> {
+    fn milestones(&self) -> Vec<ironclaw_loop_contracts::LoopHostMilestone> {
         self.milestone_sink.milestones()
     }
 
@@ -3716,8 +3715,10 @@ async fn claimed_run_context() -> LoopRunContext {
     )
 }
 
-fn driver_run_request(host: &RecordingAgentLoopHost) -> ironclaw_turns::AgentLoopDriverRunRequest {
-    ironclaw_turns::AgentLoopDriverRunRequest {
+fn driver_run_request(
+    host: &RecordingAgentLoopHost,
+) -> ironclaw_loop_contracts::AgentLoopDriverRunRequest {
+    ironclaw_loop_contracts::AgentLoopDriverRunRequest {
         turn_id: host.context.turn_id,
         run_id: host.context.run_id,
         resolved_run_profile: host.context.resolved_run_profile.clone(),
@@ -3864,7 +3865,7 @@ fn simple_model_request(context: &LoopRunContext) -> LoopModelRequest {
 
 fn success_response(context: &LoopRunContext) -> LoopModelResponse {
     LoopModelResponse {
-        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+        chunks: vec![ironclaw_loop_contracts::ModelStreamChunk {
             safe_text_delta: "safe delta".to_string(),
         }],
         safe_reasoning_deltas: Vec::new(),
@@ -3957,7 +3958,7 @@ async fn redaction_sentinels_never_leak_through_serialized_surfaces() {
 
     // Success path: response content has a sentinel, but milestones must not expose it.
     gateway.push_response(Ok(LoopModelResponse {
-        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+        chunks: vec![ironclaw_loop_contracts::ModelStreamChunk {
             safe_text_delta: "RAW_CREDENTIAL_SENTINEL visible in chunk".to_string(),
         }],
         safe_reasoning_deltas: Vec::new(),

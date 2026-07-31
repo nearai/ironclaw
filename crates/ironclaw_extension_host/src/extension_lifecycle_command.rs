@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use ironclaw_auth::RuntimeCredentialAccountSelectionService;
 use ironclaw_host_api::{
-    http::RuntimeHttpEgress, product_surface::ProductSurfaceError, state::InstallationState,
+    hosted_mcp::RegisterHostedMcpRequest, product_surface::ProductSurfaceError,
+    state::InstallationState,
 };
 use ironclaw_product::{
     LifecycleExtensionSource, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
@@ -18,6 +19,7 @@ use ironclaw_skills::ScopedSkillManagementPort;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RebornExtensionLifecycleCommand {
+    RegisterHostedMcp { request: RegisterHostedMcpRequest },
     Search { query: String },
     Install { id: String },
     Activate { id: String },
@@ -37,7 +39,6 @@ pub enum RebornExtensionLifecycleCommandError {
 pub trait RebornExtensionLifecycleRuntime {
     fn skill_management(&self) -> Arc<ScopedSkillManagementPort>;
     fn extension_management(&self) -> Arc<RebornLocalExtensionManagementPort>;
-    fn runtime_http_egress(&self) -> Option<Arc<dyn RuntimeHttpEgress>>;
     fn runtime_credential_accounts(&self) -> Arc<dyn RuntimeCredentialAccountSelectionService>;
     fn extension_lifecycle_surface_context(&self) -> LifecycleProductSurfaceContext;
 }
@@ -46,12 +47,9 @@ pub async fn execute_reborn_extension_lifecycle_command(
     runtime: &impl RebornExtensionLifecycleRuntime,
     command: RebornExtensionLifecycleCommand,
 ) -> Result<LifecycleProductResponse, RebornExtensionLifecycleCommandError> {
-    let mut service = ExtensionHostLifecycleProductService::new(runtime.skill_management())
+    let service = ExtensionHostLifecycleProductService::new(runtime.skill_management())
         .with_extension_management(runtime.extension_management());
-    if let Some(runtime_http_egress) = runtime.runtime_http_egress() {
-        service = service.with_runtime_http_egress(runtime_http_egress);
-    }
-    service = service.with_runtime_credential_accounts(runtime.runtime_credential_accounts());
+    let service = service.with_runtime_credential_accounts(runtime.runtime_credential_accounts());
     let context = LifecycleProductContext::Surface(runtime.extension_lifecycle_surface_context());
     execute_reborn_extension_lifecycle_service_command(&service, context, command).await
 }
@@ -171,6 +169,9 @@ pub fn render_reborn_extension_lifecycle_response(
 impl RebornExtensionLifecycleCommand {
     fn into_action(self) -> Result<LifecycleProductAction, ProductSurfaceFailure> {
         Ok(match self {
+            Self::RegisterHostedMcp { request } => {
+                LifecycleProductAction::ExtensionRegisterHostedMcp { request }
+            }
             Self::Search { query } => LifecycleProductAction::ExtensionSearch { query },
             Self::Install { id } => LifecycleProductAction::ExtensionInstall {
                 package_ref: extension_package_ref(id)?,

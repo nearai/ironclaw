@@ -13,7 +13,7 @@ struct ActiveLookupItem {
     record: TriggerRecord,
     fire_slot: chrono::DateTime<chrono::Utc>,
     record_cursor: ActiveTriggerScanCursor,
-    run_id: ironclaw_turns::TurnRunId,
+    run_id: ironclaw_host_api::turn::TurnRunId,
     result_index: usize,
 }
 

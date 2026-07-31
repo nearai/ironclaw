@@ -3,8 +3,8 @@ use ironclaw_first_party_extension_ports::{
     SkillActivationRequest as FirstPartySkillActivationRequest,
     SkillBundleAsset as FirstPartySkillBundleAsset, SkillBundleAssetReadError, SkillExecutionPlan,
 };
+use ironclaw_loop_contracts::LoopRunContext;
 use ironclaw_loop_host::{SkillBundleId, SkillBundleSource, SkillSourceKind};
-use ironclaw_turns::run_profile::LoopRunContext;
 
 use super::{AssistantReply, RebornRuntimeError};
 

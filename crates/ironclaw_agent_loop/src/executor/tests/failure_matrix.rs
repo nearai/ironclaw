@@ -8,7 +8,7 @@ use super::{
     family_with_iteration_limit, family_with_reply_admission, final_staged_state,
     provider_calls_response, reply_response, reply_response_with_text, resolution,
 };
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     AppendCapabilityResultRef, CapabilityFailureDetail, LoopRunInfoPort, ToolObservationDetail,
     ToolObservationStatus,
 };
@@ -73,7 +73,7 @@ enum ExpectedError {
 #[derive(Debug)]
 struct ObservedTerminal {
     terminal: Terminal,
-    final_assistant_refs: Option<Vec<ironclaw_turns::LoopMessageRef>>,
+    final_assistant_refs: Option<Vec<ironclaw_host_api::turn::LoopMessageRef>>,
     finalized_assistant_messages: Vec<String>,
     model_request_count: usize,
     appended_result_refs: Vec<AppendCapabilityResultRef>,
@@ -433,7 +433,7 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
             ])
             .with_batch_outcomes(vec![batch_outcome(
                 resolution::denied(
-                    ironclaw_turns::run_profile::CapabilityDeniedReasonKind::EmptySurface,
+                    ironclaw_loop_contracts::CapabilityDeniedReasonKind::EmptySurface,
                     "provider call denied".to_string(),
                 )
                 .resolution,
@@ -726,7 +726,7 @@ fn assert_expected_error(
     }
 }
 
-fn assert_explanation_refs(row: &MatrixRow, refs: &[ironclaw_turns::LoopMessageRef]) {
+fn assert_explanation_refs(row: &MatrixRow, refs: &[ironclaw_host_api::turn::LoopMessageRef]) {
     if row.expects_explanation {
         assert!(
             !refs.is_empty(),
@@ -777,7 +777,7 @@ fn no_change_result(result_ref: &str) -> ironclaw_host_api::resolution::Resoluti
     resolution::completed(
         LoopResultRef::new(result_ref).expect("valid"),
         "completed without progress".to_string(),
-        ironclaw_turns::run_profile::CapabilityProgress::NoChange,
+        ironclaw_loop_contracts::CapabilityProgress::NoChange,
         false,
         0,
         None,

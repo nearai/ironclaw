@@ -578,6 +578,38 @@ capture python3 "${gate}" \
 check_rc "an uncovered line added during a rename fails" 1
 check_text "rename sabotage names the new source path" "${renamed_path}:11"
 
+echo "▶ the changed-line denominator is computed with the histogram diff algorithm"
+# Myers (git's default) anchors greedily. On a deletion-shaped diff it shreds one
+# large removal into interleaved -/+ hunks, re-emitting surviving *unchanged* text
+# as added lines — which this gate then demands coverage for. Found on #6964, where
+# deleting the dead half of llm::reasoning made myers report 907 added lines in a
+# file whose real change was 8 (all doc comments and imports, zero executable).
+#
+# This asserts the invocation rather than re-staging a myers pathology on purpose:
+# the pathology depends on git's internal heuristics, so a fixture built around one
+# can quietly stop reproducing on a future git and leave a vacuous green test. The
+# flag is the actual contract, so pin the flag.
+shim_bin="${work}/shim-bin"
+mkdir -p "${shim_bin}"
+real_git="$(command -v git)"
+cat >"${shim_bin}/git" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"${work}/git-argv.log"
+exec "${real_git}" "\$@"
+EOF
+chmod +x "${shim_bin}/git"
+: >"${work}/git-argv.log"
+PATH="${shim_bin}:${PATH}" python3 "${gate}" \
+  --lcov "${work}/coverage.lcov" \
+  --manifest "${work}/policy.toml" \
+  --base "${base_commit}" \
+  --head "${head_commit}" \
+  --repo-root "${case_root}" >/dev/null 2>&1 || true
+capture grep -Fq -- "--diff-algorithm=histogram" "${work}/git-argv.log"
+check_rc "the gate pins the histogram diff algorithm when it generates the diff" 0
+capture grep -Eq -- "diff .*--unified=0" "${work}/git-argv.log"
+check_rc "the gate still generates the diff with zero context" 0
+
 echo
 if [ "${failures}" -ne 0 ]; then
   echo "${failures} changed-coverage self-test(s) failed" >&2

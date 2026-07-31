@@ -17,8 +17,9 @@ mod support;
 
 use ironclaw_event_projections::TimelineEntryKind;
 use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_loop_contracts::LoopHostMilestoneKind;
 use ironclaw_loop_host::{HostManagedModelErrorKind, HostManagedModelResponse};
-use ironclaw_turns::{TurnRunId, TurnRunState, TurnStatus, run_profile::LoopHostMilestoneKind};
+use ironclaw_turns::{TurnRunId, TurnRunState, TurnStatus};
 use parity_qa_support::{
     binary_e2e::RebornBinaryE2EHarness,
     model_replay::{

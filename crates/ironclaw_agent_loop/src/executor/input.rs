@@ -1,7 +1,6 @@
 use async_trait::async_trait;
-use ironclaw_turns::{
-    LoopCancelledReasonKind, LoopExit,
-    run_profile::{LoopInput, LoopInputAckToken, LoopInputBatch},
+use ironclaw_loop_contracts::{
+    LoopCancelledReasonKind, LoopExit, LoopInput, LoopInputAckToken, LoopInputBatch,
 };
 
 use crate::state::{CheckpointKind, LoopExecutionState};
