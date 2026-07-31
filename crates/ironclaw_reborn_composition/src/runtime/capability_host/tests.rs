@@ -2467,6 +2467,18 @@ mod tests {
                 .contains("at most eight active skills total per run"),
             "skill_activate description must advertise the selector's activation limit"
         );
+        // Ask for the COMPLETE set, not the smallest one. The description used to say "pick the
+        // smallest relevant set", which is a minimisation instruction with nothing to justify
+        // it: precision was already 100% (zero wrong activations), so there was no
+        // over-activation to prevent, while recall sat at 26.7% because the model activated one
+        // correct skill and stopped -- on powerlifting_coef_calc it took `powerlifting` and
+        // ignored the other two skills the task needed. We told it to do that.
+        assert!(
+            descriptor
+                .safe_description
+                .contains("activate every skill the task needs rather than only the first match"),
+            "skill_activate description must ask for the complete set; minimising suppresses recall"
+        );
         assert!(
             descriptor
                 .parameters_schema
