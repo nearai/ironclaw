@@ -48,7 +48,7 @@ Adapters implement **behavior only** (overview §4): they never report ids,
 schemas, effects, scopes, routes, or credentials — the resolved manifest is the
 sole authority. Trait homes:
 `ToolAdapter` — `crates/ironclaw_host_api/src/tool_adapter.rs`;
-`ChannelAdapter` — `crates/ironclaw_product_adapters/src/channel_adapter.rs`;
+`ChannelAdapter` — `crates/ironclaw_host_api/src/product_adapter/channel_adapter.rs`;
 `ExtensionEntrypoint`/`ExtensionBindings` —
 `crates/ironclaw_extension_host/src/entrypoint.rs`. Auth has **no** adapter
 trait — it is one host engine driving manifest recipes (overview §4.3).
@@ -63,7 +63,7 @@ prompts + any WASM) beside one module
 concatenates them; add a line to `PACKAGES` in `.../src/packages/mod.rs`.
 Composition and the CLI consume these as **opaque bundles** and never name a
 package (overview §3). Do NOT register assets in composition — the old
-`available_extensions.rs::*_assets()` home is being dissolved.
+`available_extensions.rs::*_assets()` home (now `crates/ironclaw_extension_host/src/available_extensions.rs`) is being dissolved.
 Re-verify the module list: `grep -n 'ID,' crates/ironclaw_first_party_extensions/src/packages/mod.rs`.
 
 ## Adding a tool surface
@@ -72,7 +72,8 @@ Re-verify the module list: `grep -n 'ID,' crates/ironclaw_first_party_extensions
    default_permission, visibility, `input_schema_ref`, optional
    `prompt_doc_ref`) with a `[[tools.credentials]]` block naming its `vendor`,
    `audience`, and `injection`. Copy the shape from
-   `assets/slack/manifest.toml` (5 `[[tools]]` entries) or
+   `assets/slack/manifest.toml` (8 `[[tools]]` entries — count with
+   `grep -c '^\[\[tools\]\]' <manifest>`) or
    `assets/github/manifest.toml`.
 2. Schemas and prompt docs are **package assets** (`schemas/…`, `prompts/…`)
    embedded by the package module — not composition.
@@ -91,7 +92,7 @@ Re-verify the module list: `grep -n 'ID,' crates/ironclaw_first_party_extensions
    `[channel.ingress]` (route_suffix, method, body limit),
    `[channel.ingress.verification]` (declarative recipe the *host* executes —
    `hmac_sha256` segment list or `shared_secret_header`; signing secrets never
-   reach the adapter), `[channel.config]` (operator setup fields; host renders
+   reach the adapter), `[channel.connection]` (operator setup fields; host renders
    the generic form), `[[channel.egress]]` (host allowlist + credential handle),
    and `[channel.presentation]`.
 2. Direction is the `inbound`/`outbound` bools, which project to
@@ -109,7 +110,8 @@ Re-verify the module list: `grep -n 'ID,' crates/ironclaw_first_party_extensions
    `conversation_model` value + the identity resolver drive it. Contract:
    `docs/reborn/contracts/conversation-binding.md`. The actor→user resolver is
    `ProviderIdentityActorResolver`
-   (`crates/ironclaw_reborn_composition/src/provider_identity.rs`),
+   (`crates/ironclaw_extension_host/src/provider_identity.rs`, re-exported by
+   composition),
    parameterized by (vendor, adapter id, actor kind) — not a per-channel
    resolver (the retired-taxonomy gate hunts the old pattern).
 5. Connect affordance is **derived** (overview §6.4): installation state +
@@ -138,10 +140,12 @@ Re-verify the module list: `grep -n 'ID,' crates/ironclaw_first_party_extensions
    with a conflict; scopes union across active extensions (overview §3.2).
 3. Renaming any persisted identity (vendor id, extension id) requires a one-time
    forward data migration, never a runtime alias. Exemplars:
-   `migrate_retired_slack_bot_identity`
-   (`extension_host/extension_installation_store.rs`) and
-   `migrate_retired_slack_personal_provider`
-   (`product_auth/durable/mod.rs`), both with idempotency pins. These files are
+   the retired-identity migration step in
+   `crates/ironclaw_extension_host/src/lifecycle_restore.rs`
+   (`RETIRED_SLACK_USER_EXTENSION_ID`). The two `migrate_retired_*` symbols this
+   skill used to name by hand no longer exist (`rg -n "migrate_retired" crates/`
+   → nothing); the live pin on retired vocabulary is
+   `crates/ironclaw_architecture/tests/reborn_retired_taxonomy.rs`. These are
    sanctioned to name the retired vocabulary (both the retired-taxonomy and
    specificity gates carve migration code out).
 
@@ -158,11 +162,14 @@ tool surface (overview §3.1). Worked example:
 
 - Manifest projection (v3): `crates/ironclaw_extensions/tests/manifest_v3_contract.rs`;
   channel ingestion through the real contract:
-  `crates/ironclaw_product_adapter_registry/tests/manifest_ingestion.rs`. Extend
+  `crates/ironclaw_product/tests/adapter_registry_manifest_ingestion.rs`. Extend
   these rather than adding parallel suites.
 - Adapter behavior: the exported conformance suites — channel in
-  `ironclaw_product_adapters`, tool in `ironclaw_host_api` test-support, auth in
-  the `ironclaw_auth` engine suite — run by every extension crate + the `acme`
+  `crates/ironclaw_host_api/src/product_adapter/test_support/conformance.rs`
+  (`run_channel_adapter_conformance`, consumed by
+  `crates/ironclaw_{slack,telegram}_extension/tests/channel_conformance.rs`) and
+  auth in `crates/ironclaw_auth/src/test_support/conformance.rs`. There is no
+  tool-adapter conformance suite today. Run by every extension crate + the `acme`
   fixture (`tests/fixtures/extensions/acme-messenger/`). Real extensions add one
   end-to-end integration proof each (`tests/integration/`).
 - Frontend: `pnpm --dir crates/ironclaw_webui/frontend test`.

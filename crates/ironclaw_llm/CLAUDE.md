@@ -43,7 +43,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `vision_models.rs` | Vision-capable model registry for attachment routing |
 | `reasoning_models.rs` | Reasoning-capable model registry (Codex, R1, o-series, etc.) used for thinking-mode dispatch |
 | `models.rs` | Top-level model-name catalog and helpers |
-| `testing/` | `StubLlm`, `StubErrorKind`, `fault_injection` — gated behind the `testing` cargo feature for downstream test harnesses |
+| `testing/` | `StubLlm`, `StubErrorKind`, `fault_injection` — gated behind the `test-support` cargo feature for downstream test harnesses |
 
 ## Provider Selection
 
@@ -186,8 +186,8 @@ To add a new provider:
 1. Create `crates/ironclaw_llm/src/myprovider.rs` implementing `LlmProvider`
 2. Add a `ProviderProtocol` variant in `registry.rs` (or wire a backend-string match in `lib.rs` for non-registry providers like `nearai`/`bedrock`/`openai_codex`)
 3. Wire into the factory dispatch in `lib.rs` (`create_registry_provider` for registry-backed protocols, top-level `create_llm_provider` for backend-string-keyed providers)
-4. Add env vars to `src/config/llm.rs` (main crate) and `.env.example`
-5. If the provider needs persistent state (session tokens, refresh tokens, etc.), use the host traits in `host.rs` — never reach for `crate::db`, `crate::secrets`, or `crate::bootstrap`. The crate must stay independent of the binary; the binary supplies adapter impls in `src/llm_host.rs`.
+4. Add env vars to `.env.example` and to whichever crate reads them (the v1 `src/config/llm.rs` is gone)
+5. If the provider needs persistent state (session tokens, refresh tokens, etc.), use the host traits in `host.rs` — never reach for `crate::db`, `crate::secrets`, or `crate::bootstrap`. The crate must stay independent of the binary; the binary supplies the adapter impls.
 
 ## Host Trait Surface
 
@@ -195,10 +195,17 @@ To add a new provider:
 
 | Trait | Purpose | Binary adapter |
 |-------|---------|----------------|
-| `SessionDb` | JSON settings persistence | `DatabaseSessionDb` in `src/llm_host.rs` |
-| `SessionSecrets` | Encrypted secrets store | `SecretsStoreSessionSecrets` in `src/llm_host.rs` |
-| `SessionRenewer` | Interactive NEAR-AI re-auth flow | CLI/wizard impl wired in `src/setup/` |
-| `SessionKeyPersistor` | Runtime env overlay + `.env` upsert | `BootstrapKeyPersistor` in `src/llm_host.rs` |
+| `SessionDb` | JSON settings persistence | none today |
+| `SessionSecrets` | Encrypted secrets store | none today |
+| `SessionRenewer` | Interactive NEAR-AI re-auth flow | only `NoopSessionRenewer` (`src/host.rs`) |
+| `SessionKeyPersistor` | Runtime env overlay + `.env` upsert | only `NoopKeyPersistor` (`src/host.rs`) |
+
+The v1 adapter names this table used to cite (`DatabaseSessionDb`,
+`SecretsStoreSessionSecrets`, `BootstrapKeyPersistor`, `src/llm_host.rs`,
+`src/setup/`) went with the monolith and resolve to nothing today — and no
+Reborn binary has supplied replacements yet. Re-derive the real implementor set
+with `rg -n "impl (SessionDb|SessionSecrets|SessionRenewer|SessionKeyPersistor) for" crates/`
+before assuming any of these ports is wired.
 
 `NoopSessionRenewer` and `NoopKeyPersistor` are provided for headless / hosted contexts (return errors / no-ops). The binary plugs concrete impls into `SessionManager` at startup.
 
@@ -232,7 +239,7 @@ Uses the Responses API at `chatgpt.com/backend-api/codex/responses` with ChatGPT
 
 ## Provider Chain Construction
 
-`build_provider_chain()` in `lib.rs` is the entry point for chain construction: it creates the base provider (dispatching to `create_openai_codex_provider()` for codex, `create_llm_provider()` for everything else), then delegates the decorator stack to `pub(crate) async fn apply_decorator_chain(raw, config, session)` — the single source of truth for decorator assembly. Assemble the chain only through `apply_decorator_chain`; never apply these decorators inline or at a higher seam. It is crate-internal; the integration-test harness wraps a scripted raw provider beneath the real chain via the test-only `testing::provider_chain_over` re-export (gated by the `testing` feature), so the production API is not widened. The decorators `apply_decorator_chain` assembles, in order (`RecordingLlm` is appended afterward by `build_provider_chain`, not by `apply_decorator_chain`):
+`build_provider_chain()` in `lib.rs` is the entry point for chain construction: it creates the base provider (dispatching to `create_openai_codex_provider()` for codex, `create_llm_provider()` for everything else), then delegates the decorator stack to `pub(crate) async fn apply_decorator_chain(raw, config, session)` — the single source of truth for decorator assembly. Assemble the chain only through `apply_decorator_chain`; never apply these decorators inline or at a higher seam. It is crate-internal; the integration-test harness wraps a scripted raw provider beneath the real chain via the test-only `testing::provider_chain_over` re-export (gated by the `test-support` feature), so the production API is not widened. The decorators `apply_decorator_chain` assembles, in order (`RecordingLlm` is appended afterward by `build_provider_chain`, not by `apply_decorator_chain`):
 
 ```
 Raw provider

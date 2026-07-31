@@ -5,7 +5,7 @@ argument-hint: <event_name> [description]
 model: opus
 ---
 
-> **v1-maintenance only.** This scaffolds into the legacy `src/` gateway. Per the repo's reborn-first rule, use it only to maintain existing v1 behavior — new user-visible events belong Reborn-side (projection/SSE frame via `ironclaw_webui` + the event-stream substrate; start from the `reborn-feature` skill).
+> ⚠ **This command is stale and cannot be followed as written.** Steps 4–5 scaffold into `crates/ironclaw_gateway/static/`, which was deleted with the v1 monolith along with the rest of `src/`. Do not create those files. New user-visible events belong Reborn-side: the projection/SSE frame via `ironclaw_webui` (+ `crates/ironclaw_webui/frontend/` for the client) over the event-stream substrate — start from the `reborn-feature` skill and `.claude/rules/gateway-events.md`.
 
 Add a new SSE event called `$ARGUMENTS` to the IronClaw web gateway. This involves changes across 5 files in a specific order. Follow each step exactly.
 
@@ -47,7 +47,7 @@ If the event carries structured data beyond a simple string, add a serializable 
 
 ## Step 4: Add frontend handler
 
-**File**: `crates/ironclaw_gateway/static/js/core/sse.js`
+**File**: ~~`crates/ironclaw_gateway/static/js/core/sse.js`~~ — **deleted; do not create.** The Reborn client lives in `crates/ironclaw_webui/frontend/`.
 
 In the `connectSSE()` function, add a new `eventSource.addEventListener()` for the snake_case event name. Parse the JSON data and call a handler function.
 
@@ -58,7 +58,7 @@ Create the handler function that updates the DOM. Put it in the split file that 
 
 ## Step 5: Add CSS if needed
 
-**File**: pick the matching surface under `crates/ironclaw_gateway/static/styles/surfaces/` (e.g. `chat.css` for chat UI, `jobs.css` for sandbox job cards) or `styles/components/` for cross-surface reusable pieces.
+**File**: ~~`crates/ironclaw_gateway/static/styles/`~~ — **deleted; do not create.** Reborn styling lives with the SPA under `crates/ironclaw_webui/frontend/`.
 
 If the event needs custom UI (cards, badges, etc.), add styles. Follow the existing naming conventions (`.approval-card`, `.log-entry`, etc.).
 

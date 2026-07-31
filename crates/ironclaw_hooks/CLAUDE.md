@@ -18,7 +18,6 @@ hooks across the Reborn loop. It does not own:
 ironclaw_turns       -> no dependency on ironclaw_hooks
 ironclaw_hooks       -> depends on ironclaw_turns + ironclaw_host_api
 ironclaw_runner      -> depends on ironclaw_hooks for host composition (follow-up)
-ironclaw_engine      -> no hook ownership; optional future driver consumer
 ```
 
 Architecture test in `ironclaw_architecture::tests::reborn_dependency_boundaries`
@@ -90,7 +89,7 @@ dispatcher and calls `install_*`. The contract is:
 If the dispatcher's install API changes in the future (new installer, renamed
 method, additional trust tier), the loader contract must be re-evaluated:
 the `tier_specific_installers_are_documented_as_loader_contract` test in
-`dispatch.rs` is the regression guard that flags such changes.
+`src/dispatch/mod.rs` is the regression guard that flags such changes.
 
 ## Non-negotiable invariants
 
@@ -107,8 +106,8 @@ the `tier_specific_installers_are_documented_as_loader_contract` test in
 - `Gate` / `Mutator` hooks fail closed.
 - `Observer` / `Effect` hooks fail isolated with redacted audit.
 - All model-visible hook output is bounded, typed, redacted/trust-labeled, and
-  envelope-wrapped when untrusted (reuses the prompt envelope from
-  `ironclaw_host_runtime::memory_context` once that helper is extracted).
+  envelope-wrapped when untrusted (reuses the extracted
+  `ironclaw_prompt_envelope` crate, which this crate already depends on).
 - A hook that demonstrates protocol violation (timeout, panic, malformed
   decision) gets its slot poisoned for the rest of the current turn run.
 
@@ -121,7 +120,7 @@ the `tier_specific_installers_are_documented_as_loader_contract` test in
   `prompt`, `observer`)
 - `kinds/` — sealed decision types (`gate`, `mutator`, `observer`); only the
   dispatcher and matching hook sinks can mint them
-- `sink` — `BuiltinHookSink` / `TrustedHookSink` / `InstalledHookSink`
+- `sink` — the trust-tiered sink/hook traits (`PrivilegedGateSink` / `RestrictedGateSink` / `PrivilegedMutatorSink` / `RestrictedMutatorSink` / `ObserverSink`, and the matching `*BeforeCapabilityHook` / `*BeforePromptHook` / `ObserverHook` / `EventTriggeredHook`)
 - `ordering` — `HookPhase`, `HookPriority`, stable composition
 - `failure_policy` — `FailureCategory` taxonomy and per-kind behavior
 - `registry` — `HookRegistry`, `HookBinding`, run-profile-sourced resolution
@@ -179,11 +178,13 @@ same `Arc`, so a hook poisoned in run N stays poisoned for run N+1. New
 call sites should reach for `with_hook_dispatcher_factory` for real per-run
 isolation.
 
-Cross-run isolation is regression-tested in
-`crates/ironclaw_runner/tests/hooks_integration.rs`:
-`per_build_dispatcher_state_does_not_leak_across_runs` installs a panicking
-hook and proves that the inner port still never receives the call on build
-2 (because the fresh dispatcher's slot is un-poisoned and re-applies the
-fail-closed deny). `legacy_with_hook_dispatcher_shares_state_across_builds`
-pins the shared-state semantic of the legacy adapter as the explicit
+Cross-run isolation was described here as covered by
+`crates/ironclaw_runner/tests/hooks_integration.rs` with the tests
+`per_build_dispatcher_state_does_not_leak_across_runs` and
+`legacy_with_hook_dispatcher_shares_state_across_builds`. **None of those
+exist** (`ls crates/ironclaw_runner/tests/`; `rg` for either name returns only
+this file). The intended semantic — a fresh dispatcher per build has an
+un-poisoned slot and re-applies the fail-closed deny, while the legacy
+`with_hook_dispatcher` adapter shares state across builds — is currently
+unpinned by any test. Treat it as the explicit
 opt-in baseline.

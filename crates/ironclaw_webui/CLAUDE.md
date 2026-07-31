@@ -13,7 +13,7 @@ subsystems that used to live apart (see `README.md` for the fold-in map):
    from `ironclaw_reborn_composition::webui`) — `webui_v2_app(bundle, config)`
    composes the full `Router` and layers the fixed middleware stack; owns the
    `WebuiAuthenticator` / `WebuiAuthentication` host-auth vocabulary and the
-   feature-gated OpenAI-compat mounts.
+   OpenAI-compat mounts (unconditional — this crate's only feature is `test-support`).
 3. **Serve loop + host authentication** (`src/lib.rs`, `src/auth/`,
    `src/session.rs`, `src/oidc.rs`) — `serve_webui_v2` binds the listener and
    runs `axum::serve`; the `Env`/`Session`/`Oidc` authenticators, the
@@ -30,11 +30,12 @@ Composition deliberately stops at the
 fully composed `Router` but must never bind a socket. This crate is the
 host-owned counterpart that binds the `TcpListener` and drives the serve loop.
 
-Path A of `docs/reborn/how-to-port-channel-to-reborn.md` rules apply: host auth
-stays host-owned in this crate, no `src/` (v1) imports, no v1 secrets / settings
-/ DB, and no direct `ironclaw_product` edge (reach it through
-composition's facade). Enforced by `ironclaw_architecture`
-(`tests/reborn_dependency_boundaries.rs`).
+The "Native host surface" rules of `docs/reborn/how-to-port-channel-to-reborn.md`
+apply: host auth stays host-owned in this crate, and behavior is reached through
+`ironclaw_host_api::product_surface::ProductSurface`. The crate *does* carry a
+direct `ironclaw_product` dependency (see `Cargo.toml`), but it is limited to
+wire DTOs and ProductSurface descriptors — never behavior. Enforced by
+`ironclaw_architecture` (`tests/reborn_dependency_boundaries.rs`).
 
 ## Surface
 
@@ -351,7 +352,7 @@ composition):
 
 **Host authentication:**
 
-- `src/{auth, oidc, session}/tests` — unit tests per module
+- `src/auth/` module tests, plus the `mod tests` blocks in `src/oidc.rs` and `src/session.rs` (those two are files, not directories)
   (provider URL building, PKCE math, ID-token decode, pending
   store, redirect sanitization, session lookup).
 - `tests/google_oauth_routes.rs` — caller-level tests on
@@ -375,7 +376,6 @@ composition):
   WebChat v2 route").
 - `tests/oidc_e2e.rs` — pre-existing JWKS-signed ID-token e2e
   for the OIDC authenticator path.
-- `tests/serve_loop.rs` — listener bind + graceful shutdown.
 
 ## Validation
 

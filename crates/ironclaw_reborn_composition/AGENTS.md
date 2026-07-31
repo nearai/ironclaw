@@ -13,7 +13,7 @@
 ## What This Crate Owns
 
 - Service-shaped production composition root for Reborn.
-- Top-level factories for runtime/profile inputs, storage substrate wiring, and LLM catalog wiring: `build_runtime` (`src/runtime.rs`), `RebornHostBindings`/`RebornBuildError` (`src/input.rs`, `src/error.rs`), and the feature-gated LLM catalog resolvers (`llm_admin::llm_catalog`).
+- Top-level factories for runtime/profile inputs, storage substrate wiring, and LLM catalog wiring: `build_runtime` (`src/runtime.rs`), `RebornHostBindings`/`RebornBuildError` (`src/input.rs`, `src/error.rs`), The LLM catalog resolvers are **not** here — `llm_catalog` belongs to `ironclaw_operator` (`crates/ironclaw_operator/src/llm_admin/llm_catalog.rs`); this crate's `src/llm_admin/` holds only `nearai_login_serve`, `nearai_mcp`, and `openai_compat_serve`.
 - The `RebornRuntime` conversation-level service (`RebornRuntime`/`build_reborn_runtime`, `AssistantReply`, `ConversationId`, `RebornRuntimeError`) owns the composed `HostRuntime`, `TurnCoordinator`, readiness, and runtime inputs (`RebornRuntimeInput`/`RebornRuntimeIdentity`, `TurnRunnerSettings`/`PollSettings`, heartbeat/poll-interval defaults).
 - Test-support-only ProductLive adapter fixtures, plus production WebUI service wiring.
 - Production and migration-dry-run profile validation for required handles (`profile`, `readiness`).

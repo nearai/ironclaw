@@ -31,11 +31,9 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 
 ## Dependencies
 
-- `ironclaw_product` — adapter DTOs, envelope/ack types, `ProjectionStream` for SSE
-- `ironclaw_approvals` / `ironclaw_authorization` — canonical approval resolution and scoped lease issue ports used by approval interactions
+- `ironclaw_approvals` / `ironclaw_authorization` — canonical approval resolution, the approval request store contract surfaced through the approval resolution/read-model ports, and scoped lease issue ports used by approval interactions
 - `ironclaw_auth` — typed product-auth continuation events consumed by the workflow auth bridge
 - `ironclaw_conversations` — canonical actor/conversation binding and thread route ownership
-- `ironclaw_approvals` — approval request store contract surfaced through approval resolution/read-model ports
 - `ironclaw_turns` — turn coordinator, scope, IDs
 - `ironclaw_threads` — session thread service contract
 - `ironclaw_host_api` — canonical identifiers (TenantId, UserId, etc.)
@@ -44,7 +42,7 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 
 Must NOT depend on: `ironclaw_dispatcher`, `ironclaw_extensions`,
 `ironclaw_host_runtime`, `ironclaw_mcp`, `ironclaw_wasm`, `ironclaw_scripts`,
-`ironclaw_network`, `ironclaw_engine`, `ironclaw_gateway`.
+`ironclaw_network`.
 
 Agent-loop note: product-facing turns enter through workflow services and
 canonical turn submission. Do not shortcut directly to `AgentLoopDriver`,
