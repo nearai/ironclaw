@@ -25,7 +25,7 @@ pub use slots::{
 pub use terminal_warning::TerminalWarningState;
 pub(crate) use terminal_warning::{TerminalWarningKind, TerminalWarningObservation};
 
-use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId};
+use ironclaw_host_api::ids::{ApprovalRequestId, CapabilityId, CorrelationId};
 use ironclaw_turns::{
     LoopGateRef, LoopMessageRef, LoopResultRef,
     run_profile::{
@@ -365,8 +365,8 @@ impl LoopExecutionState {
     /// The bytes are the raw JSON-serialized `LoopExecutionState` — i.e. what
     /// the executor produced via `serde_json::to_vec(&state)` before passing
     /// the bytes to `LoopCheckpointPort::stage_checkpoint_payload`. The payload
-    /// contains **no outer envelope**: schema-id and kind live in store-side
-    /// metadata, validated by `CheckpointStateStorePort::get_checkpoint_state`
+    /// contains **no outer envelope**: schema-id and kind live in journal
+    /// metadata, validated by the process-backed checkpoint projection
     /// before the bytes ever reach this function. The `kind` argument is
     /// accepted for API symmetry (the call site can document what boundary the
     /// checkpoint belongs to) but is not used to authenticate the bytes.
@@ -448,7 +448,7 @@ pub enum CheckpointPayloadError {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{CapabilityId, TenantId, ThreadId};
+    use ironclaw_host_api::ids::{CapabilityId, TenantId, ThreadId};
     use ironclaw_turns::{
         AgentLoopDriverDescriptor, GateResumeDisposition, RunProfileId, RunProfileVersion, TurnId,
         TurnRunId, TurnScope,
@@ -539,8 +539,8 @@ mod tests {
 
     /// Encode a checkpoint payload the same way the executor does:
     /// `serde_json::to_vec(&state)` — no outer envelope.
-    /// Schema-id and kind are stored as side-channel metadata by
-    /// `CheckpointStateStorePort::put_checkpoint_state`, not inside the bytes.
+    /// Schema-id and kind are stored as process checkpoint metadata, not inside
+    /// the bytes.
     fn encode_payload(state: &LoopExecutionState) -> Vec<u8> {
         serde_json::to_vec(state).expect("encode payload")
     }
@@ -822,8 +822,8 @@ mod tests {
         assert_eq!(gate_restored, gate);
     }
 
-    /// Schema-id and kind validation now live in the store layer
-    /// (`CheckpointStateStorePort::get_checkpoint_state`) — not in the payload
+    /// Schema-id and kind validation live in the process checkpoint projection,
+    /// not in the payload
     /// bytes. `from_checkpoint_payload` therefore succeeds for any
     /// well-formed `LoopExecutionState` regardless of what kind is passed.
     #[test]
@@ -1147,7 +1147,7 @@ mod tests {
 
     #[test]
     fn pending_auth_resume_optional_fields_round_trip_through_checkpoint_payload() {
-        use ironclaw_host_api::{ApprovalRequestId, CorrelationId};
+        use ironclaw_host_api::ids::{ApprovalRequestId, CorrelationId};
         use ironclaw_turns::run_profile::{AuthResumeApprovalIdentity, CapabilityResumeToken};
 
         let context = test_run_context();
@@ -1213,7 +1213,7 @@ mod tests {
         // The `Some(Denied)` disposition stamped on `pending_approval_resume` before the
         // capability stage must survive the checkpoint encode/decode cycle so that a
         // resumed run still sees the approval denial.
-        use ironclaw_host_api::{ApprovalRequestId, CorrelationId};
+        use ironclaw_host_api::ids::{ApprovalRequestId, CorrelationId};
         use ironclaw_turns::run_profile::CapabilityResumeToken;
 
         let context = test_run_context();

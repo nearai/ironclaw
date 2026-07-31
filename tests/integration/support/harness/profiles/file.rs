@@ -2,7 +2,11 @@
 //! / `write_only()`, sharing `file_tools_with_runtime_policy` as their
 //! internal tail. See `harness/options.rs` for the `ToolsProfile` pattern.
 
-use ironclaw_host_api::{CapabilityId, EffectKind, MountPermissions, UserId};
+use ironclaw_host_api::{
+    capability::EffectKind,
+    ids::{CapabilityId, UserId},
+    mount::MountPermissions,
+};
 use ironclaw_host_runtime::{
     JSON_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
 };
@@ -29,7 +33,7 @@ fn file_tools_with_runtime_policy(
 
 pub(crate) fn file_tools_profile() -> HarnessResult<ToolsProfile> {
     Ok(file_tools_with_runtime_policy(Some(
-        ironclaw_reborn_composition::local_dev_yolo_runtime_policy(true)?,
+        ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?,
     ))?
     .with_auto_approve_default(true))
 }
@@ -74,7 +78,7 @@ pub(crate) async fn file_tools_requiring_approval() -> HarnessResult<HostRuntime
 /// through it. Auto-approve on, like `file_tools`.
 pub(crate) fn file_tools_with_durable_capability_io_profile() -> HarnessResult<ToolsProfile> {
     let mut profile = file_tools_with_runtime_policy(Some(
-        ironclaw_reborn_composition::local_dev_yolo_runtime_policy(true)?,
+        ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?,
     ))?
     .with_auto_approve_default(true);
     profile.options = std::mem::take(&mut profile.options).with_durable_capability_io();

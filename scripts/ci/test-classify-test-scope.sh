@@ -180,6 +180,14 @@ has_legacy_tests=true
 has_reborn_tests=true"
 
 assert_scope \
+  "process lifecycle authority crate" \
+  "crates/ironclaw_processes/src/journal_store.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope \
   "shared classifier script" \
   "scripts/ci/classify-test-scope.sh" \
   "docs_only=false
@@ -333,6 +341,20 @@ has_reborn_tests=true"
 assert_scope \
   "reborn coverage regression suite, sourced sibling (R-section split)" \
   "scripts/ci/test-reborn-coverage-ratchet-cases.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "WS12 generated gates and sabotage tests are reborn-scoped" \
+  "scripts/ci/reborn_changed_coverage.py
+scripts/ci/test_reborn_changed_coverage.py
+scripts/ci/ws12-suite-shards.toml
+scripts/ci/ws12_suite_shards.py
+scripts/ci/test_ws12_suite_shards.py
+scripts/ci/ws12_workflow_contracts.py
+scripts/ci/test_ws12_workflow_contracts.py" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false

@@ -65,6 +65,15 @@ run_lib_test_exact() {
 
 run_architecture() {
   run_test ironclaw_architecture reborn_dependency_boundaries
+  # Pins docs/reborn/contracts/turns-agent-loop.md: terminal model
+  # provider authentication and transcript persistence failures remain durable,
+  # actionable, redacted, and never issue duplicate model/tool side effects.
+  run_test_exact ironclaw_reborn_integration_tests reborn_integration_cancel \
+    mid_turn_auth_provider_error_reaches_failed_with_credentials_category
+  run_test_exact ironclaw_reborn_integration_tests reborn_integration_model_recovery \
+    transcript_write_failure_stops_without_another_model_or_tool_side_effect
+  run_test_exact ironclaw_reborn_integration_tests reborn_integration_model_recovery \
+    tool_result_transcript_failure_stops_without_duplicate_model_or_tool_side_effect
   # Pins the retired-taxonomy Telegram identifiers and prevents v1 pairing
   # routes from re-entering the Reborn context.
   run_test ironclaw_architecture telegram_extension_gates
@@ -79,6 +88,11 @@ run_architecture() {
   run_test ironclaw_host_runtime host_runtime_services_contract
   run_test ironclaw_host_runtime reborn_e2e_gate
   run_test ironclaw_host_runtime reborn_invoke_vertical_slice
+  # Pins docs/reborn/contracts/agent-loop-protocol.md: completed malformed,
+  # JSON-invalid, and empty provider responses use bounded invalid-output
+  # recovery, while interrupted streams retain availability semantics.
+  run_test_exact ironclaw_runner llm_gateway gateway_maps_deterministic_provider_response_errors_to_invalid_output
+  run_test_exact ironclaw_reborn_integration_tests reborn_integration_model_recovery deterministic_provider_response_errors_use_bounded_invalid_output_recovery
   run_test ironclaw_host_runtime runtime_http_egress_contract
   run_test ironclaw_host_runtime builtin_obligation_handler_contract
   run_test ironclaw_host_runtime obligation_services_composition_contract
@@ -87,12 +101,17 @@ run_architecture() {
   run_test ironclaw_capabilities capability_host_contract
   run_test ironclaw_capabilities capability_host_dispatcher_integration
   run_test ironclaw_capabilities capability_host_process_integration
-  run_test ironclaw_capabilities capability_host_run_state_contract
+  run_test ironclaw_capabilities capability_host_invocation_state_contract
   run_test ironclaw_capabilities capability_host_spawn_contract
   run_test ironclaw_capabilities capability_obligation_handler_contract
   # Pins docs/reborn/contracts/events.md: product snapshots and cursor resumes
   # keep nested dispatcher failures attached to capability activity, not runs.
   run_lib_test ironclaw_reborn_composition projection::tests::nested_dispatch_stream
+  # Pins docs/reborn/contracts/loop-exit.md and turn-runner.md: a rejected
+  # checkpoint remains terminal after projection into the process journal and
+  # cannot create a retry process.
+  run_lib_test_exact ironclaw_turns \
+    process_projection::runtime::tests::retry_rejects_checkpoint_rejection_without_creating_a_process
 }
 
 run_runtimes() {
@@ -113,10 +132,10 @@ run_runtimes() {
   # Pins docs/reborn/contracts/trust-boundary-hardening.md through the whole
   # turn: the scrubbed, bounded MCP cause reaches the next model request.
   run_test_exact ironclaw_reborn_integration_tests reborn_integration_mcp mcp_tool_call_error_cause_is_scrubbed_and_bounded_in_next_model_request
-  run_test ironclaw_processes process_dispatch_integration
   run_test ironclaw_processes process_host_contract
+  run_test ironclaw_processes process_journal_store_contract
+  run_test ironclaw_processes legacy_migration_backend_contract
   run_test ironclaw_processes process_services_contract
-  run_test ironclaw_processes process_store_contract
 }
 
 run_substrates() {
@@ -132,8 +151,7 @@ run_substrates() {
   run_test ironclaw_secrets boundary_contract
   run_test ironclaw_secrets secret_store_contract
   run_test ironclaw_resources resource_governor_contract
-  run_test ironclaw_run_state approval_resolution_contract
-  run_test ironclaw_run_state run_state_contract
+  run_test ironclaw_approvals approval_store_contract
   run_test ironclaw_approvals approval_resolution_contract
   run_test ironclaw_approvals boundary_contract
   run_test ironclaw_authorization boundary_contract

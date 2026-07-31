@@ -5,7 +5,7 @@
 //! the product surface that produced the command.
 
 use crate::{InboundCommandPayload, ProductRejection, ProductRejectionKind};
-use ironclaw_host_api::HostApiError;
+use ironclaw_host_api::error::HostApiError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -18,6 +18,13 @@ use crate::lifecycle::{
 pub const PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID: &str = "product.lifecycle.command";
 pub const PRODUCT_MODEL_COMMAND_OPERATION_ID: &str = "product.model.command";
 pub const PRODUCT_STATUS_COMMAND_OPERATION_ID: &str = "product.status.command";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandAudience {
+    User,
+    Admin,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProductLifecycleCommandInput {
@@ -56,7 +63,10 @@ pub struct CommandResultField {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProductCommandDescriptor {
     pub name: &'static str,
-    pub aliases: &'static [&'static str],
+    pub audience: CommandAudience,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub usage: &'static str,
 }
 
 struct ProductCommandSpec {
@@ -68,14 +78,20 @@ const COMMAND_SPECS: &[ProductCommandSpec] = &[
     ProductCommandSpec {
         descriptor: ProductCommandDescriptor {
             name: "model",
-            aliases: &[],
+            audience: CommandAudience::User,
+            title: "Model",
+            description: "Show or switch the active LLM provider and model",
+            usage: "/model [<model> | set-provider <provider> [--model <model>]]",
         },
         parse: parse_model_command,
     },
     ProductCommandSpec {
         descriptor: ProductCommandDescriptor {
             name: "status",
-            aliases: &["progress"],
+            audience: CommandAudience::User,
+            title: "Status",
+            description: "Show what the assistant is doing in this conversation",
+            usage: "/status",
         },
         parse: parse_status_command,
     },
@@ -87,9 +103,15 @@ pub fn product_command_descriptors() -> impl Iterator<Item = ProductCommandDescr
     LifecycleCommandKind::ALL
         .iter()
         .copied()
-        .map(|kind| ProductCommandDescriptor {
-            name: kind.command_name(),
-            aliases: &[],
+        .map(|kind| {
+            let (title, description, usage) = lifecycle_command_metadata(kind);
+            ProductCommandDescriptor {
+                name: kind.command_name(),
+                audience: CommandAudience::Admin,
+                title,
+                description,
+                usage,
+            }
         })
         .chain(COMMAND_SPECS.iter().map(|spec| spec.descriptor.clone()))
 }
@@ -101,9 +123,7 @@ pub struct UnknownProductCommandName {
 }
 
 pub fn validate_declared_product_command(name: &str) -> Result<(), UnknownProductCommandName> {
-    if product_command_descriptors()
-        .any(|descriptor| descriptor.name == name || descriptor.aliases.contains(&name))
-    {
+    if product_command_descriptors().any(|descriptor| descriptor.name == name) {
         return Ok(());
     }
     Err(UnknownProductCommandName {
@@ -112,6 +132,22 @@ pub fn validate_declared_product_command(name: &str) -> Result<(), UnknownProduc
 }
 
 pub fn declared_command_help_text<I, S>(commands: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    declared_command_help_text_with_prefix(commands, None)
+}
+
+/// Same rendering as [`declared_command_help_text`], but renders each name
+/// as `{prefix}{name}` instead of the bare `/{name}` form when `prefix` is
+/// set — the manifest-declared `[channel.presentation].command_prefix` a
+/// channel adapter whose native command namespace requires an app-scoped
+/// dispatcher prefix (e.g. a `/ironclaw` slash dispatcher) uses to
+/// namespace its commands. `prefix` is rendered exactly as declared,
+/// including any trailing separator (a manifest `command_prefix` of
+/// `"/ironclaw "` plus `model` yields `/ironclaw model`).
+pub fn declared_command_help_text_with_prefix<I, S>(commands: I, prefix: Option<&str>) -> String
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -125,17 +161,11 @@ where
     }
     let names = names
         .into_iter()
-        .map(|name| format!("/{name}"))
+        .map(|name| match prefix {
+            Some(prefix) => format!("{prefix}{name}"),
+            None => format!("/{name}"),
+        })
         .collect::<Vec<_>>();
-    format!("Available commands:\n{}", names.join("\n"))
-}
-
-pub fn command_help_text() -> String {
-    let mut names = product_command_descriptors()
-        .map(|descriptor| format!("/{}", descriptor.name))
-        .collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
     format!("Available commands:\n{}", names.join("\n"))
 }
 
@@ -198,16 +228,30 @@ impl ProductCommand {
     }
 
     pub fn descriptor(&self) -> Option<ProductCommandDescriptor> {
-        product_command_descriptors().find(|descriptor| {
-            descriptor.name == self.name() || descriptor.aliases.contains(&self.name())
-        })
+        product_command_descriptors().find(|descriptor| descriptor.name == self.name())
+    }
+}
+
+/// Execution audience, action-aware: `/model` bare is a user-safe read while
+/// its `set`/`set-provider` actions mutate operator-wide LLM configuration.
+/// `Unknown` is `User` — it never executes (admission rejects undeclared
+/// tokens before the audience step) and must not hide behind the admin gate.
+pub fn required_audience(command: &ProductCommand) -> CommandAudience {
+    match command {
+        ProductCommand::Model {
+            action: ProductModelCommand::Status,
+        } => CommandAudience::User,
+        ProductCommand::Model { .. } => CommandAudience::Admin,
+        ProductCommand::Status => CommandAudience::User,
+        ProductCommand::Lifecycle { .. } => CommandAudience::Admin,
+        ProductCommand::Unknown { .. } => CommandAudience::User,
     }
 }
 
 fn command_spec_for_name(name: &str) -> Option<&'static ProductCommandSpec> {
     COMMAND_SPECS
         .iter()
-        .find(|spec| spec.descriptor.name == name || spec.descriptor.aliases.contains(&name))
+        .find(|spec| spec.descriptor.name == name)
 }
 
 fn parse_model_command(payload: &InboundCommandPayload) -> ProductCommandParseResult {
@@ -454,6 +498,63 @@ fn invalid_lifecycle_rejection(reason: impl Into<String>) -> Result<String, Prod
         ProductRejectionKind::InvalidRequest,
         reason,
     ))
+}
+
+fn lifecycle_command_metadata(
+    kind: LifecycleCommandKind,
+) -> (&'static str, &'static str, &'static str) {
+    match kind {
+        LifecycleCommandKind::ExtensionSearch => (
+            "Search extensions",
+            "Search the extension registry",
+            "/extension_search <query>",
+        ),
+        LifecycleCommandKind::ExtensionList => (
+            "List extensions",
+            "List installed extensions",
+            "/extension_list",
+        ),
+        LifecycleCommandKind::ExtensionInstall => (
+            "Install extension",
+            "Install an extension by id",
+            "/extension_install <id>",
+        ),
+        LifecycleCommandKind::ExtensionAuth => (
+            "Connect extension account",
+            "Start authentication for an installed extension",
+            "/extension_auth <id>",
+        ),
+        LifecycleCommandKind::ExtensionActivate => (
+            "Activate extension",
+            "Activate an installed extension",
+            "/extension_activate <id>",
+        ),
+        LifecycleCommandKind::ExtensionConfigure => (
+            "Configure extension",
+            "Update an installed extension's configuration values",
+            "/extension_configure <id> <json>",
+        ),
+        LifecycleCommandKind::ExtensionRemove => (
+            "Remove extension",
+            "Remove an installed extension",
+            "/extension_remove <id>",
+        ),
+        LifecycleCommandKind::SkillSearch => (
+            "Search skills",
+            "Search the skill registry",
+            "/skill_search <query>",
+        ),
+        LifecycleCommandKind::SkillInstall => (
+            "Install skill",
+            "Install a skill from JSON content",
+            "/skill_install <json>",
+        ),
+        LifecycleCommandKind::SkillRemove => (
+            "Remove skill",
+            "Remove an installed skill",
+            "/skill_remove <id or name>",
+        ),
+    }
 }
 
 fn lifecycle_package_ref(

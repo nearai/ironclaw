@@ -6,9 +6,14 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, MountAlias,
-    MountGrant, MountPermissions, MountView, PermissionMode, ProviderToolName, Resolution,
-    ResourceEstimate, ResourceUsage, RuntimeKind, ThreadId, TrustClass, UserId, VirtualPath,
+    capability::{CapabilityDescriptionTrust, CapabilityDescriptor, CapabilitySet, PermissionMode},
+    ids::{CapabilityId, ExtensionId, ProviderToolName, ThreadId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resolution::Resolution,
+    resource::{ResourceEstimate, ResourceUsage},
+    runtime::{RuntimeKind, TrustClass},
+    scope::ExecutionContext,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime,
@@ -172,9 +177,19 @@ async fn factory_stages_provider_tool_call_arguments_without_custom_resolver_ove
     );
     let port: Arc<dyn LoopCapabilityPort> = factory.for_run_context(run_context);
 
-    port.visible_capabilities(VisibleCapabilityRequest)
+    let visible_surface = port
+        .visible_capabilities(VisibleCapabilityRequest)
         .await
         .expect("surface should snapshot provider tools");
+    let descriptor = visible_surface
+        .descriptors
+        .iter()
+        .find(|descriptor| descriptor.capability_id.as_str() == "demo.echo")
+        .expect("runtime descriptor reaches the loop surface");
+    assert_eq!(
+        descriptor.description_trust,
+        CapabilityDescriptionTrust::VerifiedCatalog
+    );
     let arguments = serde_json::json!({
         "message": "hello\nfrom provider\r\n\twith tab"
     });
@@ -368,6 +383,7 @@ impl HostRuntime for SingleToolHostRuntime {
                     resource_profile: None,
                     origin_gate_matrix: None,
                 },
+                description_trust: CapabilityDescriptionTrust::VerifiedCatalog,
                 access: VisibleCapabilityAccess::Available,
                 estimated_resources: ResourceEstimate::default(),
             }],
@@ -431,7 +447,7 @@ fn dispatch_trust_decision() -> TrustDecision {
     TrustDecision {
         effective_trust: EffectiveTrustClass::user_trusted(),
         authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![ironclaw_host_api::EffectKind::DispatchCapability],
+            allowed_effects: vec![ironclaw_host_api::capability::EffectKind::DispatchCapability],
             max_resource_ceiling: None,
         },
         provenance: TrustProvenance::Default,

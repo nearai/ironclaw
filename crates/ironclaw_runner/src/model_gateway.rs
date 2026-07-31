@@ -16,7 +16,10 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_common::llm_costs::{default_cost, model_cost};
-use ironclaw_host_api::{CapabilityId, ProviderToolName, sha256_digest_token};
+use ironclaw_host_api::{
+    approval::sha256_digest_token,
+    ids::{CapabilityId, ProviderToolName},
+};
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
     FinishReason, ImageUrl, LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest,
@@ -413,10 +416,14 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let replay_identity = ProviderReplayIdentity::new(&self.provider_id, &model_override)?;
-        let mut completion =
-            CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
-        completion.model = Some(model_override);
+        let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
+            prepare_fallback_completion(
+                self.provider.as_ref(),
+                &self.provider_id,
+                &model_override,
+                request.fallback_index,
+                request.messages,
+            )?;
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
         complete_model_request(
@@ -425,10 +432,11 @@ where
             None,
             None,
             None,
-            replay_identity,
+            ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await
+        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
     }
 
     async fn stream_model_with_progress(
@@ -456,10 +464,14 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let replay_identity = ProviderReplayIdentity::new(&self.provider_id, &model_override)?;
-        let mut completion =
-            CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
-        completion.model = Some(model_override);
+        let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
+            prepare_fallback_completion(
+                self.provider.as_ref(),
+                &self.provider_id,
+                &model_override,
+                request.fallback_index,
+                request.messages,
+            )?;
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
         complete_model_request(
@@ -468,10 +480,11 @@ where
             None,
             None,
             Some(sink),
-            replay_identity,
+            ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await
+        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
     }
 
     async fn stream_model_with_capabilities(
@@ -499,10 +512,14 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let replay_identity = ProviderReplayIdentity::new(&self.provider_id, &model_override)?;
-        let mut completion =
-            CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
-        completion.model = Some(model_override);
+        let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
+            prepare_fallback_completion(
+                self.provider.as_ref(),
+                &self.provider_id,
+                &model_override,
+                request.fallback_index,
+                request.messages,
+            )?;
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
         let provider_turn_scope = format!(
@@ -515,10 +532,11 @@ where
             Some(capabilities),
             Some(provider_turn_scope),
             None,
-            replay_identity,
+            ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await
+        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
     }
 
     async fn stream_model_with_capabilities_and_progress(
@@ -547,10 +565,14 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let replay_identity = ProviderReplayIdentity::new(&self.provider_id, &model_override)?;
-        let mut completion =
-            CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
-        completion.model = Some(model_override);
+        let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
+            prepare_fallback_completion(
+                self.provider.as_ref(),
+                &self.provider_id,
+                &model_override,
+                request.fallback_index,
+                request.messages,
+            )?;
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
 
         let provider_turn_scope = format!(
@@ -563,10 +585,11 @@ where
             Some(capabilities),
             Some(provider_turn_scope),
             Some(sink),
-            replay_identity,
+            ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await
+        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
     }
 }
 
@@ -667,10 +690,10 @@ impl ModelRouteProviderPool for StaticModelRouteProviderPool {
 /// resumed runs keep using the same persisted provider/model route. This gateway
 /// validates the carried snapshot and selects the matching provider.
 ///
-/// No mid-run fallback is attempted: if a pinned route becomes unavailable
-/// because config or auth versions rotated, operators must either restore the
-/// provider-pool entry for the persisted key or cancel/retry the run so host
-/// composition can attach a fresh route snapshot before driver side effects.
+/// The persisted outer route remains pinned across the run. When the provider
+/// behind that route is an ordered [`ironclaw_llm::FailoverProvider`], the loop
+/// may advance within that already-resolved chain; it never re-resolves or
+/// substitutes the outer provider-pool entry mid-run.
 pub struct RoutedLlmProviderModelGateway<P>
 where
     P: ModelRouteProviderPool + ?Sized,
@@ -719,14 +742,15 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let replay_identity = ProviderReplayIdentity::new(
-            snapshot.route().provider_id(),
-            snapshot.route().model_id(),
-        )?;
-        let mut completion =
-            CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
-        completion.model = Some(snapshot.route().model_id().to_string());
         validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
+        let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
+            prepare_fallback_completion(
+                provider.as_ref(),
+                snapshot.route().provider_id(),
+                snapshot.route().model_id(),
+                request.fallback_index,
+                request.messages,
+            )?;
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
@@ -736,10 +760,11 @@ where
             None,
             None,
             None,
-            replay_identity,
+            ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await
+        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
     }
 
     async fn stream_model_with_progress(
@@ -758,14 +783,15 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let replay_identity = ProviderReplayIdentity::new(
-            snapshot.route().provider_id(),
-            snapshot.route().model_id(),
-        )?;
-        let mut completion =
-            CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
-        completion.model = Some(snapshot.route().model_id().to_string());
         validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
+        let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
+            prepare_fallback_completion(
+                provider.as_ref(),
+                snapshot.route().provider_id(),
+                snapshot.route().model_id(),
+                request.fallback_index,
+                request.messages,
+            )?;
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
@@ -775,10 +801,11 @@ where
             None,
             None,
             Some(sink),
-            replay_identity,
+            ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await
+        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
     }
 
     async fn stream_model_with_capabilities(
@@ -797,14 +824,15 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let replay_identity = ProviderReplayIdentity::new(
-            snapshot.route().provider_id(),
-            snapshot.route().model_id(),
-        )?;
-        let mut completion =
-            CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
-        completion.model = Some(snapshot.route().model_id().to_string());
         validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
+        let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
+            prepare_fallback_completion(
+                provider.as_ref(),
+                snapshot.route().provider_id(),
+                snapshot.route().model_id(),
+                request.fallback_index,
+                request.messages,
+            )?;
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
@@ -818,10 +846,11 @@ where
             Some(capabilities),
             Some(provider_turn_scope),
             None,
-            replay_identity,
+            ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await
+        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
     }
 
     async fn stream_model_with_capabilities_and_progress(
@@ -841,14 +870,15 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
-        let replay_identity = ProviderReplayIdentity::new(
-            snapshot.route().provider_id(),
-            snapshot.route().model_id(),
-        )?;
-        let mut completion =
-            CompletionRequest::new(convert_messages(request.messages, &replay_identity)?);
-        completion.model = Some(snapshot.route().model_id().to_string());
         validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
+        let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
+            prepare_fallback_completion(
+                provider.as_ref(),
+                snapshot.route().provider_id(),
+                snapshot.route().model_id(),
+                request.fallback_index,
+                request.messages,
+            )?;
         add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
         add_route_metadata(&mut completion, &snapshot);
 
@@ -862,10 +892,11 @@ where
             Some(capabilities),
             Some(provider_turn_scope),
             Some(sink),
-            replay_identity,
+            ProviderRequestContext::new(replay_identity, next_fallback_index),
             Some(self.prompt_cache_scope(run_id)),
         )
         .await
+        .map(|response| response.with_effective_fallback_index(effective_fallback_index))
     }
 }
 
@@ -905,6 +936,90 @@ fn add_request_metadata(
     completion
         .metadata
         .insert("run_id".to_string(), run_id.to_string());
+}
+
+fn resolve_fallback_route<P>(
+    provider: &P,
+    fallback_index: u32,
+    requested_model: &str,
+) -> Result<ironclaw_llm::ModelFallbackRoute, HostManagedModelError>
+where
+    P: LlmProvider + ?Sized,
+{
+    let route = provider
+        .fallback_route(fallback_index, Some(requested_model))
+        .map_err(|error| map_fallback_route_error(error, fallback_index))?;
+    debug!(
+        fallback_index = route.fallback_index,
+        effective_model = %route.model,
+        "reborn model gateway selected ordered fallback route"
+    );
+    Ok(route)
+}
+
+fn map_fallback_route_error(error: LlmError, fallback_index: u32) -> HostManagedModelError {
+    if fallback_index > 0 && matches!(&error, LlmError::ModelNotAvailable { .. }) {
+        let provider_detail = error.to_string();
+        let safe_log_detail = ironclaw_loop_host::scrub_model_visible_detail(&provider_detail);
+        tracing::debug!(
+            component = "model_provider",
+            operation = "fallback_route",
+            fallback_index,
+            error = %ironclaw_common::truncate_for_preview(&safe_log_detail, 512),
+            "configured model fallback route is unavailable"
+        );
+        return HostManagedModelError::safe(
+            HostManagedModelErrorKind::Unavailable,
+            "configured model fallback route is unavailable",
+        )
+        .safe_with_detail(provider_detail);
+    }
+    map_provider_error(error)
+}
+
+fn prepare_fallback_completion<P>(
+    provider: &P,
+    provider_id: &str,
+    requested_model: &str,
+    fallback_index: u32,
+    messages: Vec<HostManagedModelMessage>,
+) -> Result<(CompletionRequest, ProviderReplayIdentity, u32, Option<u32>), HostManagedModelError>
+where
+    P: LlmProvider + ?Sized,
+{
+    let route = resolve_fallback_route(provider, fallback_index, requested_model)?;
+    let next_fallback_index = route.fallback_index.checked_add(1).and_then(|next_index| {
+        match provider.fallback_route(next_index, Some(requested_model)) {
+            Ok(next_route) if next_route.fallback_index == next_index => Some(next_index),
+            Ok(next_route) => {
+                debug!(
+                    requested_fallback_index = next_index,
+                    resolved_fallback_index = next_route.fallback_index,
+                    "provider returned mismatched fallback route evidence"
+                );
+                None
+            }
+            Err(LlmError::ModelNotAvailable { .. }) => None,
+            Err(error) => {
+                debug!(
+                    fallback_index = next_index,
+                    error = %ironclaw_common::truncate_for_preview(&error.to_string(), 512),
+                    "provider could not prove that another fallback route exists"
+                );
+                None
+            }
+        }
+    });
+    let replay_identity = ProviderReplayIdentity::new(provider_id, &route.model)?;
+    let mut completion = CompletionRequest::new(convert_messages(messages, &replay_identity)?);
+    completion.model = Some(route.model);
+    completion.set_fallback_index(route.fallback_index);
+    Ok((
+        completion,
+        replay_identity,
+        route.fallback_index,
+        next_fallback_index,
+    ))
 }
 
 fn add_route_metadata(completion: &mut CompletionRequest, snapshot: &ResolvedModelRouteSnapshot) {
@@ -1083,6 +1198,20 @@ impl ProviderReplayIdentity {
     }
 }
 
+struct ProviderRequestContext {
+    replay_identity: ProviderReplayIdentity,
+    next_fallback_index: Option<u32>,
+}
+
+impl ProviderRequestContext {
+    fn new(replay_identity: ProviderReplayIdentity, next_fallback_index: Option<u32>) -> Self {
+        Self {
+            replay_identity,
+            next_fallback_index,
+        }
+    }
+}
+
 fn validate_replay_identity_text(
     value: &str,
     label: &'static str,
@@ -1172,10 +1301,10 @@ impl CompletionStreamSink for ProviderStreamSink {
 
 #[tracing::instrument(
     level = "debug",
-    skip(provider, completion, capabilities, stream_sink, replay_identity, cache_scope),
+    skip(provider, completion, capabilities, stream_sink, request_context, cache_scope),
     fields(
-        provider_id = %replay_identity.provider_id,
-        provider_model_id = %replay_identity.provider_model_id,
+        provider_id = %request_context.replay_identity.provider_id,
+        provider_model_id = %request_context.replay_identity.provider_model_id,
         provider_turn_scope = provider_turn_scope.as_deref().unwrap_or("model_call=unknown"),
     )
 )]
@@ -1185,12 +1314,16 @@ async fn complete_model_request<P>(
     capabilities: Option<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>>,
     provider_turn_scope: Option<String>,
     stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
-    replay_identity: ProviderReplayIdentity,
+    request_context: ProviderRequestContext,
     cache_scope: Option<PromptCacheCallScope>,
 ) -> Result<HostManagedModelResponse, HostManagedModelError>
 where
     P: LlmProvider + ?Sized,
 {
+    let ProviderRequestContext {
+        replay_identity,
+        next_fallback_index,
+    } = request_context;
     let system_prompt_hash = system_prompt_cache_signature(&completion.messages);
     if let Some(capabilities) = capabilities {
         let tool_definitions = capabilities
@@ -1260,7 +1393,7 @@ where
                         provider_started_at,
                         &error,
                     );
-                    return Err(map_provider_error(error));
+                    return Err(map_provider_completion_error(error, next_fallback_index));
                 }
             };
             if let Some(scope) = cache_scope.as_ref() {
@@ -1332,7 +1465,7 @@ where
                                 retry_started_at,
                                 &error,
                             );
-                            return Err(map_provider_error(error));
+                            return Err(map_provider_completion_error(error, next_fallback_index));
                         }
                     };
                     if let Some(scope) = cache_scope.as_ref() {
@@ -1424,7 +1557,7 @@ where
                 provider_started_at,
                 &error,
             );
-            return Err(map_provider_error(error));
+            return Err(map_provider_completion_error(error, next_fallback_index));
         }
     };
     if let Some(scope) = cache_scope.as_ref() {
@@ -1464,7 +1597,7 @@ fn recover_textual_tool_calls_from_tool_response(
     response: ToolCompletionResponse,
     tool_names: &[String],
 ) -> Result<ToolCompletionResponse, HostManagedModelError> {
-    if !response.tool_calls.is_empty() {
+    if !response.tool_calls.is_empty() || response.finish_reason == FinishReason::Length {
         return Ok(response);
     }
     let Some(content) = response.content.as_deref() else {
@@ -1683,9 +1816,15 @@ async fn tool_response_to_host(
             }))
         }
         FinishReason::Length => Err(HostManagedModelError::safe(
-            HostManagedModelErrorKind::BudgetExceeded,
+            HostManagedModelErrorKind::OutputTruncated,
             "model response was truncated before completion",
-        )),
+        )
+        .with_usage(LoopModelUsage {
+            input_tokens: response.input_tokens,
+            output_tokens: response.output_tokens,
+            cache_read_input_tokens: response.cache_read_input_tokens,
+            cache_creation_input_tokens: response.cache_creation_input_tokens,
+        })),
         FinishReason::ContentFilter => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::ContentFiltered,
             "model response was blocked by provider policy",
@@ -2011,9 +2150,10 @@ fn response_to_host_reply(
             .with_usage(usage))
         }
         FinishReason::Length => Err(HostManagedModelError::safe(
-            HostManagedModelErrorKind::BudgetExceeded,
+            HostManagedModelErrorKind::OutputTruncated,
             "model response was truncated before completion",
-        )),
+        )
+        .with_usage(usage)),
         FinishReason::ContentFilter => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::ContentFiltered,
             "model response was blocked by provider policy",
@@ -2038,6 +2178,11 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
             HostManagedModelErrorKind::PolicyDenied
         }
         AgentLoopHostErrorKind::BudgetExceeded => HostManagedModelErrorKind::BudgetExceeded,
+        AgentLoopHostErrorKind::SpendBudgetExceeded => {
+            HostManagedModelErrorKind::SpendBudgetExceeded
+        }
+        AgentLoopHostErrorKind::ContextOverflow => HostManagedModelErrorKind::ContextOverflow,
+        AgentLoopHostErrorKind::OutputTruncated => HostManagedModelErrorKind::OutputTruncated,
         AgentLoopHostErrorKind::BudgetApprovalRequired => {
             HostManagedModelErrorKind::BudgetApprovalRequired
         }
@@ -2045,6 +2190,7 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
             HostManagedModelErrorKind::BudgetAccountingFailed
         }
         AgentLoopHostErrorKind::ContentFiltered => HostManagedModelErrorKind::ContentFiltered,
+        AgentLoopHostErrorKind::RateLimited => HostManagedModelErrorKind::RateLimited,
         AgentLoopHostErrorKind::Cancelled => HostManagedModelErrorKind::Cancelled,
         AgentLoopHostErrorKind::StaleSurface => HostManagedModelErrorKind::StaleRequest,
         AgentLoopHostErrorKind::Invalid
@@ -2489,11 +2635,12 @@ fn provider_tool_call_from_reference(
 }
 
 fn map_provider_error(error: LlmError) -> HostManagedModelError {
+    let provider_detail = error.to_string();
+    let safe_log_detail = ironclaw_loop_host::scrub_model_visible_detail(&provider_detail);
     tracing::warn!(
         component = "model_provider",
         operation = "complete",
-        error = %error,
-        error_debug = ?error,
+        error = %ironclaw_common::truncate_for_preview(&safe_log_detail, 512),
         "reborn model provider error mapped to safe summary"
     );
     // Tier 2b: carry the provider's real message (status line + body snippet)
@@ -2501,7 +2648,6 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
     // the actual fault. `safe_with_detail` scrubs credential-looking tokens
     // (api_key=…, sk-…, access_token=…) before the text is stored; the safe
     // summary stays a fixed host-authored category string.
-    let provider_detail = error.to_string();
     if is_unconfigured_provider_error(&error) {
         // No provider is configured at all: a configuration fault, not an
         // availability fault. CredentialUnavailable is unclassified in the
@@ -2514,35 +2660,128 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
         )
         .safe_with_detail(provider_detail);
     }
-    if is_credit_exhaustion_error(&error) {
-        return HostManagedModelError::safe(
-            HostManagedModelErrorKind::CredentialUnavailable,
-            MODEL_CREDITS_EXHAUSTED_SUMMARY,
-        )
-        .with_reason_kind(MODEL_CREDITS_EXHAUSTED_REASON_KIND)
-        .safe_with_detail(provider_detail.clone());
+    if is_legacy_credit_exhaustion_error(&error) {
+        return model_credits_exhausted_error().safe_with_detail(provider_detail);
     }
     match error {
         LlmError::ContextLengthExceeded { .. } => HostManagedModelError::safe(
-            HostManagedModelErrorKind::BudgetExceeded,
+            HostManagedModelErrorKind::ContextOverflow,
             "model request exceeded its context budget",
+        ),
+        LlmError::InvalidRequest { .. } => HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "model provider rejected the request",
         ),
         LlmError::ModelNotAvailable { .. } => HostManagedModelError::safe(
             HostManagedModelErrorKind::PolicyDenied,
             "requested model is not available through this profile",
         ),
-        LlmError::AuthFailed { .. } | LlmError::SessionExpired { .. } => {
+        LlmError::AuthFailed { .. }
+        | LlmError::SessionExpired { .. }
+        | LlmError::SessionRenewalFailed { .. } => HostManagedModelError::safe(
+            HostManagedModelErrorKind::CredentialUnavailable,
+            "model credentials are unavailable",
+        ),
+        LlmError::RateLimited { retry_after, .. } => {
+            let error = HostManagedModelError::safe(
+                HostManagedModelErrorKind::RateLimited,
+                "model provider rate limited the request",
+            );
+            if let Some(delay) = retry_after {
+                error.with_retry_after(delay)
+            } else {
+                error
+            }
+        }
+        LlmError::BadGateway { retry_after, .. } => {
+            let error = HostManagedModelError::safe(
+                HostManagedModelErrorKind::ProviderUnavailable,
+                "model provider is temporarily unavailable",
+            );
+            if let Some(delay) = retry_after {
+                error.with_retry_after(delay)
+            } else {
+                error
+            }
+        }
+        LlmError::InvalidResponse { .. } => HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidOutput,
+            "model provider returned an invalid response",
+        ),
+        LlmError::EmptyResponse { .. } => HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidOutput,
+            InvalidOutputReason::EmptyAssistantResponse.safe_summary(),
+        ),
+        LlmError::Json(_) => HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidOutput,
+            "model provider returned invalid JSON",
+        ),
+        LlmError::QuotaExceeded { .. } => model_credits_exhausted_error(),
+        LlmError::StreamInterrupted { .. } | LlmError::RequestFailed { .. } => {
             HostManagedModelError::safe(
-                HostManagedModelErrorKind::CredentialUnavailable,
-                "model credentials are unavailable",
+                HostManagedModelErrorKind::Unavailable,
+                "model service is unavailable",
             )
         }
-        _ => HostManagedModelError::safe(
-            HostManagedModelErrorKind::Unavailable,
-            "model service is unavailable",
+        LlmError::Http(error) => {
+            let status = error.status().map(|status| status.as_u16());
+            match status {
+                Some(402) => model_credits_exhausted_error(),
+                Some(401 | 403) => HostManagedModelError::safe(
+                    HostManagedModelErrorKind::CredentialUnavailable,
+                    "model credentials are unavailable",
+                ),
+                Some(429) => HostManagedModelError::safe(
+                    HostManagedModelErrorKind::RateLimited,
+                    "model provider rate limited the request",
+                ),
+                Some(500..=599) => HostManagedModelError::safe(
+                    HostManagedModelErrorKind::ProviderUnavailable,
+                    "model provider is temporarily unavailable",
+                ),
+                _ if ironclaw_llm::error::is_transient_http_error(&error) => {
+                    HostManagedModelError::safe(
+                        HostManagedModelErrorKind::Unavailable,
+                        "model service connection failed",
+                    )
+                }
+                _ if error.is_decode() => HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidOutput,
+                    "model provider returned an invalid response",
+                ),
+                _ => HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    "model provider HTTP request failed",
+                ),
+            }
+        }
+        LlmError::Io(error) if ironclaw_llm::error::is_transient_io_error(&error) => {
+            HostManagedModelError::safe(
+                HostManagedModelErrorKind::Unavailable,
+                "model service connection failed",
+            )
+        }
+        LlmError::Io(_) => HostManagedModelError::safe(
+            HostManagedModelErrorKind::CredentialUnavailable,
+            "model provider session storage is unavailable",
         ),
     }
     .safe_with_detail(provider_detail)
+}
+
+fn map_provider_completion_error(
+    error: LlmError,
+    next_fallback_index: Option<u32>,
+) -> HostManagedModelError {
+    let mapped = map_provider_error(error);
+    if matches!(
+        mapped.kind,
+        HostManagedModelErrorKind::ProviderUnavailable | HostManagedModelErrorKind::Unavailable
+    ) && let Some(next_fallback_index) = next_fallback_index
+    {
+        return mapped.with_next_fallback_index(next_fallback_index);
+    }
+    mapped
 }
 
 fn is_unconfigured_provider_error(error: &LlmError) -> bool {
@@ -2553,7 +2792,17 @@ fn is_unconfigured_provider_error(error: &LlmError) -> bool {
     )
 }
 
-fn is_credit_exhaustion_error(error: &LlmError) -> bool {
+fn model_credits_exhausted_error() -> HostManagedModelError {
+    HostManagedModelError::safe(
+        HostManagedModelErrorKind::CredentialUnavailable,
+        MODEL_CREDITS_EXHAUSTED_SUMMARY,
+    )
+    .with_reason_kind(MODEL_CREDITS_EXHAUSTED_REASON_KIND)
+}
+
+/// Compatibility fallback for older/external providers that have not adopted
+/// the typed `QuotaExceeded` variant yet.
+fn is_legacy_credit_exhaustion_error(error: &LlmError) -> bool {
     let LlmError::RequestFailed { reason, .. } = error else {
         return false;
     };
@@ -2572,6 +2821,7 @@ fn is_credit_exhaustion_error(error: &LlmError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[derive(Default)]
     struct RecordingSafeTextSink {
@@ -2644,6 +2894,37 @@ mod tests {
             provider: "test_provider".to_string(),
             reason: reason.to_string(),
         }
+    }
+
+    #[test]
+    fn provider_completion_error_exposes_only_proven_availability_fallbacks() {
+        let unavailable = map_provider_completion_error(
+            LlmError::BadGateway {
+                provider: "primary".to_string(),
+                status: 503,
+                retry_after: None,
+            },
+            Some(1),
+        );
+        assert_eq!(unavailable.next_fallback_index, Some(1));
+
+        let exhausted = map_provider_completion_error(
+            LlmError::BadGateway {
+                provider: "fallback".to_string(),
+                status: 503,
+                retry_after: None,
+            },
+            None,
+        );
+        assert_eq!(exhausted.next_fallback_index, None);
+
+        let auth = map_provider_completion_error(
+            LlmError::AuthFailed {
+                provider: "primary".to_string(),
+            },
+            Some(1),
+        );
+        assert_eq!(auth.next_fallback_index, None);
     }
 
     fn tool_def(capability_id: &str, name: &str) -> ProviderToolDefinition {
@@ -2746,6 +3027,75 @@ mod tests {
     }
 
     #[test]
+    fn typed_provider_errors_preserve_recovery_class_and_payload_at_gateway_seam() {
+        let rate_limited = map_provider_error(LlmError::RateLimited {
+            provider: "fixture-provider".to_string(),
+            retry_after: Some(Duration::from_millis(1_750)),
+        });
+        assert_eq!(
+            rate_limited.kind,
+            HostManagedModelErrorKind::RateLimited,
+            "rate limiting must remain distinct until the loop recovery seam"
+        );
+        assert_eq!(rate_limited.retry_after_ms, Some(1_750));
+        assert!(
+            rate_limited
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("fixture-provider")),
+            "typed provider identity should remain available to diagnostics"
+        );
+
+        let unavailable = map_provider_error(LlmError::BadGateway {
+            provider: "fixture-provider".to_string(),
+            status: 503,
+            retry_after: Some(Duration::from_secs(9)),
+        });
+        assert_eq!(
+            unavailable.kind,
+            HostManagedModelErrorKind::ProviderUnavailable
+        );
+        assert_eq!(unavailable.retry_after_ms, Some(9_000));
+        assert!(
+            unavailable
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("HTTP 503"))
+        );
+
+        let invalid = map_provider_error(LlmError::InvalidRequest {
+            provider: "fixture-provider".to_string(),
+            reason: "unsupported request option".to_string(),
+        });
+        assert_eq!(invalid.kind, HostManagedModelErrorKind::InvalidRequest);
+        assert!(
+            invalid
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("unsupported request option"))
+        );
+
+        let exhausted = map_provider_error(LlmError::QuotaExceeded {
+            provider: "fixture-provider".to_string(),
+            reason: "HTTP 402: insufficient_quota".to_string(),
+        });
+        assert_eq!(
+            exhausted.kind,
+            HostManagedModelErrorKind::CredentialUnavailable
+        );
+        assert_eq!(
+            exhausted.reason_kind,
+            Some(MODEL_CREDITS_EXHAUSTED_REASON_KIND)
+        );
+        assert!(
+            exhausted
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("insufficient_quota"))
+        );
+    }
+
+    #[test]
     fn capability_budget_accounting_error_is_not_collapsed_to_budget_exceeded() {
         let mapped = map_capability_host_error(AgentLoopHostError::new(
             AgentLoopHostErrorKind::BudgetAccountingFailed,
@@ -2828,7 +3178,7 @@ mod tests {
     }
 
     #[test]
-    fn is_credit_exhaustion_error_matches_all_trigger_phrases() {
+    fn legacy_credit_exhaustion_error_matches_all_trigger_phrases() {
         let phrases = [
             "HTTP 402",
             "402 Payment Required",
@@ -2843,17 +3193,20 @@ mod tests {
         for phrase in &phrases {
             let err = request_failed(&format!("error: {phrase}: some detail"));
             assert!(
-                is_credit_exhaustion_error(&err),
+                is_legacy_credit_exhaustion_error(&err),
                 "should match phrase: {phrase}"
             );
         }
         // Case-insensitive
         let err = request_failed("HTTP 402 payment required");
-        assert!(is_credit_exhaustion_error(&err), "should match lowercase");
+        assert!(
+            is_legacy_credit_exhaustion_error(&err),
+            "should match lowercase"
+        );
     }
 
     #[test]
-    fn is_credit_exhaustion_error_returns_false_for_non_request_failed_variants() {
+    fn legacy_credit_exhaustion_error_returns_false_for_typed_variants() {
         let non_request_failed = [
             LlmError::ContextLengthExceeded {
                 used: 1000,
@@ -2872,19 +3225,19 @@ mod tests {
         ];
         for err in &non_request_failed {
             assert!(
-                !is_credit_exhaustion_error(err),
+                !is_legacy_credit_exhaustion_error(err),
                 "should not match: {err:?}"
             );
         }
     }
 
     #[test]
-    fn is_credit_exhaustion_error_returns_false_for_non_matching_request_failed() {
+    fn legacy_credit_exhaustion_error_returns_false_for_other_request_failures() {
         let err = request_failed("Internal server error");
-        assert!(!is_credit_exhaustion_error(&err));
+        assert!(!is_legacy_credit_exhaustion_error(&err));
 
         let err = request_failed("rate limit exceeded");
-        assert!(!is_credit_exhaustion_error(&err));
+        assert!(!is_legacy_credit_exhaustion_error(&err));
     }
 
     #[test]

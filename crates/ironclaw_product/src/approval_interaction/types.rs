@@ -1,8 +1,11 @@
 use crate::ProductSurfaceRejectionKind;
+use ironclaw_approvals::ApprovalStatus;
 use ironclaw_host_api::{
-    Action, ApprovalRequest, ApprovalRequestId, CapabilityId, InvocationId, ResourceScope,
+    action::Action,
+    approval::ApprovalRequest,
+    ids::{ApprovalRequestId, CapabilityId, InvocationId},
+    resource::ResourceScope,
 };
-use ironclaw_run_state::ApprovalStatus;
 use ironclaw_turns::{
     GateRef, IdempotencyKey, ResumeTurnResponse, TurnActor, TurnRunId, TurnScope,
 };
@@ -85,13 +88,13 @@ impl ApprovalInteractionRejectionKind {
 /// Caller-visible scope for approval interactions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalInteractionScope {
-    pub tenant_id: ironclaw_host_api::TenantId,
-    pub user_id: ironclaw_host_api::UserId,
+    pub tenant_id: ironclaw_host_api::ids::TenantId,
+    pub user_id: ironclaw_host_api::ids::UserId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<ironclaw_host_api::AgentId>,
+    pub agent_id: Option<ironclaw_host_api::ids::AgentId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<ironclaw_host_api::ProjectId>,
-    pub thread_id: ironclaw_host_api::ThreadId,
+    pub project_id: Option<ironclaw_host_api::ids::ProjectId>,
+    pub thread_id: ironclaw_host_api::ids::ThreadId,
 }
 
 impl ApprovalInteractionScope {
@@ -292,8 +295,14 @@ fn display_safe_summary() -> String {
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::{
-        Action, AgentId, ApprovalRequest, CapabilityId, CorrelationId, InvocationId, Principal,
-        ProjectId, ResourceEstimate, TenantId, ThreadId, UserId,
+        action::Action,
+        approval::ApprovalRequest,
+        ids::{
+            AgentId, CapabilityId, CorrelationId, InvocationId, ProjectId, TenantId, ThreadId,
+            UserId,
+        },
+        resource::ResourceEstimate,
+        scope::Principal,
     };
 
     use super::*;

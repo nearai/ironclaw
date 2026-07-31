@@ -93,11 +93,11 @@ pub(crate) use crate::LeaderOutcome;
 /// [`crate::KeepaliveLeaderLock`].
 ///
 /// The Postgres pool is intentionally `Option`: `None` on the libsql /
-/// local-dev path means this process is trivially the leader (single writer by
+/// standalone path means this process is trivially the leader (single writer by
 /// deployment topology), so the sweep always runs without touching the DB.
 pub struct CredentialRefreshLeaderLock {
     /// Postgres pool for leader-lock acquisition. `None` on the libsql /
-    /// local-dev path → always-leader (pass-through). MUST stay private;
+    /// standalone path → always-leader (pass-through). MUST stay private;
     /// never exposed through any public API or the composition service.
     pool: Option<deadpool_postgres::Pool>,
 }
@@ -114,7 +114,7 @@ impl CredentialRefreshLeaderLock {
 
     /// Build the always-leader lock for validated single-writer topologies.
     ///
-    /// Intended for local-dev and libsql production wiring where deployment
+    /// Intended for standalone and libsql production wiring where deployment
     /// topology already guarantees only one credential-refresh writer.
     pub fn always_leader_for_single_writer() -> Self {
         Self::new(None)
@@ -138,7 +138,7 @@ impl CredentialRefreshLeaderLock {
         if let Some(pool) = &self.pool {
             return run_as_leader_postgres(pool, sweep).await;
         }
-        // No pool (libsql / local-dev): trivially the leader.
+        // No pool (libsql / standalone): trivially the leader.
         LeaderOutcome::Ran(sweep().await)
     }
 }

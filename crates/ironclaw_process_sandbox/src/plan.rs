@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use ironclaw_host_api::{RuntimeCredentialTarget, SecretHandle};
+use ironclaw_host_api::{http::RuntimeCredentialTarget, ids::SecretHandle};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

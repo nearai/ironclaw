@@ -1,6 +1,9 @@
 //! Skill domain tools profiles.
 
-use ironclaw_host_api::{CapabilityId, EffectKind, TenantId};
+use ironclaw_host_api::{
+    capability::EffectKind,
+    ids::{CapabilityId, TenantId},
+};
 use ironclaw_host_runtime::{
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
 };
@@ -28,9 +31,7 @@ pub(crate) fn skill_management_tools_profile() -> HarnessResult<ToolsProfile> {
         ],
         options: HostRuntimeHarnessOptions::new(
             skill_mounts()?,
-            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
-                true,
-            )?),
+            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
         ),
         network_policy_override: Some(http_test_policy()),
         auto_approve_default: Some(true),
@@ -68,9 +69,7 @@ pub(crate) fn skill_activation_tools_profile(tenant: &TenantId) -> HarnessResult
         ],
         options: HostRuntimeHarnessOptions::new(
             skill_mounts()?,
-            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
-                true,
-            )?),
+            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
         )
         .with_skill_activation_tenant(tenant.clone())
         .with_system_skill_fixture(

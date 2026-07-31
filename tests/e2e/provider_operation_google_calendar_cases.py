@@ -3,7 +3,12 @@
 import json
 
 from emulate_provider import google_json
-from provider_operation_types import ProviderOperationCase
+from provider_operation_types import (
+    ProviderOperationCase,
+    exact_provider_http_output,
+    provider_http_body,
+    static_provider_json_response,
+)
 
 CALENDAR_ID = "primary"
 EVENT_ID = "evt_reborn_planning_sync"
@@ -123,6 +128,28 @@ async def _list_calendars_outcome(emulate_url: str, preview: dict) -> None:
     assert CALENDAR_ID in json.dumps(preview), preview
 
 
+async def _list_events_outcome(emulate_url: str, preview: dict) -> None:
+    await _seeded_event_baseline(emulate_url)
+    rendered = json.dumps(preview)
+    assert EVENT_ID in rendered, preview
+    assert "Reborn planning sync" in rendered, preview
+
+
+EMPTY_EVENT_QUERY = "REBORN_PROVIDER_CASE_NO_SUCH_EVENT"
+
+
+async def _list_events_empty_outcome(emulate_url: str, preview: dict) -> None:
+    assert await _events(emulate_url, EMPTY_EVENT_QUERY) == []
+    body = provider_http_body(preview)
+    assert body.get("items", []) == [], body
+
+
+async def _free_busy_empty_outcome(emulate_url: str, preview: dict) -> None:
+    await _seeded_event_baseline(emulate_url)
+    body = provider_http_body(preview)
+    assert body["calendars"][CALENDAR_ID]["busy"] == [], body
+
+
 GOOGLE_CALENDAR_PROVIDER_OPERATION_CASES = (
     # Executable evidence for a read capability whose harvested journey was
     # quarantined with the retired activation flow (#6520).
@@ -133,6 +160,50 @@ GOOGLE_CALENDAR_PROVIDER_OPERATION_CASES = (
         arguments={},
         assert_baseline=_calendar_list_baseline,
         assert_outcome=_list_calendars_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="google_calendar_list_calendars_empty",
+        provider_service="google",
+        capability_id="google-calendar.list_calendars",
+        arguments={},
+        assert_baseline=_calendar_list_baseline,
+        assert_outcome=exact_provider_http_output(
+            {"kind": "calendar#calendarList", "items": []}
+        ),
+        outcome_class="empty",
+        setup_provider_proxy=static_provider_json_response(
+            method="GET",
+            path="/calendar/v3/users/me/calendarList",
+            payload={"kind": "calendar#calendarList", "items": []},
+        ),
+        expect_provider_forward=False,
+        expected_proxy_profile="provider_contract_empty",
+    ),
+    ProviderOperationCase(
+        case_id="google_calendar_list_events",
+        provider_service="google",
+        capability_id="google-calendar.list_events",
+        arguments={
+            "calendar_id": CALENDAR_ID,
+            "time_min": "2026-06-22T12:00:00.000Z",
+            "time_max": "2026-06-22T14:00:00.000Z",
+            "max_results": 25,
+        },
+        assert_baseline=_seeded_event_baseline,
+        assert_outcome=_list_events_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="google_calendar_list_events_empty",
+        provider_service="google",
+        capability_id="google-calendar.list_events",
+        arguments={
+            "calendar_id": CALENDAR_ID,
+            "query": EMPTY_EVENT_QUERY,
+            "max_results": 25,
+        },
+        assert_baseline=_seeded_event_baseline,
+        assert_outcome=_list_events_empty_outcome,
+        outcome_class="empty",
     ),
     ProviderOperationCase(
         case_id="google_calendar_create_event",
@@ -174,6 +245,28 @@ GOOGLE_CALENDAR_PROVIDER_OPERATION_CASES = (
         assert_outcome=_get_event_outcome,
     ),
     ProviderOperationCase(
+        case_id="google_calendar_get_event_empty",
+        provider_service="google",
+        capability_id="google-calendar.get_event",
+        arguments={
+            "calendar_id": CALENDAR_ID,
+            "event_id": "evt_provider_contract_empty",
+        },
+        assert_baseline=_seeded_event_baseline,
+        assert_outcome=exact_provider_http_output({}),
+        outcome_class="empty",
+        setup_provider_proxy=static_provider_json_response(
+            method="GET",
+            path=(
+                f"/calendar/v3/calendars/{CALENDAR_ID}/events/"
+                "evt_provider_contract_empty"
+            ),
+            payload={},
+        ),
+        expect_provider_forward=False,
+        expected_proxy_profile="provider_contract_empty",
+    ),
+    ProviderOperationCase(
         case_id="google_calendar_find_free_slots",
         provider_service="google",
         capability_id="google-calendar.find_free_slots",
@@ -185,6 +278,20 @@ GOOGLE_CALENDAR_PROVIDER_OPERATION_CASES = (
         },
         assert_baseline=_free_busy_baseline,
         assert_outcome=_free_busy_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="google_calendar_find_free_slots_empty",
+        provider_service="google",
+        capability_id="google-calendar.find_free_slots",
+        arguments={
+            "timeMin": "2026-06-22T15:00:00.000Z",
+            "timeMax": "2026-06-22T15:30:00.000Z",
+            "timeZone": "UTC",
+            "items": [{"id": CALENDAR_ID}],
+        },
+        assert_baseline=_free_busy_baseline,
+        assert_outcome=_free_busy_empty_outcome,
+        outcome_class="empty",
     ),
     ProviderOperationCase(
         case_id="google_calendar_update_event",
@@ -209,6 +316,7 @@ GOOGLE_CALENDAR_PROVIDER_OPERATION_CASES = (
         },
         assert_baseline=_seeded_event_baseline,
         assert_outcome=_add_attendees_outcome,
+        expected_request_count=2,
     ),
     ProviderOperationCase(
         case_id="google_calendar_set_reminder",

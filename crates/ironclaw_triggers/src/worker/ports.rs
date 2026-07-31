@@ -1,7 +1,10 @@
 use std::{collections::HashMap, time::Duration};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{TenantId, ThreadId, Timestamp};
+use ironclaw_host_api::{
+    Timestamp,
+    ids::{TenantId, ThreadId},
+};
 use ironclaw_turns::{TurnRunId, TurnScope};
 
 use crate::{
@@ -169,11 +172,9 @@ pub struct MissingTriggerActiveRunLookup;
 pub trait TriggerActiveRunLookup: Send + Sync {
     /// Resolve a single active-run state.
     ///
-    /// The default composition-root implementation reads a full
-    /// `TurnPersistenceSnapshot` for each call, so batch-oriented
-    /// implementations should prefer overriding `active_run_states` and
-    /// handling single-record lookups through the shared batch path when
-    /// they need to amortize snapshot reads.
+    /// Batch-oriented implementations should prefer overriding
+    /// `active_run_states` and handling single-record lookups through the
+    /// shared batch path when they need to amortize journal reads.
     async fn active_run_state(
         &self,
         request: TriggerActiveRunStateRequest,
@@ -372,7 +373,7 @@ pub async fn active_holds_for_records(
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 
     use super::*;
     use crate::{TriggerSchedule, TriggerSourceKind, TriggerState};

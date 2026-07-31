@@ -266,27 +266,39 @@ impl CircuitBreakerProvider {
 /// auth infrastructure trouble.
 ///
 /// Excludes client errors that are the caller's problem, not backend trouble:
-/// `AuthFailed`, `ContextLengthExceeded`, `ModelNotAvailable`, `Json`.
+/// `InvalidRequest`, `AuthFailed`, `ContextLengthExceeded`,
+/// `ModelNotAvailable`, `QuotaExceeded`, `Json`, completed malformed/empty
+/// responses, and local/unknown I/O failures.
 ///
 /// See also `retry::is_retryable()` which answers a different question:
 /// "could retrying this exact request succeed?"
 fn is_transient(err: &LlmError) -> bool {
-    matches!(
-        err,
+    match err {
         LlmError::RequestFailed { .. }
-            | LlmError::RateLimited { .. }
-            | LlmError::BadGateway { .. }
-            | LlmError::InvalidResponse { .. }
-            | LlmError::EmptyResponse { .. }
-            | LlmError::SessionExpired { .. }
-            | LlmError::SessionRenewalFailed { .. }
-            | LlmError::Http(_)
-            | LlmError::Io(_)
-    )
+        | LlmError::RateLimited { .. }
+        | LlmError::BadGateway { .. }
+        | LlmError::StreamInterrupted { .. }
+        | LlmError::SessionExpired { .. }
+        | LlmError::SessionRenewalFailed { .. } => true,
+        LlmError::Http(error) => crate::error::is_transient_http_error(error),
+        LlmError::Io(error) => crate::error::is_transient_io_error(error),
+        LlmError::InvalidRequest { .. }
+        | LlmError::InvalidResponse { .. }
+        | LlmError::EmptyResponse { .. }
+        | LlmError::ContextLengthExceeded { .. }
+        | LlmError::ModelNotAvailable { .. }
+        | LlmError::QuotaExceeded { .. }
+        | LlmError::AuthFailed { .. }
+        | LlmError::Json(_) => false,
+    }
 }
 
 #[async_trait]
 impl LlmProvider for CircuitBreakerProvider {
+    fn provider_id(&self) -> String {
+        self.inner.provider_id()
+    }
+
     fn model_name(&self) -> &str {
         self.inner.model_name()
     }
@@ -344,6 +356,14 @@ impl LlmProvider for CircuitBreakerProvider {
 
     fn effective_model_name(&self, requested_model: Option<&str>) -> String {
         self.inner.effective_model_name(requested_model)
+    }
+
+    fn fallback_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<crate::ModelFallbackRoute, LlmError> {
+        self.inner.fallback_route(fallback_index, requested_model)
     }
 
     fn active_model_name(&self) -> String {
@@ -583,9 +603,9 @@ mod tests {
             provider: "p".into(),
             retry_after: None,
         }));
-        assert!(is_transient(&LlmError::InvalidResponse {
+        assert!(is_transient(&LlmError::StreamInterrupted {
             provider: "p".into(),
-            reason: "bad".into(),
+            reason: "connection closed".into(),
         }));
         assert!(is_transient(&LlmError::SessionExpired {
             provider: "p".into(),
@@ -611,6 +631,17 @@ mod tests {
             provider: "p".into(),
             model: "m".into(),
         }));
+        assert!(!is_transient(&LlmError::InvalidResponse {
+            provider: "p".into(),
+            reason: "bad".into(),
+        }));
+        assert!(!is_transient(&LlmError::EmptyResponse {
+            provider: "p".into(),
+        }));
+        assert!(!is_transient(&LlmError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "session file denied"
+        ))));
         assert!(!is_transient(&LlmError::Json(
             serde_json::from_str::<String>("bad").unwrap_err()
         )));

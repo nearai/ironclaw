@@ -7,7 +7,7 @@ use ironclaw_extensions::{
     ManifestHash, ManifestSource, canonicalize_installation_rows,
 };
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{UserId, sha256_digest_token};
+use ironclaw_host_api::{approval::sha256_digest_token, ids::UserId};
 use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef, ProductSurfaceFailure};
 use tokio::sync::Mutex;
 
@@ -176,6 +176,7 @@ pub fn prepare_install(
         &host_ports,
         Some(manifest_hash.clone()),
         &contracts,
+        Some(available.package.root.clone()),
     )
     .map_err(map_extension_installation_error)?
     .with_removal_cleanup_requirements(available.cleanup_requirements.clone());
@@ -217,6 +218,7 @@ fn prepare_manifest_migration(
         &host_ports,
         Some(manifest_hash.clone()),
         &contracts,
+        Some(available.package.root.clone()),
     )
     .map_err(map_extension_installation_error)?
     .with_removal_cleanup_requirements(available.cleanup_requirements.clone());

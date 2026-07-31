@@ -1,27 +1,28 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{TenantId, ThreadId};
+use ironclaw_host_api::ids::{ProcessId, TenantId, ThreadId};
+use ironclaw_processes::{
+    ClaimProcessesRequest, ClaimedProcess, FailProcessRequest, JournaledProcessSnapshot,
+    ProcessJournalCursor, ProcessLeaseRequest, ProcessLifecycleStatus,
+    ProcessStateTransitionRequest, ProcessSuspension, ProcessTransitionPort,
+    RecoverExpiredProcessLeasesRequest, RecoverExpiredProcessLeasesResponse, SuspendProcessRequest,
+};
 use ironclaw_threads::{
     AppendToolResultReferenceRequest, InMemorySessionThreadService, SessionThreadService,
     ThreadMessageRecord, ThreadScope, ToolResultSafeSummary,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
-    GetLoopCheckpointRequest, GetRunStateRequest, LoopBlocked, LoopBlockedKind, LoopCheckpointKind,
-    LoopCheckpointRecord, LoopCheckpointStateRef, LoopCheckpointStore, LoopCompleted,
-    LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef,
-    PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
-    RunProfileVersion, SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
-    TurnActor, TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState,
-    TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
+    AcceptedMessageRef, AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, EventCursor,
+    GateRef, GetLoopCheckpointRequest, GetRunStateRequest, LoopBlocked, LoopBlockedKind,
+    LoopCheckpointKind, LoopCheckpointRecord, LoopCheckpointStateRef, LoopCheckpointStore,
+    LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef,
+    LoopResultRef, PutLoopCheckpointRequest, RedactedCheckpointPayload, ReplyTargetBindingRef,
+    ResumeTurnRequest, ResumeTurnResponse, RunProfileVersion, SanitizedFailure, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnError, TurnId,
+    TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope, TurnStatus,
     run_profile::{CheckpointSchemaId, LoopDriverId},
-    runner::{
-        ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
-        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
-        RecoverExpiredLeasesResponse, TurnRunTransitionPort,
-    },
+    runner::ClaimedTurnRun,
 };
 
 use crate::loop_exit_applier::{
@@ -52,9 +53,7 @@ pub(super) fn empty_await_dependent_run_evidence() -> Arc<dyn AwaitDependentRunE
 /// Minimal in-memory test double recording one `(scope, run_id, gate_ref,
 /// mode)` tuple — enough for the two real-evidence tests in `mod.rs`
 /// (accept a matching blocking-mode gate, reject a background-mode one)
-/// without pulling in the real filesystem-backed `AwaitEdgeStore`
-/// (feature-gated behind `filesystem-goal-store`; this test module is
-/// `#[cfg(test)]`-only and must stay compilable without that feature).
+/// without pulling in the process-journal-backed `AwaitEdgeStore`.
 pub(super) struct RecordingAwaitDependentRunEvidence {
     scope: TurnScope,
     run_id: TurnRunId,
@@ -98,10 +97,37 @@ pub(super) fn text_checkpoint_evidence(
 ) -> ThreadCheckpointLoopExitEvidencePort<InMemorySessionThreadService> {
     ThreadCheckpointLoopExitEvidencePort::new(
         Arc::new(InMemorySessionThreadService::default()),
-        Arc::new(StaticTurnStateStore::new(claimed_run().state)),
+        Arc::new(StaticAgentTurnRuntime::new(claimed_run().state)),
         loop_checkpoint_store,
         empty_await_dependent_run_evidence(),
     )
+}
+
+pub(super) async fn put_final_checkpoint(
+    store: &dyn LoopCheckpointStore,
+    claimed: &ClaimedTurnRun,
+    payload: Vec<u8>,
+) -> LoopCheckpointRecord {
+    let state_ref = LoopCheckpointStateRef::new(format!(
+        "checkpoint:{}:{}",
+        claimed.state.run_id,
+        TurnRunId::new()
+    ))
+    .expect("valid run-scoped checkpoint ref");
+    store
+        .put_loop_checkpoint(PutLoopCheckpointRequest {
+            scope: claimed.state.scope.clone(),
+            turn_id: claimed.state.turn_id,
+            run_id: claimed.state.run_id,
+            state_ref,
+            payload: RedactedCheckpointPayload::new(payload).expect("bounded checkpoint payload"),
+            schema_id: claimed.resolved_run_profile.checkpoint_schema_id.clone(),
+            schema_version: claimed.resolved_run_profile.checkpoint_schema_version,
+            kind: LoopCheckpointKind::Final,
+            gate_ref: None,
+        })
+        .await
+        .expect("loop checkpoint")
 }
 
 pub(super) async fn append_tool_result_reference<S>(
@@ -161,18 +187,18 @@ pub(super) fn running_run_state(
     }
 }
 
-pub(super) struct StaticTurnStateStore {
+pub(super) struct StaticAgentTurnRuntime {
     state: TurnRunState,
 }
 
-impl StaticTurnStateStore {
+impl StaticAgentTurnRuntime {
     pub(super) fn new(state: TurnRunState) -> Self {
         Self { state }
     }
 }
 
 #[async_trait]
-impl TurnStateStore for StaticTurnStateStore {
+impl AgentTurnRuntimePort for StaticAgentTurnRuntime {
     async fn submit_turn(
         &self,
         _request: SubmitTurnRequest,
@@ -335,6 +361,7 @@ pub(super) fn loop_checkpoint_record_with_gate(
         turn_id: claimed.state.turn_id,
         run_id: claimed.state.run_id,
         state_ref,
+        payload: None,
         schema_id: claimed.resolved_run_profile.checkpoint_schema_id.clone(),
         schema_version: claimed.resolved_run_profile.checkpoint_schema_version,
         kind,
@@ -403,6 +430,8 @@ pub(super) fn claimed_run() -> ClaimedTurnRun {
             resume_disposition: None,
         },
         resolved_run_profile: profile,
+        subagent_depth: 0,
+        spawn_tree_descendant_cap: None,
         runner_id: TurnRunnerId::new(),
         lease_token: TurnLeaseToken::new(),
     }
@@ -466,7 +495,6 @@ fn test_profile(
 pub(super) struct RecordingTransitionPort {
     raw_failures: Mutex<Vec<String>>,
     apply_calls: Mutex<usize>,
-    latest_resumable_checkpoint_result: Mutex<Result<Option<TurnCheckpointId>, TurnError>>,
 }
 
 impl Default for RecordingTransitionPort {
@@ -474,7 +502,6 @@ impl Default for RecordingTransitionPort {
         Self {
             raw_failures: Mutex::new(Vec::new()),
             apply_calls: Mutex::new(0),
-            latest_resumable_checkpoint_result: Mutex::new(Ok(None)),
         }
     }
 }
@@ -494,195 +521,125 @@ impl RecordingTransitionPort {
 }
 
 #[async_trait]
-impl TurnRunTransitionPort for RecordingTransitionPort {
-    async fn claim_next_run(
+impl ProcessTransitionPort for RecordingTransitionPort {
+    type Error = TurnError;
+
+    async fn claim_next_processes(
         &self,
-        _request: ClaimRunRequest,
-    ) -> Result<Option<ClaimedTurnRun>, TurnError> {
-        Ok(None)
+        _request: ClaimProcessesRequest,
+    ) -> Result<Vec<ClaimedProcess>, TurnError> {
+        Ok(Vec::new())
     }
 
-    async fn heartbeat(&self, _request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
-        Ok(EventCursor(0))
-    }
-
-    async fn recover_expired_leases(
+    async fn heartbeat_process(
         &self,
-        _request: RecoverExpiredLeasesRequest,
-    ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
-        Ok(RecoverExpiredLeasesResponse { recovered: vec![] })
+        _request: ProcessLeaseRequest,
+    ) -> Result<ProcessJournalCursor, TurnError> {
+        Ok(ProcessJournalCursor(0))
     }
 
-    async fn latest_resumable_checkpoint(
+    async fn recover_expired_process_leases(
         &self,
-        _scope: &TurnScope,
-        _turn_id: TurnId,
-        _run_id: TurnRunId,
-    ) -> Result<Option<TurnCheckpointId>, TurnError> {
-        self.latest_resumable_checkpoint_result
-            .lock()
-            .expect("lock")
-            .clone()
+        _request: RecoverExpiredProcessLeasesRequest,
+    ) -> Result<RecoverExpiredProcessLeasesResponse, TurnError> {
+        Ok(RecoverExpiredProcessLeasesResponse { recovered: vec![] })
     }
 
-    async fn record_model_route_snapshot(
+    async fn suspend_process(
         &self,
-        _request: RecordModelRouteSnapshotRequest,
-    ) -> Result<TurnRunState, TurnError> {
-        panic!("loop-exit applier tests should not record model route snapshots")
-    }
-
-    async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
-        Ok(state_for_mapping(
-            TurnStatus::BlockedApproval,
-            request.run_id,
-            None,
-            None,
-        ))
-    }
-
-    async fn complete_run(&self, request: CompleteRunRequest) -> Result<TurnRunState, TurnError> {
-        Ok(state_for_mapping(
-            TurnStatus::Completed,
-            request.run_id,
-            None,
-            None,
-        ))
-    }
-
-    async fn cancel_run(
-        &self,
-        request: CancelRunCompletionRequest,
-    ) -> Result<TurnRunState, TurnError> {
-        Ok(state_for_mapping(
-            TurnStatus::Cancelled,
-            request.run_id,
-            None,
-            None,
-        ))
-    }
-
-    async fn fail_run(&self, request: FailRunRequest) -> Result<TurnRunState, TurnError> {
-        self.raw_failures
-            .lock()
-            .expect("lock")
-            .push(request.failure.category().to_string());
-        Ok(state_for_mapping(
-            TurnStatus::Failed,
-            request.run_id,
-            Some(request.failure),
-            None,
-        ))
-    }
-
-    async fn record_runner_failure(
-        &self,
-        request: RecordRunnerFailureRequest,
-    ) -> Result<TurnRunState, TurnError> {
-        self.raw_failures
-            .lock()
-            .expect("lock")
-            .push(request.failure.category().to_string());
-        Ok(state_for_mapping(
-            TurnStatus::Failed,
-            request.run_id,
-            Some(request.failure),
-            None,
-        ))
-    }
-
-    async fn apply_validated_loop_exit(
-        &self,
-        request: ApplyValidatedLoopExitRequest,
-    ) -> Result<TurnRunState, TurnError> {
+        request: SuspendProcessRequest,
+    ) -> Result<JournaledProcessSnapshot, TurnError> {
         *self.apply_calls.lock().expect("lock") += 1;
-        match request.mapping {
-            ironclaw_turns::LoopExitMapping::RunnerOutcome(outcome) => match outcome {
-                ironclaw_turns::runner::TurnRunnerOutcome::Completed => {
-                    self.complete_run(CompleteRunRequest {
-                        run_id: request.run_id,
-                        runner_id: request.runner_id,
-                        lease_token: request.lease_token,
-                    })
-                    .await
-                }
-                ironclaw_turns::runner::TurnRunnerOutcome::Cancelled => {
-                    self.cancel_run(CancelRunCompletionRequest {
-                        run_id: request.run_id,
-                        runner_id: request.runner_id,
-                        lease_token: request.lease_token,
-                    })
-                    .await
-                }
-                ironclaw_turns::runner::TurnRunnerOutcome::Blocked {
-                    checkpoint_id: _,
-                    state_ref: _,
-                    reason,
-                    blocked_activity_id: _,
-                } => {
-                    let status = reason.status();
-                    Ok(state_for_mapping(
-                        status,
-                        request.run_id,
-                        None,
-                        Some(reason.gate_ref().clone()),
-                    ))
-                }
-                ironclaw_turns::runner::TurnRunnerOutcome::Failed { failure } => {
-                    self.fail_run(FailRunRequest {
-                        run_id: request.run_id,
-                        runner_id: request.runner_id,
-                        lease_token: request.lease_token,
-                        failure,
-                    })
-                    .await
-                }
-            },
-            ironclaw_turns::LoopExitMapping::RecoveryRequired { failure } => {
-                self.record_runner_failure(RecordRunnerFailureRequest {
-                    run_id: request.run_id,
-                    runner_id: request.runner_id,
-                    lease_token: request.lease_token,
-                    failure,
-                })
-                .await
-            }
+        Ok(process_state_for_mapping(
+            ProcessLifecycleStatus::Suspended,
+            request.process_id,
+            None,
+            Some(request.suspension),
+            Some(request.checkpoint_ref),
+        ))
+    }
+
+    async fn complete_process(
+        &self,
+        request: ProcessStateTransitionRequest,
+    ) -> Result<JournaledProcessSnapshot, TurnError> {
+        *self.apply_calls.lock().expect("lock") += 1;
+        let mut snapshot = process_state_for_mapping(
+            ProcessLifecycleStatus::Completed,
+            request.lease.process_id,
+            None,
+            None,
+            None,
+        );
+        if let Some(metadata) = request.metadata {
+            snapshot.metadata = metadata;
         }
+        Ok(snapshot)
+    }
+
+    async fn cancel_process(
+        &self,
+        request: ProcessStateTransitionRequest,
+    ) -> Result<JournaledProcessSnapshot, TurnError> {
+        *self.apply_calls.lock().expect("lock") += 1;
+        let mut snapshot = process_state_for_mapping(
+            ProcessLifecycleStatus::Cancelled,
+            request.lease.process_id,
+            None,
+            None,
+            None,
+        );
+        if let Some(metadata) = request.metadata {
+            snapshot.metadata = metadata;
+        }
+        Ok(snapshot)
+    }
+
+    async fn fail_process(
+        &self,
+        request: FailProcessRequest,
+    ) -> Result<JournaledProcessSnapshot, TurnError> {
+        *self.apply_calls.lock().expect("lock") += 1;
+        self.raw_failures
+            .lock()
+            .expect("lock")
+            .push(request.failure.category().to_string());
+        Ok(process_state_for_mapping(
+            ProcessLifecycleStatus::Failed,
+            request.process_id,
+            Some(request.failure),
+            None,
+            request.checkpoint_ref,
+        ))
+    }
+
+    async fn relinquish_process(
+        &self,
+        request: ProcessLeaseRequest,
+    ) -> Result<JournaledProcessSnapshot, TurnError> {
+        Ok(process_state_for_mapping(
+            ProcessLifecycleStatus::Queued,
+            request.process_id,
+            None,
+            None,
+            None,
+        ))
     }
 }
 
-fn state_for_mapping(
-    status: TurnStatus,
-    run_id: TurnRunId,
+fn process_state_for_mapping(
+    status: ProcessLifecycleStatus,
+    process_id: ProcessId,
     failure: Option<SanitizedFailure>,
-    gate_ref: Option<GateRef>,
-) -> TurnRunState {
-    TurnRunState {
-        scope: TurnScope::new(
-            TenantId::new("tenant").expect("valid"),
-            None,
-            None,
-            ThreadId::new("thread").expect("valid"),
-        ),
-        actor: None,
-        turn_id: TurnId::new(),
-        run_id,
-        status,
-        accepted_message_ref: AcceptedMessageRef::new("msg:accepted").expect("valid"),
-        source_binding_ref: SourceBindingRef::new("source").expect("valid"),
-        reply_target_binding_ref: ReplyTargetBindingRef::new("reply").expect("valid"),
-        resolved_run_profile_id: ironclaw_turns::RunProfileId::default_profile(),
-        resolved_run_profile_version: RunProfileVersion::new(1),
-        resolved_model_route: None,
-        model_usage: None,
-        received_at: chrono::Utc::now(),
-        checkpoint_id: None,
-        gate_ref,
-        blocked_activity_id: None,
-        credential_requirements: Vec::new(),
-        failure,
-        event_cursor: EventCursor(0),
-        product_context: None,
-        resume_disposition: None,
-    }
+    suspension: Option<ProcessSuspension>,
+    checkpoint_ref: Option<ironclaw_processes::ProcessCheckpointRef>,
+) -> JournaledProcessSnapshot {
+    let mut claimed = claimed_run();
+    claimed.state.run_id = TurnRunId::from_uuid(process_id.as_uuid());
+    let mut snapshot = ClaimedProcess::from(&claimed).state;
+    snapshot.status = status;
+    snapshot.failure = failure;
+    snapshot.suspension = suspension;
+    snapshot.checkpoint_ref = checkpoint_ref;
+    snapshot
 }

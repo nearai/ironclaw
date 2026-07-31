@@ -5,18 +5,19 @@ use std::sync::Arc;
 use ironclaw_auth::{
     AuthProductError, OAuthClientId, OAuthRedirectUri, RebornProductAuthServicePorts,
 };
+use ironclaw_host_api::ids::{AgentId, TenantId};
 use ironclaw_host_api::runtime_policy::ProcessBackendKind;
 use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, SecretMode,
 };
-use ironclaw_host_api::{AgentId, TenantId};
 use ironclaw_host_runtime::TenantSandboxProcessPort;
 use ironclaw_host_runtime::memory_binding::MemoryBindingPolicy;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_network::NetworkHttpEgress;
+use ironclaw_processes::ProcessConcurrencyLimits;
 use ironclaw_trust::HostTrustPolicy;
-use ironclaw_turns::{TurnRunWakeNotifier, TurnStateStoreLimits};
+use ironclaw_turns::TurnRunWakeNotifier;
 use secrecy::SecretString;
 
 use ironclaw_reborn_config::StorageBackend;
@@ -272,19 +273,9 @@ pub(crate) enum PostgresPoolSource {
     Prebuilt(deadpool_postgres::Pool),
 }
 
-/// Declarative libSQL connection config (Phase B). `path_or_url` / `auth_token`
-/// flow to the durable event-store config regardless of whether the database
-/// handle is opened at build time or supplied pre-opened, so they live here
-/// rather than inside [`RebornStorageInput::Libsql`]'s handle.
-#[derive(Clone)]
-pub(crate) struct LibsqlConnectionConfig {
-    pub(crate) path_or_url: String,
-    pub(crate) auth_token: Option<ironclaw_secrets::SecretMaterial>,
-}
-
 pub(crate) enum RebornStorageInput {
     Disabled,
-    LocalDev {
+    LocalFilesystem {
         root: PathBuf,
         workspace_root: Option<PathBuf>,
         host_home_root: Option<PathBuf>,
@@ -297,12 +288,10 @@ pub(crate) enum RebornStorageInput {
         secret_master_key: ironclaw_secrets::SecretMaterial,
         process_local_resource_governor_singleton: bool,
     },
+    #[cfg(any(test, feature = "test-support"))]
     Libsql {
-        connection: LibsqlConnectionConfig,
-        /// Test escape hatch: a caller-supplied, already-opened database the
-        /// build prefers over opening from `connection`. When `None` the build
-        /// opens the handle from `connection` at build time.
-        prebuilt_db: Option<Arc<libsql::Database>>,
+        database_path_or_url: String,
+        runtime: Arc<ironclaw_libsql_runtime::LibSqlRuntime>,
         secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
         process_local_resource_governor_singleton: bool,
     },
@@ -409,29 +398,29 @@ impl RebornHostBindings {
         )
     }
 
-    /// Build a local-dev-storage-shaped input from an already-resolved
-    /// deployment. The `debug_assert` is on the storage-shape **axis**, not on
-    /// a list of profile names (§4.4).
-    pub(crate) fn local_dev_from_deployment(
+    /// Build a local-filesystem input from an already-resolved deployment. The
+    /// `debug_assert` is on the storage-shape **axis**, not on a list of profile
+    /// names (§4.4).
+    pub(crate) fn local_filesystem_from_deployment(
         deployment: DeploymentConfig,
         owner_id: impl Into<String>,
         root: PathBuf,
     ) -> Self {
-        debug_assert!(deployment.uses_local_dev_storage_input());
+        debug_assert!(deployment.uses_local_filesystem_storage());
         // Resolve the deployment's runtime policy from its policy request up
-        // front, so a local-dev input is buildable without the caller
+        // front, so a local-filesystem input is buildable without the caller
         // separately calling `.with_runtime_policy(...)`. This is what the
         // `local_runtime_build_input*` bridge did explicitly; folding it in here
-        // removes the bare, unresolved-policy local-dev constructor that left
+        // removes the bare, unresolved-policy storage constructor that left
         // `runtime_policy` unset (and the build failing `MissingRuntimePolicy`).
-        // Resolution is infallible for the non-yolo local-dev shapes; a yolo
+        // Resolution is infallible for host-mediated filesystem shapes; a yolo
         // shape without an acknowledged disclosure resolves to no policy, which
         // the caller can still override via `with_runtime_policy`.
         let resolved_policy = deployment.resolve().ok().flatten();
         let bindings = Self::new(
             deployment,
             owner_id,
-            RebornStorageInput::LocalDev {
+            RebornStorageInput::LocalFilesystem {
                 root,
                 workspace_root: None,
                 host_home_root: None,
@@ -517,7 +506,7 @@ impl RebornHostBindings {
 
     pub fn with_local_runtime_workspace_root(mut self, workspace_root: PathBuf) -> Self {
         match &mut self.storage {
-            RebornStorageInput::LocalDev {
+            RebornStorageInput::LocalFilesystem {
                 workspace_root: root,
                 ..
             } => {
@@ -532,15 +521,11 @@ impl RebornHostBindings {
             _ => {}
         }
         self
-    }
-
-    pub fn with_local_dev_workspace_root(self, workspace_root: PathBuf) -> Self {
-        self.with_local_runtime_workspace_root(workspace_root)
     }
 
     pub fn with_local_runtime_confirmed_host_home_root(mut self, host_home_root: PathBuf) -> Self {
         match &mut self.storage {
-            RebornStorageInput::LocalDev {
+            RebornStorageInput::LocalFilesystem {
                 host_home_root: root,
                 ..
             } => {
@@ -555,10 +540,6 @@ impl RebornHostBindings {
             _ => {}
         }
         self
-    }
-
-    pub fn with_local_dev_confirmed_host_home_root(self, host_home_root: PathBuf) -> Self {
-        self.with_local_runtime_confirmed_host_home_root(host_home_root)
     }
 
     pub fn requires_local_runtime_confirmed_host_home_root(&self) -> bool {
@@ -568,10 +549,6 @@ impl RebornHostBindings {
             .is_some_and(|policy| {
                 policy.filesystem_backend == FilesystemBackendKind::HostWorkspaceAndHome
             })
-    }
-
-    pub fn requires_local_dev_confirmed_host_home_root(&self) -> bool {
-        self.requires_local_runtime_confirmed_host_home_root()
     }
 
     pub fn grants_trusted_laptop_access(&self) -> bool {
@@ -584,52 +561,70 @@ impl RebornHostBindings {
                     || policy.secret_mode == SecretMode::InheritedEnv
             })
     }
+}
 
-    pub fn libsql(
-        profile: RebornCompositionProfile,
-        owner_id: impl Into<String>,
-        db: Arc<libsql::Database>,
-        path_or_url: impl Into<String>,
-        auth_token: Option<ironclaw_secrets::SecretMaterial>,
-        secret_master_key: ironclaw_secrets::SecretMaterial,
-    ) -> Self {
-        Self::new(
-            DeploymentConfig::for_profile(profile, false),
-            owner_id,
-            RebornStorageInput::Libsql {
-                connection: LibsqlConnectionConfig {
-                    path_or_url: path_or_url.into(),
-                    auth_token,
-                },
-                prebuilt_db: Some(db),
-                secret_master_key: Some(secret_master_key),
-                process_local_resource_governor_singleton: true,
-            },
-        )
-    }
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn libsql_host_bindings_for_test(
+    profile: RebornCompositionProfile,
+    owner_id: impl Into<String>,
+    db: Arc<libsql::Database>,
+    database_path_or_url: impl Into<String>,
+    _auth_token: Option<ironclaw_secrets::SecretMaterial>,
+    secret_master_key: ironclaw_secrets::SecretMaterial,
+) -> Result<RebornHostBindings, RebornBuildError> {
+    Ok(RebornHostBindings::new(
+        DeploymentConfig::for_profile(profile, false),
+        owner_id,
+        RebornStorageInput::Libsql {
+            database_path_or_url: database_path_or_url.into(),
+            runtime: Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(db)?),
+            secret_master_key: Some(secret_master_key),
+            process_local_resource_governor_singleton: true,
+        },
+    ))
+}
 
-    pub fn libsql_with_resolved_secret_master_key(
-        profile: RebornCompositionProfile,
-        owner_id: impl Into<String>,
-        db: Arc<libsql::Database>,
-        path_or_url: impl Into<String>,
-        auth_token: Option<ironclaw_secrets::SecretMaterial>,
-    ) -> Self {
-        Self::new(
-            DeploymentConfig::for_profile(profile, false),
-            owner_id,
-            RebornStorageInput::Libsql {
-                connection: LibsqlConnectionConfig {
-                    path_or_url: path_or_url.into(),
-                    auth_token,
-                },
-                prebuilt_db: Some(db),
-                secret_master_key: None,
-                process_local_resource_governor_singleton: true,
-            },
-        )
-    }
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn libsql_host_bindings_from_runtime_for_test(
+    profile: RebornCompositionProfile,
+    owner_id: impl Into<String>,
+    runtime: Arc<ironclaw_libsql_runtime::LibSqlRuntime>,
+    database_path_or_url: impl Into<String>,
+    secret_master_key: ironclaw_secrets::SecretMaterial,
+) -> RebornHostBindings {
+    RebornHostBindings::new(
+        DeploymentConfig::for_profile(profile, false),
+        owner_id,
+        RebornStorageInput::Libsql {
+            database_path_or_url: database_path_or_url.into(),
+            runtime,
+            secret_master_key: Some(secret_master_key),
+            process_local_resource_governor_singleton: true,
+        },
+    )
+}
 
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn libsql_host_bindings_with_resolved_secret_master_key_for_test(
+    profile: RebornCompositionProfile,
+    owner_id: impl Into<String>,
+    db: Arc<libsql::Database>,
+    database_path_or_url: impl Into<String>,
+    _auth_token: Option<ironclaw_secrets::SecretMaterial>,
+) -> Result<RebornHostBindings, RebornBuildError> {
+    Ok(RebornHostBindings::new(
+        DeploymentConfig::for_profile(profile, false),
+        owner_id,
+        RebornStorageInput::Libsql {
+            database_path_or_url: database_path_or_url.into(),
+            runtime: Arc::new(ironclaw_libsql_runtime::LibSqlRuntime::new(db)?),
+            secret_master_key: None,
+            process_local_resource_governor_singleton: true,
+        },
+    ))
+}
+
+impl RebornHostBindings {
     pub fn postgres(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
@@ -701,7 +696,7 @@ impl RebornHostBindings {
 
     pub fn with_required_runtime_backends(
         mut self,
-        backends: impl IntoIterator<Item = ironclaw_host_api::RuntimeKind>,
+        backends: impl IntoIterator<Item = ironclaw_host_api::runtime::RuntimeKind>,
     ) -> Self {
         self.deployment.required_runtime_backends = backends.into_iter().collect();
         self
@@ -799,7 +794,7 @@ impl RebornHostBindings {
         self
     }
 
-    /// Override local-dev host HTTP egress for fixture recording and replay.
+    /// Override standalone host HTTP egress for fixture recording and replay.
     ///
     /// This is compiled only for tests/test-support so Reborn QA harnesses can
     /// route host-mediated integration calls through trace record/replay
@@ -858,13 +853,12 @@ impl RebornHostBindings {
         Ok(self)
     }
 
-    /// Set concurrency limits for the in-memory turn-state store.
-    ///
-    /// Called by `build_reborn_runtime` after mapping from `TurnRunnerSettings` so the
-    /// factory can apply them when constructing the store. Callers should use
-    /// `RebornRuntimeInput::with_runner_settings` rather than calling this directly.
-    pub(crate) fn with_turn_state_store_limits(mut self, limits: TurnStateStoreLimits) -> Self {
-        self.deployment.turn_state_store_limits = limits;
+    /// Set claim-time concurrency limits for the process journal.
+    pub(crate) fn with_process_concurrency_limits(
+        mut self,
+        limits: ProcessConcurrencyLimits,
+    ) -> Self {
+        self.deployment.process_concurrency_limits = limits;
         self
     }
 

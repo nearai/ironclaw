@@ -4,7 +4,7 @@
 
 use std::borrow::Cow;
 
-use ironclaw_host_api::EffectKind;
+use ironclaw_host_api::capability::EffectKind;
 
 use super::{PackageBundle, PackageOnboarding, bytes_asset};
 

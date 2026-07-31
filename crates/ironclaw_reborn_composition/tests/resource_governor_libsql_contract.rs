@@ -2,7 +2,9 @@ use std::{sync::Arc, time::Duration};
 
 use ironclaw_filesystem::{LibSqlRootFilesystem, RootFilesystem, ScopedFilesystem, SeqNo};
 use ironclaw_host_api::{
-    MountAlias, MountGrant, MountPermissions, MountView, TenantId, VirtualPath,
+    ids::TenantId,
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
 };
 use ironclaw_resources::{
     FilesystemResourceGovernor, ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
@@ -18,7 +20,8 @@ async fn real_libsql_contention_fails_current_write_then_same_governor_recovers(
             .await
             .expect("local libSQL database"),
     );
-    let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&database)));
+    let filesystem =
+        Arc::new(LibSqlRootFilesystem::new(Arc::clone(&database)).expect("filesystem runtime"));
     filesystem
         .run_migrations()
         .await

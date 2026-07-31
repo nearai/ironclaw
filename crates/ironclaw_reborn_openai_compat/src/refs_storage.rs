@@ -21,7 +21,7 @@ use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{
     CasExpectation, Entry, FilesystemError, RecordKind, RecordVersion, RootFilesystem,
 };
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 

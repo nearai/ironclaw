@@ -16,10 +16,16 @@ use ironclaw_events::{
     sanitize_recovery_label,
 };
 use ironclaw_host_api::{
-    ActionResultSummary, ActionSummary, AgentId, ApprovalRequestId, AuditEnvelope, AuditEventId,
-    AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, ExtensionId,
-    InvocationId, OBLIGATION_EVALUATION_ORDER, ObligationKind, ProcessId, ProjectId, ResourceScope,
-    RuntimeKind, TenantId, ThreadId, Timestamp, UserId,
+    Timestamp,
+    audit::{ActionResultSummary, ActionSummary, AuditEnvelope, AuditStage, DecisionSummary},
+    capability::EffectKind,
+    decision::{OBLIGATION_EVALUATION_ORDER, ObligationKind},
+    ids::{
+        AgentId, ApprovalRequestId, AuditEventId, CapabilityId, CorrelationId, ExtensionId,
+        InvocationId, ProcessId, ProjectId, TenantId, ThreadId, UserId,
+    },
+    resource::ResourceScope,
+    runtime::RuntimeKind,
 };
 use ironclaw_memory::{
     MemoryAuditContext, MemoryDocumentScope, MemoryEventSinkError, MemorySignificantEvent,

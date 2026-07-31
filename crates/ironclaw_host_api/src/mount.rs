@@ -8,7 +8,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{HostApiError, MountAlias, ScopedPath, VirtualPath, path_matches_alias};
+use crate::{
+    error::HostApiError,
+    path::{MountAlias, ScopedPath, VirtualPath, path_matches_alias},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MountPermissions {

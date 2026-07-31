@@ -40,11 +40,12 @@ ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_loop_host = { path = "../ironclaw_loop_host", version = "0.1.0" }
 ironclaw_conversations = { path = "../ironclaw_conversations", version = "0.1.0" }
 ironclaw_outbound = { path = "../ironclaw_outbound", version = "0.1.0" }
+ironclaw_projects = { path = "../ironclaw_projects", version = "0.1.0" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
 ironclaw_runner = { path = "../ironclaw_runner", version = "0.1.0" }
-ironclaw_run_state = { path = "../ironclaw_run_state", version = "0.1.0" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
+ironclaw_triggers = { path = "../ironclaw_triggers", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -58,6 +59,7 @@ url = "2"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 [dev-dependencies]
+ironclaw_processes = { path = "../ironclaw_processes" }
 # Enables the shared in-memory turn-state store double for tests only.
 ironclaw_turns = { path = "../ironclaw_turns", features = ["test-support"] }
 # Enables the in-memory-backed outbound-state store constructor for tests only.
@@ -67,7 +69,6 @@ ironclaw_approvals = { path = "../ironclaw_approvals", features = ["test-support
 # Enables the in-memory-backed capability-lease store constructor for tests only.
 ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test-support"] }
 # Enables the in-memory-backed run-state/approval store constructors for tests only.
-ironclaw_run_state = { path = "../ironclaw_run_state", features = ["test-support"] }
 # FaultInjecting decorator: test store fault paths through the real store
 ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }
 # ProductLive planned-loop harness builds a `FilesystemReplayPayloadStore` over
@@ -94,3 +95,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 deadpool-postgres = "0.14"
 tokio-postgres = "0.7"
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
+# Captures per-test tracing output so the command-palette parse/rejection
+# debug! logging (item 5 of the PR-2 review fix wave) can be asserted on
+# through the caller, not just trusted by inspection.
+tracing-test = { version = "0.2", features = ["no-env-filter"] }

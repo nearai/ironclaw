@@ -3,10 +3,15 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, FailureKind, HostApiError,
-    ModelDiagnostic, ProviderToolName, Resolution, ResolutionBatch, RuntimeKind,
+    error::HostApiError,
+    ids::{ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, ProviderToolName},
+    resolution::{Resolution, ResolutionBatch},
+    result_meta::{FailureKind, ModelDiagnostic},
+    runtime::RuntimeKind,
 };
 use serde::{Deserialize, Deserializer, Serialize};
+
+pub use ironclaw_host_api::capability::CapabilityDescriptionTrust;
 
 use crate::run_profile::content_digest::ContentDigest;
 use crate::run_profile::model_observation::{CapabilityFailureDetail, ModelVisibleToolObservation};
@@ -127,6 +132,9 @@ pub struct CapabilityDescriptorView {
     pub runtime: RuntimeKind,
     pub safe_name: String,
     pub safe_description: String,
+    /// Unknown and legacy sources default to the fully checked path.
+    #[serde(default)]
+    pub description_trust: CapabilityDescriptionTrust,
     pub concurrency_hint: ConcurrencyHint,
     #[serde(default)]
     pub parameters_schema: serde_json::Value,
@@ -423,9 +431,9 @@ pub enum CapabilityProgress {
 
 /// The agent-loop executor's reconstructed view of a completed capability result.
 ///
-/// Producers no longer emit this (they emit [`Resolution`](ironclaw_host_api::Resolution)
+/// Producers no longer emit this (they emit [`Resolution`](ironclaw_host_api::resolution::Resolution)
 /// directly, §5.3 Stage 2b); the executor rebuilds it from the host_api
-/// [`Outcome`](ironclaw_host_api::Outcome) channel (`capability_result_from_outcome`)
+/// [`Outcome`](ironclaw_host_api::resolution::Outcome) channel (`capability_result_from_outcome`)
 /// to feed its result-admission/strategy pipeline. It is loop-internal working
 /// vocabulary, no longer a wire/producer DTO.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

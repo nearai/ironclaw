@@ -30,7 +30,7 @@ pub trait BudgetEventObserver: Send + Sync + std::fmt::Debug + 'static {
 
 /// Default observer that logs every event at `debug!`. Used as the
 /// fallback when no production owner installs a richer projection
-/// (e.g. tracing-only deploys, local-dev binaries that just want the
+/// (e.g. tracing-only deploys, standalone binaries that just want the
 /// observability without an SSE bridge).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TracingBudgetEventObserver;
@@ -118,7 +118,7 @@ async fn run_projection(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use ironclaw_host_api::{TenantId, UserId};
+    use ironclaw_host_api::ids::{TenantId, UserId};
     use ironclaw_resources::{
         BudgetEventSink, BudgetWarning, ResourceAccount, ResourceDimension, ResourceValue,
     };

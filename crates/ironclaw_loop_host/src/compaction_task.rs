@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::ids::ThreadId;
 use ironclaw_safety::{InjectionScanner, LeakDetector, LeakScanner, Sanitizer};
 use ironclaw_threads::{
     CreateSummaryArtifactRequest, MessageContent, MessageKind, MessageStatus, SessionThreadService,
@@ -14,6 +14,10 @@ use ironclaw_turns::run_profile::{
     SystemTaskKind,
 };
 use thiserror::Error;
+
+mod sanitization;
+
+use sanitization::CompactionSanitizer;
 
 pub const DEFAULT_COMPACTION_PROMPT_ID: &str = "compaction_summarizer_fresh";
 pub const ACTIVE_TASK_COMPACTION_PROMPT_ID: &str = "active_task_compaction_summarizer_fresh";
@@ -30,8 +34,8 @@ pub(crate) enum CompactionError {
     InputTooLarge { cap: usize, observed_bytes: usize },
     #[error("compaction content contains injection markers")]
     InjectionDetected,
-    #[error("compaction output contains leaked secret markers")]
-    LeakDetected,
+    #[error("compaction leak redaction failed or left unsafe content")]
+    LeakRedactionFailed,
     #[error("compaction inference failed: {safe_summary}")]
     InferenceFailed { safe_summary: LoopSafeSummary },
     #[error("compaction was cancelled")]
@@ -127,11 +131,13 @@ struct ValidatedCompactionMessage {
 
 struct CompactionInput {
     text: String,
+    redacted_leak_count: u32,
 }
 
 struct SanitizedSummary {
     content: String,
     compression_ratio_ppm: u32,
+    redacted_leak_count: u32,
 }
 
 impl<S> HostManagedLoopCompactionPort<S>
@@ -258,8 +264,13 @@ where
         };
         let input = self.build_input(&range)?;
         let input_bytes = input.text.len();
+        let input_redacted_leak_count = input.redacted_leak_count;
         let response = self.run_inference(&request, input).await?;
-        let summary = self.sanitize_summary(&response, input_bytes)?;
+        let mut summary = self.sanitize_summary(&response, input_bytes)?;
+        summary.redacted_leak_count = summary
+            .redacted_leak_count
+            .checked_add(input_redacted_leak_count)
+            .ok_or(CompactionError::LeakRedactionFailed)?;
         self.persist_summary(range, summary)
             .await
             .map(LoopCompactionOutcome::Compacted)
@@ -386,34 +397,19 @@ where
         &self,
         range: &ValidatedCompactionRange,
     ) -> Result<CompactionInput, CompactionError> {
-        let mut text = String::new();
-        for message in &range.messages {
-            let body = message.body.as_str();
-            if !self.injection_scanner.scan_injection(body).is_empty() {
-                return Err(CompactionError::InjectionDetected);
-            }
-            if !self.leak_detector.scan_leaks(body).is_clean() {
-                return Err(CompactionError::LeakDetected);
-            }
-            append_escaped_message_checked(
-                &mut text,
-                message.sequence,
-                message.kind,
-                body,
-                self.max_input_bytes,
-            )?;
-        }
-        // The raw per-message scan is the primary guard. This second pass is
-        // intentionally over the exact serialized input that reaches system
-        // inference, catching delimiter/escaping interactions in the final
-        // model-visible shape.
-        if !self.injection_scanner.scan_injection(&text).is_empty() {
-            return Err(CompactionError::InjectionDetected);
-        }
-        if !self.leak_detector.scan_leaks(&text).is_clean() {
-            return Err(CompactionError::LeakDetected);
-        }
-        Ok(CompactionInput { text })
+        let sanitized = self.sanitizer().sanitize_messages(&range.messages)?;
+        Ok(CompactionInput {
+            text: sanitized.content,
+            redacted_leak_count: sanitized.redacted_leak_count,
+        })
+    }
+
+    fn sanitizer(&self) -> CompactionSanitizer<'_> {
+        CompactionSanitizer::new(
+            self.injection_scanner.as_ref(),
+            self.leak_detector.as_ref(),
+            self.max_input_bytes,
+        )
     }
 
     async fn run_inference(
@@ -444,28 +440,12 @@ where
         response: &SystemInferenceResponse,
         input_bytes: usize,
     ) -> Result<SanitizedSummary, CompactionError> {
-        if !self
-            .injection_scanner
-            .scan_injection(&response.output_text)
-            .is_empty()
-        {
-            return Err(CompactionError::InjectionDetected);
-        }
-        if !self
-            .leak_detector
-            .scan_leaks(&response.output_text)
-            .is_clean()
-        {
-            return Err(CompactionError::LeakDetected);
-        }
-        let content = format!(
-            "{ANTI_INJECTION_PREFIX}<summary>{}</summary>",
-            escape_xml(&response.output_text)
-        );
-        let compression_ratio_ppm = compression_ratio_ppm(input_bytes, content.len());
+        let sanitized = self.sanitizer().sanitize_summary(&response.output_text)?;
+        let compression_ratio_ppm = compression_ratio_ppm(input_bytes, sanitized.content.len());
         Ok(SanitizedSummary {
-            content,
+            content: sanitized.content,
             compression_ratio_ppm,
+            redacted_leak_count: sanitized.redacted_leak_count,
         })
     }
 
@@ -498,6 +478,7 @@ where
                     safe_summary: safe("summary artifact id is invalid"),
                 })?,
             compression_ratio_ppm: summary.compression_ratio_ppm,
+            redacted_leak_count: summary.redacted_leak_count,
         })
     }
 }
@@ -648,86 +629,6 @@ fn compaction_message_body(
         .ok_or(CompactionError::InvalidCutPoint)
 }
 
-fn append_escaped_message_checked(
-    output: &mut String,
-    sequence: u64,
-    kind: MessageKind,
-    body: &str,
-    cap: usize,
-) -> Result<(), CompactionError> {
-    push_checked(output, "<message sequence=\"", cap)?;
-    push_checked(output, &sequence.to_string(), cap)?;
-    push_checked(output, "\" kind=\"", cap)?;
-    push_checked(output, message_kind_name(kind), cap)?;
-    push_checked(output, "\">", cap)?;
-    append_escaped_xml_checked(output, body, cap)?;
-    push_checked(output, "</message>\n", cap)
-}
-
-fn message_kind_name(kind: MessageKind) -> &'static str {
-    match kind {
-        MessageKind::User => "user",
-        MessageKind::Assistant => "assistant",
-        MessageKind::System => "system",
-        MessageKind::Summary => "summary",
-        MessageKind::CheckpointReference => "checkpoint_reference",
-        MessageKind::ToolResultReference => "tool_result_reference",
-        MessageKind::CapabilityDisplayPreview => "capability_display_preview",
-    }
-}
-
-fn append_escaped_xml_checked(
-    output: &mut String,
-    value: &str,
-    cap: usize,
-) -> Result<(), CompactionError> {
-    let mut run_start: Option<usize> = None;
-    for (idx, character) in value.char_indices() {
-        match character {
-            '&' | '<' | '>' => {
-                if let Some(start) = run_start.take() {
-                    push_checked(output, &value[start..idx], cap)?;
-                }
-                let segment = match character {
-                    '&' => "&amp;",
-                    '<' => "&lt;",
-                    '>' => "&gt;",
-                    _ => unreachable!(),
-                };
-                push_checked(output, segment, cap)?;
-            }
-            _ => {
-                if run_start.is_none() {
-                    run_start = Some(idx);
-                }
-            }
-        }
-    }
-    if let Some(start) = run_start {
-        push_checked(output, &value[start..], cap)?;
-    }
-    Ok(())
-}
-
-fn push_checked(output: &mut String, segment: &str, cap: usize) -> Result<(), CompactionError> {
-    let observed_bytes = output.len().saturating_add(segment.len());
-    if observed_bytes > cap {
-        return Err(CompactionError::InputTooLarge {
-            cap,
-            observed_bytes,
-        });
-    }
-    output.push_str(segment);
-    Ok(())
-}
-
-fn escape_xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
 fn map_inference_error(error: SystemInferenceError) -> CompactionError {
     match error {
         SystemInferenceError::InputTooLarge => CompactionError::InferenceFailed {
@@ -765,8 +666,8 @@ fn compaction_error_to_loop(error: CompactionError) -> LoopCompactionError {
         CompactionError::InjectionDetected => LoopCompactionError::SecurityRejected {
             safe_summary: safe("injection detected"),
         },
-        CompactionError::LeakDetected => LoopCompactionError::SecurityRejected {
-            safe_summary: safe("leak detected"),
+        CompactionError::LeakRedactionFailed => LoopCompactionError::SecurityRejected {
+            safe_summary: safe("leak redaction failed"),
         },
         CompactionError::InferenceFailed { safe_summary } => {
             LoopCompactionError::InferenceFailed { safe_summary }
@@ -840,21 +741,6 @@ mod tests {
         let message = record_with_content(MessageKind::ToolResultReference, Some("tool summary"));
 
         assert_eq!(compaction_message_body(&message), Ok("tool summary"));
-    }
-
-    #[test]
-    fn push_checked_accepts_exact_cap_and_rejects_one_over() {
-        let mut output = String::from("abcd");
-
-        assert_eq!(push_checked(&mut output, "ef", 6), Ok(()));
-        assert_eq!(output, "abcdef");
-        assert_eq!(
-            push_checked(&mut output, "g", 6),
-            Err(CompactionError::InputTooLarge {
-                cap: 6,
-                observed_bytes: 7,
-            })
-        );
     }
 
     #[test]

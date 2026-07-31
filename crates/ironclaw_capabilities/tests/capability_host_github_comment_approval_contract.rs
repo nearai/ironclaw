@@ -3,8 +3,16 @@ use ironclaw_approvals::*;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_host_api::*;
-use ironclaw_run_state::*;
+use ironclaw_host_api::{
+    action::NetworkPolicy,
+    approval::InvocationFingerprint,
+    capability::{CapabilitySet, EffectKind, GrantConstraints},
+    ids::{ApprovalRequestId, CapabilityGrantId, InvocationId, SecretHandle},
+    mount::MountView,
+    resource::{ResourceEstimate, ResourceScope},
+    scope::{ExecutionContext, Principal},
+};
+use ironclaw_processes::*;
 use serde_json::json;
 
 mod support;
@@ -22,7 +30,7 @@ async fn capability_host_blocks_github_comment_issue_before_dispatch() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(run.status, RunStatus::BlockedApproval);
+    assert_eq!(run.status, ProcessInvocationStatus::BlockedApproval);
     let approval = fixture
         .approval_requests
         .get(&fixture.scope, fixture.approval_id)
@@ -60,7 +68,7 @@ async fn capability_host_resumes_approved_github_comment_issue_and_dispatches_on
         &resume_authorizer,
         &trust_policy,
     )
-    .with_run_state(&fixture.run_state)
+    .with_invocation_state(&fixture.run_state)
     .with_approval_requests(&fixture.approval_requests)
     .with_capability_leases(&fixture.leases)
     .with_obligation_handler(&obligation_handler);
@@ -90,7 +98,7 @@ async fn capability_host_resumes_approved_github_comment_issue_and_dispatches_on
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(run.status, RunStatus::Completed);
+    assert_eq!(run.status, ProcessInvocationStatus::Completed);
     let consumed = fixture
         .leases
         .get(
@@ -108,7 +116,7 @@ async fn capability_host_rejects_mutated_github_comment_issue_replay_before_disp
     let obligation_handler = AllowAllObligationHandler;
     let resume_authorizer = GrantAuthorizer::new();
     let resume_host = capability_host(&fixture.registry, &fixture.dispatcher, &resume_authorizer)
-        .with_run_state(&fixture.run_state)
+        .with_invocation_state(&fixture.run_state)
         .with_approval_requests(&fixture.approval_requests)
         .with_capability_leases(&fixture.leases)
         .with_obligation_handler(&obligation_handler);
@@ -149,9 +157,10 @@ async fn capability_host_rejects_mutated_github_comment_issue_replay_before_disp
 struct GitHubCommentApprovalFixture {
     registry: ironclaw_extensions::ExtensionRegistry,
     dispatcher: TestDispatcher,
-    run_state: ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>,
+    run_state:
+        ironclaw_processes::ProcessInvocationStateStore<ironclaw_filesystem::InMemoryBackend>,
     approval_requests:
-        ironclaw_run_state::ApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
+        ironclaw_approvals::ApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
     leases: CapabilityLeaseStore<InMemoryBackend>,
     context: ExecutionContext,
     scope: ResourceScope,
@@ -165,11 +174,11 @@ struct GitHubCommentApprovalFixture {
 async fn blocked_github_comment_fixture() -> GitHubCommentApprovalFixture {
     let registry = registry_with_github_comment_capability();
     let dispatcher = recording_dispatcher();
-    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
-    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
+    let approval_requests = ironclaw_approvals::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let block_host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
-        .with_run_state(&run_state)
+        .with_invocation_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
     let scope = context.resource_scope.clone();

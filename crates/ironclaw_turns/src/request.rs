@@ -114,6 +114,10 @@ pub struct SubmitChildRunRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_run_id: Option<TurnRunId>,
     pub spawn_tree_descendant_cap: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_dependency: Option<ironclaw_processes::ProcessDependencySubmission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_input: Option<ironclaw_processes::ProcessInputSubmission>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,7 +166,7 @@ pub struct GetRunStateRequest {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{TenantId, ThreadId, UserId};
+    use ironclaw_host_api::ids::{TenantId, ThreadId, UserId};
 
     use super::*;
 

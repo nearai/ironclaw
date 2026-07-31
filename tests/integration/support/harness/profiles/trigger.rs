@@ -1,6 +1,10 @@
 //! trigger domain capability profile.
 
-use ironclaw_host_api::{CapabilityId, EffectKind, MountPermissions, MountView};
+use ironclaw_host_api::{
+    capability::EffectKind,
+    ids::CapabilityId,
+    mount::{MountPermissions, MountView},
+};
 use ironclaw_host_runtime::{
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
@@ -21,9 +25,7 @@ pub(crate) fn trigger_management_tools_profile() -> HarnessResult<ToolsProfile> 
         effect_kinds: vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
-            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
-                true,
-            )?),
+            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
         ),
         auto_approve_default: Some(true),
         ..ToolsProfile::new(
@@ -48,9 +50,7 @@ pub(crate) fn trigger_management_with_gated_write_profile() -> HarnessResult<Too
     profile.effect_kinds.push(EffectKind::WriteFilesystem);
     profile.options = HostRuntimeHarnessOptions::new(
         workspace_mounts(MountPermissions::read_write_list_delete())?,
-        Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
-            true,
-        )?),
+        Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
     )
     // #5886: this profile's group asserts `trigger_list`'s `active_hold`
     // against a REAL gate-parked run, which lives in the group's shared

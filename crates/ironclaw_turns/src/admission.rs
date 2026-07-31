@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 use serde::{Deserialize, Serialize};
-
-use crate::{TurnActor, TurnRunId, TurnScope};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
@@ -243,64 +241,176 @@ pub struct TurnAdmissionCapacityDenial {
     pub retry_after_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnAdmissionReservationRecord {
-    pub run_id: TurnRunId,
-    pub admission_class: TurnAdmissionClass,
-    pub buckets: Vec<TurnAdmissionBucket>,
-    pub released: bool,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-pub(crate) fn admission_buckets(
-    scope: &TurnScope,
-    actor: &TurnActor,
-    admission_class: &TurnAdmissionClass,
-) -> Vec<TurnAdmissionBucket> {
-    let tenant_id = scope.tenant_id.clone();
-    let total_and_class = |axis_kind: TurnAdmissionAxisKind, scope: TurnAdmissionBucketScope| {
-        [
-            TurnAdmissionBucket {
-                axis_kind,
-                bucket_kind: TurnAdmissionBucketKind::Total,
-                admission_class: None,
-                scope: scope.clone(),
-            },
-            TurnAdmissionBucket {
-                axis_kind,
-                bucket_kind: TurnAdmissionBucketKind::Class,
-                admission_class: Some(admission_class.clone()),
-                scope,
-            },
-        ]
-    };
+    fn tenant_id() -> TenantId {
+        TenantId::new("tenant-admission-test").expect("tenant")
+    }
 
-    let mut buckets = Vec::with_capacity(8);
-    buckets.extend(total_and_class(
-        TurnAdmissionAxisKind::Tenant,
-        TurnAdmissionBucketScope::Tenant {
-            tenant_id: tenant_id.clone(),
-        },
-    ));
-    buckets.extend(total_and_class(
-        TurnAdmissionAxisKind::ActorUser,
-        TurnAdmissionBucketScope::ActorUser {
-            tenant_id: tenant_id.clone(),
-            user_id: actor.user_id.clone(),
-        },
-    ));
-    buckets.extend(total_and_class(
-        TurnAdmissionAxisKind::Project,
-        TurnAdmissionBucketScope::Project {
-            tenant_id: tenant_id.clone(),
-            project_id: scope.project_id.clone(),
-        },
-    ));
-    buckets.extend(total_and_class(
-        TurnAdmissionAxisKind::Agent,
-        TurnAdmissionBucketScope::Agent {
-            tenant_id,
-            agent_id: scope.agent_id.clone(),
-        },
-    ));
-    buckets
+    fn user_id() -> UserId {
+        UserId::new("user-admission-test").expect("user")
+    }
+
+    fn bucket(
+        axis_kind: TurnAdmissionAxisKind,
+        bucket_kind: TurnAdmissionBucketKind,
+        admission_class: Option<TurnAdmissionClass>,
+    ) -> TurnAdmissionBucket {
+        TurnAdmissionBucket {
+            axis_kind,
+            bucket_kind,
+            admission_class,
+            scope: TurnAdmissionBucketScope::ActorUser {
+                tenant_id: tenant_id(),
+                user_id: user_id(),
+            },
+        }
+    }
+
+    #[test]
+    fn admission_class_validation_and_serde_are_fail_closed() {
+        for invalid in ["", "Interactive", "has-dash", "has space", "line\nbreak"] {
+            assert!(
+                TurnAdmissionClass::new(invalid).is_err(),
+                "{invalid:?} must be rejected"
+            );
+        }
+        assert!(TurnAdmissionClass::new("a".repeat(129)).is_err());
+
+        let class = TurnAdmissionClass::new("mission_42").expect("valid class");
+        assert_eq!(class.as_str(), "mission_42");
+        let encoded = serde_json::to_string(&class).expect("serialize class");
+        assert_eq!(
+            serde_json::from_str::<TurnAdmissionClass>(&encoded).expect("deserialize class"),
+            class
+        );
+        assert!(serde_json::from_str::<TurnAdmissionClass>("\"INVALID\"").is_err());
+    }
+
+    #[test]
+    fn builtin_admission_classes_are_stable() {
+        assert_eq!(TurnAdmissionClass::interactive().as_str(), "interactive");
+        assert_eq!(TurnAdmissionClass::mission().as_str(), "mission");
+        assert_eq!(TurnAdmissionClass::admin_system().as_str(), "admin_system");
+    }
+
+    #[test]
+    fn static_limits_select_total_and_class_buckets_independently() {
+        let mission = TurnAdmissionClass::mission();
+        let provider = StaticTurnAdmissionLimitProvider::default()
+            .with_total_limit(TurnAdmissionAxisKind::ActorUser, 5)
+            .with_class_limit(TurnAdmissionAxisKind::ActorUser, mission.clone(), 2);
+
+        assert_eq!(
+            provider
+                .limit_for(&bucket(
+                    TurnAdmissionAxisKind::ActorUser,
+                    TurnAdmissionBucketKind::Total,
+                    None,
+                ))
+                .expect("total limit"),
+            TurnAdmissionLimit::max_active(5)
+        );
+        assert_eq!(
+            provider
+                .limit_for(&bucket(
+                    TurnAdmissionAxisKind::ActorUser,
+                    TurnAdmissionBucketKind::Class,
+                    Some(mission),
+                ))
+                .expect("class limit"),
+            TurnAdmissionLimit::max_active(2)
+        );
+        assert_eq!(
+            provider
+                .limit_for(&bucket(
+                    TurnAdmissionAxisKind::Tenant,
+                    TurnAdmissionBucketKind::Total,
+                    None,
+                ))
+                .expect("unspecified limit"),
+            TurnAdmissionLimit::unlimited()
+        );
+    }
+
+    #[test]
+    fn limit_provider_unavailability_is_not_treated_as_unlimited() {
+        let unavailable = StaticTurnAdmissionLimitProvider::default().unavailable();
+        assert_eq!(
+            unavailable.limit_for(&bucket(
+                TurnAdmissionAxisKind::ActorUser,
+                TurnAdmissionBucketKind::Total,
+                None,
+            )),
+            Err(TurnAdmissionLimitUnavailable)
+        );
+        assert_eq!(
+            AllowAllTurnAdmissionLimitProvider
+                .limit_for(&bucket(
+                    TurnAdmissionAxisKind::ActorUser,
+                    TurnAdmissionBucketKind::Total,
+                    None,
+                ))
+                .expect("allow-all limit"),
+            TurnAdmissionLimit::unlimited()
+        );
+    }
+
+    #[test]
+    fn admission_limit_retry_hint_and_capacity_denial_round_trip() {
+        let limit = TurnAdmissionLimit::max_active(3).with_retry_after_ms(250);
+        assert_eq!(limit.max_active, Some(3));
+        assert_eq!(limit.retry_after_ms, Some(250));
+
+        let denial = TurnAdmissionCapacityDenial {
+            axis_kind: TurnAdmissionAxisKind::Project,
+            bucket_kind: TurnAdmissionBucketKind::Class,
+            admission_class: Some(TurnAdmissionClass::interactive()),
+            limit: 3,
+            active_count: 4,
+            retry_after_ms: Some(250),
+        };
+        let encoded = serde_json::to_vec(&denial).expect("serialize denial");
+        assert_eq!(
+            serde_json::from_slice::<TurnAdmissionCapacityDenial>(&encoded)
+                .expect("deserialize denial"),
+            denial
+        );
+    }
+
+    #[test]
+    fn admission_bucket_scopes_preserve_authority_dimensions() {
+        let tenant = tenant_id();
+        let user = user_id();
+        let project = ProjectId::new("project-admission-test").expect("project");
+        let agent = AgentId::new("agent-admission-test").expect("agent");
+        let scopes = [
+            TurnAdmissionBucketScope::Tenant {
+                tenant_id: tenant.clone(),
+            },
+            TurnAdmissionBucketScope::ActorUser {
+                tenant_id: tenant.clone(),
+                user_id: user,
+            },
+            TurnAdmissionBucketScope::Project {
+                tenant_id: tenant.clone(),
+                project_id: Some(project),
+            },
+            TurnAdmissionBucketScope::Agent {
+                tenant_id: tenant,
+                agent_id: Some(agent),
+            },
+        ];
+
+        for scope in scopes {
+            let encoded = serde_json::to_vec(&scope).expect("serialize scope");
+            assert_eq!(
+                serde_json::from_slice::<TurnAdmissionBucketScope>(&encoded)
+                    .expect("deserialize scope"),
+                scope
+            );
+        }
+    }
 }

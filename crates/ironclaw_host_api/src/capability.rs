@@ -10,10 +10,16 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CapabilityGrantId, CapabilityId, ExtensionId, InvocationOrigin, MountView, NetworkPolicy,
-    NetworkTargetPattern, Principal, ResourceCeiling, ResourceProfile,
-    RuntimeCredentialAuthRequirement, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
-    Timestamp, TrustClass, VendorId,
+    Timestamp,
+    action::{NetworkPolicy, NetworkTargetPattern},
+    decision::RuntimeCredentialAuthRequirement,
+    http::RuntimeCredentialTarget,
+    ids::{CapabilityGrantId, CapabilityId, ExtensionId, SecretHandle, VendorId},
+    invocation::InvocationOrigin,
+    mount::MountView,
+    resource::{ResourceCeiling, ResourceProfile},
+    runtime::{RuntimeKind, TrustClass},
+    scope::Principal,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -59,6 +65,23 @@ pub enum PermissionMode {
     Allow,
     Ask,
     Deny,
+}
+
+/// Provenance-backed policy for a capability's model-visible description.
+///
+/// This marker does not grant execution authority. It only records whether the
+/// description was supplied by a signature-verified catalog path and may
+/// therefore bypass vocabulary/path/credential-shape false-positive checks.
+/// Structural prompt limits still apply on every variant.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityDescriptionTrust {
+    /// Unknown, local, client-supplied, or otherwise unverified provenance.
+    #[default]
+    Untrusted,
+    /// Description came from a registry package whose catalog manifest and
+    /// artifacts were signature/digest verified before installation.
+    VerifiedCatalog,
 }
 
 /// Per-origin gate requirement (§5.2.1). Absence of a declaration for an
@@ -323,7 +346,10 @@ pub struct GrantConstraints {
 #[cfg(test)]
 mod capability_descriptor_runtime_kind_tests {
     use super::{CapabilityDescriptor, PermissionMode};
-    use crate::{CapabilityId, ExtensionId, RuntimeKind, TrustClass};
+    use crate::{
+        ids::{CapabilityId, ExtensionId},
+        runtime::{RuntimeKind, TrustClass},
+    };
 
     fn descriptor() -> CapabilityDescriptor {
         CapabilityDescriptor {
@@ -411,7 +437,10 @@ mod credential_setup_wire_tests {
 #[cfg(test)]
 mod origin_gate_wire_tests {
     use super::{OriginGateMatrix, OriginGatePolicy, UNGATED_LOOP_RUN_CAPABILITIES};
-    use crate::{CapabilityId, InvocationOrigin, ProductKind, RoutineId, RunId};
+    use crate::{
+        ids::{CapabilityId, ProductKind, RoutineId, RunId},
+        invocation::InvocationOrigin,
+    };
 
     /// The checked-in Ungated-for-LoopRun allowlist seed (§5.2.1/§10) must be
     /// internally consistent: non-empty, free of duplicates, and every entry a

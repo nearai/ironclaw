@@ -32,10 +32,15 @@ class CaseSpec:
         expects_llm_trace: bool = True,
         default_enabled: bool = True,
         implemented: bool = True,
+        retry_policy: str = "transient",
     ) -> None:
         if tier not in ("contract", "behavioral"):
             raise ValueError(
                 "CaseSpec tier must be exactly 'contract' or 'behavioral'"
+            )
+        if retry_policy not in ("transient", "never"):
+            raise ValueError(
+                "CaseSpec retry_policy must be exactly 'transient' or 'never'"
             )
         self.fn = fn
         self.tier = tier
@@ -50,6 +55,7 @@ class CaseSpec:
         self.expects_llm_trace = expects_llm_trace
         self.default_enabled = default_enabled
         self.implemented = implemented
+        self.retry_policy = retry_policy
 
 
 def qa_row_sort_key(row_id: str) -> tuple[int, str]:

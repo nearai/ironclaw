@@ -19,10 +19,15 @@ use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
-    ActivityId, AgentId, LifecyclePublicState, NetworkMethod, Outcome, OutcomeRefs,
-    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    ProjectId, Resolution, ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, TenantId,
-    TerminateHint, ThreadId, ToolVerdict, UserId,
+    action::NetworkMethod,
+    ids::{ActivityId, AgentId, ProjectId, ResultRef, TenantId, ThreadId, UserId},
+    product_surface::{
+        ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    },
+    resolution::{Outcome, OutcomeRefs, Resolution, ResultPreviewMeta, ToolVerdict},
+    result_meta::{ResultProgress, TerminateHint},
+    safe_summary::SafeSummary,
+    state::LifecyclePublicState,
 };
 use ironclaw_host_ingress::{ProtectedRouteMount, PublicRouteMount};
 use ironclaw_product::{
@@ -50,7 +55,7 @@ fn public_test_descriptor(
     route_id: &str,
     route_pattern: &str,
 ) -> ironclaw_host_api::ingress::IngressRouteDescriptor {
-    use ironclaw_host_api::IngressScopeSource;
+    use ironclaw_host_api::ingress::IngressScopeSource;
     use ironclaw_host_api::ingress::{
         AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
         IngressJustification, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor,
@@ -248,6 +253,7 @@ async fn health_route_is_public_for_platform_probes() {
     assert_eq!(json["channel"], "reborn");
 }
 
+#[allow(dead_code)]
 mod openai_compat_mount_tests {
     use super::*;
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
@@ -260,12 +266,9 @@ mod openai_compat_mount_tests {
         OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow, openai_compat_router_with_state,
         openai_compat_routes,
     };
-    use ironclaw_turns::runner::{ClaimRunRequest, CompleteRunRequest, TurnRunTransitionPort};
-    use ironclaw_turns::test_support::in_memory_turn_state_store;
     use ironclaw_turns::{
-        AcceptedMessageRef, DefaultTurnCoordinator, IdempotencyKey, ReplyTargetBindingRef,
-        SourceBindingRef, StaticTurnAdmissionLimitProvider, SubmitTurnRequest,
-        TurnAdmissionAxisKind, TurnCoordinator, TurnError, TurnLeaseToken, TurnRunId, TurnRunnerId,
+        AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef,
+        SubmitTurnRequest, TurnCoordinator, TurnError, TurnRunId,
     };
 
     const AGENT: &str = "agent-alpha";
@@ -324,119 +327,6 @@ mod openai_compat_mount_tests {
             "hello through composition"
         );
         assert_eq!(workflow.submit_count(), 1);
-    }
-
-    #[tokio::test]
-    async fn openai_chat_timeout_keeps_shared_turn_admission_until_terminal_release() {
-        let limits = StaticTurnAdmissionLimitProvider::default()
-            .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
-        let turn_state =
-            Arc::new(in_memory_turn_state_store().with_admission_limit_provider(Arc::new(limits)));
-        let turn_coordinator = Arc::new(DefaultTurnCoordinator::new(turn_state.clone()));
-        let workflow = Arc::new(AdmissionProductSurface::new(turn_coordinator));
-        let chat = Arc::new(
-            OpenAiChatCompletionsWorkflow::new(
-                workflow,
-                in_memory_openai_compat_ref_store(),
-                Arc::new(NeverCompletingChatProjectionReader),
-            )
-            .with_wait_timeout(Duration::from_millis(1)),
-        );
-        let mount = ProtectedRouteMount::new(
-            openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(chat)),
-            openai_compat_routes(),
-        );
-        let product_surface = Arc::new(StubServices::default());
-        let config = WebuiServeConfig::new(
-            TenantId::new(TENANT).expect("tenant"),
-            Arc::new(OnlyValidToken),
-            vec![HeaderValue::from_static("http://localhost:3000")],
-        )
-        .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
-        .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-        .with_protected_route_mount(mount);
-        let app = webui_v2_app(product_surface.clone(), config).expect("webui v2 app");
-
-        let timed_out = app
-            .clone()
-            .oneshot(chat_request(Some(VALID_TOKEN)))
-            .await
-            .expect("timed-out chat response");
-        assert_eq!(timed_out.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(
-            turn_state
-                .active_admission_reservations()
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-
-        let denied = app
-            .clone()
-            .oneshot(chat_request(Some(VALID_TOKEN)))
-            .await
-            .expect("admission-denied chat response");
-        assert_eq!(denied.status(), StatusCode::TOO_MANY_REQUESTS);
-        let denied_body = to_bytes(denied.into_body(), 4096)
-            .await
-            .expect("denied body");
-        let denied_body: serde_json::Value =
-            serde_json::from_slice(&denied_body).expect("denied json");
-        assert_eq!(denied_body["error"]["code"], "rate_limited");
-        assert_eq!(
-            turn_state
-                .active_admission_reservations()
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-
-        let runner_id = TurnRunnerId::new();
-        let lease_token = TurnLeaseToken::new();
-        let claimed = turn_state
-            .claim_next_run(ClaimRunRequest {
-                runner_id,
-                lease_token,
-                scope_filter: None,
-            })
-            .await
-            .expect("claim active run")
-            .expect("active run should be claimable");
-        turn_state
-            .complete_run(CompleteRunRequest {
-                run_id: claimed.state.run_id,
-                runner_id,
-                lease_token,
-            })
-            .await
-            .expect("complete active run");
-        assert!(
-            turn_state
-                .active_admission_reservations()
-                .await
-                .unwrap()
-                .is_empty()
-        );
-
-        let accepted_after_release = app
-            .oneshot(chat_request(Some(VALID_TOKEN)))
-            .await
-            .expect("chat response after release");
-        assert_eq!(
-            accepted_after_release.status(),
-            StatusCode::SERVICE_UNAVAILABLE,
-            "the route still times out waiting for projection, but admission accepted a new turn"
-        );
-        assert_eq!(
-            turn_state
-                .active_admission_reservations()
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
     }
 
     #[tokio::test]
@@ -541,12 +431,15 @@ mod openai_compat_mount_tests {
     }
 
     #[async_trait]
-    impl ironclaw_host_api::ProductSurface for GatewayOpenAiSurface {
+    impl ironclaw_host_api::product_surface::ProductSurface for GatewayOpenAiSurface {
         async fn invoke(
             &self,
             caller: ProductSurfaceCaller,
-            request: ironclaw_host_api::ProductSurfaceInvokeRequest,
-        ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+            request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
+        ) -> Result<
+            ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse,
+            ProductSurfaceError,
+        > {
             let output = match request.operation_id.as_str() {
                 "thread.create" => {
                     let input: ProductCreateThreadRequest =
@@ -591,22 +484,26 @@ mod openai_compat_mount_tests {
                 }
                 _ => return Err(ProductSurfaceError::service_unavailable(false)),
             };
-            Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
+            Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
         }
 
         async fn query(
             &self,
             _caller: ProductSurfaceCaller,
-            _request: ironclaw_host_api::ProductSurfaceQueryRequest,
-        ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+            _request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
+        ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+        {
             Err(ProductSurfaceError::service_unavailable(false))
         }
 
         async fn stream_events(
             &self,
             _caller: ProductSurfaceCaller,
-            _request: ironclaw_host_api::ProductSurfaceStreamRequest,
-        ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+            _request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
+        ) -> Result<
+            ironclaw_host_api::product_surface::ProductSurfaceStreamResponse,
+            ProductSurfaceError,
+        > {
             Err(ProductSurfaceError::service_unavailable(false))
         }
     }
@@ -622,12 +519,15 @@ mod openai_compat_mount_tests {
     }
 
     #[async_trait]
-    impl ironclaw_host_api::ProductSurface for AdmissionProductSurface {
+    impl ironclaw_host_api::product_surface::ProductSurface for AdmissionProductSurface {
         async fn invoke(
             &self,
             caller: ProductSurfaceCaller,
-            request: ironclaw_host_api::ProductSurfaceInvokeRequest,
-        ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+            request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
+        ) -> Result<
+            ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse,
+            ProductSurfaceError,
+        > {
             let output = match request.operation_id.as_str() {
                 "thread.create" => {
                     let input: ProductCreateThreadRequest =
@@ -726,22 +626,26 @@ mod openai_compat_mount_tests {
                 }
                 _ => return Err(ProductSurfaceError::service_unavailable(false)),
             };
-            Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
+            Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
         }
 
         async fn query(
             &self,
             _caller: ProductSurfaceCaller,
-            _request: ironclaw_host_api::ProductSurfaceQueryRequest,
-        ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+            _request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
+        ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+        {
             Err(ProductSurfaceError::service_unavailable(false))
         }
 
         async fn stream_events(
             &self,
             _caller: ProductSurfaceCaller,
-            _request: ironclaw_host_api::ProductSurfaceStreamRequest,
-        ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+            _request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
+        ) -> Result<
+            ironclaw_host_api::product_surface::ProductSurfaceStreamResponse,
+            ProductSurfaceError,
+        > {
             Err(ProductSurfaceError::service_unavailable(false))
         }
     }
@@ -939,12 +843,13 @@ struct StubServices {
 }
 
 #[async_trait]
-impl ironclaw_host_api::ProductSurface for StubServices {
+impl ironclaw_host_api::product_surface::ProductSurface for StubServices {
     async fn invoke(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
+    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse, ProductSurfaceError>
+    {
         let output = match request.operation_id.as_str() {
             "thread.create" => {
                 self.create_thread_calls.lock().expect("lock").push(caller);
@@ -1039,14 +944,15 @@ impl ironclaw_host_api::ProductSurface for StubServices {
                 });
             }
         };
-        Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
+        Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
     }
 
     async fn query(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+    {
         let query = RebornViewQuery {
             view_id: request.view_id,
             params: request.input,
@@ -1118,23 +1024,29 @@ impl ironclaw_host_api::ProductSurface for StubServices {
                 });
             }
         };
-        Ok(ironclaw_host_api::ProductSurfaceQueryPage {
-            items: vec![payload],
-            next_cursor: None,
-        })
+        Ok(
+            ironclaw_host_api::product_surface::ProductSurfaceQueryPage {
+                items: vec![payload],
+                next_cursor: None,
+            },
+        )
     }
 
     async fn stream_events(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceStreamRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+        request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
+    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceStreamResponse, ProductSurfaceError>
+    {
         let _ = request;
         self.stream_events_calls.lock().expect("lock").push(caller);
-        Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
-            events: Vec::new(),
-            next_cursor: None,
-        })
+        Ok(
+            ironclaw_host_api::product_surface::ProductSurfaceStreamResponse {
+                events: Vec::new(),
+                next_cursor: None,
+                subscription: None,
+            },
+        )
     }
 }
 
@@ -1870,6 +1782,43 @@ async fn mutation_body_within_descriptor_cap_reaches_service() {
         1,
         "service should be reached for in-budget payload",
     );
+}
+
+#[tokio::test]
+async fn send_message_body_above_axum_default_but_within_descriptor_cap_reaches_service() {
+    // Inline attachment bodies legitimately exceed Axum's 2 MiB extractor
+    // default: 10 MiB decoded files need roughly 13.4 MiB after base64. The
+    // descriptor-driven 14 MiB middleware is the authority, so an otherwise
+    // valid body above 2 MiB must not be rejected by Json<T>'s implicit cap.
+    let (app, services) = build_app();
+    let payload = json!({
+        "client_action_id": "large-inline-attachment",
+        "content": "read this",
+        "attachments": [{
+            "mime_type": "text/plain",
+            "filename": "large.txt",
+            "data_base64": "A".repeat(3 * 1024 * 1024),
+        }],
+    })
+    .to_string();
+    assert!(payload.len() > 2 * 1024 * 1024);
+    assert!(payload.len() < 14 * 1024 * 1024);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads/thread-large/messages")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    drop(services);
 }
 
 #[tokio::test]

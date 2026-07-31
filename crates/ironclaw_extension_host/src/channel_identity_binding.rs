@@ -35,11 +35,16 @@ use ironclaw_extension_host::{
     ChannelConfigService, channel_config_connection_scope_source, discover_channel_extensions,
 };
 use ironclaw_host_api::{
-    ChannelConnectionScopeSource, ChannelIdentityOverride, ChannelIdentityPostBind,
-    ChannelIdentityPostBindFactory, ExtensionId, RebornIdentityProviderId,
-    RebornIdentityProviderUserId, RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
-    RebornUserIdentityBindingError, RebornUserIdentityBindingStore, TenantId, UserId,
-    installation_scoped_provider_user_id,
+    channel_identity::{
+        ChannelConnectionScopeSource, ChannelIdentityOverride, ChannelIdentityPostBind,
+        ChannelIdentityPostBindFactory,
+    },
+    ids::{ExtensionId, TenantId, UserId},
+    user_identity::{
+        RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
+        RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
+        RebornUserIdentityBindingStore, installation_scoped_provider_user_id,
+    },
 };
 
 /// The identity claims the OAuth token exchange can prove
@@ -398,7 +403,8 @@ mod tests {
         ManifestSource,
     };
     use ironclaw_host_api::{
-        AdapterInstallationId, ChannelConnectionScope, InvocationId, ResourceScope,
+        channel_identity::ChannelConnectionScope, ids::InvocationId,
+        product_adapter::AdapterInstallationId, resource::ResourceScope,
     };
 
     use super::*;
@@ -493,6 +499,7 @@ app_id = "/app_id"
             &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
             None,
             &product_extension_host_api_contract_registry().expect("contracts"),
+            None,
         )
         .expect("fixture manifest parses");
         let extension_id = ExtensionId::new("acmechat").expect("extension id");

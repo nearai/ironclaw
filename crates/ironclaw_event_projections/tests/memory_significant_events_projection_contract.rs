@@ -7,8 +7,10 @@ use ironclaw_event_projections::{
 use ironclaw_events::{AuditSink, DurableAuditSink};
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
 use ironclaw_host_api::{
-    AgentId, AuditStage, CorrelationId, InvocationId, MissionId, ProjectId, ResourceScope,
-    TenantId, ThreadId, UserId, VirtualPath,
+    audit::AuditStage,
+    ids::{AgentId, CorrelationId, InvocationId, MissionId, ProjectId, TenantId, ThreadId, UserId},
+    path::VirtualPath,
+    resource::ResourceScope,
 };
 use ironclaw_memory_native::{
     ChunkingMemoryDocumentIndexer, FilesystemMemoryDocumentRepository,
@@ -25,7 +27,7 @@ async fn memory_write_index_and_search_project_metadata_only_from_jsonl_audit_lo
     let temp = tempfile::tempdir().unwrap();
     let store_root = temp.path().join("reborn-event-store");
     let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root: store_root.clone(),
             accept_single_node_durable: false,
@@ -184,7 +186,7 @@ async fn memory_write_index_and_search_project_metadata_only_from_jsonl_audit_lo
 async fn memory_write_projects_under_thread_scoped_audit_context() {
     let temp = tempfile::tempdir().unwrap();
     let stores = build_reborn_event_stores(
-        RebornProfile::LocalDev,
+        RebornProfile::Standalone,
         RebornEventStoreConfig::Jsonl {
             root: temp.path().join("reborn-event-store"),
             accept_single_node_durable: false,

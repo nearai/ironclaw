@@ -7,10 +7,17 @@
 use async_trait::async_trait;
 use ironclaw_filesystem::FilesystemError;
 use ironclaw_host_api::{
-    AgentId, CapabilityId, CapabilitySet, ExtensionId, HostApiError, InvocationId, MissionId,
-    MountView, ProcessAuthorizedContinuation, ProcessId, ProjectId, ResourceEstimate,
-    ResourceReservation, ResourceReservationId, ResourceScope, RuntimeKind, TenantId, ThreadId,
-    UserId, VirtualPath,
+    authorized::ProcessAuthorizedContinuation,
+    capability::CapabilitySet,
+    error::HostApiError,
+    ids::{
+        AgentId, CapabilityId, ExtensionId, InvocationId, MissionId, ProcessId, ProjectId,
+        ResourceReservationId, TenantId, ThreadId, UserId,
+    },
+    mount::MountView,
+    path::VirtualPath,
+    resource::{ResourceEstimate, ResourceReservation, ResourceScope},
+    runtime::RuntimeKind,
 };
 use ironclaw_resources::ResourceError;
 use serde::{Deserialize, Serialize};
@@ -50,7 +57,7 @@ pub struct ProcessRecord {
     // back through the trusted path so the store round-trips privileged kinds
     // (arch-simplification §4.3 exposed this when the InMemory store — which never
     // serialized — was replaced by the serde-round-tripping filesystem store).
-    #[serde(deserialize_with = "ironclaw_host_api::deserialize_trusted_runtime_kind")]
+    #[serde(deserialize_with = "ironclaw_host_api::runtime::deserialize_trusted_runtime_kind")]
     pub runtime: RuntimeKind,
     pub status: ProcessStatus,
     pub grants: CapabilitySet,
@@ -156,8 +163,6 @@ pub enum ProcessError {
         original: Box<ProcessError>,
         cleanup: ResourceError,
     },
-    #[error("process result store is not configured")]
-    ProcessResultStoreUnavailable,
     #[error("process result is unavailable for {process_id}")]
     ProcessResultUnavailable { process_id: ProcessId },
     #[error("invalid stored process record: {reason}")]
@@ -251,6 +256,15 @@ pub trait ProcessManager: Send + Sync {
 }
 
 #[async_trait]
+pub trait ProcessSubmissionLifecycle: Send + Sync {
+    async fn before_submit(&self, start: &ProcessStart) -> Result<(), ProcessError>;
+
+    async fn submit_failed(&self, start: &ProcessStart) -> Result<(), ProcessError>;
+
+    async fn submitted(&self, record: &ProcessRecord) -> Result<(), ProcessError>;
+}
+
+#[async_trait]
 pub trait ProcessResultStorePort: Send + Sync {
     /// Stores successful process output separately from the lifecycle record.
     async fn complete(
@@ -295,47 +309,6 @@ pub trait ProcessResultStorePort: Send + Sync {
     }
 }
 
-#[async_trait]
-pub trait ProcessStorePort: Send + Sync {
-    /// Persists a running process record without storing raw input.
-    async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError>;
-
-    /// Transitions a scoped running process to completed.
-    async fn complete(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-    ) -> Result<ProcessRecord, ProcessError>;
-
-    /// Transitions a scoped running process to failed with a classified error kind.
-    async fn fail(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-        error_kind: String,
-    ) -> Result<ProcessRecord, ProcessError>;
-
-    /// Marks a scoped process killed and must not reveal cross-tenant process existence.
-    async fn kill(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-    ) -> Result<ProcessRecord, ProcessError>;
-
-    /// Loads scoped process lifecycle metadata; wrong-scope lookups must look unknown.
-    async fn get(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-    ) -> Result<Option<ProcessRecord>, ProcessError>;
-
-    /// Lists process lifecycle records visible to the exact resource-owner scope only.
-    async fn records_for_scope(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<ProcessRecord>, ProcessError>;
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ProcessKey {
     tenant_id: TenantId,
@@ -359,21 +332,6 @@ impl ProcessKey {
             process_id,
         }
     }
-}
-
-pub(crate) fn ensure_status_transition(
-    process_id: ProcessId,
-    from: ProcessStatus,
-    to: ProcessStatus,
-) -> Result<(), ProcessError> {
-    if from != ProcessStatus::Running {
-        return Err(ProcessError::InvalidTransition {
-            process_id,
-            from,
-            to,
-        });
-    }
-    Ok(())
 }
 
 pub(crate) fn same_scope_owner(left: &ResourceScope, right: &ResourceScope) -> bool {

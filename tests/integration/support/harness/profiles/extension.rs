@@ -5,7 +5,9 @@ use ironclaw_auth::{
     CredentialOwnership, NewCredentialAccount, ProviderScope,
 };
 use ironclaw_host_api::{
-    AgentId, InvocationId, MountView, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+    ids::{AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId},
+    mount::{MountPermissions, MountView},
+    resource::ResourceScope,
 };
 
 use std::sync::Arc;
@@ -16,9 +18,9 @@ use super::super::super::extension_surface::{
 use super::super::super::github;
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{
-    HarnessResult, HostRuntimeCapabilityHarness, RecordingNetworkHttpEgress,
-    bundled_extension_provider_trust, capability_ids_from_strs, local_dev_all_effects,
-    wildcard_test_policy,
+    HarnessResult, HostRuntimeCapabilityHarness, RecordingNetworkHttpEgress, VendorResponseRouter,
+    bundled_extension_provider_trust, capability_ids_from_strs, standalone_all_effects,
+    wildcard_test_policy, workspace_mounts,
 };
 
 pub(crate) fn extension_lifecycle_tools_profile() -> HarnessResult<ToolsProfile> {
@@ -54,12 +56,10 @@ pub(crate) fn extension_lifecycle_tools_profile_for_user(
     );
     Ok(ToolsProfile {
         capability_ids,
-        effect_kinds: local_dev_all_effects(),
+        effect_kinds: standalone_all_effects(),
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
-            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
-                true,
-            )?),
+            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
         )
         .with_durable_capability_io()
         .with_seed_extension_credentials()
@@ -100,12 +100,22 @@ fn hosted_mcp_discovery_fixture_response(
                 "annotations": {"readOnlyHint": true}
             }]
         }),
-        "tools/call" if is_nearai => serde_json::json!({
-            "content": [{
-                "type": "text",
-                "text": "REBORN_NEARAI_WEB_SEARCH_RESULT"
-            }]
-        }),
+        "tools/call" if is_nearai => {
+            let is_empty_query = body
+                .pointer("/params/arguments/query")
+                .and_then(serde_json::Value::as_str)
+                == Some("NEARAI_EMPTY_PROVIDER_RESULT");
+            serde_json::json!({
+                "content": [{
+                    "type": "text",
+                    "text": if is_empty_query {
+                        "[]"
+                    } else {
+                        "REBORN_NEARAI_WEB_SEARCH_RESULT"
+                    }
+                }]
+            })
+        }
         _ => return None,
     };
     let response = serde_json::to_vec(&serde_json::json!({
@@ -203,19 +213,18 @@ fn visibility_probe_package() -> HarnessResult<(
     ironclaw_extensions::ExtensionPackage,
     ironclaw_extensions::ResolvedExtensionManifest,
 )> {
+    let root = ironclaw_host_api::path::VirtualPath::new("/system/extensions/visprobe")?;
     let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
         VISIBILITY_PROBE_MANIFEST,
         ironclaw_extensions::ManifestSource::HostBundled,
         &ironclaw_host_api::host_port::HostPortCatalog::empty(),
         None,
         &capability_provider_contracts(),
+        Some(root.clone()),
     )?;
     let manifest = ironclaw_extensions::ExtensionManifest::try_from(record.manifest().clone())?;
     Ok((
-        ironclaw_extensions::ExtensionPackage::from_manifest(
-            manifest,
-            ironclaw_host_api::VirtualPath::new("/system/extensions/visprobe")?,
-        )?,
+        ironclaw_extensions::ExtensionPackage::from_manifest(manifest, root)?,
         record.resolved().clone(),
     ))
 }
@@ -232,18 +241,16 @@ pub(crate) fn extension_visibility_probe_tools_profile() -> HarnessResult<ToolsP
             VISIBILITY_PROBE_MODEL_CAPABILITY_ID,
             VISIBILITY_PROBE_HOST_INTERNAL_CAPABILITY_ID,
         ])?,
-        effect_kinds: local_dev_all_effects(),
+        effect_kinds: standalone_all_effects(),
         options: HostRuntimeHarnessOptions::new(
             MountView::default(),
-            Some(ironclaw_reborn_composition::local_dev_yolo_runtime_policy(
-                true,
-            )?),
+            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
         )
         .with_activated_bundled_extension_resolved(package, resolved),
         network_policy_override: Some(wildcard_test_policy()),
         provider_trust_override: Some(vec![(
-            ironclaw_host_api::ExtensionId::new("visprobe")?,
-            local_dev_all_effects(),
+            ironclaw_host_api::ids::ExtensionId::new("visprobe")?,
+            standalone_all_effects(),
         )]),
         // Surface resolution reads each advertised capability's
         // `input_schema_ref` off the mounted filesystem under the package
@@ -264,6 +271,195 @@ pub(crate) fn extension_visibility_probe_tools_profile() -> HarnessResult<ToolsP
 pub(crate) async fn extension_visibility_probe_tools() -> HarnessResult<HostRuntimeCapabilityHarness>
 {
     extension_visibility_probe_tools_profile()?.build().await
+}
+
+/// Catalog wording from the Attio incident. Registry-installed descriptions
+/// may retain this authentication vocabulary; local packages may not.
+pub(crate) const PROMPT_DENIAL_DESCRIPTION: &str =
+    "Authenticated with a workspace API key presented as a Bearer header";
+
+const VERIFIED_PROMPT_DESCRIPTION_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "verifiedprompt"
+name = "Verified Prompt Description Probe"
+version = "0.1.0"
+description = "Verified prompt-description probe fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/verifiedprompt.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "verifiedprompt.invoke"
+description = "Authenticated with a workspace API key presented as a Bearer header"
+effects = ["network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/invoke.input.json"
+output_schema_ref = "schemas/invoke.output.json"
+"#;
+
+const LOCAL_PROMPT_DESCRIPTION_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "localprompt"
+name = "Local Prompt Description Probe"
+version = "0.1.0"
+description = "Local prompt-description probe fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/localprompt.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "localprompt.unsafe"
+description = "Authenticated with a workspace API key presented as a Bearer header"
+effects = ["network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/probe.input.json"
+output_schema_ref = "schemas/probe.output.json"
+
+[[capability_provider.tools.capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "localprompt.healthy"
+description = "Healthy local capability remains available"
+effects = ["network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/probe.input.json"
+output_schema_ref = "schemas/probe.output.json"
+"#;
+
+fn prompt_description_files(
+    manifest_toml: &str,
+    package_id: &str,
+    module_name: &str,
+    schema_names: &[&str],
+) -> HarnessResult<Vec<(String, Vec<u8>)>> {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture_root = repo_root
+        .join("tests/fixtures/extension_prompt_trust")
+        .join(package_id);
+    let module = std::fs::read(
+        repo_root
+            .join("crates/ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm"),
+    )?;
+    let mut files = vec![
+        (
+            "manifest.toml".to_string(),
+            manifest_toml.as_bytes().to_vec(),
+        ),
+        (format!("wasm/{module_name}"), module),
+    ];
+    for schema_name in schema_names {
+        files.push((
+            format!("schemas/{schema_name}"),
+            std::fs::read(fixture_root.join("schemas").join(schema_name))?,
+        ));
+    }
+    Ok(files)
+}
+
+fn verified_prompt_description_package() -> HarnessResult<(
+    ironclaw_extensions::ExtensionPackage,
+    ironclaw_extensions::ResolvedExtensionManifest,
+)> {
+    let available = ironclaw_extension_host::registry_extension_package(
+        prompt_description_files(
+            VERIFIED_PROMPT_DESCRIPTION_MANIFEST,
+            "verifiedprompt",
+            "verifiedprompt.wasm",
+            &["invoke.input.json", "invoke.output.json"],
+        )?,
+        &[],
+    )?;
+    let resolved = available.resolved_manifest.as_ref().clone();
+    Ok((available.package, resolved))
+}
+
+fn local_prompt_description_package() -> HarnessResult<(
+    ironclaw_extensions::ExtensionPackage,
+    ironclaw_extensions::ResolvedExtensionManifest,
+)> {
+    let available = ironclaw_extension_host::imported_extension_package(
+        prompt_description_files(
+            LOCAL_PROMPT_DESCRIPTION_MANIFEST,
+            "localprompt",
+            "localprompt.wasm",
+            &["probe.input.json", "probe.output.json"],
+        )?,
+        &[],
+    )?;
+    let resolved = available.resolved_manifest.as_ref().clone();
+    Ok((available.package, resolved))
+}
+
+/// Real-turn prompt-description trust probe. Both fixture manifests go
+/// through the production registry/local import boundaries and the
+/// active-extension publisher. Those boundaries assign the manifest source,
+/// which is the production input that derives `CapabilityDescriptionTrust`.
+pub(crate) fn extension_prompt_description_trust_probe_tools_profile() -> HarnessResult<ToolsProfile>
+{
+    let (verified_package, verified_resolved) = verified_prompt_description_package()?;
+    let (local_package, local_resolved) = local_prompt_description_package()?;
+    Ok(ToolsProfile {
+        capability_ids: capability_ids_from_strs(&[
+            "verifiedprompt.invoke",
+            "localprompt.unsafe",
+            "localprompt.healthy",
+        ])?,
+        effect_kinds: standalone_all_effects(),
+        options: HostRuntimeHarnessOptions::new(
+            MountView::default(),
+            Some(ironclaw_reborn_composition::standalone_unrestricted_runtime_policy(true)?),
+        )
+        .with_activated_bundled_extension_resolved(verified_package, verified_resolved)
+        .with_activated_bundled_extension_resolved(local_package, local_resolved),
+        network_policy_override: Some(wildcard_test_policy()),
+        provider_trust_override: Some(vec![
+            (
+                ironclaw_host_api::ids::ExtensionId::new("verifiedprompt")?,
+                standalone_all_effects(),
+            ),
+            (
+                ironclaw_host_api::ids::ExtensionId::new("localprompt")?,
+                standalone_all_effects(),
+            ),
+        ]),
+        post_construct_asset_copy: Some((
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/extension_prompt_trust"),
+            std::path::PathBuf::from("local-dev/system/extensions"),
+        )),
+        auto_approve_default: Some(true),
+        ..ToolsProfile::new(
+            "reborn-e2e-extension-prompt-description-trust",
+            "reborn-e2e-extension-prompt-description-trust-user",
+        )?
+    })
+}
+
+pub(crate) async fn extension_prompt_description_trust_probe_tools()
+-> HarnessResult<HostRuntimeCapabilityHarness> {
+    extension_prompt_description_trust_probe_tools_profile()?
+        .build()
+        .await
 }
 
 pub(crate) async fn seed_extension_lifecycle_credentials(
@@ -505,7 +701,7 @@ impl ironclaw_product::ChannelAdapter for AcmeFixtureChannelAdapter {
     async fn deliver(
         &self,
         envelope: ironclaw_product::OutboundEnvelope,
-        egress: &dyn ironclaw_host_api::RestrictedEgress,
+        egress: &dyn ironclaw_host_api::tool_adapter::RestrictedEgress,
     ) -> Result<ironclaw_product::DeliveryReport, ironclaw_product::ChannelError> {
         use ironclaw_product::{ChannelError, OutboundPart, PartDeliveryOutcome};
         if envelope.parts.is_empty() {
@@ -522,8 +718,8 @@ impl ironclaw_product::ChannelAdapter for AcmeFixtureChannelAdapter {
                         "text": text,
                     });
                     let response = egress
-                        .send(ironclaw_host_api::RestrictedEgressRequest {
-                            method: ironclaw_host_api::NetworkMethod::Post,
+                        .send(ironclaw_host_api::tool_adapter::RestrictedEgressRequest {
+                            method: ironclaw_host_api::action::NetworkMethod::Post,
                             url: "https://api.acme.example/messages".to_string(),
                             headers: vec![(
                                 "content-type".to_string(),
@@ -565,12 +761,15 @@ impl ironclaw_product::ChannelAdapter for AcmeFixtureChannelAdapter {
 struct AcmeFixtureToolAdapter;
 
 #[async_trait::async_trait]
-impl ironclaw_host_api::ToolAdapter for AcmeFixtureToolAdapter {
+impl ironclaw_host_api::tool_adapter::ToolAdapter for AcmeFixtureToolAdapter {
     async fn invoke(
         &self,
-        call: ironclaw_host_api::ToolCall,
-        _ports: &ironclaw_host_api::ToolPorts<'_>,
-    ) -> Result<ironclaw_host_api::ToolResult, ironclaw_host_api::ToolError> {
+        call: ironclaw_host_api::tool_adapter::ToolCall,
+        _ports: &ironclaw_host_api::tool_adapter::ToolPorts<'_>,
+    ) -> Result<
+        ironclaw_host_api::tool_adapter::ToolResult,
+        ironclaw_host_api::tool_adapter::ToolError,
+    > {
         match call.capability_id.as_str() {
             ACME_SEND_NOTE_CAPABILITY_ID => {
                 let text = call
@@ -584,14 +783,14 @@ impl ironclaw_host_api::ToolAdapter for AcmeFixtureToolAdapter {
                 let output_bytes = serde_json::to_vec(&output)
                     .map(|bytes| bytes.len() as u64)
                     .unwrap_or_default();
-                Ok(ironclaw_host_api::ToolResult {
+                Ok(ironclaw_host_api::tool_adapter::ToolResult {
                     output,
                     display_preview: None,
                     output_bytes,
                 })
             }
-            _ => Err(ironclaw_host_api::ToolError::Failed {
-                kind: ironclaw_host_api::RuntimeDispatchErrorKind::UndeclaredCapability,
+            _ => Err(ironclaw_host_api::tool_adapter::ToolError::Failed {
+                kind: ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::UndeclaredCapability,
                 safe_summary: None,
                 model_visible_cause: None,
             }),
@@ -608,7 +807,7 @@ pub(crate) fn extension_runtime_acme_tools_profile() -> HarnessResult<ToolsProfi
     let mut profile = extension_lifecycle_tools_profile()?;
     profile
         .capability_ids
-        .push(ironclaw_host_api::CapabilityId::new(
+        .push(ironclaw_host_api::ids::CapabilityId::new(
             ACME_SEND_NOTE_CAPABILITY_ID,
         )?);
     // The real Slack package's five tools (TOOL-7 drives them through the
@@ -622,16 +821,16 @@ pub(crate) fn extension_runtime_acme_tools_profile() -> HarnessResult<ToolsProfi
     ] {
         profile
             .capability_ids
-            .push(ironclaw_host_api::CapabilityId::new(slack_tool)?);
+            .push(ironclaw_host_api::ids::CapabilityId::new(slack_tool)?);
     }
     if let Some(trust) = profile.provider_trust_override.as_mut() {
         trust.push((
-            ironclaw_host_api::ExtensionId::new("acme-messenger")?,
-            local_dev_all_effects(),
+            ironclaw_host_api::ids::ExtensionId::new("acme-messenger")?,
+            standalone_all_effects(),
         ));
         trust.push((
-            ironclaw_host_api::ExtensionId::new("slack")?,
-            local_dev_all_effects(),
+            ironclaw_host_api::ids::ExtensionId::new("slack")?,
+            standalone_all_effects(),
         ));
     }
     profile.options = profile
@@ -721,8 +920,14 @@ fn delivery_vendor_router(
         ));
     }
     if request.url.contains("api.telegram.org") {
+        if request.url.contains("api.telegram.org/file/") {
+            // The manifest's path-prefixed download target streams raw bytes.
+            return Some((200, b"DATA".to_vec()));
+        }
         let body: &[u8] = if request.url.ends_with("/sendMessage") {
             br#"{"ok":true,"result":{"message_id":4242}}"#
+        } else if request.url.ends_with("/getFile") {
+            br#"{"ok":true,"result":{"file_path":"documents/report.pdf","file_size":4}}"#
         } else {
             // setWebhook / deleteWebhook and friends return a bool result.
             br#"{"ok":true,"result":true}"#
@@ -730,6 +935,22 @@ fn delivery_vendor_router(
         return Some((200, body.to_vec()));
     }
     None
+}
+
+/// The delivery router plus a scripted transient failure on the FIRST
+/// Telegram `getFile` lookup, so the attachment journey can prove the
+/// retryable-release-then-refetch ledger semantics on the production mount.
+fn delivery_vendor_router_with_flaky_get_file() -> Arc<VendorResponseRouter> {
+    let get_file_calls = std::sync::atomic::AtomicUsize::new(0);
+    Arc::new(move |request: &ironclaw_network::NetworkHttpRequest| {
+        if request.url.contains("api.telegram.org")
+            && request.url.ends_with("/getFile")
+            && get_file_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+        {
+            return Some((500, br#"{"ok":false,"error_code":500}"#.to_vec()));
+        }
+        delivery_vendor_router(request)
+    })
 }
 
 /// The acme runtime profile extended for the §5.4 delivery proofs: the
@@ -741,18 +962,24 @@ pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> 
     let mut profile = extension_runtime_acme_tools_profile()?;
     profile
         .capability_ids
-        .push(ironclaw_host_api::CapabilityId::new(
+        .push(ironclaw_host_api::ids::CapabilityId::new(
             ironclaw_host_runtime::OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
         )?);
+    profile
+        .capability_ids
+        .push(ironclaw_host_api::ids::CapabilityId::new(
+            ironclaw_host_runtime::ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
+        )?);
+    profile.options.mounts = workspace_mounts(MountPermissions::read_only())?;
     if let Some(trust) = profile.provider_trust_override.as_mut() {
         trust.push((
-            ironclaw_host_api::ExtensionId::new("telegram")?,
-            local_dev_all_effects(),
+            ironclaw_host_api::ids::ExtensionId::new("telegram")?,
+            standalone_all_effects(),
         ));
     }
     let network_egress = Arc::new(
         RecordingNetworkHttpEgress::with_body(br#"{"ok":true}"#.to_vec())
-            .with_vendor_router(Arc::new(delivery_vendor_router)),
+            .with_vendor_router(delivery_vendor_router_with_flaky_get_file()),
     );
     profile.options = profile
         .options

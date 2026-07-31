@@ -21,8 +21,14 @@ futures-util = "0.3"
 dirs = "6"
 hex = "0.4"
 ironclaw_approvals = { path = "../ironclaw_approvals" }
+ironclaw_attachments = { path = "../ironclaw_attachments" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
+# `sandbox_process::connect` reads the `IRONCLAW_REBORN_DOCKER_HOST` override
+# through `ironclaw_common::env_helpers::env_or_override`, so the retry path
+# honors the same runtime-override precedence the rest of Reborn uses instead
+# of a second, bare `std::env::var` lookup.
+ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_process_sandbox = { path = "../ironclaw_process_sandbox" }
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
@@ -41,7 +47,6 @@ ironclaw_prompt_envelope = { path = "../ironclaw_prompt_envelope" }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces" }
 ironclaw_resources = { path = "../ironclaw_resources" }
-ironclaw_run_state = { path = "../ironclaw_run_state" }
 ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
 ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_scripts = { path = "../ironclaw_scripts" }
@@ -88,10 +93,11 @@ ironclaw_event_projections = { path = "../ironclaw_event_projections" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }
 # shared TestDispatcher double
 ironclaw_host_api = { path = "../ironclaw_host_api", features = ["test-support"] }
+# Enables the sanctioned in-memory-backed outbound store constructor for tests.
+ironclaw_outbound = { path = "../ironclaw_outbound", features = ["test-support"] }
 # Enables the in-memory-backed process store constructors for tests only.
 ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
 # Enables the in-memory-backed run-state/approval store constructors for tests only.
-ironclaw_run_state = { path = "../ironclaw_run_state", features = ["test-support"] }
 sha2 = "0.11"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }

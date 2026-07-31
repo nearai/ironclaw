@@ -1,8 +1,12 @@
 // arch-exempt: large_file, validator+markers+schema checks pending split, plan #6310
-use ironclaw_host_api::{CapabilityId, INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolName};
+use ironclaw_host_api::{
+    dispatch::INPUT_ENCODE_HUMAN_SUMMARY,
+    ids::{CapabilityId, ProviderToolName},
+};
 use ironclaw_safety::{
-    validate_optional_provider_metadata_text, validate_provider_arguments,
-    validate_provider_identity, validate_provider_token, validate_provider_tool_name,
+    PROVIDER_METADATA_TEXT_MAX_BYTES, validate_optional_provider_metadata_text,
+    validate_provider_arguments, validate_provider_identity, validate_provider_token,
+    validate_provider_tool_name,
 };
 use serde::{Deserialize, Serialize};
 
@@ -166,10 +170,18 @@ impl ProviderToolCallReferenceEnvelope {
         validate_optional_provider_text(
             &self.response_reasoning,
             "provider response reasoning",
-            4096,
+            PROVIDER_METADATA_TEXT_MAX_BYTES,
         )?;
-        validate_optional_provider_text(&self.reasoning, "provider reasoning", 4096)?;
-        validate_optional_provider_text(&self.signature, "provider signature", 4096)?;
+        validate_optional_provider_text(
+            &self.reasoning,
+            "provider reasoning",
+            PROVIDER_METADATA_TEXT_MAX_BYTES,
+        )?;
+        validate_optional_provider_text(
+            &self.signature,
+            "provider signature",
+            PROVIDER_METADATA_TEXT_MAX_BYTES,
+        )?;
         Ok(())
     }
 }
@@ -997,7 +1009,7 @@ fn validate_model_observation_recovery(value: &serde_json::Value) -> Result<(), 
     // Deserializing the real type makes that drift impossible: a variant added
     // in `host_api` is accepted here the moment it exists.
     let retry = required_string(object, "same_call_retry", "model observation recovery")?;
-    serde_json::from_value::<ironclaw_host_api::SameCallRetryConstraint>(
+    serde_json::from_value::<ironclaw_host_api::result_meta::SameCallRetryConstraint>(
         serde_json::Value::String(retry.to_string()),
     )
     .map_err(|_| format!("model observation same-call retry `{retry}` is unsupported"))?;
@@ -1005,9 +1017,9 @@ fn validate_model_observation_recovery(value: &serde_json::Value) -> Result<(), 
         validate_model_observation_repairs(repairs)?;
     }
     let hint = required_string(object, "recovery_hint", "model observation recovery")?;
-    serde_json::from_value::<ironclaw_host_api::CapabilityRecoveryHint>(serde_json::Value::String(
-        hint.to_string(),
-    ))
+    serde_json::from_value::<ironclaw_host_api::result_meta::CapabilityRecoveryHint>(
+        serde_json::Value::String(hint.to_string()),
+    )
     .map_err(|_| format!("model observation recovery hint `{hint}` is unsupported"))?;
     Ok(())
 }
@@ -1230,7 +1242,8 @@ fn is_disallowed_control_character(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{CapabilityId, ProviderToolName};
+    use ironclaw_host_api::ids::{CapabilityId, ProviderToolName};
+    use ironclaw_safety::PROVIDER_METADATA_TEXT_MAX_BYTES;
 
     use super::{
         INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope,
@@ -2152,6 +2165,27 @@ mod tests {
         let mut envelope = provider_reference();
         envelope.arguments = serde_json::json!({});
         envelope.validate().expect("safe provider metadata");
+    }
+
+    #[test]
+    fn provider_reference_validation_uses_shared_metadata_limit() {
+        let mut envelope = provider_reference();
+        envelope.response_reasoning = Some("r".repeat(PROVIDER_METADATA_TEXT_MAX_BYTES));
+        envelope.reasoning = Some("c".repeat(PROVIDER_METADATA_TEXT_MAX_BYTES));
+        envelope.signature = Some("s".repeat(PROVIDER_METADATA_TEXT_MAX_BYTES));
+        envelope
+            .validate()
+            .expect("metadata at the shared provider limit should remain replayable");
+
+        envelope.response_reasoning =
+            Some("r".repeat(PROVIDER_METADATA_TEXT_MAX_BYTES.saturating_add(1)));
+        let error = envelope
+            .validate()
+            .expect_err("metadata beyond the shared provider limit must remain bounded");
+        assert_eq!(
+            error,
+            format!("provider response reasoning exceeds {PROVIDER_METADATA_TEXT_MAX_BYTES} bytes")
+        );
     }
 
     fn provider_reference() -> ProviderToolCallReferenceEnvelope {

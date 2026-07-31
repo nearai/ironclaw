@@ -20,7 +20,7 @@ Placement decision, in order:
 2. **Domain type** (thread/turn/run/resource/capability/... shapes shared
    across crates) → the **domain vocabulary crate** that already owns that
    concept: `ironclaw_turns`, `ironclaw_threads`, `ironclaw_resources`,
-   `ironclaw_events`, `ironclaw_run_state`, `ironclaw_host_api`, ...
+   `ironclaw_events`, `ironclaw_processes`, `ironclaw_host_api`, ...
 3. **API contract type** (request/response/config for a trait or HTTP surface)
    → the crate that **defines the contract**. ProductSurface DTOs and
    descriptors live in `ironclaw_product`; host caller/error vocabulary lives

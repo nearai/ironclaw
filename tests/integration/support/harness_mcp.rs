@@ -15,10 +15,17 @@ use ironclaw_extensions::{
     ExtensionRegistry, ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId,
-    NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, PackageId, PermissionMode,
-    RequestedTrustClass, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse, RuntimeKind, TrustClass, VirtualPath,
+    action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    capability::{CapabilityDescriptor, EffectKind, PermissionMode},
+    capability_profile::CapabilityProfileSchemaRef,
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
+    ids::{CapabilityId, ExtensionId, PackageId},
+    path::VirtualPath,
+    runtime::{RuntimeKind, TrustClass},
+    trust::RequestedTrustClass,
 };
 use ironclaw_host_runtime::{
     BUILTIN_FIRST_PARTY_PROVIDER, CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion,
@@ -33,7 +40,9 @@ use ironclaw_secrets::SecretStore;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use serde_json::json;
 
-use super::harness::{LocalDevRootMounts, RecordingRuntimeHttpEgress, local_dev_root_filesystem};
+use super::harness::{
+    RecordingRuntimeHttpEgress, StandaloneRootMounts, standalone_root_filesystem,
+};
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -60,13 +69,13 @@ pub(super) fn build_loopback_mcp_runtime(mcp_url: &str) -> HarnessResult<Arc<Loo
     Ok(mcp_runtime)
 }
 
-/// Variant of `local_dev_host_runtime_with_registry_and_runtime_http_egress`
+/// Variant of `standalone_host_runtime_with_registry_and_runtime_http_egress`
 /// that also wires a loopback MCP runtime for the mock-MCP integration test.
 ///
 /// The `first_party_egress` covers any first-party tool calls (recording, no
 /// network). The `mcp_runtime` is a concrete loopback runtime that makes real
 /// HTTP requests to the test-local mock MCP server.
-pub(super) fn local_dev_host_runtime_with_registry_egress_and_mcp(
+pub(super) fn standalone_host_runtime_with_registry_egress_and_mcp(
     storage_root: PathBuf,
     registry: ExtensionRegistry,
     first_party_egress: Arc<RecordingRuntimeHttpEgress>,
@@ -75,7 +84,7 @@ pub(super) fn local_dev_host_runtime_with_registry_egress_and_mcp(
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
     let services = HostRuntimeServices::new(
         Arc::new(registry),
-        local_dev_root_filesystem(storage_root, LocalDevRootMounts::core_builtins())?,
+        standalone_root_filesystem(storage_root, StandaloneRootMounts::core_builtins())?,
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),

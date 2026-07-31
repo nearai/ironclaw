@@ -19,8 +19,8 @@ use rust_decimal::Decimal;
 
 use crate::error::LlmError;
 use crate::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, FALLBACK_INDEX_METADATA_KEY, LlmProvider,
+    ModelFallbackRoute, ModelMetadata, ToolCompletionRequest, ToolCompletionResponse,
 };
 
 use crate::retry::is_retryable;
@@ -105,8 +105,19 @@ impl ProviderCooldown {
 ///
 /// Providers that repeatedly fail with retryable errors are temporarily
 /// placed in cooldown and skipped, reducing latency.
+///
+/// Host-managed requests carry an explicit fallback index. Those requests
+/// dispatch only to the selected provider so loop recovery, not this decorator,
+/// owns advancement and receives deterministic route evidence. Requests
+/// without that metadata retain the legacy automatic failover behavior.
 pub struct FailoverProvider {
     providers: Vec<Arc<dyn LlmProvider>>,
+    /// Equivalent provider routes without the per-provider retry decorator.
+    ///
+    /// Host-managed requests already carry an explicit route and return
+    /// failures to the loop's recovery policy. Using these providers prevents
+    /// an inner retry decorator from duplicating the selected vendor call.
+    explicit_route_providers: Option<Vec<Arc<dyn LlmProvider>>>,
     /// Index of the provider that last handled a request successfully.
     /// Used by `model_name()` and `cost_per_token()` so downstream cost
     /// tracking reflects the provider that actually served the request.
@@ -141,10 +152,27 @@ impl FailoverProvider {
         providers: Vec<Arc<dyn LlmProvider>>,
         cooldown_config: CooldownConfig,
     ) -> Result<Self, LlmError> {
+        Self::with_cooldown_and_explicit_routes(providers, None, cooldown_config)
+    }
+
+    pub(crate) fn with_cooldown_and_explicit_routes(
+        providers: Vec<Arc<dyn LlmProvider>>,
+        explicit_route_providers: Option<Vec<Arc<dyn LlmProvider>>>,
+        cooldown_config: CooldownConfig,
+    ) -> Result<Self, LlmError> {
         if providers.is_empty() {
             return Err(LlmError::RequestFailed {
                 provider: "failover".to_string(),
                 reason: "FailoverProvider requires at least one provider".to_string(),
+            });
+        }
+        if explicit_route_providers
+            .as_ref()
+            .is_some_and(|routes| routes.len() != providers.len())
+        {
+            return Err(LlmError::InvalidRequest {
+                provider: "failover".to_string(),
+                reason: "explicit failover routes must match the provider chain length".to_string(),
             });
         }
         let cooldowns = (0..providers.len())
@@ -152,6 +180,7 @@ impl FailoverProvider {
             .collect();
         Ok(Self {
             providers,
+            explicit_route_providers,
             last_used: AtomicUsize::new(0),
             cooldowns,
             epoch: Instant::now(),
@@ -197,11 +226,43 @@ impl FailoverProvider {
     /// Providers in cooldown are skipped unless *all* providers are in
     /// cooldown, in which case the one with the oldest cooldown timestamp
     /// (most likely to have recovered) is tried.
-    async fn try_providers<T, F, Fut>(&self, mut call: F) -> Result<(usize, T), LlmError>
+    async fn try_providers<T, F, Fut>(
+        &self,
+        requested_index: Option<u32>,
+        mut call: F,
+    ) -> Result<(usize, T), LlmError>
     where
         F: FnMut(Arc<dyn LlmProvider>) -> Fut,
         Fut: Future<Output = Result<T, LlmError>>,
     {
+        if let Some(requested_index) = requested_index {
+            let index = usize::try_from(requested_index)
+                .map_err(|_| self.missing_fallback_error(requested_index, None))?;
+            let route_providers = self
+                .explicit_route_providers
+                .as_ref()
+                .unwrap_or(&self.providers);
+            let provider = route_providers
+                .get(index)
+                .ok_or_else(|| self.missing_fallback_error(requested_index, None))?;
+            return match call(Arc::clone(provider)).await {
+                Ok(response) => {
+                    self.last_used.store(index, Ordering::Relaxed);
+                    self.cooldowns[index].reset();
+                    Ok((index, response))
+                }
+                Err(error) => {
+                    if is_retryable(&error)
+                        && self.cooldowns[index]
+                            .record_failure(self.cooldown_config.failure_threshold)
+                    {
+                        self.cooldowns[index].activate_cooldown(self.now_nanos());
+                    }
+                    Err(error)
+                }
+            };
+        }
+
         let now_nanos = self.now_nanos();
         let cooldown_nanos = self.cooldown_config.cooldown_duration.as_nanos() as u64;
 
@@ -284,10 +345,42 @@ impl FailoverProvider {
             reason: "Invariant violated in FailoverProvider: providers were exhausted but no last_error was recorded (this branch should be unreachable; possible causes: no provider attempts were made or `available` was unexpectedly empty).".to_string(),
         }))
     }
+
+    fn missing_fallback_error(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> LlmError {
+        LlmError::ModelNotAvailable {
+            provider: "failover".to_string(),
+            model: requested_model
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("fallback[{fallback_index}]")),
+        }
+    }
+
+    fn take_requested_fallback_index(
+        metadata: &mut HashMap<String, String>,
+    ) -> Result<Option<u32>, LlmError> {
+        let Some(raw_index) = metadata.remove(FALLBACK_INDEX_METADATA_KEY) else {
+            return Ok(None);
+        };
+        raw_index
+            .parse::<u32>()
+            .map(Some)
+            .map_err(|_| LlmError::InvalidRequest {
+                provider: "failover".to_string(),
+                reason: "fallback index metadata was not a valid u32".to_string(),
+            })
+    }
 }
 
 #[async_trait]
 impl LlmProvider for FailoverProvider {
+    fn provider_id(&self) -> String {
+        "failover".to_string()
+    }
+
     fn model_name(&self) -> &str {
         self.providers[self.last_used.load(Ordering::Relaxed)].model_name()
     }
@@ -304,28 +397,37 @@ impl LlmProvider for FailoverProvider {
         self.providers[self.last_used.load(Ordering::Relaxed)].cache_read_discount()
     }
 
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+    async fn complete(
+        &self,
+        mut request: CompletionRequest,
+    ) -> Result<CompletionResponse, LlmError> {
+        let requested_index = Self::take_requested_fallback_index(&mut request.metadata)?;
         let (provider_idx, response) = self
-            .try_providers(|provider| {
+            .try_providers(requested_index, |provider| {
                 let req = request.clone();
                 async move { provider.complete(req).await }
             })
             .await?;
-        self.bind_provider_to_current_task(provider_idx);
+        if requested_index.is_none() {
+            self.bind_provider_to_current_task(provider_idx);
+        }
         Ok(response)
     }
 
     async fn complete_with_tools(
         &self,
-        request: ToolCompletionRequest,
+        mut request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
+        let requested_index = Self::take_requested_fallback_index(&mut request.metadata)?;
         let (provider_idx, response) = self
-            .try_providers(|provider| {
+            .try_providers(requested_index, |provider| {
                 let req = request.clone();
                 async move { provider.complete_with_tools(req).await }
             })
             .await?;
-        self.bind_provider_to_current_task(provider_idx);
+        if requested_index.is_none() {
+            self.bind_provider_to_current_task(provider_idx);
+        }
         Ok(response)
     }
 
@@ -378,6 +480,30 @@ impl LlmProvider for FailoverProvider {
         }
 
         self.providers[self.last_used.load(Ordering::Relaxed)].effective_model_name(requested_model)
+    }
+
+    fn fallback_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<ModelFallbackRoute, LlmError> {
+        let index = usize::try_from(fallback_index)
+            .map_err(|_| self.missing_fallback_error(fallback_index, requested_model))?;
+        let provider = self
+            .providers
+            .get(index)
+            .ok_or_else(|| self.missing_fallback_error(fallback_index, requested_model))?;
+        Ok(ModelFallbackRoute {
+            fallback_index,
+            // Index zero is the caller-selected primary route and therefore
+            // honors its model override. Later indices are independently
+            // configured providers and use their own active model.
+            model: if fallback_index == 0 {
+                provider.effective_model_name(requested_model)
+            } else {
+                provider.active_model_name()
+            },
+        })
     }
 }
 
@@ -1105,9 +1231,9 @@ mod tests {
             provider: "p".into(),
             retry_after: None,
         }));
-        assert!(is_retryable(&LlmError::InvalidResponse {
+        assert!(is_retryable(&LlmError::StreamInterrupted {
             provider: "p".into(),
-            reason: "bad json".into(),
+            reason: "connection closed".into(),
         }));
         assert!(is_retryable(&LlmError::SessionRenewalFailed {
             provider: "p".into(),
@@ -1133,6 +1259,17 @@ mod tests {
             provider: "p".into(),
             model: "m".into(),
         }));
+        assert!(!is_retryable(&LlmError::InvalidResponse {
+            provider: "p".into(),
+            reason: "bad json".into(),
+        }));
+        assert!(!is_retryable(&LlmError::EmptyResponse {
+            provider: "p".into(),
+        }));
+        assert!(!is_retryable(&LlmError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "session file denied"
+        ))));
     }
 
     // Test: empty providers list returns error (not panic).
@@ -1239,6 +1376,76 @@ mod tests {
         let result = failover.complete(make_request()).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().content, "solo ok");
+    }
+
+    #[tokio::test]
+    async fn explicit_fallback_retry_uses_only_the_requested_ordered_route() {
+        let primary = Arc::new(MultiCallMockProvider::always_fail("primary"));
+        let fallback = Arc::new(MultiCallMockProvider::always_ok("fallback"));
+        let failover = FailoverProvider::new(vec![
+            primary.clone() as Arc<dyn LlmProvider>,
+            fallback.clone() as Arc<dyn LlmProvider>,
+        ])
+        .unwrap();
+
+        let mut primary_request = make_request();
+        primary_request.set_fallback_index(0);
+        assert!(
+            failover.complete(primary_request).await.is_err(),
+            "an explicitly selected primary failure must return to the loop"
+        );
+        assert_eq!(primary.call_count(), 1);
+        assert_eq!(
+            fallback.call_count(),
+            0,
+            "the provider decorator must not auto-advance behind the loop"
+        );
+
+        let route = failover
+            .fallback_route(1, Some("requested-model"))
+            .expect("configured fallback route");
+        assert_eq!(route.fallback_index, 1);
+        assert_eq!(route.model, "fallback");
+
+        let mut fallback_request = make_request();
+        fallback_request.set_fallback_index(route.fallback_index);
+        let response = failover
+            .complete(fallback_request)
+            .await
+            .expect("fallback succeeds");
+        assert_eq!(response.content, "fallback ok");
+        assert_eq!(primary.call_count(), 1);
+        assert_eq!(fallback.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn exhausted_or_absent_fallback_is_rejected_without_model_calls() {
+        let only = Arc::new(MultiCallMockProvider::always_ok("only"));
+        let failover = FailoverProvider::new(vec![only.clone() as Arc<dyn LlmProvider>]).unwrap();
+
+        let route_error = failover
+            .fallback_route(1, Some("requested-model"))
+            .expect_err("single-provider chain has no fallback");
+        assert!(matches!(
+            route_error,
+            LlmError::ModelNotAvailable {
+                provider,
+                model
+            } if provider == "failover" && model == "requested-model"
+        ));
+        assert_eq!(only.call_count(), 0);
+
+        let mut request = make_request();
+        request.set_fallback_index(1);
+        assert!(matches!(
+            failover.complete(request).await,
+            Err(LlmError::ModelNotAvailable { .. })
+        ));
+        assert_eq!(
+            only.call_count(),
+            0,
+            "routing exhaustion must be decided before provider dispatch"
+        );
     }
 
     // === QA Plan 2.6: Failover edge case tests ===

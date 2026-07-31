@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::ids::ThreadId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -104,6 +104,15 @@ pub struct LoopCompactionResponse {
     pub summary_artifact_id: LoopSummaryArtifactId,
     /// Output bytes divided by input bytes, scaled by 1,000,000.
     pub compression_ratio_ppm: u32,
+    /// Number of secret matches deterministically redacted across compaction
+    /// input and output. Additive and defaulted for checkpoint/wire
+    /// compatibility with responses produced before redaction telemetry.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub redacted_leak_count: u32,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 /// Outcome returned by host-managed compaction.

@@ -27,7 +27,7 @@ use ironclaw_extensions::{
     ExtensionError, ExtensionInstallationError, ExtensionManifestRecord, ExtensionManifestV2,
     ExtensionPackage, ManifestSource,
 };
-use ironclaw_host_api::{MemoryDescriptor, VirtualPath};
+use ironclaw_host_api::{memory::MemoryDescriptor, path::VirtualPath};
 
 use crate::extension_contracts::{default_host_api_contract_registry, default_host_port_catalog};
 
@@ -76,7 +76,9 @@ pub const MEM0_MEMORY_MANIFEST_TOML: &str = include_str!("../assets/memory_mem0/
 /// surface, schema refs, and provider-prefixed tool ids are validated by the
 /// parser.
 pub fn native_memory_manifest() -> Result<ExtensionManifestV2, ExtensionInstallationError> {
-    Ok(memory_manifest_record(NATIVE_MEMORY_MANIFEST_TOML)?
+    // No package root is being materialized here — this accessor only
+    // needs the validated manifest shape, not a bound package.
+    Ok(memory_manifest_record(NATIVE_MEMORY_MANIFEST_TOML, None)?
         .manifest()
         .clone())
 }
@@ -86,6 +88,7 @@ pub fn native_memory_manifest() -> Result<ExtensionManifestV2, ExtensionInstalla
 /// dispatches on `schema_version` (v2 or v3) and normalizes into one model.
 fn memory_manifest_record(
     toml: &str,
+    root: Option<VirtualPath>,
 ) -> Result<ExtensionManifestRecord, ExtensionInstallationError> {
     let host_ports = default_host_port_catalog().map_err(|error| {
         ExtensionInstallationError::InvalidManifest {
@@ -103,6 +106,7 @@ fn memory_manifest_record(
         &host_ports,
         None,
         &contracts,
+        root,
     )
 }
 
@@ -152,7 +156,9 @@ fn memory_provider_bundle(
     let invalid = |error: &dyn std::fmt::Display| ExtensionError::InvalidManifest {
         reason: format!("{label} memory provider package is invalid: {error}"),
     };
-    let record = memory_manifest_record(toml).map_err(|error| invalid(&error))?;
+    let root = VirtualPath::new(package_root)?;
+    let record =
+        memory_manifest_record(toml, Some(root.clone())).map_err(|error| invalid(&error))?;
     // The manifest is the single source of truth for the provider's surface:
     // a bundled provider manifest without `[memory]` is a contract break, not
     // an empty lifecycle.
@@ -166,7 +172,6 @@ fn memory_provider_bundle(
         .clone()
         .try_into()
         .map_err(|error: ExtensionError| invalid(&error))?;
-    let root = VirtualPath::new(package_root)?;
     let package = ExtensionPackage::from_manifest_toml(manifest, root, record.raw_toml())?;
     Ok(BundledMemoryProvider { package, lifecycle })
 }
@@ -273,7 +278,7 @@ service = "acme_memoryless_provider"
 
     #[test]
     fn native_provider_bundle_declares_the_full_lifecycle() {
-        use ironclaw_host_api::MemoryLifecycleHook;
+        use ironclaw_host_api::memory::MemoryLifecycleHook;
         let bundle = native_memory_provider_bundle().expect("native bundle builds");
         assert_eq!(
             bundle.package.manifest.id.as_str(),
@@ -289,7 +294,7 @@ service = "acme_memoryless_provider"
 
     #[test]
     fn mem0_provider_bundle_builds_with_its_honest_lifecycle_and_tools() {
-        use ironclaw_host_api::MemoryLifecycleHook;
+        use ironclaw_host_api::memory::MemoryLifecycleHook;
         let bundle = mem0_memory_provider_bundle().expect("mem0 bundle builds");
         assert_eq!(
             bundle.package.manifest.id.as_str(),
@@ -328,7 +333,7 @@ service = "acme_memoryless_provider"
 
     #[test]
     fn mem0_backend_manifest_is_a_valid_v3_memory_provider() {
-        let record = memory_manifest_record(MEM0_MEMORY_MANIFEST_TOML)
+        let record = memory_manifest_record(MEM0_MEMORY_MANIFEST_TOML, None)
             .expect("mem0 backend manifest must parse");
         assert_eq!(record.manifest().id.as_str(), MEM0_MEMORY_EXTENSION_ID);
         match &record.manifest().runtime {
@@ -369,7 +374,7 @@ service = "acme_memoryless_provider"
         // long-term retrieval lane and profile reads, has no thread
         // partitioning (no short-term lane), and does not record
         // interactions — undeclared hooks are never called by the host.
-        use ironclaw_host_api::MemoryLifecycleHook;
+        use ironclaw_host_api::memory::MemoryLifecycleHook;
         assert!(memory.declares(MemoryLifecycleHook::ReadLongTerm));
         assert!(memory.declares(MemoryLifecycleHook::ProfileRead));
         assert!(!memory.declares(MemoryLifecycleHook::ReadShortTerm));

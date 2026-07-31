@@ -8,7 +8,11 @@ use ironclaw_first_party_extensions::skills::{
     SkillManagementCapabilityRequest, dispatch,
 };
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, HostApiError, PermissionMode, ResourceUsage, RuntimeDispatchErrorKind,
+    capability::{EffectKind, PermissionMode},
+    dispatch::RuntimeDispatchErrorKind,
+    error::HostApiError,
+    ids::CapabilityId,
+    resource::ResourceUsage,
 };
 use ironclaw_skills::InstalledSkillMetadataSource;
 use serde_json::{Map, Value, json};
@@ -32,7 +36,7 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
         first_party_capability_manifest(
             SKILL_LIST_CAPABILITY_ID,
-            "List Reborn filesystem skills visible to the current local-dev agent",
+            "List Reborn filesystem skills visible to the current standalone agent",
             vec![EffectKind::ReadFilesystem],
             PermissionMode::Allow,
             resource_profile(),

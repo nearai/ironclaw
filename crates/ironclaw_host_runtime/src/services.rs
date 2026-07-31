@@ -3,7 +3,7 @@
 //! This module is intentionally composition-only. It wires the owning Reborn
 //! service crates together, adapts Script/MCP/WASM runtimes into the neutral
 //! dispatcher port, and hands upper services a single [`DefaultHostRuntime`]
-//! service. Authorization, run-state transitions, approval leases, process
+//! service. Authorization, process invocation transitions, approval leases, process
 //! lifecycle, and runtime execution semantics remain in their owning crates.
 
 mod process_executor;
@@ -11,6 +11,7 @@ mod process_executor;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use ironclaw_approvals::{ApprovalRequestStore, ApprovalRequestStorePort};
 use ironclaw_approvals::{ApprovalResolver, PersistentApprovalPolicyStorePort};
 use ironclaw_authorization::{CapabilityLeaseStorePort, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_capabilities::{
@@ -26,9 +27,12 @@ use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    CapabilityDispatcher, CapabilityId, DispatchError, DispatchErrorLane, ResourceReservationId,
-    ResourceScope, ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeKind,
-    RuntimeLane, SecretHandle,
+    dispatch::{CapabilityDispatcher, DispatchError, RuntimeDispatchErrorKind},
+    http::RuntimeHttpEgress,
+    ids::{CapabilityId, ResourceReservationId, SecretHandle},
+    lane::RuntimeLane,
+    resource::{ResourceScope, ResourceUsage},
+    runtime::{DispatchErrorLane, RuntimeKind},
     runtime_policy::{
         DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode,
         ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -37,18 +41,14 @@ use ironclaw_host_api::{
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{
-    BackgroundFailureStage, ProcessExecutor, ProcessManager, ProcessResultStorePort,
-    ProcessServices, ProcessStorePort,
+    BackgroundFailureStage, ProcessExecutor, ProcessInvocationStatePort, ProcessManager,
+    ProcessServices,
 };
 use ironclaw_reborn_event_store::{
     CoalescingEventSink, EventBatchConfig, RebornEventStoreConfig, RebornEventStoreError,
     RebornEventStores, RebornProfile, build_reborn_event_stores,
 };
 use ironclaw_resources::{FilesystemResourceGovernor, InMemoryResourceGovernor, ResourceGovernor};
-use ironclaw_run_state::{
-    ApprovalRequestStore, ApprovalRequestStorePort, RunStateApprovalStorePort, RunStateStore,
-    RunStateStorePort,
-};
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
 use ironclaw_secrets::{
     CredentialAccountStore, CredentialSessionStore, InMemoryCredentialBroker, SecretStore,
@@ -56,8 +56,8 @@ use ironclaw_secrets::{
 };
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
 use ironclaw_turns::{
-    DefaultTurnCoordinator, NoopTurnRunWakeNotifier, RunProfileResolver, TurnRunWakeNotifier,
-    TurnStateRowStore, TurnStateStore, runner::TurnRunTransitionPort,
+    AgentTurnRuntimePort, DefaultTurnCoordinator, NoopTurnRunWakeNotifier, RunProfileResolver,
+    TurnRunWakeNotifier,
 };
 use ironclaw_wasm::{
     DenyWasmHostHttp, EmptyWasmRuntimeCredentials, PreparedWitTool, WasmError,
@@ -121,12 +121,10 @@ use ironclaw_capabilities::ChainToolResolver;
 /// handles are available for setup/tests inside the host-runtime layer, but
 /// product/upper Reborn code should prefer [`Self::host_runtime`] and depend on
 /// `Arc<dyn crate::HostRuntime>` instead of reaching around the service.
-pub struct HostRuntimeServices<F, G, S, R>
+pub struct HostRuntimeServices<F, G>
 where
     F: RootFilesystem + 'static,
     G: ResourceGovernor + 'static,
-    S: ProcessStorePort + 'static,
-    R: ProcessResultStorePort + 'static,
 {
     registry: Arc<SharedExtensionRegistry>,
     trust_policy: Arc<dyn TrustPolicy>,
@@ -134,11 +132,10 @@ where
     filesystem: Arc<F>,
     governor: Arc<G>,
     authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
-    process_services: ProcessServices<S, R>,
+    process_services: ProcessServices,
     surface_version: CapabilitySurfaceVersion,
-    run_state: Option<Arc<dyn RunStateStorePort>>,
+    invocation_state: Option<Arc<dyn ProcessInvocationStatePort>>,
     approval_requests: Option<Arc<dyn ApprovalRequestStorePort>>,
-    run_state_approval_store: Option<Arc<dyn RunStateApprovalStorePort>>,
     capability_leases: Option<Arc<dyn CapabilityLeaseStorePort>>,
     // arch-exempt: optional_arc, service builders support minimal/test host runtime
     // graphs while production Reborn wiring installs this store, plan #4539
@@ -166,9 +163,8 @@ where
     mcp_runtime: Option<Arc<dyn McpExecutor>>,
     first_party_runtime: Option<Arc<FirstPartyCapabilityRegistry>>,
     wasm_runtime: Option<Arc<WasmRuntimeAdapter>>,
-    turn_state: Option<Arc<dyn TurnStateStore>>,
+    turn_state: Option<Arc<dyn AgentTurnRuntimePort>>,
     run_profile_resolver: Option<Arc<dyn RunProfileResolver>>,
-    turn_run_transition_port: Option<Arc<dyn TurnRunTransitionPort>>,
     turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
     /// Late-installed extension-host snapshot resolver (composition builds
     /// the extension host after these services; same slot pattern as the
@@ -227,7 +223,7 @@ impl Drop for ProductAuthRuntimeHandoffGuard {
 }
 
 /// Alias for [`RuntimeSecretStageError`], which re-exports
-/// [`ironclaw_host_api::CredentialStageError`].
+/// [`ironclaw_host_api::dispatch::CredentialStageError`].
 pub type ProductAuthCredentialStageError = RuntimeSecretStageError;
 
 impl ProductAuthProviderRuntimePorts {
@@ -306,10 +302,10 @@ impl ProductAuthProviderRuntimePorts {
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
-        requirement: &ironclaw_host_api::RuntimeCredentialRequirement,
-        requester_extension: &ironclaw_host_api::ExtensionId,
+        requirement: &ironclaw_host_api::capability::RuntimeCredentialRequirement,
+        requester_extension: &ironclaw_host_api::ids::ExtensionId,
     ) -> Result<(), ProductAuthCredentialStageError> {
-        use ironclaw_host_api::RuntimeCredentialRequirementSource;
+        use ironclaw_host_api::capability::RuntimeCredentialRequirementSource;
         match &requirement.source {
             RuntimeCredentialRequirementSource::SecretHandle => {
                 self.stage_secret_once(scope, capability_id, &requirement.handle)
@@ -348,7 +344,7 @@ impl ProductAuthProviderRuntimePorts {
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
-        policy: ironclaw_host_api::NetworkPolicy,
+        policy: ironclaw_host_api::action::NetworkPolicy,
     ) {
         self.network_policy_store
             .insert(scope, capability_id, policy);
@@ -406,25 +402,25 @@ pub(crate) fn stage_secret_error(error: SecretStoreError) -> ProductAuthCredenti
     }
 }
 
-impl<F, G, S, R> HostRuntimeServices<F, G, S, R>
+impl<F, G> HostRuntimeServices<F, G>
 where
     F: RootFilesystem + 'static,
     G: ResourceGovernor + 'static,
-    S: ProcessStorePort + 'static,
-    R: ProcessResultStorePort + 'static,
 {
     pub fn new(
         registry: Arc<ExtensionRegistry>,
         filesystem: Arc<F>,
         governor: Arc<G>,
         authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
-        process_services: ProcessServices<S, R>,
+        process_services: ProcessServices,
         surface_version: CapabilitySurfaceVersion,
     ) -> Self {
+        let (process_store_name, process_store_type_id) = process_services.process_store_type();
+        let (result_store_name, result_store_type_id) = process_services.result_store_type();
         let network_policy_store = Arc::new(NetworkObligationPolicyStore::new());
         let secret_injection_store = Arc::new(RuntimeSecretInjectionStore::new());
-        let process_lifecycle_store = Arc::new(ProcessObligationLifecycleStore::new(
-            process_services.process_store(),
+        let process_lifecycle_store = Arc::new(ProcessObligationLifecycleStore::from_dyn(
+            process_services.process_runtime(),
             Arc::clone(&network_policy_store),
             Arc::clone(&secret_injection_store),
             governor.clone(),
@@ -441,9 +437,8 @@ where
             authorizer,
             process_services,
             surface_version,
-            run_state: None,
+            invocation_state: None,
             approval_requests: None,
-            run_state_approval_store: None,
             capability_leases: None,
             persistent_approval_policies: None,
             event_sink: None,
@@ -471,7 +466,6 @@ where
             wasm_runtime: None,
             turn_state: None,
             run_profile_resolver: None,
-            turn_run_transition_port: None,
             turn_run_wake_notifier: None,
             extension_tool_resolver: Arc::new(Mutex::new(None)),
             post_edit_check: None,
@@ -480,9 +474,15 @@ where
                 trust_policy_verified: false,
                 filesystem: ProductionComponentType::of::<F>(),
                 resource_governor: ProductionComponentType::of::<G>(),
-                process_store: ProductionComponentType::of::<S>(),
-                process_result_store: ProductionComponentType::of::<R>(),
-                run_state: None,
+                process_store: ProductionComponentType::erased(
+                    process_store_name,
+                    process_store_type_id,
+                ),
+                process_result_store: ProductionComponentType::erased(
+                    result_store_name,
+                    result_store_type_id,
+                ),
+                invocation_state: None,
                 approval_requests: None,
                 capability_leases: None,
                 persistent_approval_policies: None,
@@ -503,8 +503,6 @@ where
                 first_party_runtime: None,
                 turn_state: None,
                 run_profile_resolver: None,
-                turn_run_transition_port: None,
-                turn_run_transition_port_verified: false,
                 turn_run_wake_notifier: None,
             },
         }
@@ -556,7 +554,7 @@ where
 
     /// The binder the extension host's loaders use to prebind WASM / hosted
     /// MCP / first-party-registry packages to their runtime lanes as
-    /// [`ironclaw_host_api::ToolAdapter`]s. The lanes stay host-private.
+    /// [`ironclaw_host_api::tool_adapter::ToolAdapter`]s. The lanes stay host-private.
     pub fn extension_lane_tool_binder(&self) -> ExtensionLaneToolBinder {
         ExtensionLaneToolBinder::new(Arc::new(ServiceLanePackageBinder {
             executor: self.runtime_lane_executor(),
@@ -696,25 +694,29 @@ where
     /// stores, cancellation registry, result store, and runtime health graph.
     fn build_host_runtime(&self) -> DefaultHostRuntime {
         let lifecycle_process_store = Arc::clone(&self.process_lifecycle_store);
-        let process_store: Arc<dyn ProcessStorePort> = lifecycle_process_store.clone();
+        if let Err(error) = lifecycle_process_store
+            .register_journal_observer(self.process_services.process_runtime().as_ref())
+        {
+            tracing::error!(%error, "process obligation journal observer failed to register");
+        }
         let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(self.runtime_dispatcher());
+        let process_runtime = self.process_services.process_runtime();
         let process_executor = Arc::new(HostProcessExecutor::new(
             Arc::new(RuntimeDispatchProcessExecutor::new(
                 Arc::clone(&dispatcher),
-                ironclaw_capabilities::process_authorization_remint_port(Arc::clone(
-                    &process_store,
-                )),
+                ironclaw_capabilities::process_authorization_remint_port(process_runtime),
             )),
             self.process_sandbox_executor.clone(),
         ));
         let result_failure_cleanup_store = Arc::clone(&lifecycle_process_store);
+        let submission_lifecycle: Arc<dyn ironclaw_processes::ProcessSubmissionLifecycle> =
+            lifecycle_process_store.clone();
         let process_manager: Arc<dyn ProcessManager> = Arc::new(
             ironclaw_processes::BackgroundProcessManager::new(
-                lifecycle_process_store,
+                self.process_services.clone(),
                 process_executor,
             )
-            .with_cancellation_registry(self.process_services.cancellation_registry())
-            .with_result_store(self.process_services.result_store())
+            .with_submission_lifecycle(submission_lifecycle)
             .with_error_handler(move |failure| {
                 let reconcile = match failure.stage {
                     BackgroundFailureStage::StoreComplete => true,
@@ -737,10 +739,9 @@ where
                         );
                     }
                 });
-            }),
+            })
+            .start_supervisor(),
         );
-        let process_result_store: Arc<dyn ProcessResultStorePort> =
-            self.process_services.result_store();
         let runtime_health = self.runtime_health.clone().unwrap_or_else(|| {
             Arc::new(RegisteredRuntimeHealth::new(
                 self.registered_runtime_backends(),
@@ -762,17 +763,13 @@ where
         .with_surface_filesystem(surface_filesystem)
         .with_trust_policy_dyn(Arc::clone(&self.trust_policy))
         .with_process_manager(process_manager)
-        .with_process_store(process_store)
-        .with_process_result_store(process_result_store)
-        .with_process_cancellation_registry(self.process_services.cancellation_registry())
+        .with_process_services(self.process_services.clone())
         .with_runtime_health(runtime_health);
 
-        if let Some(run_state) = &self.run_state {
-            runtime = runtime.with_run_state(Arc::clone(run_state));
+        if let Some(invocation_state) = &self.invocation_state {
+            runtime = runtime.with_invocation_state(Arc::clone(invocation_state));
         }
-        if let Some(run_state_approval_store) = &self.run_state_approval_store {
-            runtime = runtime.with_run_state_approval_store(Arc::clone(run_state_approval_store));
-        } else if let Some(approval_requests) = &self.approval_requests {
+        if let Some(approval_requests) = &self.approval_requests {
             runtime = runtime.with_approval_requests(Arc::clone(approval_requests));
         }
         if let Some(capability_leases) = &self.capability_leases {
@@ -877,10 +874,12 @@ where
 fn local_testing_runtime_policy() -> EffectiveRuntimePolicy {
     ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
         DeploymentMode::LocalSingleUser,
-        RuntimeProfile::LocalDev,
+        RuntimeProfile::LocalHost,
     ))
     .unwrap_or_else(|error| {
-        panic!("LocalSingleUser + LocalDev runtime policy must resolve for local testing: {error}")
+        panic!(
+            "LocalSingleUser + Standalone runtime policy must resolve for local testing: {error}"
+        ) // safety: the fixed local deployment/profile pair is resolver-valid by construction.
     })
 }
 

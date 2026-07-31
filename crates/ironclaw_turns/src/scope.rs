@@ -1,1 +1,1 @@
-pub use ironclaw_host_api::{TurnActor, TurnScope, TurnThreadOwner};
+pub use ironclaw_host_api::turn::{TurnActor, TurnScope, TurnThreadOwner};

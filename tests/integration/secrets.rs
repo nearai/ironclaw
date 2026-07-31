@@ -15,10 +15,10 @@ mod support;
 use std::sync::Arc;
 
 use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
-use ironclaw_host_api::SecretHandle;
+use ironclaw_host_api::ids::SecretHandle;
 use ironclaw_reborn_composition::test_support::{
-    LOCAL_DEV_DB_FILENAME, build_default_local_dev_database_roots_for_test,
-    build_secret_store_for_test, mount_local_dev_database_roots_for_test,
+    STANDALONE_DB_FILENAME, build_default_database_roots_for_test, build_secret_store_for_test,
+    mount_database_roots_for_test,
 };
 use ironclaw_reborn_composition::wrap_scoped;
 use ironclaw_secrets::{SecretMaterial, SecretStoreError, SecretStorePort};
@@ -38,7 +38,7 @@ async fn secret_persists_across_libsql_reopen() {
 
     // --- First store: write secret ---
     let mut composite = CompositeRootFilesystem::new();
-    build_default_local_dev_database_roots_for_test(dir.path(), &mut composite)
+    build_default_database_roots_for_test(dir.path(), &mut composite)
         .await
         .expect("build default local-dev db roots");
     let composite = Arc::new(composite);
@@ -70,22 +70,21 @@ async fn secret_persists_across_libsql_reopen() {
     // --- Reopen: fresh libsql database, fresh composite, fresh store ---
     // Mirrors `assert_reply_persists_after_reopen` (builder.rs): same `root`
     // path yields the same cached master-key file, so decryption succeeds.
-    let db_path = dir.path().join(LOCAL_DEV_DB_FILENAME);
+    let db_path = dir.path().join(STANDALONE_DB_FILENAME);
     let db = Arc::new(
         libsql::Builder::new_local(&db_path)
             .build()
             .await
             .expect("open fresh libsql for reopen"),
     );
-    let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db));
+    let fresh_fs = Arc::new(LibSqlRootFilesystem::new(db).expect("filesystem runtime"));
     // Migrations are idempotent — schema already exists from the first build.
     fresh_fs
         .run_migrations()
         .await
         .expect("run migrations on fresh libsql");
     let mut fresh_composite = CompositeRootFilesystem::new();
-    mount_local_dev_database_roots_for_test(&mut fresh_composite, fresh_fs)
-        .expect("mount fresh composite");
+    mount_database_roots_for_test(&mut fresh_composite, fresh_fs).expect("mount fresh composite");
     let fresh_composite = Arc::new(fresh_composite);
     let fresh_scoped = wrap_scoped(Arc::clone(&fresh_composite));
     let fresh_store = build_secret_store_for_test(dir.path(), fresh_scoped)
@@ -117,7 +116,7 @@ async fn secret_read_back_fails_for_unknown_handle() {
 
     // Build the store and write one secret under a known handle.
     let mut composite = CompositeRootFilesystem::new();
-    build_default_local_dev_database_roots_for_test(dir.path(), &mut composite)
+    build_default_database_roots_for_test(dir.path(), &mut composite)
         .await
         .expect("build default local-dev db roots");
     let composite = Arc::new(composite);
@@ -164,7 +163,7 @@ async fn secret_read_back_fails_for_wrong_tenant_scope() {
 
     // Build the store and write one secret under a known handle/scope.
     let mut composite = CompositeRootFilesystem::new();
-    build_default_local_dev_database_roots_for_test(dir.path(), &mut composite)
+    build_default_database_roots_for_test(dir.path(), &mut composite)
         .await
         .expect("build default local-dev db roots");
     let composite = Arc::new(composite);

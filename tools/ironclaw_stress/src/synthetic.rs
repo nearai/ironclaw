@@ -1,5 +1,6 @@
 use ironclaw_host_api::{
-    AgentId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+    ids::{AgentId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
+    resource::ResourceScope,
 };
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::TurnScope;
@@ -16,6 +17,7 @@ pub(crate) struct SyntheticIds {
 pub(crate) struct UserTurnContext {
     pub(crate) user_id: UserId,
     pub(crate) thread_owner_user_id: UserId,
+    pub(crate) thread_owner_user_index: usize,
     pub(crate) thread_id: ThreadId,
     pub(crate) thread_scope: ThreadScope,
     pub(crate) turn_scope: TurnScope,
@@ -109,11 +111,9 @@ impl SyntheticIds {
         );
         let thread_user_index =
             self.thread_user_index(args, actor_user_index, worker_index, operation_index);
-        // Spread one owner's concurrent load across `threads_per_owner` distinct
-        // threads that all share that owner's single `/turns/state.json`. This
-        // is what makes the filesystem turn-state CAS actually contend
-        // cross-thread (the production shape); with the default 1, behavior is
-        // unchanged (one thread per owner).
+        // Spread one owner's concurrent load across distinct threads that share
+        // one process-journal mount. This exercises cross-thread journal CAS;
+        // with the default 1, each owner targets one thread.
         let thread_slot = if args.threads_per_owner > 1 {
             Some(
                 worker_index.wrapping_mul(31).wrapping_add(operation_index)
@@ -154,10 +154,9 @@ impl SyntheticIds {
         let tenant_id = self.tenants[tenant_index].clone();
         let user_id = self.users[actor_user_index].clone();
         let thread_owner_user_id = self.users[thread_user_index].clone();
-        // The owner (and thus the per-user `/turns/state.json`) is keyed by
-        // `thread_user_index`; the optional slot adds a distinct thread *under*
-        // that same owner so multiple threads share — and contend on — one
-        // turn-state document.
+        // The owner and process-journal mount are keyed by `thread_user_index`;
+        // the optional slot adds a distinct thread under that same owner so
+        // multiple threads contend on one journal.
         let thread_id = match thread_slot {
             Some(slot) => ThreadId::new(format!(
                 "thread-{tenant_index:04}-{thread_user_index:06}-{slot:04}"
@@ -182,6 +181,7 @@ impl SyntheticIds {
         Ok(UserTurnContext {
             user_id,
             thread_owner_user_id,
+            thread_owner_user_index: thread_user_index,
             thread_id,
             thread_scope,
             turn_scope,

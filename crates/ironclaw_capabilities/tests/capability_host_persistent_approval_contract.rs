@@ -13,7 +13,15 @@
 use async_trait::async_trait;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    action::Action,
+    approval::ApprovalRequest,
+    capability::{CapabilityDescriptor, CapabilitySet, EffectKind},
+    decision::{Decision, Obligations},
+    ids::ApprovalRequestId,
+    resource::ResourceEstimate,
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_trust::TrustDecision;
 use serde_json::json;
 
@@ -122,11 +130,11 @@ async fn non_flipping_persistent_grant_still_raises_approval_gate() {
     // Grant carries no `DispatchCapability`, so the re-authorize probe stays
     // `RequireApproval` and the candidate is never adopted.
     let policy_facts = PersistentGrantPolicyFacts::new(capability_grant_with_effects(Vec::new()));
-    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
-    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
+    let approval_requests = ironclaw_approvals::in_memory_backed_approval_request_store();
     let host =
         capability_host_with_policy_facts(&registry, &dispatcher, &authorizer, &policy_facts)
-            .with_run_state(&run_state)
+            .with_invocation_state(&run_state)
             .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
 

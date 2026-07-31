@@ -11,9 +11,10 @@
 // arch-exempt: large_file, keep recovery policy beside its exhaustive mapping tests until the item-7 conformance-matrix extraction, plan #6284
 
 use async_trait::async_trait;
-use ironclaw_host_api::{FailureFate, FailureKind};
+use ironclaw_host_api::result_meta::{FailureFate, FailureKind};
 use ironclaw_turns::{
-    LoopFailureKind, ModelInvalidOutputDetailReason, run_profile::LoopSafeSummary,
+    LoopFailureKind, ModelInvalidOutputDetailReason,
+    run_profile::{LoopSafeSummary, ModelVisibleToolObservation},
 };
 
 use crate::state::{
@@ -29,10 +30,15 @@ use crate::state::{
 /// swaps it into the next whole state.
 #[async_trait]
 pub(crate) trait RecoveryStrategy: Send + Sync {
+    /// Decide recovery from the sanitized summary plus the exact bounded,
+    /// provenance-tagged observation the executor will expose to the model.
+    /// `None` is reserved for failures that intentionally have no model-visible
+    /// structured observation.
     async fn on_capability_error(
         &self,
         state: &LoopExecutionState,
         err: &CapabilityErrorSummary,
+        observation: Option<&ModelVisibleToolObservation>,
     ) -> RecoveryOutcome;
 
     async fn on_model_error(
@@ -118,6 +124,8 @@ pub(crate) struct CapabilityErrorSummary {
 pub(crate) struct ModelErrorSummary {
     pub(crate) class: ModelErrorClass,
     pub(crate) safe_summary: SanitizedStrategySummary,
+    pub(crate) retry_after_ms: Option<u64>,
+    pub(crate) next_fallback_index: Option<u32>,
 }
 
 /// Wire-stable model error classification.
@@ -133,6 +141,8 @@ pub(crate) enum ModelErrorClass {
     ContentFiltered,
     /// Provider/model output was structurally invalid for the loop contract.
     InvalidOutput,
+    /// Provider returned a valid response cut off by its output-token limit.
+    OutputTruncated,
     /// Model route, credentials, or provider is unavailable.
     Unavailable,
     /// Model gateway failed internally without safe caller detail.
@@ -161,6 +171,8 @@ pub(crate) enum ModelErrorClass {
 ///   prompt/model hint).
 /// - `ToolErrorResult` — append a model-visible tool error result and continue
 ///   the capability batch.
+/// - `UserVisibleTerminal` — stop without another model call; the typed failure
+///   category drives a host-authored user explanation.
 /// - `Abort` — return `LoopExit::Failed { reason_kind: failure_kind }`.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -184,6 +196,14 @@ pub(crate) enum RecoveryOutcome {
         scope: RetryScope,
         alter: Option<RetryAlteration>,
         observation: ModelErrorRecoveryObservation,
+    },
+    /// A terminal model-stage failure that cannot safely produce a
+    /// model-visible observation. The user-visible explanation is projected
+    /// from the typed failure category; the failed model is never credited
+    /// with seeing it.
+    UserVisibleTerminal {
+        recovery: RecoveryStrategyState,
+        failure_kind: LoopFailureKind,
     },
     Abort {
         recovery: RecoveryStrategyState,
@@ -221,27 +241,35 @@ pub(crate) enum RetryScope {
 ///   observation-assisted repair attempt. Other invalid-output errors first
 ///   retry up to the same per-class budget, then get one typed observation
 ///   before aborting.
-/// - Retries model transient, unavailable, and internal errors on the much
-///   deeper [`Self::max_model_availability_attempts`] budget with a
-///   longer-capped backoff schedule, then aborts the run. Provider outages
-///   (5xx storms) routinely outlast a couple of quick retries; a long-running
-///   agentic turn must ride them out rather than discard all prior work.
+/// - Advances the host-resolved ordered fallback chain for model
+///   unavailability. Model transient, unavailable, and internal errors use the
+///   much deeper
+///   [`Self::max_model_availability_attempts`] budget with a longer-capped
+///   backoff schedule, then get one typed observation-assisted continuation
+///   attempt before aborting. Provider outages (5xx storms) routinely outlast
+///   a couple of quick retries; a long-running agentic turn must ride them out
+///   rather than discard all prior work.
 /// - Retries `ContextOverflow` at iteration scope with `ShrinkContext`, then
 ///   gives the compacted prompt one observation-assisted attempt before aborting.
 /// - Retries `StaleRequest` at iteration scope (rebuilding the capability
 ///   surface and prompt bundle) up to [`Self::max_attempts_per_class`] times,
-///   then aborts the run with the precise `model_stale_request` category.
-/// - Aborts immediately on `Unauthorized`, `CheckpointRejected`, and
-///   `TranscriptWriteFailed` — precise, user-actionable terminal categories
-///   that must never be silently retried.
+///   then gives the refreshed iteration one typed observation-assisted
+///   continuation attempt before aborting with the precise
+///   `model_stale_request` category.
+/// - Returns a user-visible terminal outcome for `Unauthorized` and
+///   `TranscriptWriteFailed`: the host projects the precise actionable
+///   explanation without pretending another model saw it.
+/// - Aborts immediately on `CheckpointRejected`, which is owned by its
+///   separate recovery follow-up.
 #[derive(Debug, Clone, Copy)]
 pub struct DefaultRecoveryStrategy {
     /// Max retries per error class before giving up. Default `2`.
     pub max_attempts_per_class: u32,
     /// Max consecutive retries for availability-class model errors
     /// (transient / unavailable / internal) before aborting the run.
-    /// Default `12`, which with [`availability_backoff_for`] rides out
-    /// roughly seven minutes of sustained provider failure.
+    /// Default `12`. Transient/internal failures use
+    /// [`availability_backoff_for`]; unavailable failures consume ordered
+    /// fallback entries.
     pub max_model_availability_attempts: u32,
 }
 
@@ -260,6 +288,7 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
         &self,
         state: &LoopExecutionState,
         err: &CapabilityErrorSummary,
+        _observation: Option<&ModelVisibleToolObservation>,
     ) -> RecoveryOutcome {
         // Wildcard-free by construction: the four `FailureFate` arms are
         // exhaustive, and `FailureKind::fate` is itself wildcard-free over the
@@ -310,11 +339,18 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
     ) -> RecoveryOutcome {
         let kind = model_error_to_failure_kind(err.class);
         match err.class {
-            // Unauthorized/checkpoint/transcript kinds carry precise
-            // user-actionable categories and must not be silently retried.
-            ModelErrorClass::Unauthorized
-            | ModelErrorClass::CheckpointRejected
-            | ModelErrorClass::TranscriptWriteFailed => RecoveryOutcome::Abort {
+            // Unauthorized and transcript failures cannot safely create a
+            // model-visible observation. They terminate with a typed,
+            // host-authored user explanation and no additional model call.
+            ModelErrorClass::Unauthorized | ModelErrorClass::TranscriptWriteFailed => {
+                RecoveryOutcome::UserVisibleTerminal {
+                    recovery: state.recovery_state.cleared_attempts(),
+                    failure_kind: kind,
+                }
+            }
+            // CheckpointRejected remains a plain abort owned by its separate
+            // recovery follow-up.
+            ModelErrorClass::CheckpointRejected => RecoveryOutcome::Abort {
                 recovery: state.recovery_state.cleared_attempts(),
                 failure_kind: kind,
             },
@@ -323,23 +359,21 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
                 RetryScope::Call,
                 ModelErrorRecoveryObservation::content_filtered(),
             ),
+            ModelErrorClass::OutputTruncated => observe_once_or_abort(
+                state,
+                RetryScope::Call,
+                ModelErrorRecoveryObservation::output_truncated(),
+            ),
             ModelErrorClass::StaleRequest => {
-                let Some(attempt_class) = model_retry_attempt_class(err.class) else {
-                    return RecoveryOutcome::Abort {
-                        recovery: state.recovery_state.cleared_attempts(),
-                        failure_kind: LoopFailureKind::DriverBug,
-                    };
-                };
                 // Iteration scope so the executor rebuilds the capability
                 // surface and prompt bundle — the stale input — before the
                 // next model call. No backoff: the rebuild itself is the fix.
-                retry_or_abort(
+                retry_observe_or_abort(
                     state,
-                    attempt_class,
                     self.max_attempts_per_class,
-                    kind,
                     RetryScope::Iteration,
                     |_| None,
+                    ModelErrorRecoveryObservation::stale_request(),
                 )
             }
             ModelErrorClass::ContextOverflow => retry_observe_or_abort(
@@ -370,26 +404,48 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
                     ModelErrorRecoveryObservation::invalid_output(reason),
                 )
             }
-            ModelErrorClass::Transient
-            | ModelErrorClass::Unavailable
-            | ModelErrorClass::Internal => {
-                let Some(attempt_class) = model_retry_attempt_class(err.class) else {
-                    return RecoveryOutcome::Abort {
-                        recovery: state.recovery_state.cleared_attempts(),
-                        failure_kind: LoopFailureKind::DriverBug,
-                    };
-                };
-                retry_or_abort(
+            ModelErrorClass::Unavailable => {
+                let next_fallback_index = err.next_fallback_index;
+                retry_observe_or_abort(
                     state,
-                    attempt_class,
                     self.max_model_availability_attempts,
-                    kind,
+                    RetryScope::Call,
+                    |attempts| {
+                        if let Some(fallback_index) = next_fallback_index {
+                            Some(RetryAlteration::AdvanceFallback { fallback_index })
+                        } else {
+                            Some(RetryAlteration::Backoff {
+                                delay_ms: availability_backoff_for(attempts),
+                            })
+                        }
+                    },
+                    ModelErrorRecoveryObservation::unavailable(),
+                )
+            }
+            ModelErrorClass::Transient | ModelErrorClass::Internal => {
+                let retry_after_ms = err.retry_after_ms;
+                let observation = match err.class {
+                    ModelErrorClass::Transient => ModelErrorRecoveryObservation::transient(),
+                    ModelErrorClass::Internal => ModelErrorRecoveryObservation::internal(),
+                    _ => {
+                        return RecoveryOutcome::Abort {
+                            recovery: state.recovery_state.cleared_attempts(),
+                            failure_kind: LoopFailureKind::DriverBug,
+                        };
+                    }
+                };
+                retry_observe_or_abort(
+                    state,
+                    self.max_model_availability_attempts,
                     RetryScope::Call,
                     |attempts| {
                         Some(RetryAlteration::Backoff {
-                            delay_ms: availability_backoff_for(attempts),
+                            delay_ms: retry_after_ms
+                                .map(BackoffDelayMs::from_provider_hint)
+                                .unwrap_or_else(|| availability_backoff_for(attempts)),
                         })
                     },
+                    observation,
                 )
             }
         }
@@ -400,14 +456,15 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
         // some class reaches its own Abort: the initial call, plus call-scope
         // invalid-output retries (`max_attempts_per_class`) and its one
         // observation-assisted repair, plus the one content-filter
-        // observation, plus an
-        // availability budget for each availability class (transient /
+        // observation, plus the output-truncation continuation observation,
+        // plus one observation for each availability class, plus an availability
+        // budget for each availability class (transient /
         // unavailable / internal — attempts are tracked per class, so a
         // pathological host can rotate through all three). Context-overflow
         // retries are iteration-scoped and leave the stage, so they don't
         // consume this loop. The final +1 keeps the strategy's Abort — with
         // its failure kind and diagnostics — strictly inside the loop bound.
-        3u32.saturating_add(self.max_attempts_per_class)
+        7u32.saturating_add(self.max_attempts_per_class)
             .saturating_add(self.max_model_availability_attempts.saturating_mul(3))
     }
 }
@@ -514,6 +571,11 @@ fn model_error_class_for_observation(class: ModelErrorObservationClass) -> Model
         ModelErrorObservationClass::ContextOverflow => ModelErrorClass::ContextOverflow,
         ModelErrorObservationClass::InvalidOutput => ModelErrorClass::InvalidOutput,
         ModelErrorObservationClass::ContentFiltered => ModelErrorClass::ContentFiltered,
+        ModelErrorObservationClass::Transient => ModelErrorClass::Transient,
+        ModelErrorObservationClass::Unavailable => ModelErrorClass::Unavailable,
+        ModelErrorObservationClass::Internal => ModelErrorClass::Internal,
+        ModelErrorObservationClass::StaleRequest => ModelErrorClass::StaleRequest,
+        ModelErrorObservationClass::OutputTruncated => ModelErrorClass::OutputTruncated,
     }
 }
 
@@ -596,6 +658,7 @@ fn model_retry_attempt_class(class: ModelErrorClass) -> Option<RecoveryAttemptCl
         ModelErrorClass::Internal => Some(RecoveryAttemptClass::ModelInternal),
         ModelErrorClass::StaleRequest => Some(RecoveryAttemptClass::ModelStaleRequest),
         ModelErrorClass::ContentFiltered
+        | ModelErrorClass::OutputTruncated
         | ModelErrorClass::Unauthorized
         | ModelErrorClass::CheckpointRejected
         | ModelErrorClass::TranscriptWriteFailed => None,
@@ -664,6 +727,7 @@ pub(crate) fn model_error_to_failure_kind(class: ModelErrorClass) -> LoopFailure
         ModelErrorClass::Transient
         | ModelErrorClass::ContextOverflow
         | ModelErrorClass::ContentFiltered
+        | ModelErrorClass::OutputTruncated
         | ModelErrorClass::Unavailable
         | ModelErrorClass::Internal
         | ModelErrorClass::StaleRequest
@@ -696,8 +760,7 @@ fn availability_backoff_for(attempt: u32) -> BackoffDelayMs {
     BackoffDelayMs(ms.min(BackoffDelayMs::MAX_DELAY_MS))
 }
 
-/// Strategy hint about WHAT to alter on retry. Prompt-shape alteration is
-/// supported; model-route swap is reserved for future fallback routing.
+/// Strategy hint about WHAT to alter on retry.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "alteration")]
@@ -710,10 +773,8 @@ pub(crate) enum RetryAlteration {
     /// hint. Used when the provider/model returned an empty or structurally
     /// invalid response for the active loop contract.
     RepairInvalidModelOutput,
-    /// Reserved for future `ModelRouteChain` landing. Skeleton executor MUST
-    /// reject this alteration with `LoopFailureKind::DriverBug` until the
-    /// chain mechanism lands.
-    AdvanceFallback,
+    /// Advance to the host-selected entry in the ordered fallback chain.
+    AdvanceFallback { fallback_index: u32 },
 }
 
 /// Bounded retry backoff delay in milliseconds.
@@ -736,6 +797,10 @@ impl BackoffDelayMs {
 
     pub(crate) fn as_u64(self) -> u64 {
         self.0
+    }
+
+    fn from_provider_hint(delay_ms: u64) -> Self {
+        Self(delay_ms.min(Self::MAX_DELAY_MS))
     }
 }
 
@@ -809,6 +874,8 @@ mod tests {
             (ModelErrorClass::Transient, "transient"),
             (ModelErrorClass::ContextOverflow, "context_overflow"),
             (ModelErrorClass::ContentFiltered, "content_filtered"),
+            (ModelErrorClass::InvalidOutput, "invalid_output"),
+            (ModelErrorClass::OutputTruncated, "output_truncated"),
             (ModelErrorClass::Unavailable, "unavailable"),
             (ModelErrorClass::Internal, "internal"),
             (ModelErrorClass::StaleRequest, "stale_request"),
@@ -847,6 +914,8 @@ mod tests {
         let summary = ModelErrorSummary {
             class: ModelErrorClass::ContextOverflow,
             safe_summary: SanitizedStrategySummary::new("context window exceeded").expect("valid"),
+            retry_after_ms: None,
+            next_fallback_index: None,
         };
         let value = serde_json::to_value(&summary).expect("serialize");
         assert_eq!(
@@ -916,8 +985,9 @@ mod tests {
 
     #[test]
     fn retry_alteration_advance_fallback_round_trips() {
-        let alteration = RetryAlteration::AdvanceFallback;
+        let alteration = RetryAlteration::AdvanceFallback { fallback_index: 2 };
         let value = serde_json::to_value(&alteration).expect("serialize");
+        assert_eq!(value["fallback_index"], serde_json::json!(2));
         let restored: RetryAlteration = serde_json::from_value(value).expect("deserialize");
         assert_eq!(restored, alteration);
     }
@@ -995,8 +1065,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn recovery_outcome_user_visible_terminal_round_trips_distinctly() {
+        let outcome = RecoveryOutcome::UserVisibleTerminal {
+            recovery: sample_recovery(),
+            failure_kind: LoopFailureKind::TranscriptWriteFailed,
+        };
+        let value = serde_json::to_value(&outcome).expect("serialize");
+        let restored: RecoveryOutcome = serde_json::from_value(value).expect("deserialize");
+
+        assert_eq!(restored, outcome);
+        assert!(matches!(
+            restored,
+            RecoveryOutcome::UserVisibleTerminal {
+                failure_kind: LoopFailureKind::TranscriptWriteFailed,
+                ..
+            }
+        ));
+    }
+
     mod default_recovery_strategy {
-        use ironclaw_host_api::{TenantId, ThreadId};
+        use ironclaw_host_api::ids::{TenantId, ThreadId};
         use ironclaw_turns::{
             AgentLoopDriverDescriptor, ModelInvalidOutputDetailReason, RunProfileId,
             RunProfileVersion, TurnId, TurnRunId, TurnScope,
@@ -1016,10 +1105,10 @@ mod tests {
             capability_error_to_failure_kind, capability_retry_attempt_class,
         };
         use crate::state::{
-            LoopExecutionState, ModelErrorRecoveryObservation, RecoveryAttemptClass,
-            RecoveryStrategyState,
+            LoopExecutionState, ModelErrorObservationClass, ModelErrorRecoveryObservation,
+            RecoveryAttemptClass, RecoveryStrategyState,
         };
-        use ironclaw_host_api::{FailureFate, FailureKind};
+        use ironclaw_host_api::result_meta::{FailureFate, FailureKind};
         use ironclaw_turns::LoopFailureKind;
 
         fn test_run_context() -> LoopRunContext {
@@ -1127,6 +1216,8 @@ mod tests {
             ModelErrorSummary {
                 class,
                 safe_summary: SanitizedStrategySummary::from_trusted_static("test"),
+                retry_after_ms: None,
+                next_fallback_index: (class == ModelErrorClass::Unavailable).then_some(1),
             }
         }
 
@@ -1134,7 +1225,7 @@ mod tests {
         fn default_max_attempts_is_two() {
             let strategy = DefaultRecoveryStrategy::default();
             assert_eq!(strategy.max_attempts_per_class, 2);
-            assert_eq!(strategy.max_total_model_attempts(), 41);
+            assert_eq!(strategy.max_total_model_attempts(), 45);
         }
 
         #[tokio::test]
@@ -1146,7 +1237,7 @@ mod tests {
             let state = state_with_no_attempts();
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(FailureKind::Cancelled))
+                .on_capability_error(&state, &cap_err(FailureKind::Cancelled), None)
                 .await;
 
             assert!(matches!(
@@ -1164,7 +1255,7 @@ mod tests {
             let state = state_with_no_attempts();
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(FailureKind::InputEncode))
+                .on_capability_error(&state, &cap_err(FailureKind::InputEncode), None)
                 .await;
 
             match outcome {
@@ -1185,7 +1276,7 @@ mod tests {
             let state = state_with_no_attempts();
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(FailureKind::OperationFailed))
+                .on_capability_error(&state, &cap_err(FailureKind::OperationFailed), None)
                 .await;
 
             match outcome {
@@ -1202,7 +1293,7 @@ mod tests {
             let state = state_with_no_attempts();
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(FailureKind::PolicyDenied))
+                .on_capability_error(&state, &cap_err(FailureKind::PolicyDenied), None)
                 .await;
 
             match outcome {
@@ -1222,7 +1313,7 @@ mod tests {
             let state = state_with_no_attempts();
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(FailureKind::AuthRequired))
+                .on_capability_error(&state, &cap_err(FailureKind::AuthRequired), None)
                 .await;
 
             assert!(matches!(outcome, RecoveryOutcome::ToolErrorResult { .. }));
@@ -1236,7 +1327,7 @@ mod tests {
                 let state =
                     state_with_attempts_for(attempts, RecoveryAttemptClass::CapabilityTransient);
                 let outcome = strategy
-                    .on_capability_error(&state, &cap_err(FailureKind::Transient))
+                    .on_capability_error(&state, &cap_err(FailureKind::Transient), None)
                     .await;
                 assert!(
                     matches!(
@@ -1252,7 +1343,7 @@ mod tests {
 
             let state = state_with_attempts_for(2, RecoveryAttemptClass::CapabilityTransient);
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(FailureKind::Transient))
+                .on_capability_error(&state, &cap_err(FailureKind::Transient), None)
                 .await;
             assert!(matches!(outcome, RecoveryOutcome::ToolErrorResult { .. }));
         }
@@ -1272,7 +1363,9 @@ mod tests {
                 ),
             ] {
                 let state = state_with_attempts_for(2, attempt_class);
-                let outcome = strategy.on_capability_error(&state, &cap_err(kind)).await;
+                let outcome = strategy
+                    .on_capability_error(&state, &cap_err(kind), None)
+                    .await;
                 assert!(
                     matches!(outcome, RecoveryOutcome::ToolErrorResult { .. }),
                     "{kind:?} at retry budget should become a tool error, got {outcome:?}"
@@ -1291,7 +1384,9 @@ mod tests {
             let strategy = DefaultRecoveryStrategy::default();
             for &kind in FailureKind::ALL {
                 let state = state_with_no_attempts();
-                let outcome = strategy.on_capability_error(&state, &cap_err(kind)).await;
+                let outcome = strategy
+                    .on_capability_error(&state, &cap_err(kind), None)
+                    .await;
                 match kind.fate() {
                     FailureFate::Retry => {
                         assert!(
@@ -1392,7 +1487,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn model_availability_errors_retry_well_past_the_generic_budget() {
+        async fn model_availability_errors_retry_then_observe_once_before_abort() {
             // A provider 5xx storm must not kill the run after a couple of
             // attempts: availability-class model errors get their own, much
             // deeper retry budget than the generic per-class default.
@@ -1415,16 +1510,31 @@ mod tests {
                 for attempts in 0..strategy.max_model_availability_attempts {
                     let state = state_with_attempts_for(attempts, attempt_class);
                     let outcome = strategy.on_model_error(&state, &model_err(class)).await;
-                    assert!(
-                        matches!(
-                            outcome,
-                            RecoveryOutcome::Retry {
-                                alter: Some(RetryAlteration::Backoff { .. }),
-                                ..
-                            }
+                    match class {
+                        ModelErrorClass::Unavailable => assert!(
+                            matches!(
+                                outcome,
+                                RecoveryOutcome::Retry {
+                                    alter: Some(RetryAlteration::AdvanceFallback {
+                                        fallback_index: 1
+                                    }),
+                                    ..
+                                }
+                            ),
+                            "{class:?} at attempts={attempts} should advance, got {outcome:?}"
                         ),
-                        "{class:?} at attempts={attempts} should retry, got {outcome:?}"
-                    );
+                        ModelErrorClass::Transient | ModelErrorClass::Internal => assert!(
+                            matches!(
+                                outcome,
+                                RecoveryOutcome::Retry {
+                                    alter: Some(RetryAlteration::Backoff { .. }),
+                                    ..
+                                }
+                            ),
+                            "{class:?} at attempts={attempts} should back off, got {outcome:?}"
+                        ),
+                        other => panic!("unexpected availability class {other:?}"),
+                    }
                 }
 
                 let state = state_with_attempts_for(
@@ -1432,15 +1542,129 @@ mod tests {
                     attempt_class,
                 );
                 let outcome = strategy.on_model_error(&state, &model_err(class)).await;
+                let recovery = match outcome {
+                    RecoveryOutcome::ModelErrorObservation {
+                        recovery,
+                        scope,
+                        alter,
+                        observation,
+                    } => {
+                        assert_eq!(scope, RetryScope::Call);
+                        match class {
+                            ModelErrorClass::Unavailable => {
+                                assert_eq!(
+                                    alter,
+                                    Some(RetryAlteration::AdvanceFallback { fallback_index: 1 })
+                                );
+                            }
+                            ModelErrorClass::Transient | ModelErrorClass::Internal => {
+                                assert!(matches!(alter, Some(RetryAlteration::Backoff { .. })));
+                            }
+                            other => panic!("unexpected availability class {other:?}"),
+                        }
+                        assert_eq!(
+                            observation.class(),
+                            match class {
+                                ModelErrorClass::Transient => {
+                                    ModelErrorObservationClass::Transient
+                                }
+                                ModelErrorClass::Unavailable => {
+                                    ModelErrorObservationClass::Unavailable
+                                }
+                                ModelErrorClass::Internal => ModelErrorObservationClass::Internal,
+                                other => panic!("unexpected availability class {other:?}"),
+                            }
+                        );
+                        recovery
+                    }
+                    other => panic!(
+                        "{class:?} past the availability budget should observe once, got {other:?}"
+                    ),
+                };
+                let mut observed = state_with_no_attempts();
+                observed.recovery_state = recovery;
+                let outcome = strategy.on_model_error(&observed, &model_err(class)).await;
                 assert!(
                     matches!(outcome, RecoveryOutcome::Abort { .. }),
-                    "{class:?} past the availability budget should abort, got {outcome:?}"
+                    "{class:?} after its observation attempt should abort, got {outcome:?}"
                 );
             }
         }
 
         #[tokio::test]
-        async fn model_stale_request_retries_at_iteration_scope_then_aborts_at_budget() {
+        async fn rate_limit_class_honors_provider_backoff_hint_without_advancing_fallback() {
+            let strategy = DefaultRecoveryStrategy::default();
+            let state = state_with_no_attempts();
+            let mut error = model_err(ModelErrorClass::Transient);
+            error.retry_after_ms = Some(17_000);
+
+            let outcome = strategy.on_model_error(&state, &error).await;
+            match outcome {
+                RecoveryOutcome::Retry {
+                    scope: RetryScope::Call,
+                    alter: Some(RetryAlteration::Backoff { delay_ms }),
+                    ..
+                } => assert_eq!(delay_ms.as_u64(), 17_000),
+                other => panic!("expected rate-limit backoff, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn rate_limit_class_caps_oversized_provider_backoff_hint() {
+            let strategy = DefaultRecoveryStrategy::default();
+            let state = state_with_no_attempts();
+            let mut error = model_err(ModelErrorClass::Transient);
+            error.retry_after_ms = Some(BackoffDelayMs::MAX_DELAY_MS + 1);
+
+            let outcome = strategy.on_model_error(&state, &error).await;
+            match outcome {
+                RecoveryOutcome::Retry {
+                    scope: RetryScope::Call,
+                    alter: Some(RetryAlteration::Backoff { delay_ms }),
+                    ..
+                } => assert_eq!(delay_ms.as_u64(), BackoffDelayMs::MAX_DELAY_MS),
+                other => panic!("expected bounded rate-limit backoff, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn provider_unavailable_class_advances_fallback_even_with_retry_hint() {
+            let strategy = DefaultRecoveryStrategy::default();
+            let state = state_with_no_attempts();
+            let mut error = model_err(ModelErrorClass::Unavailable);
+            error.retry_after_ms = Some(17_000);
+
+            let outcome = strategy.on_model_error(&state, &error).await;
+            assert!(matches!(
+                outcome,
+                RecoveryOutcome::Retry {
+                    scope: RetryScope::Call,
+                    alter: Some(RetryAlteration::AdvanceFallback { fallback_index: 1 }),
+                    ..
+                }
+            ));
+        }
+
+        #[tokio::test]
+        async fn provider_unavailable_without_a_proven_fallback_retries_the_same_route() {
+            let strategy = DefaultRecoveryStrategy::default();
+            let state = state_with_no_attempts();
+            let mut error = model_err(ModelErrorClass::Unavailable);
+            error.next_fallback_index = None;
+
+            let outcome = strategy.on_model_error(&state, &error).await;
+            assert!(matches!(
+                outcome,
+                RecoveryOutcome::Retry {
+                    scope: RetryScope::Call,
+                    alter: Some(RetryAlteration::Backoff { .. }),
+                    ..
+                }
+            ));
+        }
+
+        #[tokio::test]
+        async fn model_stale_request_retries_then_observes_at_iteration_scope_before_abort() {
             let strategy = DefaultRecoveryStrategy::default();
 
             let state = state_with_no_attempts();
@@ -1471,6 +1695,25 @@ mod tests {
             let outcome = strategy
                 .on_model_error(&state, &model_err(ModelErrorClass::StaleRequest))
                 .await;
+            let recovery = match outcome {
+                RecoveryOutcome::ModelErrorObservation {
+                    recovery,
+                    scope,
+                    alter,
+                    observation,
+                } => {
+                    assert_eq!(scope, RetryScope::Iteration);
+                    assert_eq!(alter, None);
+                    assert_eq!(observation, ModelErrorRecoveryObservation::stale_request());
+                    recovery
+                }
+                other => panic!("expected stale-request observation, got {other:?}"),
+            };
+            let mut observed = state_with_no_attempts();
+            observed.recovery_state = recovery;
+            let outcome = strategy
+                .on_model_error(&observed, &model_err(ModelErrorClass::StaleRequest))
+                .await;
             assert!(matches!(
                 outcome,
                 RecoveryOutcome::Abort {
@@ -1481,15 +1724,11 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn model_precise_terminal_classes_abort_immediately() {
+        async fn model_user_visible_terminal_classes_do_not_become_observations() {
             let strategy = DefaultRecoveryStrategy::default();
 
             for (class, expected_kind) in [
                 (ModelErrorClass::Unauthorized, LoopFailureKind::ModelError),
-                (
-                    ModelErrorClass::CheckpointRejected,
-                    LoopFailureKind::CheckpointRejected,
-                ),
                 (
                     ModelErrorClass::TranscriptWriteFailed,
                     LoopFailureKind::TranscriptWriteFailed,
@@ -1498,12 +1737,32 @@ mod tests {
                 let state = state_with_no_attempts();
                 let outcome = strategy.on_model_error(&state, &model_err(class)).await;
                 match outcome {
-                    RecoveryOutcome::Abort { failure_kind, .. } => {
+                    RecoveryOutcome::UserVisibleTerminal { failure_kind, .. } => {
                         assert_eq!(failure_kind, expected_kind, "failure kind for {class:?}");
                     }
-                    other => panic!("{class:?} must abort immediately, got {other:?}"),
+                    other => panic!(
+                        "{class:?} must produce only a user-visible terminal explanation, got {other:?}"
+                    ),
                 }
             }
+        }
+
+        #[tokio::test]
+        async fn checkpoint_rejected_remains_a_plain_abort() {
+            let strategy = DefaultRecoveryStrategy::default();
+            let outcome = strategy
+                .on_model_error(
+                    &state_with_no_attempts(),
+                    &model_err(ModelErrorClass::CheckpointRejected),
+                )
+                .await;
+            assert!(matches!(
+                outcome,
+                RecoveryOutcome::Abort {
+                    failure_kind: LoopFailureKind::CheckpointRejected,
+                    ..
+                }
+            ));
         }
 
         #[tokio::test]
@@ -1574,6 +1833,8 @@ mod tests {
                 safe_summary: SanitizedStrategySummary::from_trusted_static(
                     ModelInvalidOutputDetailReason::OutsideCapabilitySurface.safe_summary(),
                 ),
+                retry_after_ms: None,
+                next_fallback_index: None,
             };
 
             let outcome = strategy
@@ -1650,6 +1911,49 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn output_truncation_observes_once_without_consuming_context_retries() {
+            let strategy = DefaultRecoveryStrategy::default();
+            let state = state_with_no_attempts();
+            let outcome = strategy
+                .on_model_error(&state, &model_err(ModelErrorClass::OutputTruncated))
+                .await;
+            let recovery = match outcome {
+                RecoveryOutcome::ModelErrorObservation {
+                    recovery,
+                    scope,
+                    alter,
+                    observation,
+                } => {
+                    assert_eq!(scope, RetryScope::Call);
+                    assert_eq!(alter, None);
+                    assert!(
+                        recovery.attempts_by_class.is_empty(),
+                        "FinishReason::Length must not consume ShrinkContext attempts"
+                    );
+                    assert_eq!(
+                        observation,
+                        ModelErrorRecoveryObservation::output_truncated()
+                    );
+                    recovery
+                }
+                other => panic!("expected output-truncation observation, got {other:?}"),
+            };
+
+            let mut state = state_with_no_attempts();
+            state.recovery_state = recovery;
+            let outcome = strategy
+                .on_model_error(&state, &model_err(ModelErrorClass::OutputTruncated))
+                .await;
+            assert!(matches!(
+                outcome,
+                RecoveryOutcome::Abort {
+                    failure_kind: LoopFailureKind::ModelError,
+                    ..
+                }
+            ));
+        }
+
+        #[tokio::test]
         async fn retry_budget_tracks_each_error_class_independently() {
             let strategy = DefaultRecoveryStrategy::default();
             let mut state = state_with_attempts_for(2, RecoveryAttemptClass::CapabilityTransient);
@@ -1658,7 +1962,7 @@ mod tests {
                 .with_incremented_attempts_for(RecoveryAttemptClass::CapabilityUnavailable);
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(FailureKind::Transient))
+                .on_capability_error(&state, &cap_err(FailureKind::Transient), None)
                 .await;
 
             assert!(matches!(outcome, RecoveryOutcome::ToolErrorResult { .. }));
@@ -1670,7 +1974,7 @@ mod tests {
             let state = state_with_attempts_for(2, RecoveryAttemptClass::CapabilityTransient);
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(FailureKind::Unavailable))
+                .on_capability_error(&state, &cap_err(FailureKind::Unavailable), None)
                 .await;
 
             match outcome {
@@ -1694,7 +1998,7 @@ mod tests {
             let state = state_with_attempts_for(2, RecoveryAttemptClass::CapabilityTransient);
 
             let outcome = strategy
-                .on_capability_error(&state, &cap_err(FailureKind::PolicyDenied))
+                .on_capability_error(&state, &cap_err(FailureKind::PolicyDenied), None)
                 .await;
             let RecoveryOutcome::ToolErrorResult { recovery } = outcome else {
                 panic!("expected policy denied tool error result");

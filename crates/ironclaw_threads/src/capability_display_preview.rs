@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{CapabilityId, InvocationId};
+use ironclaw_host_api::ids::{CapabilityId, InvocationId};
 use serde::{Deserialize, Serialize};
 
 const CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES: usize = 2 * 1024;
@@ -187,7 +187,7 @@ fn validate_output_kind(value: Option<&str>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use ironclaw_host_api::{CapabilityId, InvocationId};
+    use ironclaw_host_api::ids::{CapabilityId, InvocationId};
 
     use crate::{
         CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,

@@ -3,7 +3,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
-use ironclaw_host_api::{InvocationId, ResourceScope, TenantId, ThreadId, UserId, VirtualPath};
+use ironclaw_host_api::{
+    ids::{InvocationId, TenantId, ThreadId, UserId},
+    path::VirtualPath,
+    resource::ResourceScope,
+};
 use ironclaw_memory_native::{
     MemoryBackend, MemoryBackendCapabilities, MemoryContext, MemoryDocumentPath,
     MemorySearchRequest, MemorySearchResult, MemoryServiceErrorKind, MemoryWriteOutcome,
@@ -27,7 +31,7 @@ fn invocation() -> MemoryInvocation {
             thread_id: None,
             invocation_id: InvocationId::new(),
         },
-        correlation_id: ironclaw_host_api::CorrelationId::new(),
+        correlation_id: ironclaw_host_api::ids::CorrelationId::new(),
     }
 }
 

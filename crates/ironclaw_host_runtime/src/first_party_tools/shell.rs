@@ -3,8 +3,10 @@ use ironclaw_filesystem::FilesystemError;
 use std::time::Duration;
 
 use ironclaw_host_api::{
-    EffectKind, PermissionMode, ResourceCeiling, ResourceEstimate, ResourceProfile,
-    RuntimeDispatchErrorKind, SandboxQuota, ScopedPath, VirtualPath,
+    capability::{EffectKind, PermissionMode},
+    dispatch::RuntimeDispatchErrorKind,
+    path::{ScopedPath, VirtualPath},
+    resource::{ResourceCeiling, ResourceEstimate, ResourceProfile, SandboxQuota},
 };
 use serde_json::{Value, json};
 

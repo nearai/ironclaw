@@ -26,7 +26,9 @@ jq -c -n --argjson packages "${packages_json}" '
     "events-conversations",
     "auth-security",
     "memory-skills",
-    "adapters-misc"
+    "channel-adapters",
+    "extension-operator",
+    "architecture-misc"
   ];
 
   def bucket_map:
@@ -75,7 +77,6 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_event_streams: "events-conversations",
       ironclaw_events: "events-conversations",
       ironclaw_prompt_envelope: "events-conversations",
-      ironclaw_run_state: "events-conversations",
       ironclaw_threads: "events-conversations",
       ironclaw_turns: "events-conversations",
 
@@ -95,12 +96,20 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_skill_learning: "memory-skills",
       ironclaw_skills: "memory-skills",
 
-      ironclaw_architecture: "adapters-misc",
-      ironclaw_common: "adapters-misc",
-      ironclaw_extensions: "adapters-misc",
-      ironclaw_reborn_traces: "adapters-misc",
-      ironclaw_slack_extension: "adapters-misc",
-      ironclaw_telegram_extension: "adapters-misc"
+      ironclaw_host_ingress: "channel-adapters",
+      ironclaw_slack_extension: "channel-adapters",
+      ironclaw_telegram_extension: "channel-adapters",
+      ironclaw_telegram_v2_adapter: "channel-adapters",
+
+      ironclaw_extension_host: "extension-operator",
+      ironclaw_extensions: "extension-operator",
+      ironclaw_operator: "extension-operator",
+
+      ironclaw_architecture: "architecture-misc",
+      ironclaw_common: "architecture-misc",
+      ironclaw_libsql_runtime: "architecture-misc",
+      ironclaw_reborn_traces: "architecture-misc",
+      ironclaw_triggers: "architecture-misc"
     };
 
   bucket_map as $bucket_map
@@ -110,7 +119,7 @@ jq -c -n --argjson packages "${packages_json}" '
         name: $bucket,
         packages: [
           $packages[]?
-          | select(($bucket_map[.] // "adapters-misc") == $bucket)
+          | select(($bucket_map[.] // "architecture-misc") == $bucket)
         ]
       }
     | select(.packages | length > 0)

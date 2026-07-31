@@ -14,7 +14,10 @@
 mod programmable_surface;
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -25,11 +28,22 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
-    ActivityId, AgentId, Blocked, CapabilityId, ExtensionId, GateRef, GateWaypoint, InvocationId,
-    LifecyclePublicState, Outcome, OutcomeRefs, ProductSurface, ProductSurfaceCaller,
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    ProductSurfaceValidationCode, ProjectId, Resolution, ResultPreviewMeta, ResultProgress,
-    ResultRef, RuntimeKind, SafeSummary, TenantId, TerminateHint, ThreadId, ToolVerdict, UserId,
+    ids::{
+        ActivityId, AgentId, CapabilityId, ExtensionId, GateRef, InvocationId, ProjectId,
+        ResultRef, TenantId, ThreadId, UserId,
+    },
+    product_surface::{
+        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+        ProductSurfaceErrorKind, ProductSurfaceEventSubscription, ProductSurfaceStreamResponse,
+        ProductSurfaceValidationCode,
+    },
+    resolution::{
+        Blocked, GateWaypoint, Outcome, OutcomeRefs, Resolution, ResultPreviewMeta, ToolVerdict,
+    },
+    result_meta::{ResultProgress, TerminateHint},
+    runtime::RuntimeKind,
+    safe_summary::SafeSummary,
+    state::LifecyclePublicState,
 };
 use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
@@ -88,12 +102,13 @@ use ironclaw_product::{
     RebornResumeGateResponse, RebornRetryRunResponse, RebornRunArtifact, RebornRunArtifactRequest,
     RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
-    RebornTraceHoldAuthorizeResponse, RebornViewPage, RebornViewQuery, RunArtifactLogs,
-    RunArtifactRedaction, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
-    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW,
+    RebornSubmitTurnResponse, RebornThreadArtifact, RebornThreadArtifactRequest,
+    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
+    RebornTraceHoldAuthorizeProductRequest, RebornTraceHoldAuthorizeResponse, RebornViewPage,
+    RebornViewQuery, RunArtifactLogs, RunArtifactRedaction,
+    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+    SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW,
+    SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW, THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW,
     THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
     TRACE_CREDITS_VIEW, rejecting_product_surface_error,
 };
@@ -114,7 +129,7 @@ use ironclaw_webui::webui_v2::{
 };
 use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 use tower::ServiceExt;
 
 use programmable_surface::ProgrammableProductSurface;
@@ -273,6 +288,15 @@ fn caller_for_user(user_id: &str) -> ProductSurfaceCaller {
 
 fn router_with(services: Arc<dyn ProductSurface>) -> Router {
     router_with_caller(services, WebUiV2Capabilities::default(), caller())
+}
+
+fn artifact_router_with(services: Arc<dyn ProductSurface>) -> Router {
+    webui_v2_router(
+        WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_regression_artifact_export_enabled(true),
+    )
+    .layer(axum::Extension(caller()))
+    .layer(axum::Extension(WebUiV2Capabilities::default()))
 }
 
 fn router_with_caller(
@@ -462,6 +486,9 @@ struct StubServices {
     read_attachment_calls: Mutex<Vec<RebornAttachmentRequest>>,
     read_attachment_response: Mutex<Option<RebornAttachmentBytes>>,
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
+    subscribe_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
+    event_subscription_enabled: AtomicBool,
+    hold_event_subscription_open: AtomicBool,
     cancel_run_calls: Mutex<Vec<ProductCancelRunRequest>>,
     resolve_gate_calls: Mutex<Vec<ProductResolveGateRequest>>,
     retry_run_calls: Mutex<Vec<ProductRetryRunRequest>>,
@@ -562,6 +589,16 @@ impl StubServices {
             .push_back(response);
     }
 
+    fn enable_event_subscription(&self) {
+        self.event_subscription_enabled
+            .store(true, Ordering::Release);
+    }
+
+    fn hold_event_subscription_open(&self) {
+        self.hold_event_subscription_open
+            .store(true, Ordering::Release);
+    }
+
     /// Triggered the first time `stream_events` is invoked. Lets the SSE
     /// test wait on the actual service call rather than guessing at a
     /// timeout — axum's SSE body is lazy, so the handler does not run
@@ -609,7 +646,7 @@ impl StubServices {
         }
         Ok(RebornCreateThreadResponse {
             thread: SessionThreadRecord {
-                thread_id: ironclaw_host_api::ThreadId::new("thread:fake").expect("thread id"),
+                thread_id: ironclaw_host_api::ids::ThreadId::new("thread:fake").expect("thread id"),
                 scope: ironclaw_threads::ThreadScope {
                     tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
                     agent_id: AgentId::new("agent-alpha").expect("agent"),
@@ -643,7 +680,7 @@ impl StubServices {
             return Ok(next);
         }
         Ok(RebornSubmitTurnResponse::Submitted {
-            thread_id: ironclaw_host_api::ThreadId::new(
+            thread_id: ironclaw_host_api::ids::ThreadId::new(
                 request.thread_id.clone().unwrap_or_default(),
             )
             .expect("thread id"),
@@ -668,7 +705,7 @@ impl StubServices {
             .push(request.clone());
         Ok(RebornTimelineResponse {
             thread: SessionThreadRecord {
-                thread_id: ironclaw_host_api::ThreadId::new(request.thread_id.clone())
+                thread_id: ironclaw_host_api::ids::ThreadId::new(request.thread_id.clone())
                     .expect("thread id"),
                 scope: ironclaw_threads::ThreadScope {
                     tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
@@ -1258,6 +1295,32 @@ impl StubServices {
                 .expect("project members payload"),
                 next_cursor: None,
             }),
+            id if id == THREAD_ARTIFACT_VIEW.id => {
+                let request: RebornThreadArtifactRequest =
+                    serde_json::from_value(query.params).expect("thread artifact params");
+                let artifact = RebornThreadArtifact {
+                    schema: THREAD_ARTIFACT_SCHEMA.to_string(),
+                    generated_at: Utc::now(),
+                    thread_id: request.thread_id,
+                    messages: Vec::new(),
+                    logs: RunArtifactLogs {
+                        source: "test".to_string(),
+                        available: true,
+                        complete: false,
+                        truncated: false,
+                        unavailable_reason: None,
+                        entries: Vec::new(),
+                    },
+                    redaction: RunArtifactRedaction {
+                        pipeline: "deterministic-trace-redactor-v1".to_string(),
+                        applied: false,
+                    },
+                };
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(artifact).expect("thread artifact payload"),
+                    next_cursor: None,
+                })
+            }
             _ => Err(rejecting_product_surface_error()),
         }
     }
@@ -1678,8 +1741,9 @@ impl ProductSurface for StubServices {
     async fn invoke(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
+    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse, ProductSurfaceError>
+    {
         if let Some(call_id) = ProductSurfaceCallId::parse(request.operation_id.as_str()) {
             let output = self
                 .record_product_surface_call(
@@ -1688,7 +1752,7 @@ impl ProductSurface for StubServices {
                 )
                 .await?
                 .into_value()?;
-            return Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output });
+            return Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output });
         }
 
         let output = StubServices::invoke(
@@ -1700,14 +1764,15 @@ impl ProductSurface for StubServices {
         )
         .await?;
         let output = serde_json::to_value(output).map_err(ProductSurfaceError::internal_from)?;
-        Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
+        Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
     }
 
     async fn query(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+    {
         let page = StubServices::query(
             self,
             caller,
@@ -1718,17 +1783,20 @@ impl ProductSurface for StubServices {
             },
         )
         .await?;
-        Ok(ironclaw_host_api::ProductSurfaceQueryPage {
-            items: vec![page.payload],
-            next_cursor: page.next_cursor,
-        })
+        Ok(
+            ironclaw_host_api::product_surface::ProductSurfaceQueryPage {
+                items: vec![page.payload],
+                next_cursor: page.next_cursor,
+            },
+        )
     }
 
     async fn stream_events(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceStreamRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+        request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
+    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceStreamResponse, ProductSurfaceError>
+    {
         let thread_id = request.stream_id.ok_or_else(|| {
             ProductSurfaceError::validation("stream_id", ProductSurfaceValidationCode::MissingField)
         })?;
@@ -1737,25 +1805,64 @@ impl ProductSurface for StubServices {
             .map(ProjectionCursor::new)
             .transpose()
             .map_err(ProductSurfaceError::internal_from)?;
-        let response = StubServices::stream_events(
-            self,
-            caller,
-            RebornStreamEventsRequest {
-                thread_id,
-                after_cursor,
-            },
-        )
-        .await?;
+        let stream_request = RebornStreamEventsRequest {
+            thread_id,
+            after_cursor,
+        };
+        let response = StubServices::stream_events(self, caller, stream_request.clone()).await?;
         let events = response
             .events
             .into_iter()
             .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()
             .map_err(ProductSurfaceError::internal_from)?;
-        Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
-            events,
-            next_cursor: None,
-        })
+        let subscription = if self.event_subscription_enabled.load(Ordering::Acquire) {
+            self.subscribe_events_calls
+                .lock()
+                .expect("lock")
+                .push(stream_request);
+            let responses = self
+                .next_stream_events
+                .lock()
+                .expect("lock")
+                .drain(..)
+                .collect::<Vec<_>>();
+            let hold_open = self.hold_event_subscription_open.load(Ordering::Acquire);
+            let (sender, receiver) = mpsc::channel(1);
+            tokio::spawn(async move {
+                for response in responses {
+                    let response = response.and_then(|response| {
+                        let events = response
+                            .events
+                            .into_iter()
+                            .map(serde_json::to_value)
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(ProductSurfaceError::internal_from)?;
+                        Ok(ProductSurfaceStreamResponse {
+                            events,
+                            next_cursor: None,
+                            subscription: None,
+                        })
+                    });
+                    if sender.send(response).await.is_err() {
+                        return;
+                    }
+                }
+                if hold_open {
+                    std::future::pending::<()>().await;
+                }
+            });
+            Some(ProductSurfaceEventSubscription::new(receiver))
+        } else {
+            None
+        };
+        Ok(
+            ironclaw_host_api::product_surface::ProductSurfaceStreamResponse {
+                events,
+                next_cursor: None,
+                subscription,
+            },
+        )
     }
 }
 
@@ -2216,7 +2323,7 @@ async fn get_timeline_threads_path_into_request() {
 #[tokio::test]
 async fn get_run_artifact_threads_path_and_run_path_into_request() {
     let services = Arc::new(StubServices::default());
-    let router = router_with(services.clone());
+    let router = artifact_router_with(services.clone());
     let run_id = "3d54a1f0-0a7f-4b9c-a350-4258f2fa3e18";
 
     let response = router
@@ -2245,6 +2352,65 @@ async fn get_run_artifact_threads_path_and_run_path_into_request() {
         serde_json::from_value(queries[0].params.clone()).expect("artifact params");
     assert_eq!(request.thread_id, "thread-x");
     assert_eq!(request.run_id, run_id);
+}
+
+#[tokio::test]
+async fn get_thread_artifact_threads_path_into_request() {
+    let services = Arc::new(StubServices::default());
+    let router = artifact_router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/artifact")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let payload: Value = serde_json::from_slice(&body).expect("artifact json");
+    assert_eq!(payload["schema"], THREAD_ARTIFACT_SCHEMA);
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id, THREAD_ARTIFACT_VIEW.id);
+    let request: RebornThreadArtifactRequest =
+        serde_json::from_value(queries[0].params.clone()).expect("artifact params");
+    assert_eq!(request.thread_id, "thread-x");
+}
+
+#[tokio::test]
+async fn regression_artifact_routes_are_unmounted_by_default() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    for path in [
+        "/api/webchat/v2/threads/thread-x/runs/run-x/artifact",
+        "/api/webchat/v2/threads/thread-x/artifact",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "path={path}");
+    }
+
+    assert!(
+        services.view_queries.lock().expect("lock").is_empty(),
+        "a disabled artifact route must not invoke the product surface"
+    );
 }
 
 // The attachment-bytes route carries three path segments and returns raw
@@ -3639,14 +3805,14 @@ async fn get_session_returns_caller_identity_and_capabilities() {
         !accept.iter().any(|t| t.contains('*')),
         "accept must not advertise wildcards: {accept:?}"
     );
-    assert_eq!(body["attachments"]["max_count"], expected.max_count);
+    assert_eq!(body["attachments"]["max_count"], expected.budgets.max_count);
     assert_eq!(
         body["attachments"]["max_file_bytes"],
-        expected.max_file_bytes
+        expected.budgets.max_file_bytes
     );
     assert_eq!(
         body["attachments"]["max_total_bytes"],
-        expected.max_total_bytes
+        expected.budgets.max_total_bytes
     );
 }
 
@@ -3706,6 +3872,37 @@ async fn get_session_reports_reborn_projects_feature_from_state_flag() {
         assert_eq!(
             body["features"]["reborn_projects"], enabled,
             "features.reborn_projects must mirror the state flag (enabled={enabled})"
+        );
+    }
+}
+
+#[tokio::test]
+async fn get_session_reports_regression_artifact_export_feature_from_state_flag() {
+    for enabled in [false, true] {
+        let services = Arc::new(StubServices::default());
+        let router = webui_v2_router(
+            WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+                .with_regression_artifact_export_enabled(enabled),
+        )
+        .layer(axum::Extension(caller()))
+        .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/webchat/v2/session")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(
+            body["features"]["regression_artifact_export"], enabled,
+            "session feature must mirror the artifact export gate"
         );
     }
 }
@@ -6660,6 +6857,85 @@ async fn stream_events_continues_immediately_after_non_empty_batch() {
         Some(&expected_cursor),
         "follow-up call must still preserve cursor ordering"
     );
+}
+
+#[tokio::test]
+async fn stream_events_forwards_one_continuous_subscription_without_poll_gaps() {
+    let services = Arc::new(StubServices::default());
+    services.enable_event_subscription();
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
+        events: vec![make_projection_update_envelope("cursor:sub-a")],
+    }));
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
+        events: vec![make_projection_update_envelope("cursor:sub-b")],
+    }));
+
+    let response = router_with(services.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let mut body = response.into_body();
+    let bytes = collect_sse_until(&mut body, Duration::from_millis(250), |buf| {
+        parse_sse_events(buf).len() >= 2
+    })
+    .await;
+    drop(body);
+
+    assert_eq!(
+        parse_sse_events(&bytes).len(),
+        2,
+        "both back-to-back subscription events must reach one SSE connection"
+    );
+    assert_eq!(
+        services.subscribe_events_calls.lock().expect("lock").len(),
+        1,
+        "the SSE connection must open exactly one product subscription"
+    );
+    assert_eq!(
+        services.stream_events_calls.lock().expect("lock").len(),
+        1,
+        "the SSE connection must enter the product stream method only once"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn stream_events_emits_application_keep_alive_while_subscription_is_idle() {
+    let services = Arc::new(StubServices::default());
+    services.enable_event_subscription();
+    services.hold_event_subscription_open();
+
+    let response = router_with(services)
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let mut body = response.into_body();
+    let body_task = tokio::spawn(async move {
+        collect_sse_until(&mut body, Duration::from_secs(30), |buffer| {
+            String::from_utf8_lossy(buffer).contains("event: keep_alive")
+        })
+        .await
+    });
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(15)).await;
+    tokio::task::yield_now().await;
+
+    let bytes = body_task.await.expect("SSE body task");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("event: keep_alive"), "{text}");
+    assert!(text.contains(r#"data: {"type":"keep_alive"}"#), "{text}");
 }
 
 // Pins the *wire* contract the browser sees, not just the handler being

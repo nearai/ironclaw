@@ -6,6 +6,7 @@
 //! Tool/capability calls are rejected until a tool-capable loop driver exists.
 
 use async_trait::async_trait;
+use ironclaw_agent_loop::executor::HostStage;
 use ironclaw_turns::{
     LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopFailureKind, LoopMessageRef,
     RunProfileVersion,
@@ -17,11 +18,9 @@ use ironclaw_turns::{
     },
 };
 
-use crate::model_failure_mapping::model_stage_failure_category;
+use crate::model_failure_mapping::host_stage_failure_category;
 
 pub(crate) const TEXT_ONLY_DRIVER_ID: &str = "reborn:text-only-model-reply";
-/// Stage name for the model call site; matches the string used in `map_host_error` call sites.
-const STAGE_MODEL: &str = "model";
 pub(crate) const TEXT_ONLY_DRIVER_VERSION: u64 = 1;
 const DEFAULT_CONTEXT_LIMIT: usize = 16;
 
@@ -77,7 +76,7 @@ impl AgentLoopDriver for TextOnlyModelReplyDriver {
                 capability_view: None,
             })
             .await
-            .map_err(|error| map_host_error("prompt", error))?;
+            .map_err(|error| map_host_error(HostStage::Prompt, error))?;
 
         let model_response = host
             .stream_model(LoopModelRequest {
@@ -85,10 +84,11 @@ impl AgentLoopDriver for TextOnlyModelReplyDriver {
                 messages: prompt_bundle.messages,
                 surface_version: prompt_bundle.surface_version,
                 model_preference: None,
+                fallback_index: 0,
                 capability_view: None,
             })
             .await
-            .map_err(|error| map_host_error(STAGE_MODEL, error))?;
+            .map_err(|error| map_host_error(HostStage::Model, error))?;
 
         let reply = match model_response.output {
             ParentLoopOutput::AssistantReply(reply) => reply,
@@ -104,7 +104,7 @@ impl AgentLoopDriver for TextOnlyModelReplyDriver {
         let reply_ref = host
             .finalize_assistant_message(FinalizeAssistantMessage { reply })
             .await
-            .map_err(|error| map_host_error("transcript", error))?;
+            .map_err(|error| map_host_error(HostStage::Transcript, error))?;
 
         Ok(LoopExit::Completed(completed_final_reply(
             request.run_id,
@@ -172,24 +172,30 @@ fn context_limit_hint(context_limit: usize) -> u32 {
     u32::try_from(context_limit.max(1)).unwrap_or(u32::MAX)
 }
 
-fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDriverError {
+fn map_host_error(stage: HostStage, error: AgentLoopHostError) -> AgentLoopDriverError {
+    let error = error.sanitize_transcript_write_failure();
+    let stage_name = host_stage_name(stage);
     tracing::warn!(
-        stage,
+        stage = stage_name,
         kind = ?error.kind,
         reason_kind = ?error.reason_kind,
         safe_summary = %error.safe_summary,
         "loop host port returned sanitized error"
     );
 
-    if let Some(category) =
-        model_stage_failure_category(stage == STAGE_MODEL, error.kind, error.reason_kind)
-    {
-        // Carry the secret-scrubbed model-visible detail (falling back to the
-        // bounded safe summary) so the failure explainer gets the real cause.
-        let detail = error
-            .detail
-            .clone()
-            .or_else(|| Some(error.safe_summary.clone()));
+    if let Some(category) = host_stage_failure_category(stage, error.kind, error.reason_kind) {
+        let detail = if stage == HostStage::Transcript
+            && error.kind == AgentLoopHostErrorKind::TranscriptWriteFailed
+        {
+            Some(error.safe_summary.clone())
+        } else {
+            // Model-stage details are already secret-scrubbed. Preserve the
+            // bounded safe summary when no more specific diagnostic exists.
+            error
+                .detail
+                .clone()
+                .or_else(|| Some(error.safe_summary.clone()))
+        };
         return AgentLoopDriverError::Failed {
             reason_kind: category.to_string(),
             detail,
@@ -200,25 +206,28 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
         AgentLoopHostErrorKind::InvalidInvocation
         | AgentLoopHostErrorKind::Invalid
         | AgentLoopHostErrorKind::ScopeMismatch => AgentLoopDriverError::InvalidRequest {
-            reason: format!("{stage}: {}", error.kind.as_str()),
+            reason: format!("{stage_name}: {}", error.kind.as_str()),
         },
-        AgentLoopHostErrorKind::Unavailable | AgentLoopHostErrorKind::Cancelled => {
-            AgentLoopDriverError::Unavailable {
-                reason: format!("{stage}: {}", error.kind.as_str()),
-            }
-        }
+        AgentLoopHostErrorKind::RateLimited
+        | AgentLoopHostErrorKind::Unavailable
+        | AgentLoopHostErrorKind::Cancelled => AgentLoopDriverError::Unavailable {
+            reason: format!("{stage_name}: {}", error.kind.as_str()),
+        },
         AgentLoopHostErrorKind::InvalidOutput => AgentLoopDriverError::Failed {
             reason_kind: loop_failure_kind_name(LoopFailureKind::InvalidModelOutput).to_string(),
             detail: error.detail.clone(),
         },
         AgentLoopHostErrorKind::Internal => AgentLoopDriverError::Unavailable {
-            reason: format!("{stage}: unavailable"),
+            reason: format!("{stage_name}: unavailable"),
         },
         AgentLoopHostErrorKind::TranscriptWriteFailed => AgentLoopDriverError::Failed {
-            reason_kind: loop_failure_kind_name(LoopFailureKind::TranscriptWriteFailed).to_string(),
-            detail: error.detail.clone(),
+            reason_kind: loop_failure_kind_name(LoopFailureKind::DriverBug).to_string(),
+            detail: None,
         },
         AgentLoopHostErrorKind::BudgetExceeded
+        | AgentLoopHostErrorKind::SpendBudgetExceeded
+        | AgentLoopHostErrorKind::ContextOverflow
+        | AgentLoopHostErrorKind::OutputTruncated
         | AgentLoopHostErrorKind::BudgetApprovalRequired
         | AgentLoopHostErrorKind::BudgetAccountingFailed
         | AgentLoopHostErrorKind::ContentFiltered
@@ -240,6 +249,17 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
                 detail: error.detail.clone(),
             }
         }
+    }
+}
+
+fn host_stage_name(stage: HostStage) -> &'static str {
+    match stage {
+        HostStage::Prompt => "prompt",
+        HostStage::Model => "model",
+        HostStage::Capability => "capability",
+        HostStage::Transcript => "transcript",
+        HostStage::Checkpoint => "checkpoint",
+        HostStage::Input => "input",
     }
 }
 
@@ -268,13 +288,27 @@ mod tests {
     use super::*;
     use crate::failure_categories::{
         MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
-        MODEL_CREDITS_EXHAUSTED_REASON_KIND,
+        MODEL_CREDITS_EXHAUSTED_REASON_KIND, TRANSCRIPT_WRITE_FAILED_CATEGORY,
     };
+    use ironclaw_agent_loop::test_support::{
+        MockAgentLoopDriverHost, MockHostCall, test_run_context,
+    };
+
+    fn text_only_context(
+        driver: &TextOnlyModelReplyDriver,
+    ) -> ironclaw_turns::run_profile::LoopRunContext {
+        let descriptor = driver.descriptor();
+        let mut context = test_run_context("text-only-transcript-failure");
+        context.resolved_run_profile.loop_driver = descriptor.clone();
+        context.loop_driver_id = descriptor.id;
+        context.loop_driver_version = descriptor.version;
+        context
+    }
 
     #[test]
     fn host_internal_errors_map_to_sanitized_unavailable() {
         let mapped = map_host_error(
-            "model",
+            HostStage::Model,
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Internal,
                 "RAW_PROVIDER_ERROR invalid api key sk-provider-secret /host/path tool_input",
@@ -291,9 +325,95 @@ mod tests {
     }
 
     #[test]
+    #[tracing_test::traced_test]
+    fn transcript_failure_drops_port_detail_and_uses_fixed_safe_cause() {
+        const RAW_TRANSCRIPT: &str = "raw assistant transcript";
+        const STORAGE_SECRET: &str = "sk-TRANSCRIPT0123456789SECRET";
+        let mapped = map_host_error(
+            HostStage::Transcript,
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::TranscriptWriteFailed,
+                RAW_TRANSCRIPT,
+            )
+            .with_detail(format!("storage token {STORAGE_SECRET}")),
+        );
+
+        assert_eq!(
+            mapped,
+            AgentLoopDriverError::Failed {
+                reason_kind: TRANSCRIPT_WRITE_FAILED_CATEGORY.to_string(),
+                detail: Some("assistant transcript write failed".to_string()),
+            }
+        );
+        logs_assert(|lines: &[&str]| {
+            let transcript_warning = lines.iter().find(|line| {
+                line.contains("loop host port returned sanitized error")
+                    && line.contains("stage=\"transcript\"")
+            });
+            let Some(transcript_warning) = transcript_warning else {
+                return Err(format!(
+                    "missing transcript warning; captured lines={lines:?}"
+                ));
+            };
+            if !transcript_warning.contains("assistant transcript write failed") {
+                return Err(format!(
+                    "transcript warning omitted the fixed safe cause: {transcript_warning:?}"
+                ));
+            }
+            for forbidden in [RAW_TRANSCRIPT, STORAGE_SECRET] {
+                if transcript_warning.contains(forbidden) {
+                    return Err(format!(
+                        "transcript warning leaked {forbidden:?}: {transcript_warning:?}"
+                    ));
+                }
+            }
+            Ok(())
+        });
+    }
+
+    #[tokio::test]
+    async fn text_only_driver_preserves_terminal_transcript_failure_category() {
+        let driver = TextOnlyModelReplyDriver::default();
+        let context = text_only_context(&driver);
+        let (host, _) = MockAgentLoopDriverHost::builder()
+            .run_context(context.clone())
+            .fail_transcript_with(AgentLoopHostErrorKind::TranscriptWriteFailed)
+            .build();
+
+        let error = driver
+            .run(
+                AgentLoopDriverRunRequest {
+                    turn_id: context.turn_id,
+                    run_id: context.run_id,
+                    resolved_run_profile: context.resolved_run_profile,
+                },
+                &host,
+            )
+            .await
+            .expect_err("transcript persistence failure must terminate the text-only driver");
+
+        assert_eq!(
+            error,
+            AgentLoopDriverError::Failed {
+                reason_kind: TRANSCRIPT_WRITE_FAILED_CATEGORY.to_string(),
+                detail: Some("assistant transcript write failed".to_string()),
+            }
+        );
+        assert_eq!(host.model_call_count(), 1);
+        assert!(host.finalized_assistant_messages().is_empty());
+        assert_eq!(
+            host.call_log()
+                .iter()
+                .filter(|call| matches!(call, MockHostCall::FinalizeAssistantMessage))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn model_credit_exhaustion_maps_to_sanitized_failure_category() {
         let mapped = map_host_error(
-            "model",
+            HostStage::Model,
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::CredentialUnavailable,
                 "safe summary wording is display-only",
@@ -313,7 +433,7 @@ mod tests {
     #[test]
     fn model_credential_unavailable_maps_to_sanitized_failure_category() {
         let mapped = map_host_error(
-            "model",
+            HostStage::Model,
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::CredentialUnavailable,
                 "model credentials are unavailable",
@@ -332,7 +452,7 @@ mod tests {
     #[test]
     fn model_budget_accounting_failure_preserves_distinct_failure_category() {
         let mapped = map_host_error(
-            "model",
+            HostStage::Model,
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::BudgetAccountingFailed,
                 "resource accounting storage is unavailable",
@@ -352,7 +472,7 @@ mod tests {
     fn non_model_stage_with_credit_reason_does_not_map_to_credits_category() {
         const CREDIT_SUMMARY: &str = "model provider account is out of credits";
         let mapped = map_host_error(
-            "prompt",
+            HostStage::Prompt,
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::CredentialUnavailable,
                 CREDIT_SUMMARY,
@@ -409,7 +529,7 @@ mod tests {
 
         for (kind, expected_category) in cases {
             let mapped = map_host_error(
-                "model",
+                HostStage::Model,
                 AgentLoopHostError::new(kind, "model stage rejected the request"),
             );
 
@@ -431,7 +551,7 @@ mod tests {
     #[test]
     fn non_model_stage_with_credential_unavailable_maps_to_model_error() {
         let mapped = map_host_error(
-            "prompt",
+            HostStage::Prompt,
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::CredentialUnavailable,
                 "model credentials are unavailable",

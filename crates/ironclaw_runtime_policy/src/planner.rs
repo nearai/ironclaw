@@ -6,7 +6,7 @@
 //! host runtime carries through dispatch. Examples:
 //!
 //! ```text
-//! LocalDev + filesystem.read   -> HostWorkspace read under selected root
+//! LocalHost + filesystem.read   -> HostWorkspace read under selected root
 //! HostedDev + shell.run        -> tenant-sandbox process, never provider-host
 //! EnterpriseDev + process.run  -> org-dedicated runner if org policy permits
 //! Experiment + package install -> disposable SmolVm/Docker workspace
@@ -54,7 +54,11 @@ use ironclaw_host_api::runtime_policy::{
     DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, ProcessBackendKind,
     RuntimeProfile, SecretMode,
 };
-use ironclaw_host_api::{CapabilityDescriptor, CapabilityId, EffectKind, RuntimeKind};
+use ironclaw_host_api::{
+    capability::{CapabilityDescriptor, EffectKind},
+    ids::CapabilityId,
+    runtime::RuntimeKind,
+};
 use thiserror::Error;
 
 /// Concrete plan derived from an `EffectiveRuntimePolicy` for a single
@@ -177,7 +181,11 @@ mod tests {
     use ironclaw_host_api::runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, RuntimeProfile,
     };
-    use ironclaw_host_api::{ExtensionId, PermissionMode, RuntimeKind, TrustClass};
+    use ironclaw_host_api::{
+        capability::PermissionMode,
+        ids::ExtensionId,
+        runtime::{RuntimeKind, TrustClass},
+    };
 
     fn descriptor(effects: Vec<EffectKind>) -> CapabilityDescriptor {
         descriptor_with_runtime(RuntimeKind::Script, effects)
@@ -212,8 +220,8 @@ mod tests {
     ) -> EffectiveRuntimePolicy {
         EffectiveRuntimePolicy {
             deployment: DeploymentMode::LocalSingleUser,
-            requested_profile: RuntimeProfile::LocalDev,
-            resolved_profile: RuntimeProfile::LocalDev,
+            requested_profile: RuntimeProfile::LocalHost,
+            resolved_profile: RuntimeProfile::LocalHost,
             filesystem_backend: filesystem,
             process_backend: process,
             network_mode: network,
@@ -224,8 +232,8 @@ mod tests {
     }
 
     #[test]
-    fn plans_local_dev_filesystem_read_against_host_workspace() {
-        // Issue example: `LocalDev + filesystem.read -> HostWorkspace
+    fn plans_standalone_filesystem_read_against_host_workspace() {
+        // Issue example: `LocalHost + filesystem.read -> HostWorkspace
         // read under selected root`. The planner forwards the
         // resolved filesystem backend; downstream composition picks
         // the actual root.

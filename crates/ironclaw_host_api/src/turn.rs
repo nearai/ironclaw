@@ -7,7 +7,10 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{AgentId, ProjectId, ResourceScope, SYSTEM_RESERVED_ID, TenantId, ThreadId, UserId};
+use crate::{
+    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+    resource::{ResourceScope, SYSTEM_RESERVED_ID},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -124,6 +127,10 @@ impl TurnCheckpointId {
         Self(Uuid::new_v4())
     }
 
+    pub fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
     pub fn as_uuid(&self) -> Uuid {
         self.0
     }
@@ -143,6 +150,14 @@ impl TurnLeaseToken {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
+
+    pub fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
 }
 
 impl Default for TurnLeaseToken {
@@ -158,6 +173,14 @@ pub struct TurnRunnerId(Uuid);
 impl TurnRunnerId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    pub fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
     }
 }
 

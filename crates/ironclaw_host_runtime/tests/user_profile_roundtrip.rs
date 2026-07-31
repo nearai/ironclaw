@@ -25,15 +25,25 @@ use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
-    AgentId, CapabilityGrantId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId,
-    GrantConstraints, MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy,
-    PackageId, Principal, ProjectId, ResourceEstimate, RunId, RuntimeHttpEgress,
-    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
-    TenantId, ThreadId, TrustClass, UserId, VirtualPath,
+    action::NetworkPolicy,
+    capability::{CapabilitySet, EffectKind, GrantConstraints},
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
+    ids::{
+        AgentId, CapabilityGrantId, ExtensionId, PackageId, ProjectId, RunId, TenantId, ThreadId,
+        UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceEstimate,
+    runtime::{RuntimeKind, TrustClass},
     runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
     },
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, MemoryBackedUserProfileSource,
@@ -70,11 +80,11 @@ impl RuntimeHttpEgress for NoopRuntimeHttpEgress {
 
 // ── Shared test helpers ──
 
-fn local_dev_policy() -> EffectiveRuntimePolicy {
+fn local_host_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend: ProcessBackendKind::LocalHost,
         network_mode: NetworkMode::DirectLogged,
@@ -134,10 +144,10 @@ fn memory_mounts() -> MountView {
 fn dispatch_grant_with_mounts(
     capability: &str,
     mounts: MountView,
-) -> ironclaw_host_api::CapabilityGrant {
-    ironclaw_host_api::CapabilityGrant {
+) -> ironclaw_host_api::capability::CapabilityGrant {
+    ironclaw_host_api::capability::CapabilityGrant {
         id: CapabilityGrantId::new(),
-        capability: ironclaw_host_api::CapabilityId::new(capability).unwrap(),
+        capability: ironclaw_host_api::ids::CapabilityId::new(capability).unwrap(),
         grantee: Principal::Extension(ExtensionId::new("caller").unwrap()),
         issued_by: Principal::HostRuntime,
         constraints: GrantConstraints {
@@ -256,7 +266,7 @@ fn build_runtime(shared_fs: Arc<InMemoryBackend>) -> impl HostRuntime {
     }))
     .with_runtime_http_egress(Arc::new(NoopRuntimeHttpEgress))
     .with_audit_sink(Arc::new(InMemoryAuditSink::new()))
-    .with_runtime_policy(local_dev_policy())
+    .with_runtime_policy(local_host_policy())
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
@@ -299,7 +309,7 @@ async fn profile_set_then_runtime_context_renders_local_time_and_profile_line() 
     let outcome = runtime
         .invoke_capability((
             context,
-            ironclaw_host_api::CapabilityId::new(PROFILE_SET_CAPABILITY_ID).unwrap(),
+            ironclaw_host_api::ids::CapabilityId::new(PROFILE_SET_CAPABILITY_ID).unwrap(),
             ResourceEstimate::default(),
             json!({"timezone": "Asia/Tokyo", "locale": "ja-JP", "location": "Tokyo, Japan"}),
         ))
@@ -419,7 +429,7 @@ async fn profile_set_for_one_user_is_not_visible_to_another() {
     let outcome = runtime
         .invoke_capability((
             context_a,
-            ironclaw_host_api::CapabilityId::new(PROFILE_SET_CAPABILITY_ID).unwrap(),
+            ironclaw_host_api::ids::CapabilityId::new(PROFILE_SET_CAPABILITY_ID).unwrap(),
             ResourceEstimate::default(),
             json!({"timezone": "America/New_York", "locale": "en-US"}),
         ))

@@ -19,8 +19,13 @@ use std::sync::Arc;
 
 use ironclaw_extensions::ExtensionPackage;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, DispatchError, RuntimeKind, RuntimeLane, ToolAdapter,
-    ToolCall, ToolError, ToolPorts, ToolResult, runtime_policy::EffectiveRuntimePolicy,
+    capability::CapabilityDescriptor,
+    dispatch::DispatchError,
+    ids::CapabilityId,
+    lane::RuntimeLane,
+    runtime::RuntimeKind,
+    runtime_policy::EffectiveRuntimePolicy,
+    tool_adapter::{ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult},
 };
 use ironclaw_resources::ResourceGovernor;
 
@@ -137,7 +142,7 @@ where
     ) -> Result<ToolResult, ToolError> {
         let Some(descriptor) = self.descriptors.get(&call.capability_id) else {
             return Err(ToolError::Failed {
-                kind: ironclaw_host_api::RuntimeDispatchErrorKind::UndeclaredCapability,
+                kind: ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::UndeclaredCapability,
                 safe_summary: None,
                 model_visible_cause: None,
             });
@@ -218,9 +223,115 @@ fn tool_error_from_dispatch(error: DispatchError) -> ToolError {
             model_visible_cause: None,
         },
         other => ToolError::Failed {
-            kind: ironclaw_host_api::RuntimeDispatchErrorKind::Client,
+            kind: ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::Client,
             safe_summary: Some(other.event_kind().replace('_', " ")),
             model_visible_cause: None,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use ironclaw_extensions::{ExtensionManifest, ManifestSource};
+    use ironclaw_filesystem::DiskFilesystem;
+    use ironclaw_host_api::host_port::HostPortCatalog;
+    use ironclaw_host_api::runtime_policy::{
+        ApprovalPolicy, AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode,
+        ProcessBackendKind, RuntimeProfile, SecretMode,
+    };
+    use ironclaw_resources::InMemoryResourceGovernor;
+
+    use super::*;
+
+    const TEST_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
+id = "test-lane-binder"
+name = "Test Lane Binder"
+version = "0.1.0"
+description = "lane binder root test extension"
+trust = "untrusted"
+
+[runtime]
+kind = "wasm"
+module = "test.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "test-lane-binder.run"
+description = "Run test"
+effects = ["network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/test-lane-binder/run.input.v1.json"
+output_schema_ref = "schemas/test-lane-binder/run.output.v1.json"
+prompt_doc_ref = "prompts/test-lane-binder/run.md"
+"#;
+
+    fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+        let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+        contracts
+            .register(Arc::new(
+                ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                    .expect("capability provider contract"),
+            ))
+            .expect("register capability provider contract");
+        contracts
+    }
+
+    fn test_package(root: ironclaw_host_api::path::VirtualPath) -> ExtensionPackage {
+        let manifest = ExtensionManifest::parse(
+            TEST_MANIFEST,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+            &capability_provider_contracts(),
+        )
+        .expect("test manifest parses");
+        ExtensionPackage::from_manifest(manifest, root).expect("test package builds")
+    }
+
+    fn test_policy() -> EffectiveRuntimePolicy {
+        EffectiveRuntimePolicy {
+            deployment: DeploymentMode::LocalSingleUser,
+            requested_profile: RuntimeProfile::LocalHost,
+            resolved_profile: RuntimeProfile::LocalHost,
+            filesystem_backend: FilesystemBackendKind::HostWorkspace,
+            process_backend: ProcessBackendKind::LocalHost,
+            network_mode: NetworkMode::Deny,
+            secret_mode: SecretMode::ScrubbedEnv,
+            approval_policy: ApprovalPolicy::AskDestructive,
+            audit_mode: AuditMode::LocalMinimal,
+        }
+    }
+
+    /// Gap-closing unit test for the deleted cross-layer `ToolAdapter`
+    /// test-only method (`bound_package_root_for_test`, removed per the
+    /// thermo-nuclear review — a default trait method that silently returned
+    /// `None` for any implementor that forgot to override it). Proves the
+    /// lane-backed adapter holds the exact package root it was constructed
+    /// with by building the private struct directly in-crate, without
+    /// growing any production-facing test seam.
+    #[test]
+    fn lane_backed_tool_adapter_holds_the_root_it_was_built_with() {
+        let root = ironclaw_host_api::path::VirtualPath::new("/system/extensions/test-lane-binder")
+            .expect("root");
+        let package = Arc::new(test_package(root.clone()));
+        let adapter = LaneBackedToolAdapter {
+            package: Arc::clone(&package),
+            descriptors: HashMap::new(),
+            lane: RuntimeLane::Wasm,
+            executor: Arc::new(RuntimeLaneExecutor::new(None, None, None, None)),
+            filesystem: Arc::new(DiskFilesystem::new()),
+            governor: Arc::new(InMemoryResourceGovernor::new()),
+            runtime_policy: test_policy(),
+        };
+
+        assert_eq!(adapter.package.root, root);
     }
 }

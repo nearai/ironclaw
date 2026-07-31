@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_approvals::{LeaseApproval, permission_mode_allows_persistent_approval};
 use ironclaw_extensions::ExtensionRegistry;
-use ironclaw_host_api::{EffectKind, MountView, Principal};
+use ironclaw_host_api::{capability::EffectKind, mount::MountView, scope::Principal};
 use ironclaw_product::{
     ApprovalGateRecord, ApprovalInteractionRejectionKind, ApprovalLeaseTermsProvider,
     ProductSurfaceFailure,
@@ -15,7 +15,7 @@ use crate::builtin_capability_policy::{
 };
 use crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID;
 
-use super::local_dev::extension_surface::ExtensionCapabilitySurfaceSource;
+use ironclaw_extension_host::capability_surface::ExtensionCapabilitySurfaceSource;
 
 pub(super) struct PolicyApprovalLeaseTermsProvider {
     policy: Arc<BuiltinCapabilityPolicy>,
@@ -72,7 +72,7 @@ impl PolicyApprovalLeaseTermsProvider {
             .snapshot()
             .await
             .map_err(|error| {
-                tracing::error!(%error, "local-dev extension approval lease terms are unavailable");
+                tracing::error!(%error, "standalone extension approval lease terms are unavailable");
                 lease_terms_unavailable()
             })?;
         // Lease terms resolve for the user whose run raised the gate; the
@@ -94,7 +94,7 @@ impl PolicyApprovalLeaseTermsProvider {
         {
             tracing::error!(
                 capability = %capability,
-                "local-dev extension spawn approval lease lacks SpawnProcess"
+                "standalone extension spawn approval lease lacks SpawnProcess"
             );
             return Err(lease_terms_unavailable());
         }
@@ -110,7 +110,7 @@ impl PolicyApprovalLeaseTermsProvider {
             .snapshot()
             .await
             .map_err(|error| {
-                tracing::error!(%error, "local-dev extension approval surface is unavailable");
+                tracing::error!(%error, "standalone extension approval surface is unavailable");
                 lease_terms_unavailable()
             })?;
         let Some(capability) = surface.capability(action.capability()) else {
@@ -119,7 +119,7 @@ impl PolicyApprovalLeaseTermsProvider {
         if action.is_spawn_capability() && !capability.effects.contains(&EffectKind::SpawnProcess) {
             tracing::error!(
                 capability = %action.capability(),
-                "local-dev extension spawn persistent approval lacks SpawnProcess"
+                "standalone extension spawn persistent approval lacks SpawnProcess"
             );
             return Ok(false);
         }
@@ -158,7 +158,7 @@ impl ApprovalLeaseTermsProvider for PolicyApprovalLeaseTermsProvider {
                 self.extension_lease_terms_for(gate, action).await
             }
             Err(error) => {
-                tracing::error!(%error, "local-dev approval lease terms are unavailable");
+                tracing::error!(%error, "standalone approval lease terms are unavailable");
                 Err(lease_terms_unavailable())
             }
         }
@@ -193,7 +193,7 @@ impl ApprovalLeaseTermsProvider for PolicyApprovalLeaseTermsProvider {
                 Err(error) => {
                     tracing::error!(
                         %error,
-                        "local-dev persistent approval terms are unavailable"
+                        "standalone persistent approval terms are unavailable"
                     );
                     return Err(lease_terms_unavailable());
                 }
@@ -223,18 +223,23 @@ mod tests {
     use std::sync::Arc;
 
     use ironclaw_host_api::{
-        Action, ApprovalRequest, ApprovalRequestId, CapabilityId, CorrelationId, EffectKind,
-        ExtensionId, InvocationId, PermissionMode, ResourceEstimate, ResourceScope, SecretHandle,
-        TenantId, ThreadId, UserId,
+        action::Action,
+        approval::ApprovalRequest,
+        capability::{EffectKind, PermissionMode},
+        ids::{
+            ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, InvocationId,
+            SecretHandle, TenantId, ThreadId, UserId,
+        },
+        resource::{ResourceEstimate, ResourceScope},
     };
     use ironclaw_product::approval_gate_ref;
     use ironclaw_turns::{GateRef, TurnRunId};
 
     use crate::builtin_capability_policy::builtin_capability_policy;
-    use crate::runtime::local_dev::extension_surface::{
+    use ironclaw_extension_host::ActiveExtensionCapability;
+    use ironclaw_extension_host::capability_surface::{
         ExtensionCapabilitySurface, ExtensionCapabilitySurfaceSource,
     };
-    use ironclaw_extension_host::ActiveExtensionCapability;
 
     use super::*;
 
@@ -308,16 +313,16 @@ mod tests {
                     EffectKind::UseSecret,
                 ],
                 default_permission: PermissionMode::Allow,
-                runtime_credentials: vec![ironclaw_host_api::RuntimeCredentialRequirement {
+                runtime_credentials: vec![ironclaw_host_api::capability::RuntimeCredentialRequirement {
                     handle: secret.clone(),
-                    source: ironclaw_host_api::RuntimeCredentialRequirementSource::SecretHandle,
+                    source: ironclaw_host_api::capability::RuntimeCredentialRequirementSource::SecretHandle,
                     provider_scopes: Vec::new(),
-                    audience: ironclaw_host_api::NetworkTargetPattern {
-                        scheme: Some(ironclaw_host_api::NetworkScheme::Https),
+                    audience: ironclaw_host_api::action::NetworkTargetPattern {
+                        scheme: Some(ironclaw_host_api::action::NetworkScheme::Https),
                         host_pattern: "gmail.googleapis.com".to_string(),
                         port: None,
                     },
-                    target: ironclaw_host_api::RuntimeCredentialTarget::Header {
+                    target: ironclaw_host_api::http::RuntimeCredentialTarget::Header {
                         name: "authorization".to_string(),
                         prefix: Some("Bearer ".to_string()),
                     },

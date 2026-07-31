@@ -1,12 +1,12 @@
 //! `skill_activate` synthetic-capability test support (E-SKILL seam).
 
-/// Capability id of the local-dev synthetic `skill_activate` capability
+/// Capability id of the standalone synthetic `skill_activate` capability
 /// (E-SKILL seam). Single owner is the production constant in
-/// `runtime::local_dev::skill_activation`; mirrors `PROJECT_CREATE_CAPABILITY_ID`.
+/// `runtime::capability_host::skill_activation`; mirrors `PROJECT_CREATE_CAPABILITY_ID`.
 #[cfg(feature = "test-support")]
 pub const SKILL_ACTIVATE_CAPABILITY_ID: &str = crate::runtime::SKILL_ACTIVATE_CAPABILITY_ID;
 
-/// Opaque handle (E-SKILL seam) carrying the built local-dev skill context
+/// Opaque handle (E-SKILL seam) carrying the built standalone skill context
 /// source. Hides the crate-private `ComposedSelectableSkillContextSource` from
 /// the integration-test crate, which cannot name it. Exposes the
 /// `HostSkillContextSource` for runtime wiring; the activation source travels
@@ -30,7 +30,7 @@ impl SkillActivationTestSource {
     /// Crate-internal accessor for the wrapped activation source. Kept
     /// `pub(crate)` (never `pub`) so the crate-private
     /// `ComposedSelectableSkillContextSource` type never appears in this
-    /// crate's public API; only `runtime::local_dev`'s test-support
+    /// crate's public API; only `runtime::capability_host`'s test-support
     /// constructor (which already names the type) may call this.
     pub(crate) fn activation_source(
         &self,
@@ -39,7 +39,7 @@ impl SkillActivationTestSource {
     }
 }
 
-/// Build the local-dev skill context source (`HostSkillContextSource` for
+/// Build the standalone skill context source (`HostSkillContextSource` for
 /// prompt injection plus the activation source backing `skill_activate`) over
 /// the runtime's skill filesystem, mirroring production `build_reborn_runtime`
 /// wiring (runtime.rs ~line 2875). Returns `None` when no local runtime is
@@ -48,7 +48,7 @@ impl SkillActivationTestSource {
 #[cfg(feature = "test-support")]
 pub fn build_skill_context_source_for_test(
     runtime: &crate::RebornRuntime,
-    _tenant_id: &ironclaw_host_api::TenantId,
+    _tenant_id: &ironclaw_host_api::ids::TenantId,
     _regex_skill_activation_enabled: bool,
 ) -> Option<SkillActivationTestSource> {
     Some(SkillActivationTestSource {

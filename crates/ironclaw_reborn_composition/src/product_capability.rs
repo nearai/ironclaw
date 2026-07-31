@@ -9,14 +9,31 @@ use ironclaw_filesystem::{
     ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{
-    ActivityId, Blocked, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId,
-    CapabilitySet, CorrelationId, Denial, DenyReason, DenyRef, EffectKind, ExecutionContext,
-    ExtensionId, FailureKind, GateRef, GateWaypoint, GrantConstraints, InvocationId,
-    InvocationOrigin, ModelDiagnostic, ModelFailureDiagnostic, MountView, NetworkPolicy, Outcome,
-    OutcomeRefs, Principal, ProcessRef, ProcessWaypoint, ProductKind, ProductSurfaceCaller,
-    ProductSurfaceError, Resolution, ResourceEstimate, ResourceScope, ResultPreviewMeta,
-    ResultProgress, ResultRef, ResumeToken, RuntimeKind, SafeSummary, ScopedPath, Suspension,
-    TerminateHint, ToolVerdict, TrustClass,
+    action::NetworkPolicy,
+    capability::{
+        CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
+    },
+    decision::DenyReason,
+    ids::{
+        ActivityId, CapabilityGrantId, CapabilityId, CorrelationId, DenyRef, ExtensionId, GateRef,
+        InvocationId, ProcessRef, ProductKind, ResultRef,
+    },
+    invocation::InvocationOrigin,
+    mount::MountView,
+    path::ScopedPath,
+    product_surface::{ProductSurfaceCaller, ProductSurfaceError},
+    resolution::{
+        Blocked, Denial, GateWaypoint, Outcome, OutcomeRefs, ProcessWaypoint, Resolution,
+        ResultPreviewMeta, Suspension, ToolVerdict,
+    },
+    resource::{ResourceEstimate, ResourceScope},
+    result_meta::{
+        FailureKind, ModelDiagnostic, ModelFailureDiagnostic, ResultProgress, ResumeToken,
+        TerminateHint,
+    },
+    runtime::{RuntimeKind, TrustClass},
+    safe_summary::SafeSummary,
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{HostRuntime, RuntimeCapabilityOutcome};
 use ironclaw_product::{
@@ -40,7 +57,7 @@ pub(crate) struct RuntimeProductCapabilityInvoker {
     registry: Arc<ExtensionRegistry>,
     results: ProductResultFilesystem,
     // The scope→mount-view resolver the runtime's skill-management port was
-    // composed with. Reused here (rather than re-deriving a local-dev vs
+    // composed with. Reused here (rather than re-deriving a standalone vs
     // production branch) so product-surface skill gestures resolve exactly the
     // mounts the agent loop's skill tools do; the unified runtime graph exposes
     // a single composite filesystem, so which resolver is live is the only
@@ -595,9 +612,16 @@ where
 mod tests {
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        EffectKind, MountAlias, MountGrant, MountPermissions, NetworkScheme, NetworkTargetPattern,
-        PermissionMode, RuntimeCredentialRequirement, RuntimeCredentialRequirementSource,
-        RuntimeCredentialTarget, RuntimeKind, SecretHandle, TrustClass, VirtualPath,
+        action::{NetworkScheme, NetworkTargetPattern},
+        capability::{
+            EffectKind, PermissionMode, RuntimeCredentialRequirement,
+            RuntimeCredentialRequirementSource,
+        },
+        http::RuntimeCredentialTarget,
+        ids::SecretHandle,
+        mount::{MountGrant, MountPermissions},
+        path::{MountAlias, VirtualPath},
+        runtime::{RuntimeKind, TrustClass},
     };
 
     use super::*;
@@ -695,9 +719,8 @@ mod tests {
             EXTENSION_REMOVE_CAPABILITY_ID,
         ] {
             let descriptor = descriptor_with_id(capability);
-            let lifecycle_mounts =
-                crate::local_dev_mounts::system_extensions_lifecycle_mount_view()
-                    .expect("expected extension lifecycle mounts");
+            let lifecycle_mounts = crate::runtime_mounts::system_extensions_lifecycle_mount_view()
+                .expect("expected extension lifecycle mounts");
             let mounts = product_invocation_mounts(
                 &resource_scope(),
                 Some(&descriptor),
@@ -727,7 +750,7 @@ mod tests {
         let scope = resource_scope();
         let descriptor = descriptor_with_id(SKILL_REMOVE_CAPABILITY_ID);
         let skill_mount_resolver = |scope: &ResourceScope| {
-            crate::local_dev_mounts::scoped_skill_management_mount_view(scope)
+            crate::runtime_mounts::scoped_skill_management_mount_view(scope)
         };
         let lifecycle_mounts = MountView::default();
         let mounts = product_invocation_mounts(
@@ -740,7 +763,7 @@ mod tests {
 
         assert_eq!(
             mounts,
-            crate::local_dev_mounts::scoped_skill_management_mount_view(&scope)
+            crate::runtime_mounts::scoped_skill_management_mount_view(&scope)
                 .expect("expected skill mounts")
         );
     }
@@ -897,10 +920,10 @@ mod tests {
 
     fn resource_scope() -> ResourceScope {
         ResourceScope {
-            tenant_id: ironclaw_host_api::TenantId::new("tenant-test").unwrap(),
-            user_id: ironclaw_host_api::UserId::new("user-test").unwrap(),
-            agent_id: Some(ironclaw_host_api::AgentId::new("agent-test").unwrap()),
-            project_id: Some(ironclaw_host_api::ProjectId::new("project-test").unwrap()),
+            tenant_id: ironclaw_host_api::ids::TenantId::new("tenant-test").unwrap(),
+            user_id: ironclaw_host_api::ids::UserId::new("user-test").unwrap(),
+            agent_id: Some(ironclaw_host_api::ids::AgentId::new("agent-test").unwrap()),
+            project_id: Some(ironclaw_host_api::ids::ProjectId::new("project-test").unwrap()),
             mission_id: None,
             thread_id: None,
             invocation_id: InvocationId::new(),

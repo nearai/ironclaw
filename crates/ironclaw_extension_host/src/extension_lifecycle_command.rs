@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use ironclaw_auth::RuntimeCredentialAccountSelectionService;
-use ironclaw_host_api::{InstallationState, ProductSurfaceError, RuntimeHttpEgress};
+use ironclaw_host_api::{
+    http::RuntimeHttpEgress, product_surface::ProductSurfaceError, state::InstallationState,
+};
 use ironclaw_product::{
     LifecycleExtensionSource, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
     LifecycleProductContext, LifecycleProductPayload, LifecycleProductResponse,
@@ -24,7 +26,7 @@ pub enum RebornExtensionLifecycleCommand {
 
 #[derive(Debug, Error)]
 pub enum RebornExtensionLifecycleCommandError {
-    #[error("extension lifecycle is available only for local-dev Reborn services")]
+    #[error("extension lifecycle is available only for standalone Reborn services")]
     LocalRuntimeUnavailable,
     #[error("extension lifecycle command is invalid: {0}")]
     ProductCommand(#[from] ProductSurfaceFailure),
@@ -229,6 +231,8 @@ fn render_string_array(output: &mut String, items: &[String], label: &str) {
 fn extension_source_label(source: LifecycleExtensionSource) -> &'static str {
     match source {
         LifecycleExtensionSource::HostBundled => "host_bundled",
+        LifecycleExtensionSource::Installed => "installed",
+        LifecycleExtensionSource::Registry => "registry",
     }
 }
 
@@ -249,7 +253,9 @@ mod tests {
         AuthContinuationRef, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
     };
     use ironclaw_host_api::{
-        AgentId, InstallationState, InvocationId, ResourceScope, TenantId, UserId,
+        ids::{AgentId, InvocationId, TenantId, UserId},
+        resource::ResourceScope,
+        state::InstallationState,
     };
     use ironclaw_product::LifecycleExtensionSummary;
     use secrecy::SecretString;

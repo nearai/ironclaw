@@ -7,7 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use serde::{Deserialize, Serialize};
 
 use crate::run_profile::instruction_bundle::InstructionBundleFingerprint;
@@ -37,6 +37,9 @@ pub struct LoopModelRequest {
     pub inline_messages: Vec<LoopInlineMessage>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
     pub model_preference: Option<ModelProfileId>,
+    /// Zero-based index into the host-resolved ordered fallback chain.
+    #[serde(default)]
+    pub fallback_index: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability_view: Option<LoopModelCapabilityView>,
 }
@@ -348,7 +351,7 @@ pub trait LoopModelPort: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
 
     use super::*;
     use crate::run_profile::snapshot::ResolvedRunProfile;

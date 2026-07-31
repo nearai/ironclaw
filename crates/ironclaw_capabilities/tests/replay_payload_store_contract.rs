@@ -12,7 +12,7 @@
 //! not loadable under another (the cross-tenant + within-tenant regression
 //! `database.md` / `safety-and-sandbox.md` require).
 //!
-//! Mirrors `ironclaw_run_state`'s `gate_record_store_contract.rs`.
+//! Mirrors `ironclaw_approvals`'s `gate_record_store_contract.rs`.
 
 use std::sync::Arc;
 
@@ -21,8 +21,10 @@ use ironclaw_capabilities::{
 };
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    ApprovalRequestId, CorrelationId, InvocationId, MountAlias, MountGrant, MountPermissions,
-    MountView, ProjectId, ResourceEstimate, ResourceScope, TenantId, UserId, VirtualPath,
+    ids::{ApprovalRequestId, CorrelationId, InvocationId, ProjectId, TenantId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::{ResourceEstimate, ResourceScope},
 };
 use ironclaw_turns::run_profile::{AuthResumeApprovalIdentity, CapabilityInputRef};
 

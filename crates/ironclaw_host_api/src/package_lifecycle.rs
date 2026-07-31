@@ -11,8 +11,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 
 use crate::{
-    CapabilitySurfaceKind, ChannelPresentation, HostApiError, InstallationState,
-    LifecyclePublicState,
+    channel::ChannelPresentation,
+    error::HostApiError,
+    state::{InstallationState, LifecyclePublicState},
+    surface::CapabilitySurfaceKind,
 };
 
 pub const LIFECYCLE_ID_MAX_BYTES: usize = 256;
@@ -454,6 +456,8 @@ pub enum LifecycleExtensionCredentialSetup {
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleExtensionSource {
     HostBundled,
+    Installed,
+    Registry,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -494,6 +498,7 @@ pub struct LifecycleSkillSummary {
 pub enum LifecycleSkillSource {
     System,
     User,
+    Installed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -14,8 +14,11 @@ use ironclaw_extensions::{
     ExtensionManifestRecord, ExtensionPackage, ExtensionRuntime, is_hosted_http_mcp_package,
 };
 use ironclaw_host_api::{
-    ExtensionId, NetworkPolicy, NetworkScheme, NetworkTargetPattern, ResourceScope,
-    RuntimeCredentialAuthRequirement, RuntimeHttpEgress, UserId,
+    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    decision::RuntimeCredentialAuthRequirement,
+    http::RuntimeHttpEgress,
+    ids::{ExtensionId, UserId},
+    resource::ResourceScope,
 };
 use tokio::sync::Mutex;
 
@@ -446,9 +449,14 @@ mod tests {
         ExtensionPackage, HostApiContractRegistry, InstallationOwner, ManifestSource,
     };
     use ironclaw_host_api::{
-        HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortId,
-        InvocationId, NetworkPolicy, RuntimeCredentialAccountSetup, RuntimeHttpEgressError,
-        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle, VendorId, VirtualPath,
+        action::NetworkPolicy,
+        capability::RuntimeCredentialAccountSetup,
+        host_port::{
+            HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortId,
+        },
+        http::{RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse},
+        ids::{InvocationId, SecretHandle, VendorId},
+        path::VirtualPath,
     };
     use tokio::sync::Notify;
 
@@ -999,6 +1007,7 @@ default_permission = "ask"
 effects = ["network"]
 "#;
         let contracts = HostApiContractRegistry::new();
+        let root = VirtualPath::new("/system/extensions/hosted").expect("package root");
         let manifest = ExtensionManifestRecord::from_toml(
             raw_manifest,
             ManifestSource::HostBundled,
@@ -1008,6 +1017,7 @@ effects = ["network"]
             .expect("host port catalog"),
             None,
             &contracts,
+            Some(root.clone()),
         )
         .expect("manifest record");
         let package_manifest: ExtensionManifest = manifest
@@ -1015,12 +1025,8 @@ effects = ["network"]
             .clone()
             .try_into()
             .expect("package manifest");
-        let package = ExtensionPackage::from_manifest_toml(
-            package_manifest,
-            VirtualPath::new("/system/extensions/hosted").expect("package root"),
-            raw_manifest,
-        )
-        .expect("package");
+        let package = ExtensionPackage::from_manifest_toml(package_manifest, root, raw_manifest)
+            .expect("package");
         (package, manifest)
     }
 

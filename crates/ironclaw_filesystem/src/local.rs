@@ -4,13 +4,14 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{HostPath, VirtualPath};
+use ironclaw_host_api::path::{HostPath, VirtualPath};
 use ironclaw_safety::sensitive_paths::is_sensitive_path;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
-    CasExpectation, DirEntry, Entry, FileStat, FileType, FilesystemError, FilesystemOperation,
-    RecordVersion, RootFilesystem, VersionedEntry, path_prefix_matches,
+    AtomicSubtreeEntry, CasExpectation, DirEntry, Entry, FileStat, FileType, FilesystemError,
+    FilesystemOperation, RecordVersion, RootFilesystem, VersionedEntry, path_prefix_matches,
+    root::validate_atomic_subtree_entries,
 };
 
 static LOCAL_WRITE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -364,6 +365,76 @@ impl RootFilesystem for DiskFilesystem {
         }
     }
 
+    async fn create_subtree_atomic(
+        &self,
+        prefix: &VirtualPath,
+        entries: Vec<AtomicSubtreeEntry>,
+    ) -> Result<Vec<RecordVersion>, FilesystemError> {
+        validate_local_atomic_subtree(prefix, &entries)?;
+        let resolved = self.resolve_joined(prefix)?;
+        ensure_existing_ancestor_contained(
+            prefix,
+            &resolved.containment_root,
+            resolved.bootstrap_root,
+            &resolved.joined,
+            FilesystemOperation::CreateSubtreeAtomic,
+        )
+        .await?;
+
+        if tokio::fs::try_exists(&resolved.joined)
+            .await
+            .map_err(|error| {
+                io_error(
+                    prefix.clone(),
+                    FilesystemOperation::CreateSubtreeAtomic,
+                    error,
+                )
+            })?
+        {
+            return Err(FilesystemError::VersionMismatch {
+                path: prefix.clone(),
+                expected: None,
+                found: Some(RecordVersion::from_backend(0)),
+            });
+        }
+
+        let parent = resolved
+            .joined
+            .parent()
+            .ok_or_else(|| FilesystemError::PathOutsideMount {
+                path: prefix.clone(),
+            })?;
+        tokio::fs::create_dir_all(parent).await.map_err(|error| {
+            io_error(
+                prefix.clone(),
+                FilesystemOperation::CreateSubtreeAtomic,
+                error,
+            )
+        })?;
+        let staging = unique_subtree_temp_path(prefix, parent, &resolved.joined)?;
+        tokio::fs::create_dir(&staging).await.map_err(|error| {
+            io_error(
+                prefix.clone(),
+                FilesystemOperation::CreateSubtreeAtomic,
+                error,
+            )
+        })?;
+
+        let result =
+            publish_local_atomic_subtree(prefix, &staging, &resolved.joined, parent, entries).await;
+
+        if result.is_err()
+            && let Err(error) = tokio::fs::remove_dir_all(&staging).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::debug!(
+                reason = %error,
+                "best-effort cleanup of atomic subtree staging directory failed"
+            );
+        }
+        result
+    }
+
     async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
         let resolved = self
             .resolve_existing(path, FilesystemOperation::ReadFile)
@@ -631,13 +702,134 @@ fn unique_temp_path(
     Ok(parent.join(format!(".{name}.tmp.{counter}")))
 }
 
+fn validate_local_atomic_subtree(
+    prefix: &VirtualPath,
+    entries: &[AtomicSubtreeEntry],
+) -> Result<(), FilesystemError> {
+    validate_atomic_subtree_entries(prefix, entries)?;
+    for item in entries {
+        if item.entry.kind.is_some() || !item.entry.indexed.is_empty() {
+            return Err(FilesystemError::Unsupported {
+                path: item.path.clone(),
+                operation: FilesystemOperation::CreateSubtreeAtomic,
+            });
+        }
+    }
+    Ok(())
+}
+
+async fn materialize_local_atomic_subtree(
+    prefix: &VirtualPath,
+    staging: &Path,
+    entries: Vec<AtomicSubtreeEntry>,
+) -> Result<Vec<RecordVersion>, FilesystemError> {
+    let prefix_with_separator = format!("{}/", prefix.as_str().trim_end_matches('/'));
+    let mut versions = Vec::with_capacity(entries.len());
+    for item in entries {
+        let relative = item
+            .path
+            .as_str()
+            .strip_prefix(&prefix_with_separator)
+            .ok_or_else(|| FilesystemError::PathOutsideMount {
+                path: item.path.clone(),
+            })?;
+        let target = staging.join(relative);
+        let parent = target
+            .parent()
+            .ok_or_else(|| FilesystemError::PathOutsideMount {
+                path: item.path.clone(),
+            })?;
+        tokio::fs::create_dir_all(parent).await.map_err(|error| {
+            io_error(
+                item.path.clone(),
+                FilesystemOperation::CreateSubtreeAtomic,
+                error,
+            )
+        })?;
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .await
+            .map_err(|error| {
+                io_error(
+                    item.path.clone(),
+                    FilesystemOperation::CreateSubtreeAtomic,
+                    error,
+                )
+            })?;
+        file.write_all(&item.entry.body).await.map_err(|error| {
+            io_error(
+                item.path.clone(),
+                FilesystemOperation::CreateSubtreeAtomic,
+                error,
+            )
+        })?;
+        file.sync_all().await.map_err(|error| {
+            io_error(
+                item.path.clone(),
+                FilesystemOperation::CreateSubtreeAtomic,
+                error,
+            )
+        })?;
+        versions.push(RecordVersion::from_backend(0));
+    }
+    Ok(versions)
+}
+
+async fn publish_local_atomic_subtree(
+    prefix: &VirtualPath,
+    staging: &Path,
+    target: &Path,
+    parent: &Path,
+    entries: Vec<AtomicSubtreeEntry>,
+) -> Result<Vec<RecordVersion>, FilesystemError> {
+    let versions = materialize_local_atomic_subtree(prefix, staging, entries).await?;
+    tokio::fs::rename(staging, target).await.map_err(|error| {
+        io_error(
+            prefix.clone(),
+            FilesystemOperation::CreateSubtreeAtomic,
+            error,
+        )
+    })?;
+    sync_parent_dir_for_operation(prefix, parent, FilesystemOperation::CreateSubtreeAtomic).await?;
+    Ok(versions)
+}
+
+fn unique_subtree_temp_path(
+    virtual_path: &VirtualPath,
+    parent: &Path,
+    target: &Path,
+) -> Result<PathBuf, FilesystemError> {
+    let name = target
+        .file_name()
+        .ok_or_else(|| FilesystemError::PathOutsideMount {
+            path: virtual_path.clone(),
+        })?
+        .to_string_lossy();
+    let counter = LOCAL_WRITE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    // The counter is process-local. Include the PID so two IronClaw
+    // processes sharing one disk mount cannot choose the same staging tree
+    // and then have the loser clean up the winner's in-flight batch.
+    let process_id = std::process::id();
+    Ok(parent.join(format!(".{name}.subtree.tmp.{process_id}.{counter}")))
+}
+
 async fn sync_parent_dir(virtual_path: &VirtualPath, parent: &Path) -> Result<(), FilesystemError> {
+    sync_parent_dir_for_operation(virtual_path, parent, FilesystemOperation::WriteFile).await
+}
+
+async fn sync_parent_dir_for_operation(
+    virtual_path: &VirtualPath,
+    parent: &Path,
+    operation: FilesystemOperation,
+) -> Result<(), FilesystemError> {
     let dir = tokio::fs::File::open(parent)
         .await
-        .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error))?;
+        .map_err(|error| io_error(virtual_path.clone(), operation, error))?;
     dir.sync_all()
         .await
-        .map_err(|error| io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error))
+        .map_err(|error| io_error(virtual_path.clone(), operation, error))
 }
 
 /// For a [`LocalMount::leaf_scoped`] mount, the shared `host_root` one level

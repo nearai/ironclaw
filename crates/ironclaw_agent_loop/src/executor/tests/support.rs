@@ -2,7 +2,10 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, ProviderToolName, RuntimeKind, TenantId, ThreadId};
+use ironclaw_host_api::{
+    ids::{CapabilityId, ProviderToolName, TenantId, ThreadId},
+    runtime::RuntimeKind,
+};
 use ironclaw_turns::{
     AgentLoopDriverDescriptor, LoopFailureKind, LoopMessageRef, RunProfileId, RunProfileVersion,
     TurnCheckpointId, TurnId, TurnRunId, TurnScope,
@@ -52,8 +55,8 @@ pub(super) struct MockHost {
     compaction: MockCompactionSupport,
     input_batches: Arc<Mutex<VecDeque<LoopInputBatch>>>,
     acked_input_tokens: Arc<Mutex<Vec<LoopInputAckToken>>>,
-    batch_outcomes: Arc<Mutex<VecDeque<ironclaw_host_api::ResolutionBatch>>>,
-    single_outcomes: Arc<Mutex<VecDeque<ironclaw_host_api::Resolution>>>,
+    batch_outcomes: Arc<Mutex<VecDeque<ironclaw_host_api::resolution::ResolutionBatch>>>,
+    single_outcomes: Arc<Mutex<VecDeque<ironclaw_host_api::resolution::Resolution>>>,
     checkpoints: Arc<Mutex<Vec<LoopCheckpointKind>>>,
     batch_invocations: Arc<Mutex<Vec<LoopRequestBatch>>>,
     single_invocations: Arc<Mutex<Vec<LoopRequest>>>,
@@ -83,7 +86,7 @@ pub(super) struct MockHost {
     fail_checkpoint_on_occurrence: Arc<Mutex<Option<(LoopCheckpointKind, usize)>>>,
     fail_checkpoint_payload: Arc<Mutex<Option<(LoopCheckpointKind, AgentLoopHostError)>>>,
     fail_visible_capabilities: bool,
-    fail_prompt_bundle: bool,
+    prompt_bundle_failure: Option<AgentLoopHostError>,
     fail_batch_with: Arc<Mutex<Option<AgentLoopHostErrorKind>>>,
     fail_transcript_with: Arc<Mutex<Option<AgentLoopHostErrorKind>>>,
     extra_capability_descriptors: Vec<CapabilityDescriptorView>,
@@ -131,7 +134,7 @@ impl MockHost {
             fail_checkpoint_on_occurrence: Arc::new(Mutex::new(None)),
             fail_checkpoint_payload: Arc::new(Mutex::new(None)),
             fail_visible_capabilities: false,
-            fail_prompt_bundle: false,
+            prompt_bundle_failure: None,
             fail_batch_with: Arc::new(Mutex::new(None)),
             fail_transcript_with: Arc::new(Mutex::new(None)),
             extra_capability_descriptors: Vec::new(),
@@ -170,13 +173,16 @@ impl MockHost {
 
     pub(super) fn with_batch_outcomes(
         self,
-        outcomes: Vec<ironclaw_host_api::ResolutionBatch>,
+        outcomes: Vec<ironclaw_host_api::resolution::ResolutionBatch>,
     ) -> Self {
         *self.batch_outcomes.lock().expect("lock") = outcomes.into();
         self
     }
 
-    pub(super) fn with_single_outcomes(self, outcomes: Vec<ironclaw_host_api::Resolution>) -> Self {
+    pub(super) fn with_single_outcomes(
+        self,
+        outcomes: Vec<ironclaw_host_api::resolution::Resolution>,
+    ) -> Self {
         *self.single_outcomes.lock().expect("lock") = outcomes.into();
         self
     }
@@ -213,7 +219,21 @@ impl MockHost {
     }
 
     pub(super) fn with_failing_prompt_bundle(mut self) -> Self {
-        self.fail_prompt_bundle = true;
+        self.prompt_bundle_failure = Some(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "prompt bundle unavailable",
+        ));
+        self
+    }
+
+    pub(super) fn with_prompt_bundle_failure(mut self, kind: AgentLoopHostErrorKind) -> Self {
+        self.prompt_bundle_failure =
+            Some(AgentLoopHostError::new(kind, "prompt bundle unavailable"));
+        self
+    }
+
+    pub(super) fn with_prompt_bundle_error(mut self, error: AgentLoopHostError) -> Self {
+        self.prompt_bundle_failure = Some(error);
         self
     }
 
@@ -397,6 +417,7 @@ impl MockHost {
             runtime: RuntimeKind::FirstParty,
             safe_name: "demo".to_string(),
             safe_description: "demo capability".to_string(),
+            description_trust: Default::default(),
             concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
             parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
         }];
@@ -542,8 +563,9 @@ impl RecoveryStrategy for RetryPolicyDeniedRecoveryStrategy {
         &self,
         state: &LoopExecutionState,
         err: &CapabilityErrorSummary,
+        _observation: Option<&ironclaw_turns::run_profile::ModelVisibleToolObservation>,
     ) -> RecoveryOutcome {
-        if err.kind == ironclaw_host_api::FailureKind::PolicyDenied {
+        if err.kind == ironclaw_host_api::result_meta::FailureKind::PolicyDenied {
             return RecoveryOutcome::Retry {
                 recovery: state.recovery_state.clone(),
                 scope: RetryScope::Call,
@@ -576,6 +598,7 @@ impl RecoveryStrategy for ShrinkContextCallScopeRecoveryStrategy {
         &self,
         state: &LoopExecutionState,
         _err: &CapabilityErrorSummary,
+        _observation: Option<&ironclaw_turns::run_profile::ModelVisibleToolObservation>,
     ) -> RecoveryOutcome {
         RecoveryOutcome::Abort {
             recovery: state.recovery_state.clone(),
@@ -592,6 +615,47 @@ impl RecoveryStrategy for ShrinkContextCallScopeRecoveryStrategy {
             recovery: state.recovery_state.clone(),
             scope: RetryScope::Call,
             alter: Some(RetryAlteration::ShrinkContext),
+        }
+    }
+}
+
+pub(super) struct RequireStructuredCapabilityObservationRecoveryStrategy;
+
+#[async_trait]
+impl RecoveryStrategy for RequireStructuredCapabilityObservationRecoveryStrategy {
+    async fn on_capability_error(
+        &self,
+        state: &LoopExecutionState,
+        _err: &CapabilityErrorSummary,
+        observation: Option<&ironclaw_turns::run_profile::ModelVisibleToolObservation>,
+    ) -> RecoveryOutcome {
+        let saw_invalid_input = observation.is_some_and(|observation| {
+            matches!(
+                &observation.detail,
+                ironclaw_turns::run_profile::ToolObservationDetail::InvalidInput { issues }
+                    if issues.iter().any(|issue| issue.path == "file_path")
+            )
+        });
+        if saw_invalid_input {
+            RecoveryOutcome::ToolErrorResult {
+                recovery: state.recovery_state.clone(),
+            }
+        } else {
+            RecoveryOutcome::Abort {
+                recovery: state.recovery_state.clone(),
+                failure_kind: LoopFailureKind::DriverBug,
+            }
+        }
+    }
+
+    async fn on_model_error(
+        &self,
+        state: &LoopExecutionState,
+        _err: &ModelErrorSummary,
+    ) -> RecoveryOutcome {
+        RecoveryOutcome::Abort {
+            recovery: state.recovery_state.clone(),
+            failure_kind: LoopFailureKind::DriverBug,
         }
     }
 }
@@ -625,11 +689,8 @@ impl ironclaw_turns::run_profile::LoopPromptPort for MockHost {
         request: LoopPromptBundleRequest,
     ) -> Result<LoopPromptBundle, AgentLoopHostError> {
         self.prompt_requests.lock().expect("lock").push(request);
-        if self.fail_prompt_bundle {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::Unavailable,
-                "prompt bundle unavailable",
-            ));
+        if let Some(error) = self.prompt_bundle_failure.clone() {
+            return Err(error);
         }
         let bundle = LoopPromptBundle {
             bundle_ref: LoopPromptBundleRef::for_run(&self.context, "bundle").expect("valid"),
@@ -795,7 +856,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
     async fn invoke_capability(
         &self,
         request: LoopRequest,
-    ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
+    ) -> Result<ironclaw_host_api::resolution::Resolution, AgentLoopHostError> {
         self.single_invocations.lock().expect("lock").push(request);
         self.single_outcomes
             .lock()
@@ -809,7 +870,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
     async fn invoke_capability_batch(
         &self,
         request: LoopRequestBatch,
-    ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
+    ) -> Result<ironclaw_host_api::resolution::ResolutionBatch, AgentLoopHostError> {
         self.batch_invocations.lock().expect("lock").push(request);
         if let Some(kind) = *self.fail_batch_with.lock().expect("lock") {
             return Err(AgentLoopHostError::new(kind, "scripted batch failure"));
@@ -1314,6 +1375,19 @@ pub(super) fn family_with_shrink_context_call_scope_recovery() -> LoopFamily {
     let version = ComponentIdentity::from_static(
         "executor-shrink-context-call-scope-test",
         ComponentDigest([9; 32]),
+    );
+    LoopFamily::new(id, version, Arc::new(planner))
+}
+
+pub(super) fn family_requiring_structured_capability_observation() -> LoopFamily {
+    let planner = DefaultPlanner::compose_default().with_recovery(Arc::new(
+        RequireStructuredCapabilityObservationRecoveryStrategy,
+    ));
+    let id = LoopFamilyId::new("executor-structured-capability-observation-test")
+        .expect("valid test family id");
+    let version = ComponentIdentity::from_static(
+        "executor-structured-capability-observation-test",
+        ComponentDigest([11; 32]),
     );
     LoopFamily::new(id, version, Arc::new(planner))
 }

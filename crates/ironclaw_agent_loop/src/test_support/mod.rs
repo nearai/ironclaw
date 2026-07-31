@@ -11,7 +11,10 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityId, FailureKind, Resolution, ResolutionBatch, RuntimeKind, TenantId, ThreadId,
+    ids::{CapabilityId, TenantId, ThreadId},
+    resolution::{Resolution, ResolutionBatch},
+    result_meta::FailureKind,
+    runtime::RuntimeKind,
 };
 use ironclaw_turns::{
     AgentLoopDriverDescriptor, LoopFailureKind, LoopGateRef, LoopMessageRef, LoopResultRef,
@@ -1079,6 +1082,7 @@ pub fn capability_descriptor(
         runtime: RuntimeKind::FirstParty,
         safe_name: "demo".to_string(),
         safe_description: "demo capability".to_string(),
+        description_trust: Default::default(),
         concurrency_hint,
         parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
     }

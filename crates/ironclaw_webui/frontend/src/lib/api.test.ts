@@ -7,6 +7,7 @@ import {
   clientActionId,
   deleteAutomation,
   deleteThread,
+  eventStreamRequest,
   fetchAttachmentBlob,
   fetchAttachmentDataUrl,
   listAutomations,
@@ -78,6 +79,45 @@ test("listAutomations reads through the v2 automations route", async () => {
   assert.equal(calls[0].options.credentials, "same-origin");
   assert.equal(calls[0].options.headers.get("Authorization"), "Bearer token-1");
 });
+
+test("eventStreamRequest keeps the bearer out of the stream URL", () => {
+  const sessionStorageDescriptor = Object.getOwnPropertyDescriptor(
+    globalThis,
+    "sessionStorage",
+  );
+  const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+  try {
+    globalThis.sessionStorage = {
+      getItem: () => "token-1",
+      setItem: () => {},
+      removeItem: () => {},
+    };
+    globalThis.window = { location: { origin: "http://localhost" } };
+
+    const request = eventStreamRequest({
+      threadId: "thread/needs encoding",
+      connectionId: "connection-1",
+    });
+
+    assert.equal(
+      request.url,
+      "http://localhost/api/webchat/v2/threads/thread%2Fneeds%20encoding/events?connection_id=connection-1",
+    );
+    assert.equal(new URL(request.url).searchParams.has("token"), false);
+    assert.deepEqual(request.headers(), { Authorization: "Bearer token-1" });
+  } finally {
+    restoreGlobal("sessionStorage", sessionStorageDescriptor);
+    restoreGlobal("window", windowDescriptor);
+  }
+});
+
+function restoreGlobal(name, descriptor) {
+  if (descriptor) {
+    Object.defineProperty(globalThis, name, descriptor);
+  } else {
+    delete globalThis[name];
+  }
+}
 
 test("listAutomations propagates api errors from the automations route", async () => {
   globalThis.sessionStorage = {

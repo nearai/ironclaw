@@ -3,7 +3,7 @@
 //! # Why this exists
 //!
 //! A store's fault-handling used to be tested by hand-writing a fake that
-//! implements the *whole store trait* (`SecretStorePort`, `ProcessStorePort`, …) and
+//! implements the *whole store trait* (`SecretStorePort`, process repositories, …) and
 //! returns an error on the Nth call. That fake never runs a single line of the
 //! production `Filesystem*Store` — its encryption, path building, CAS retry,
 //! and `FilesystemError -> DomainError` mapping are all bypassed. The test
@@ -37,16 +37,16 @@
 //! assert_eq!(backend.count(FilesystemOperation::WriteFile), 2);
 //! ```
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
-    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
-    FilesystemOperation, Filter, IndexSpec, Page, RecordVersion, RootFilesystem, SeqNo,
-    VersionedEntry,
+    AtomicSubtreeEntry, BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat,
+    FilesystemError, FilesystemOperation, Filter, IndexSpec, Page, RecordVersion, RootFilesystem,
+    SeqNo, VersionedEntry,
 };
 
 /// Which [`FilesystemError`] a matched [`Fault`] returns. Constructed with the
@@ -180,7 +180,7 @@ struct FaultState {
 /// recording every gated op. See the [module docs](self).
 pub struct FaultInjecting<F> {
     inner: F,
-    state: Mutex<FaultState>,
+    state: Arc<Mutex<FaultState>>,
 }
 
 impl<F> std::fmt::Debug for FaultInjecting<F> {
@@ -202,10 +202,10 @@ impl<F> FaultInjecting<F> {
     pub fn new(inner: F) -> Self {
         Self {
             inner,
-            state: Mutex::new(FaultState {
+            state: Arc::new(Mutex::new(FaultState {
                 rules: Vec::new(),
                 recorded: Vec::new(),
-            }),
+            })),
         }
     }
 
@@ -259,25 +259,85 @@ impl<F> FaultInjecting<F> {
         operation: FilesystemOperation,
         path: &VirtualPath,
     ) -> Result<(), FilesystemError> {
-        let mut state = self.lock();
-        state.recorded.push(RecordedOp {
-            operation,
-            path: path.clone(),
-        });
-        for (fault, seen) in state.rules.iter_mut() {
-            if !fault.matches(operation, path) {
-                continue;
-            }
-            *seen += 1;
-            let fire = match fault.trigger {
-                Trigger::Always => true,
-                Trigger::Nth(n) => *seen == n,
-            };
-            if fire {
-                return Err(fault.kind.clone().into_error(path, operation));
-            }
+        gate_state(&self.state, operation, path)
+    }
+}
+
+fn gate_state(
+    state: &Mutex<FaultState>,
+    operation: FilesystemOperation,
+    path: &VirtualPath,
+) -> Result<(), FilesystemError> {
+    let mut state = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.recorded.push(RecordedOp {
+        operation,
+        path: path.clone(),
+    });
+    for (fault, seen) in state.rules.iter_mut() {
+        if !fault.matches(operation, path) {
+            continue;
         }
-        Ok(())
+        *seen += 1;
+        let fire = match fault.trigger {
+            Trigger::Always => true,
+            Trigger::Nth(n) => *seen == n,
+        };
+        if fire {
+            return Err(fault.kind.clone().into_error(path, operation));
+        }
+    }
+    Ok(())
+}
+
+struct FaultInjectingTxn {
+    inner: Box<dyn StorageTxn>,
+    state: Arc<Mutex<FaultState>>,
+}
+
+#[async_trait]
+impl StorageTxn for FaultInjectingTxn {
+    async fn put(
+        &mut self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        gate_state(&self.state, FilesystemOperation::WriteFile, path)?;
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&mut self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        gate_state(&self.state, FilesystemOperation::ReadFile, path)?;
+        self.inner.get(path).await
+    }
+
+    async fn delete(&mut self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        gate_state(&self.state, FilesystemOperation::Delete, path)?;
+        self.inner.delete(path).await
+    }
+
+    async fn reserve_sequence(&mut self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        gate_state(&self.state, FilesystemOperation::ReserveSeq, path)?;
+        self.inner.reserve_sequence(path).await
+    }
+
+    async fn reserve_sequence_range(
+        &mut self,
+        path: &VirtualPath,
+        count: u64,
+    ) -> Result<SeqNo, FilesystemError> {
+        gate_state(&self.state, FilesystemOperation::ReserveSeq, path)?;
+        self.inner.reserve_sequence_range(path, count).await
+    }
+
+    async fn commit(self: Box<Self>) -> Result<(), FilesystemError> {
+        self.inner.commit().await
+    }
+
+    async fn rollback(self: Box<Self>) {
+        self.inner.rollback().await;
     }
 }
 
@@ -320,6 +380,16 @@ where
         self.inner.query(path, filter, page).await
     }
 
+    async fn query_ordered(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: &crate::OrderedPage,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.gate(FilesystemOperation::Query, path)?;
+        self.inner.query_ordered(path, filter, page).await
+    }
+
     async fn ensure_index(
         &self,
         path: &VirtualPath,
@@ -350,7 +420,19 @@ where
 
     async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
         self.gate(FilesystemOperation::BeginTxn, path)?;
-        self.inner.begin(path).await
+        Ok(Box::new(FaultInjectingTxn {
+            inner: self.inner.begin(path).await?,
+            state: Arc::clone(&self.state),
+        }))
+    }
+
+    async fn create_subtree_atomic(
+        &self,
+        prefix: &VirtualPath,
+        entries: Vec<AtomicSubtreeEntry>,
+    ) -> Result<Vec<RecordVersion>, FilesystemError> {
+        self.gate(FilesystemOperation::CreateSubtreeAtomic, prefix)?;
+        self.inner.create_subtree_atomic(prefix, entries).await
     }
 
     async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
@@ -416,10 +498,41 @@ where
 mod tests {
     use super::*;
     use crate::{DiskFilesystem, InMemoryBackend};
-    use ironclaw_host_api::HostPath;
+    use ironclaw_host_api::path::HostPath;
 
     fn path(p: &str) -> VirtualPath {
         VirtualPath::new(p).unwrap()
+    }
+
+    #[tokio::test]
+    async fn atomic_subtree_fault_fires_before_the_inner_backend_can_write() {
+        let fs = FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::CreateSubtreeAtomic).backend("batch failed"),
+        );
+        let prefix = path("/projects/attachments/message-1");
+        let file = path("/projects/attachments/message-1/0-alpha.txt");
+
+        let error = fs
+            .create_subtree_atomic(
+                &prefix,
+                vec![crate::AtomicSubtreeEntry {
+                    path: file.clone(),
+                    entry: Entry::bytes(b"alpha".to_vec()),
+                }],
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            FilesystemError::Backend {
+                operation: FilesystemOperation::CreateSubtreeAtomic,
+                ref reason,
+                ..
+            } if reason == "batch failed"
+        ));
+        assert!(fs.get(&file).await.unwrap().is_none());
+        assert_eq!(fs.count(FilesystemOperation::CreateSubtreeAtomic), 1);
     }
 
     #[tokio::test]

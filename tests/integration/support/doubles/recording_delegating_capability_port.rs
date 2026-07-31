@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{Resolution, ResolutionBatch};
+use ironclaw_host_api::resolution::{Resolution, ResolutionBatch};
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, CapabilityCallCandidate, LoopCapabilityPort, LoopRequest, LoopRequestBatch,
     ProviderToolCall, ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,

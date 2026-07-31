@@ -18,7 +18,7 @@ use ironclaw_extension_host::{
 };
 use ironclaw_first_party_extensions::is_gsuite_extension_id;
 use ironclaw_first_party_extensions::packages::{PackageAssetContent, bundled_packages};
-use ironclaw_host_api::ExtensionId;
+use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_reborn_composition::production_first_party_trust_policy;
 use ironclaw_trust::HostTrustPolicy;
 

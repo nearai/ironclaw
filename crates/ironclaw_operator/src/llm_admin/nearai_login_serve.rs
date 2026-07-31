@@ -20,7 +20,7 @@ use ironclaw_host_api::ingress::{
     IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
-use ironclaw_host_api::{HostApiError, IngressScopeSource, NetworkMethod};
+use ironclaw_host_api::{action::NetworkMethod, error::HostApiError, ingress::IngressScopeSource};
 use ironclaw_reborn_config::RebornBootConfig;
 use serde::Deserialize;
 
@@ -169,7 +169,7 @@ mod tests {
         nearai_login_callback_mount(
             session,
             reload,
-            RebornBootConfig::new(home, RebornProfile::LocalDev),
+            RebornBootConfig::new(home, RebornProfile::Standalone),
             states,
         )
         .expect("valid NEAR AI callback route")

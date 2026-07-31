@@ -3,10 +3,14 @@ use std::ops::ControlFlow;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApprovalRequestId, Blocked, CapabilityRecoveryHint, CorrelationId, DenyReason,
-    DependentRunResult, FailureKind, INPUT_ENCODE_HUMAN_SUMMARY, LoopRef, ModelFailureDiagnostic,
-    ModelInputIssue, Outcome, Resolution, ResultProgress, ResumeToken, SameCallRetryConstraint,
-    Suspension, ToolVerdict,
+    decision::DenyReason,
+    dispatch::INPUT_ENCODE_HUMAN_SUMMARY,
+    ids::{ApprovalRequestId, CorrelationId},
+    resolution::{Blocked, DependentRunResult, Outcome, Resolution, Suspension, ToolVerdict},
+    result_meta::{
+        CapabilityRecoveryHint, FailureKind, LoopRef, ModelFailureDiagnostic, ModelInputIssue,
+        ResultProgress, ResumeToken, SameCallRetryConstraint,
+    },
 };
 use ironclaw_turns::{
     LoopFailureKind, LoopGateRef, LoopResultRef,
@@ -40,8 +44,8 @@ use super::{
     capability_invocation_from_auth_resume_candidate, capability_invocation_from_candidate,
     capability_is_visible, capability_port_error_is_terminal, capability_summary,
     clear_matching_pending_auth_resume, clear_matching_pending_external_tool_resume, failed_exit,
-    honor_retry_alteration, model_visible_capability_failure_observation, push_call_signature_once,
-    push_completed_result, sanitized_strategy_summary_or_fallback,
+    honor_capability_retry_alteration, model_visible_capability_failure_observation,
+    push_call_signature_once, push_completed_result, sanitized_strategy_summary_or_fallback,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -952,7 +956,7 @@ impl CapabilityStage {
             let outcome = ctx
                 .planner
                 .recovery()
-                .on_capability_error(&state, &summary)
+                .on_capability_error(&state, &summary, model_observation.as_ref())
                 .await;
             let outcome = match outcome {
                 RecoveryOutcome::Retry { recovery, .. } if is_resume_origin => {
@@ -964,6 +968,11 @@ impl CapabilityStage {
                 RecoveryOutcome::ModelErrorObservation { .. } => {
                     return Err(AgentLoopExecutorError::PlannerContract {
                         detail: "ModelErrorObservation on capability error",
+                    });
+                }
+                RecoveryOutcome::UserVisibleTerminal { .. } => {
+                    return Err(AgentLoopExecutorError::PlannerContract {
+                        detail: "UserVisibleTerminal on capability error",
                     });
                 }
                 RecoveryOutcome::ToolErrorResult { recovery } => {
@@ -1044,7 +1053,7 @@ impl CapabilityStage {
                             detail: "invalid model output repair retry is model-only",
                         });
                     }
-                    honor_retry_alteration(alter.as_ref())?;
+                    honor_capability_retry_alteration(alter.as_ref())?;
                     state.recovery_state = recovery;
                     CheckpointStage
                         .emit_recovery(
@@ -1886,7 +1895,7 @@ mod tests {
     };
 
     fn call(input: &str) -> CapabilityCallCandidate {
-        let capability_id = ironclaw_host_api::CapabilityId::new("test.cap").unwrap();
+        let capability_id = ironclaw_host_api::ids::CapabilityId::new("test.cap").unwrap();
         CapabilityCallCandidate {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("test-v1").unwrap(),

@@ -1,7 +1,7 @@
 //! Run-scoped loop context: the resolved model route snapshot, the neutral
 //! [`LoopRunContext`] carried across every port, and the run-info port.
 
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::ids::ThreadId;
 use serde::{Deserialize, Serialize};
 
 use crate::run_profile::refs::{CheckpointSchemaId, LoopDriverId};

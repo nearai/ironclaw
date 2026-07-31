@@ -11,8 +11,9 @@ use std::sync::Arc;
 use chrono::Utc;
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
-    AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, UserId,
-    VirtualPath,
+    ids::{AgentId, ProjectId, TenantId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
 };
 use ironclaw_projects::{
     FilesystemProjectRepository, MAX_PROJECT_METADATA_BYTES, ProjectMemberRecord,

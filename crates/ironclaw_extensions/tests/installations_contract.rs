@@ -18,7 +18,11 @@ use ironclaw_filesystem::{
     CasExpectation, Fault, FaultInjecting, FilesystemOperation, Filter, InMemoryBackend,
     LibSqlRootFilesystem, Page, PostgresRootFilesystem, RootFilesystem,
 };
-use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle, UserId, VirtualPath};
+use ironclaw_host_api::{
+    host_port::HostPortCatalog,
+    ids::{ExtensionId, SecretHandle, UserId},
+    path::VirtualPath,
+};
 
 fn extension_id(value: &str) -> ExtensionId {
     ExtensionId::new(value).unwrap()
@@ -93,6 +97,7 @@ fn manifest(hash: &str) -> ExtensionManifestRecord {
         &HostPortCatalog::empty(),
         Some(manifest_hash(hash)),
         &contracts(),
+        None,
     )
     .unwrap()
 }
@@ -160,6 +165,7 @@ fn top_level_capabilities_are_rejected_for_every_source() {
             &HostPortCatalog::empty(),
             Some(manifest_hash("sha256:abc")),
             &contracts(),
+            None,
         )
         .unwrap_err();
         match err {
@@ -326,6 +332,7 @@ async fn manifest_hash_presence_mismatch_is_rejected() {
         &HostPortCatalog::empty(),
         None,
         &contracts(),
+        None,
     )
     .unwrap();
 
@@ -1264,7 +1271,7 @@ async fn normalized_v2_contract_runs_on_libsql() {
             .await
             .unwrap(),
     );
-    let filesystem = Arc::new(LibSqlRootFilesystem::new(database));
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(database).expect("filesystem runtime"));
     filesystem.run_migrations().await.unwrap();
     let filesystem: Arc<dyn RootFilesystem> = filesystem;
     assert_normalized_backend_contract(
@@ -1981,6 +1988,7 @@ async fn listing_installations_does_not_issue_a_query_per_installation() {
                 &HostPortCatalog::empty(),
                 Some(manifest_hash("sha256:abc")),
                 &contracts(),
+                None,
             )
             .unwrap();
             let installation = ExtensionInstallation::new(

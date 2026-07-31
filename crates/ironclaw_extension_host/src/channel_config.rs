@@ -25,8 +25,10 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    ExtensionId, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    RecipeSecretField, ResourceScope, SecretHandle,
+    ids::{ExtensionId, SecretHandle},
+    product_surface::{ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind},
+    recipe::RecipeSecretField,
+    resource::ResourceScope,
 };
 use ironclaw_secrets::{SecretMaterial, SecretStorePort};
 
@@ -763,8 +765,9 @@ mod tests {
     };
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{
-        InvocationId, MountAlias, MountGrant, MountPermissions, MountView, SecretHandle, UserId,
-        VirtualPath,
+        ids::{InvocationId, SecretHandle, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
     };
     use ironclaw_secrets::SecretStore;
 
@@ -893,7 +896,7 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
         let store = Arc::new(
             ExtensionInstallationStore::load_at(
                 Arc::new(InMemoryBackend::new()),
-                ironclaw_host_api::VirtualPath::new("/system/extensions/.installations/test")
+                ironclaw_host_api::path::VirtualPath::new("/system/extensions/.installations/test")
                     .expect("valid test path"),
                 ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
                 ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
@@ -907,6 +910,7 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
             &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
             None,
             &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            None,
         )
         .expect("fixture manifest parses");
         let extension_id = ExtensionId::new(id).expect("extension id");

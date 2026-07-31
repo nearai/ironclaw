@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use ironclaw_host_api::{
-    CapabilityId, CapabilityRecoveryHint, DispatchInputIssueCode, FailureKind, ModelDiagnostic,
-    SameCallRetryConstraint,
+    dispatch::DispatchInputIssueCode,
+    ids::CapabilityId,
+    result_meta::{CapabilityRecoveryHint, FailureKind, ModelDiagnostic, SameCallRetryConstraint},
 };
 use ironclaw_turns::{
     LoopResultRef,
@@ -847,7 +848,7 @@ mod tests {
 
     #[test]
     fn capability_is_visible_authorizes_disclosed_but_unadvertised_callable_tool() {
-        use ironclaw_host_api::RuntimeKind;
+        use ironclaw_host_api::runtime::RuntimeKind;
         use ironclaw_turns::run_profile::{
             CapabilityDescriptorView, CapabilityInputRef, ConcurrencyHint, VisibleCapabilitySurface,
         };
@@ -862,6 +863,7 @@ mod tests {
             runtime: RuntimeKind::FirstParty,
             safe_name: "tool_search".to_string(),
             safe_description: "search".to_string(),
+            description_trust: Default::default(),
             concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: serde_json::json!({"type": "object"}),
         };
@@ -973,7 +975,7 @@ mod tests {
     /// - carry `approval_resume: None` (the approval-resume path is separate).
     #[test]
     fn capability_invocation_from_auth_resume_candidate_with_both_token_and_prior_approval() {
-        use ironclaw_host_api::{ApprovalRequestId, CorrelationId};
+        use ironclaw_host_api::ids::{ApprovalRequestId, CorrelationId};
         use ironclaw_turns::run_profile::{
             AuthResumeApprovalIdentity, CapabilityInputRef, CapabilityResumeToken,
         };

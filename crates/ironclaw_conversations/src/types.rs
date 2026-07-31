@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, ReplyTargetBindingRef, RunProfileRequest, SourceBindingRef,
     SubmitTurnResponse, TurnActor, TurnScope,

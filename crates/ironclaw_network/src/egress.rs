@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_host_api::NetworkMethod;
+use ironclaw_host_api::action::NetworkMethod;
 
 use crate::{
     error::NetworkHttpError,
@@ -16,6 +16,19 @@ pub trait NetworkHttpEgress: Send + Sync {
         &self,
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError>;
+}
+
+#[async_trait]
+impl<T> NetworkHttpEgress for std::sync::Arc<T>
+where
+    T: NetworkHttpEgress + ?Sized,
+{
+    async fn execute(
+        &self,
+        request: NetworkHttpRequest,
+    ) -> Result<NetworkHttpResponse, NetworkHttpError> {
+        self.as_ref().execute(request).await
+    }
 }
 
 #[async_trait]

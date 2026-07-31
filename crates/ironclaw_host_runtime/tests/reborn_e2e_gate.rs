@@ -21,8 +21,29 @@ use ironclaw_events::{
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
-use ironclaw_host_api::FailureKind;
-use ironclaw_host_api::*;
+use ironclaw_host_api::result_meta::FailureKind;
+use ironclaw_host_api::{
+    action::{Action, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    approval::ApprovalRequest,
+    capability::{
+        CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
+    },
+    decision::{Decision, Obligation, Obligations},
+    host_port::HostPortCatalog,
+    http::{
+        RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+    },
+    ids::{
+        ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId,
+        InvocationId, PackageId, RunId, SecretHandle, TenantId, UserId,
+    },
+    mount::MountView,
+    path::VirtualPath,
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CapabilitySurfacePolicy, CapabilitySurfaceVersion, HostRuntime,
     HostRuntimeServices, RuntimeCapabilityOutcome, RuntimeStatusRequest, SurfaceKind,
@@ -30,9 +51,8 @@ use ironclaw_host_runtime::{
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
-use ironclaw_processes::{ProcessResultStore, ProcessStore};
+use ironclaw_processes::{ProcessInvocationStatePort, ProcessInvocationStatus};
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount, ResourceTally};
-use ironclaw_run_state::{RunStateStorePort, RunStatus};
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptRuntime, ScriptRuntimeConfig,
 };
@@ -46,7 +66,7 @@ use serde_json::json;
 #[tokio::test]
 async fn reborn_e2e_gate_invokes_script_through_host_runtime_with_status_events_and_resources() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     let filesystem = Arc::new(InMemoryBackend::new());
     seed_script_manifest_assets(filesystem.as_ref()).await;
@@ -59,7 +79,7 @@ async fn reborn_e2e_gate_invokes_script_through_host_runtime_with_status_events_
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_script_runtime(Arc::new(ScriptRuntime::new(
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
@@ -130,7 +150,7 @@ async fn reborn_e2e_gate_invokes_script_through_host_runtime_with_status_events_
     }
 
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
-    assert_eq!(run.status, RunStatus::Completed);
+    assert_eq!(run.status, ProcessInvocationStatus::Completed);
     let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
     assert_eq!(
         governor.reserved_for(&tenant_account),
@@ -197,7 +217,7 @@ async fn reborn_e2e_gate_blocks_for_approval_resumes_once_and_rejects_replay() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(blocked_run.status, RunStatus::BlockedApproval);
+    assert_eq!(blocked_run.status, ProcessInvocationStatus::BlockedApproval);
     assert_eq!(
         blocked_run.approval_request_id,
         Some(gate.approval_request_id)
@@ -261,7 +281,7 @@ async fn reborn_e2e_gate_blocks_for_approval_resumes_once_and_rejects_replay() {
 
 #[tokio::test]
 async fn reborn_e2e_gate_fails_unsupported_obligations_before_runtime_events_or_success() {
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
     let events = InMemoryEventSink::new();
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let services = HostRuntimeServices::new(
@@ -273,7 +293,7 @@ async fn reborn_e2e_gate_fails_unsupported_obligations_before_runtime_events_or_
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_script_runtime(Arc::new(ScriptRuntime::new(
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
@@ -297,7 +317,7 @@ async fn reborn_e2e_gate_fails_unsupported_obligations_before_runtime_events_or_
     assert_failed_outcome(outcome, FailureKind::Backend);
     assert!(events.events().is_empty());
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
-    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.status, ProcessInvocationStatus::Failed);
     assert_eq!(run.error_kind.as_deref(), Some("ObligationFailed"));
     let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
     assert_eq!(
@@ -312,7 +332,7 @@ async fn reborn_e2e_gate_fails_unsupported_obligations_before_runtime_events_or_
 
 #[tokio::test]
 async fn reborn_e2e_gate_redacts_runtime_output_before_public_result() {
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -323,7 +343,7 @@ async fn reborn_e2e_gate_redacts_runtime_output_before_public_result() {
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_script_runtime(Arc::new(ScriptRuntime::new(
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
@@ -365,7 +385,7 @@ async fn reborn_e2e_gate_redacts_runtime_output_before_public_result() {
         other => panic!("expected completed redacted outcome, got {other:?}"),
     }
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
-    assert_eq!(run.status, RunStatus::Completed);
+    assert_eq!(run.status, ProcessInvocationStatus::Completed);
     let serialized_events = serde_json::to_string(&events.events()).unwrap();
     assert!(
         !serialized_events.contains(&leaked),
@@ -375,7 +395,7 @@ async fn reborn_e2e_gate_redacts_runtime_output_before_public_result() {
 
 #[tokio::test]
 async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surfaces() {
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -386,7 +406,7 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_script_runtime(Arc::new(ScriptRuntime::new(
         ScriptRuntimeConfig::for_testing(),
         FailingScriptBackend,
@@ -450,7 +470,7 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
     }
 
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
-    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.status, ProcessInvocationStatus::Failed);
     assert_eq!(run.error_kind.as_deref(), Some("Dispatch"));
     let serialized_run = serde_json::to_string(&run).unwrap();
     let serialized_events = serde_json::to_string(&events.events()).unwrap();
@@ -474,7 +494,7 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
 
 #[tokio::test]
 async fn reborn_e2e_gate_blocks_oversized_runtime_output_before_publication() {
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -487,7 +507,7 @@ async fn reborn_e2e_gate_blocks_oversized_runtime_output_before_publication() {
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_script_runtime(Arc::new(ScriptRuntime::new(
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
@@ -518,7 +538,7 @@ async fn reborn_e2e_gate_blocks_oversized_runtime_output_before_publication() {
         other => panic!("expected output-limit failure, got {other:?}"),
     }
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
-    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.status, ProcessInvocationStatus::Failed);
     assert_eq!(run.error_kind.as_deref(), Some("ObligationFailed"));
     let serialized_run = serde_json::to_string(&run).unwrap();
     assert!(
@@ -643,23 +663,19 @@ async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
     );
 }
 
-type InMemoryServices = HostRuntimeServices<
-    DiskFilesystem,
-    InMemoryResourceGovernor,
-    ProcessStore<InMemoryBackend>,
-    ProcessResultStore<InMemoryBackend>,
->;
+type InMemoryServices = HostRuntimeServices<DiskFilesystem, InMemoryResourceGovernor>;
 
 struct ApprovalFixture {
     services: InMemoryServices,
-    run_state: Arc<ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    run_state:
+        Arc<ironclaw_processes::ProcessInvocationStateStore<ironclaw_filesystem::InMemoryBackend>>,
     capability_leases: Arc<CapabilityLeaseStore<InMemoryBackend>>,
     events: InMemoryEventSink,
 }
 
 fn approval_resume_fixture() -> ApprovalFixture {
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
@@ -671,7 +687,7 @@ fn approval_resume_fixture() -> ApprovalFixture {
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(approval_requests)
     .with_capability_leases(Arc::clone(&capability_leases))
     .with_script_runtime(Arc::new(ScriptRuntime::new(

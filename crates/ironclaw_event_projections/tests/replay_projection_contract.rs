@@ -18,10 +18,18 @@ use ironclaw_filesystem::{
     Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    Action, ActionResultSummary, ActionSummary, AgentId, AuditEnvelope, AuditEventId, AuditStage,
-    CapabilityId, CapabilitySet, CorrelationId, DenyReason, ExtensionId, InvocationId, MountAlias,
-    MountGrant, MountPermissions, MountView, ProcessId, ProjectId, ResourceScope, RuntimeKind,
-    ScopedPath, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
+    action::Action,
+    audit::{ActionResultSummary, ActionSummary, AuditEnvelope, AuditStage},
+    capability::CapabilitySet,
+    decision::DenyReason,
+    ids::{
+        AgentId, AuditEventId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ProcessId,
+        ProjectId, TenantId, ThreadId, UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, ScopedPath, VirtualPath},
+    resource::ResourceScope,
+    runtime::{RuntimeKind, TrustClass},
 };
 use ironclaw_reborn_event_store::FilesystemDurableEventLog;
 
@@ -1829,6 +1837,7 @@ async fn replay_projection_keeps_spawned_process_run_active_until_terminal_proce
 
 #[tokio::test]
 async fn replay_projection_orders_runs_by_recent_activity_descending() {
+    // arch-exempt: large_file, strengthens existing replay ordering contract coverage, plan #6723
     // Six invocations, not two. `RuntimeProjectionState::runs` is a `HashMap`,
     // so with two entries its iteration order matches sorted order about half
     // the time and this test passes by luck even when the sort is gone —
@@ -2100,8 +2109,8 @@ fn scope_for_thread_with_invocation(
     }
 }
 
-fn execution_context_for_scope(scope: ResourceScope) -> ironclaw_host_api::ExecutionContext {
-    let context = ironclaw_host_api::ExecutionContext {
+fn execution_context_for_scope(scope: ResourceScope) -> ironclaw_host_api::scope::ExecutionContext {
+    let context = ironclaw_host_api::scope::ExecutionContext {
         run_id: None,
         origin: None,
         invocation_id: scope.invocation_id,

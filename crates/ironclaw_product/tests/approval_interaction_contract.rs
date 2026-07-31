@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_approvals::{ApprovalRequestStorePort, ApprovalStatus};
 use ironclaw_approvals::{
     CapabilityPermissionOverrideStorePort, DenyApproval, LeaseApproval, PersistentApprovalAction,
     PersistentApprovalPolicy, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
@@ -19,9 +20,16 @@ use ironclaw_authorization::{
 };
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_host_api::{
-    Action, ApprovalRequest, ApprovalRequestId, CapabilityId, CorrelationId, EffectKind,
-    ExtensionId, GrantConstraints, InvocationFingerprint, InvocationId, MountView, NetworkPolicy,
-    Principal, ResourceEstimate, ResourceScope, TenantId, ThreadId, UserId,
+    action::{Action, NetworkPolicy},
+    approval::{ApprovalRequest, InvocationFingerprint},
+    capability::{EffectKind, GrantConstraints},
+    ids::{
+        ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, InvocationId, TenantId,
+        ThreadId, UserId,
+    },
+    mount::MountView,
+    resource::{ResourceEstimate, ResourceScope},
+    scope::Principal,
 };
 use ironclaw_product::{
     ApprovalBlockedTurnRun, ApprovalGateRecord, ApprovalInteractionDecision,
@@ -32,7 +40,6 @@ use ironclaw_product::{
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     RunStateApprovalInteractionReadModel, approval_gate_ref,
 };
-use ironclaw_run_state::{ApprovalRequestStorePort, ApprovalStatus};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
     GateResumeDisposition, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
@@ -654,7 +661,7 @@ fn no_project_scope(user: &str, agent: Option<&str>, thread: &str) -> ResourceSc
     ResourceScope {
         tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
         user_id: UserId::new(user).expect("user"),
-        agent_id: agent.map(|id| ironclaw_host_api::AgentId::new(id).expect("agent")),
+        agent_id: agent.map(|id| ironclaw_host_api::ids::AgentId::new(id).expect("agent")),
         project_id: None,
         mission_id: None,
         thread_id: Some(ThreadId::new(thread).expect("thread")),
@@ -679,7 +686,10 @@ fn scoped_fs(
     tenant: &str,
     user: &str,
 ) -> Arc<ironclaw_filesystem::ScopedFilesystem<ironclaw_filesystem::InMemoryBackend>> {
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
     let backend = Arc::new(ironclaw_filesystem::InMemoryBackend::new());
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/approvals").expect("alias"),
@@ -1277,7 +1287,8 @@ async fn always_allow_grants_same_user_in_other_agent() {
 #[tokio::test]
 async fn always_allow_does_not_grant_other_extension_grantee() {
     for (store, idempotency) in caller_level_store_pair("ext-iso") {
-        let extension_x = ironclaw_host_api::ExtensionId::new("extension-x").expect("extension");
+        let extension_x =
+            ironclaw_host_api::ids::ExtensionId::new("extension-x").expect("extension");
         let request =
             approval_request_by("send the email", Principal::Extension(extension_x.clone()));
         let capability = dispatch_capability(&request);
@@ -1286,7 +1297,8 @@ async fn always_allow_does_not_grant_other_extension_grantee() {
 
         // Same scope, same capability, but a different extension grantee.
         let lookup_scope = no_project_scope("user-alpha", Some("agent-a"), "thread-2");
-        let extension_y = ironclaw_host_api::ExtensionId::new("extension-y").expect("extension");
+        let extension_y =
+            ironclaw_host_api::ids::ExtensionId::new("extension-y").expect("extension");
         let key = PersistentApprovalPolicyKey::new(
             &settings_scope(&lookup_scope),
             PersistentApprovalAction::Dispatch,
@@ -1547,7 +1559,7 @@ async fn always_allow_resolution_failure_preserves_existing_policy() {
             capability_id: CapabilityId::new("demo.echo").expect("capability"),
             grantee: Principal::User(UserId::new("user-alpha").expect("user")),
             approved_by: Principal::User(UserId::new("user-alpha").expect("user")),
-            constraints: ironclaw_host_api::GrantConstraints {
+            constraints: ironclaw_host_api::capability::GrantConstraints {
                 allowed_effects: vec![EffectKind::DispatchCapability],
                 mounts: MountView::default(),
                 network: NetworkPolicy::default(),
@@ -1783,7 +1795,7 @@ async fn already_approved_product_replay_without_run_hint_recovers_historical_ru
     let request_id = request.id;
     let gate_ref = approval_gate_ref(request_id).expect("approval gate");
     let run_id = TurnRunId::new();
-    let approvals = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let approvals = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     approvals
         .save_pending(approval_scope.clone(), request)
         .await
@@ -2362,7 +2374,7 @@ async fn resolve_rejects_malformed_approval_gate_ref_without_side_effects() {
     ));
     let service = DefaultApprovalInteractionService::new(
         Arc::new(RunStateApprovalInteractionReadModel::new(
-            Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store()),
+            Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store()),
             Arc::new(FakeTurnRunLocator::with_run(
                 TurnRunId::new(),
                 bad_gate_ref.clone(),
@@ -2639,7 +2651,7 @@ async fn approval_resolver_port_preserves_audit_sink() {
     let resource_scope = resource_scope(&alpha_actor);
     let request = approval_request("approval required");
     let request_id = request.id;
-    let approvals = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let approvals = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     approvals
         .save_pending(resource_scope.clone(), request)
         .await
@@ -2677,7 +2689,7 @@ async fn approval_resolver_port_retries_missing_lease_for_approved_request() {
         .expect("fingerprint"),
     );
     let request_id = request.id;
-    let approvals = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let approvals = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     approvals
         .save_pending(resource_scope.clone(), request)
         .await
@@ -2720,7 +2732,7 @@ async fn approval_resolver_port_retries_missing_spawn_lease_for_approved_request
         .expect("fingerprint"),
     );
     let request_id = request.id;
-    let approvals = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let approvals = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     approvals
         .save_pending(resource_scope.clone(), request)
         .await
@@ -2760,7 +2772,7 @@ async fn approval_resolver_port_does_not_duplicate_existing_lease_for_approved_r
         .expect("fingerprint"),
     );
     let request_id = request.id;
-    let approvals = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let approvals = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     approvals
         .save_pending(resource_scope.clone(), request)
         .await
@@ -2797,7 +2809,7 @@ async fn approval_resolver_port_reissues_when_existing_dispatch_lease_is_claimed
     );
     let fingerprint = request.invocation_fingerprint.clone().expect("fingerprint");
     let request_id = request.id;
-    let approvals = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let approvals = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     approvals
         .save_pending(resource_scope.clone(), request)
         .await
@@ -2860,7 +2872,7 @@ async fn approval_resolver_port_does_not_duplicate_existing_spawn_lease_for_appr
         .expect("fingerprint"),
     );
     let request_id = request.id;
-    let approvals = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let approvals = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     approvals
         .save_pending(resource_scope.clone(), request)
         .await
@@ -2896,7 +2908,7 @@ async fn run_state_read_model_uses_parked_turn_run_id_for_pending_approvals() {
         parked_turn_run_id, invocation_derived_run_id,
         "test must prove capability invocation ids are not turn run ids"
     );
-    let approvals = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let approvals = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     approvals
         .save_pending(resource_scope.clone(), request.clone())
         .await

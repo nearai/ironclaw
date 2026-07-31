@@ -13,10 +13,17 @@ use ironclaw_extensions::{
     MANIFEST_SCHEMA_VERSION_V3, ManifestSource,
 };
 use ironclaw_host_api::{
-    CapabilitySurfaceKind, ConversationModel, EffectKind, HOST_RUNTIME_HTTP_EGRESS_PORT_ID,
-    HostPortCatalog, HostPortCatalogEntry, HostPortId, MemoryLifecycleHook, OriginGatePolicy,
-    PermissionMode, RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource,
-    VendorAuthRecipe,
+    capability::{
+        EffectKind, OriginGatePolicy, PermissionMode, RuntimeCredentialAccountSetup,
+        RuntimeCredentialRequirementSource,
+    },
+    channel::ConversationModel,
+    host_port::{
+        HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortId,
+    },
+    memory::MemoryLifecycleHook,
+    recipe::VendorAuthRecipe,
+    surface::CapabilitySurfaceKind,
 };
 
 const ACME_MANIFEST: &str =
@@ -47,7 +54,7 @@ fn parse_v3_with_source(
     toml: &str,
     source: ManifestSource,
 ) -> Result<ExtensionManifestRecord, String> {
-    ExtensionManifestRecord::from_toml(toml, source, &catalog(), None, &contracts())
+    ExtensionManifestRecord::from_toml(toml, source, &catalog(), None, &contracts(), None)
         .map_err(|error| error.to_string())
 }
 
@@ -827,7 +834,7 @@ network_targets = [{{ scheme = "https", host_pattern = "*.blob.zephyrite.example
     assert_eq!(tool.network_targets.len(), 1);
     assert_eq!(
         tool.network_targets[0].scheme,
-        Some(ironclaw_host_api::NetworkScheme::Https)
+        Some(ironclaw_host_api::action::NetworkScheme::Https)
     );
     assert_eq!(
         tool.network_targets[0].host_pattern,

@@ -7,7 +7,7 @@
 //!   depend on;
 //! - [`DefaultHostRuntime`] — the production composition that wraps
 //!   [`ironclaw_capabilities::CapabilityHost`] (which itself coordinates
-//!   authorization, approvals, run-state lifecycle, and process spawn) behind
+//!   authorization, approvals, process invocation lifecycle, and process spawn) behind
 //!   that contract.
 //!
 //! The service preserves three important boundaries:
@@ -26,11 +26,14 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, CorrelationId,
-    DispatchFailureDetail, ExecutionContext, ExtensionId, FailureFate, FailureKind, ProcessId,
-    ResourceEstimate, ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeKind,
-    SecretHandle,
+    decision::RuntimeCredentialAuthRequirement,
+    dispatch::{CapabilityDisplayOutputPreview, DispatchFailureDetail},
+    ids::{ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, ProcessId, SecretHandle},
+    resource::{ResourceEstimate, ResourceScope, ResourceUsage},
+    result_meta::{FailureFate, FailureKind},
+    runtime::RuntimeKind,
     runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
+    scope::ExecutionContext,
 };
 use ironclaw_trust::TrustDecision;
 use serde_json::Value;
@@ -85,11 +88,12 @@ pub use first_party::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 pub use first_party_tools::{
-    APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, BuiltinFirstPartyTools,
-    ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
-    HTTP_SAVE_CAPABILITY_ID, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
-    MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    MemoryToolProfile, NATIVE_MEMORY_FIRST_PARTY_PROVIDER, NativeMemoryToolHandler,
+    APPLY_PATCH_CAPABILITY_ID, ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
+    BUILTIN_FIRST_PARTY_PROVIDER, BuiltinFirstPartyTools, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
+    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, JSON_CAPABILITY_ID,
+    LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID,
+    MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID, MemoryToolProfile,
+    NATIVE_MEMORY_FIRST_PARTY_PROVIDER, NativeMemoryToolHandler,
     OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID, PROFILE_SET_CAPABILITY_ID,
     READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
@@ -104,10 +108,10 @@ pub use first_party_tools::{
     builtin_first_party_handlers_with_trigger_create_hook,
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
     builtin_first_party_package, builtin_first_party_package_for_process_backend,
-    ensure_memory_mount, finish_memory_tool_result, map_memory_service_error,
-    memory_invocation_for_request, memory_tool_profiles, normalize_memory_tool_input,
-    register_memory_tool_handler, register_native_memory_tools,
-    register_outbound_delivery_first_party_handler,
+    ensure_memory_mount, finish_memory_tool_result, is_allowed_code_artifact_host,
+    map_memory_service_error, memory_invocation_for_request, memory_tool_profiles,
+    normalize_memory_tool_input, register_memory_tool_handler, register_native_memory_tools,
+    register_outbound_delivery_first_party_handler, register_reply_attachment_first_party_handler,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use first_party_tools::{
@@ -134,9 +138,13 @@ pub use process_port::{
 };
 pub use production::DefaultHostRuntime;
 pub use sandbox_process::{
-    RebornSandboxConfig, RebornSandboxContainerIdentity, RebornSandboxNetworkBroker,
-    RebornSandboxScopeKey, RebornSandboxSecretBroker, RebornSandboxUserKey,
-    RebornSandboxWorkspaceMode, RebornScopedSandboxCommandTransport, SandboxActivityRegistry,
+    DEFAULT_SANDBOX_ALLOWED_DOMAINS, DEFAULT_SANDBOX_MAX_EGRESS_BYTES, RebornSandboxConfig,
+    RebornSandboxContainerIdentity, RebornSandboxNetworkBroker, RebornSandboxScopeKey,
+    RebornSandboxSecretBroker, RebornSandboxUserKey, RebornSandboxWorkspaceMode,
+    RebornScopedSandboxCommandTransport, SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV,
+    SANDBOX_MAX_EGRESS_BYTES_ENV, SandboxActivityRegistry, SandboxDockerReadiness,
+    connect_docker_with_retry, sandbox_allowed_domains, sandbox_docker_readiness,
+    sandbox_extra_allowed_domains, sandbox_max_egress_bytes, sandbox_network_policy,
 };
 /// Scoped cleanup guard consumed by the generic extension activation
 /// transaction's composition adapter. Raw obligation handoff stores remain
@@ -545,7 +553,7 @@ pub enum RuntimeBlockedReason {
 ///
 /// Raw transport errors can contain URLs, query strings, host paths, proxy
 /// details, or credential-shaped text. Keep this disabled unless debugging a
-/// trusted `LocalDev` or `LocalYolo` run. Hosted and enterprise deployments
+/// trusted `Standalone` or `LocalYolo` run. Hosted and enterprise deployments
 /// never enable raw diagnostics from this environment variable alone.
 pub(crate) const UNSAFE_RAW_HTTP_EGRESS_ERRORS_ENV: &str = "IRONCLAW_UNSAFE_RAW_HTTP_EGRESS_ERRORS";
 
@@ -564,7 +572,7 @@ pub(crate) fn local_runtime_allows_unsafe_raw_http_diagnostics(
     matches!(deployment, DeploymentMode::LocalSingleUser)
         && matches!(
             profile,
-            RuntimeProfile::LocalDev | RuntimeProfile::LocalYolo
+            RuntimeProfile::LocalHost | RuntimeProfile::LocalYolo
         )
 }
 
@@ -577,10 +585,10 @@ mod raw_http_diagnostic_policy_tests {
     use super::*;
 
     #[test]
-    fn raw_http_diagnostics_are_limited_to_local_dev_and_yolo_profiles() {
+    fn raw_http_diagnostics_are_limited_to_standalone_and_yolo_profiles() {
         assert!(local_runtime_allows_unsafe_raw_http_diagnostics(
             DeploymentMode::LocalSingleUser,
-            RuntimeProfile::LocalDev,
+            RuntimeProfile::LocalHost,
         ));
         assert!(local_runtime_allows_unsafe_raw_http_diagnostics(
             DeploymentMode::LocalSingleUser,
@@ -701,7 +709,7 @@ pub fn capability_failure_disposition(kind: FailureKind) -> CapabilityFailureDis
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum RuntimeWorkId {
-    Invocation(ironclaw_host_api::InvocationId),
+    Invocation(ironclaw_host_api::ids::InvocationId),
     Process(ProcessId),
     Gate(RuntimeGateId),
 }
@@ -951,7 +959,9 @@ impl HostRuntimeError {
 #[cfg(test)]
 mod unsupported_operation_default_tests {
     use super::*;
-    use ironclaw_host_api::{CapabilitySet, MountView, TrustClass, UserId};
+    use ironclaw_host_api::{
+        capability::CapabilitySet, ids::UserId, mount::MountView, runtime::TrustClass,
+    };
 
     /// A `HostRuntime` that implements only the required methods, so every
     /// optional operation falls through to the trait's default body.
@@ -1001,18 +1011,18 @@ mod unsupported_operation_default_tests {
 
     fn context() -> ExecutionContext {
         ExecutionContext::local_default(
-            UserId::new("user").expect("user id"),
-            ExtensionId::new("caller").expect("extension id"),
+            UserId::new("user").expect("user id"), // safety: test-only static fixture
+            ExtensionId::new("caller").expect("extension id"), // safety: test-only static fixture
             RuntimeKind::Wasm,
             TrustClass::UserTrusted,
             CapabilitySet::default(),
             MountView::default(),
         )
-        .expect("execution context")
+        .expect("execution context") // safety: test-only static fixture
     }
 
     fn capability_id() -> CapabilityId {
-        CapabilityId::new("echo.say").expect("capability id")
+        CapabilityId::new("echo.say").expect("capability id") // safety: test-only static fixture
     }
 
     fn failure(outcome: RuntimeCapabilityOutcome) -> RuntimeCapabilityFailure {
@@ -1042,7 +1052,7 @@ mod unsupported_operation_default_tests {
                     Value::Null,
                 ))
                 .await
-                .expect("default spawn body returns an outcome, not an error"),
+                .expect("default spawn body returns an outcome, not an error"), // safety: test-only assertion
         );
         let auth_resume = failure(
             runtime
@@ -1054,7 +1064,7 @@ mod unsupported_operation_default_tests {
                     None,
                 ))
                 .await
-                .expect("default auth-resume body returns an outcome, not an error"),
+                .expect("default auth-resume body returns an outcome, not an error"), // safety: test-only assertion
         );
         let spawn_resume = failure(
             runtime
@@ -1066,7 +1076,7 @@ mod unsupported_operation_default_tests {
                     Value::Null,
                 ))
                 .await
-                .expect("default spawn-resume body returns an outcome, not an error"),
+                .expect("default spawn-resume body returns an outcome, not an error"), // safety: test-only assertion
         );
 
         for (label, failure) in [
@@ -1074,16 +1084,19 @@ mod unsupported_operation_default_tests {
             ("auth_resume_capability", auth_resume),
             ("resume_spawn_capability", spawn_resume),
         ] {
-            assert_eq!(
+            assert_eq! // safety: test-only assertion
+            (
                 failure.kind,
                 FailureKind::UnsupportedRunner,
                 "{label} default must name the permanent unsupported-operation kind"
             );
-            assert!(
+            assert! // safety: test-only assertion
+            (
                 !failure.kind.is_retryable(),
                 "{label} default must not consume retry budget on a permanently unsupported operation"
             );
-            assert_eq!(
+            assert_eq! // safety: test-only assertion
+            (
                 failure.kind.fate(),
                 FailureFate::ModelVisible,
                 "{label} default must surface to the model so it can route around the gap"

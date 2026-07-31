@@ -40,7 +40,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::ResourceScope;
+use ironclaw_host_api::resource::ResourceScope;
 use ironclaw_memory::{
     MemoryInvocation, MemoryProfileSetStatus, MemoryService, MemoryServiceContextRequest,
     MemoryServiceContextSnippet, MemoryServiceError, MemoryServiceProfileReadResponse,
@@ -131,7 +131,7 @@ impl Mem0MemoryService {
     /// returns the other partition's rows). Rather than depend on which secondary
     /// identifiers a given mem0 version actually enforces, the provider encodes
     /// the ENTIRE partition — full scope AND workspace — into the one key that is
-    /// guaranteed enforced: `user_id`. So the workspace partition the local-dev
+    /// guaranteed enforced: `user_id`. So the workspace partition the standalone
     /// composition passes as `config.app_id` is prefixed into the `user_id`
     /// namespace here; that prefix IS the isolation boundary. (`app_id` is still
     /// stamped via `stamp_app_id` as forward-compatible metadata, but MUST NOT be
@@ -587,7 +587,10 @@ fn result_path(item: &Value) -> String {
 mod tests {
     use super::*;
     use crate::transport::{Mem0HttpMethod, MockMem0Transport};
-    use ironclaw_host_api::{CorrelationId, InvocationId, ResourceScope, TenantId, UserId};
+    use ironclaw_host_api::{
+        ids::{CorrelationId, InvocationId, TenantId, UserId},
+        resource::ResourceScope,
+    };
     use ironclaw_memory::{MemoryContextProfileId, MemoryServiceErrorKind};
     use serde_json::Map;
 

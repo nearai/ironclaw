@@ -1,5 +1,5 @@
 //! The **host-authored remediation** channel — the trusted sibling of
-//! [`crate::SafeSummary`].
+//! [`crate::safe_summary::SafeSummary`].
 //!
 //! ## Why a second text channel exists
 //!
@@ -8,7 +8,7 @@
 //! Its rule is deliberately paranoid — 512 bytes, no control characters, no
 //! `{}[]<>/\`` delimiters (so no URLs, no paths, no backticks), and no
 //! credential *vocabulary* at all. Anything that trips it collapses to
-//! [`SafeSummary::placeholder`](crate::SafeSummary::placeholder).
+//! [`SafeSummary::placeholder`](crate::safe_summary::SafeSummary::placeholder).
 //!
 //! That rule is correct for untrusted output and *wrong* for host-authored
 //! operator remediation. "Run `ironclaw config set provider.client_id
@@ -45,10 +45,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::HostApiError;
+use crate::error::HostApiError;
 
 /// Maximum length of a host-authored remediation, in bytes. Generous relative
-/// to [`crate::SafeSummary`]'s 512 because a multi-step operator instruction is
+/// to [`crate::safe_summary::SafeSummary`]'s 512 because a multi-step operator instruction is
 /// genuinely long; matches the model-observation detail cap downstream so a
 /// value that fits here is not truncated later.
 pub const MAX_HOST_REMEDIATION_BYTES: usize = 4096;

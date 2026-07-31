@@ -15,11 +15,21 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::{
-    ActivityId, Actor, Authorized, CapabilityId, CorrelationId, EffectKind, ExtensionId, HostPath,
-    Invocation, InvocationOrigin, MountView, NetworkScheme, NetworkTargetPattern, PermissionMode,
-    ProcessId, ProductKind, ReservationStatus, ResourceEstimate, ResourceReservationId,
-    ResourceScope, ResourceUsage, RuntimeCredentialRequirementSource, RuntimeCredentialTarget,
-    RuntimeKind, RuntimeLane, SecretHandle, TenantId, Timestamp, UserId, VendorId, VirtualPath,
+    Timestamp,
+    action::{NetworkScheme, NetworkTargetPattern},
+    authorized::Authorized,
+    capability::{EffectKind, PermissionMode, RuntimeCredentialRequirementSource},
+    http::RuntimeCredentialTarget,
+    ids::{
+        ActivityId, CapabilityId, CorrelationId, ExtensionId, ProcessId, ProductKind,
+        ResourceReservationId, SecretHandle, TenantId, UserId, VendorId,
+    },
+    invocation::{Actor, Invocation, InvocationOrigin},
+    lane::RuntimeLane,
+    mount::MountView,
+    path::{HostPath, VirtualPath},
+    resource::{ReservationStatus, ResourceEstimate, ResourceScope, ResourceUsage},
+    runtime::RuntimeKind,
 };
 use ironclaw_host_runtime::{
     default_host_api_contract_registry, default_host_port_catalog,
@@ -239,20 +249,18 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
     let (_storage, fs) = mounted_github_package_fs();
     // Parse through the single record entry point (the github asset is a
     // manifest v3 document).
+    let root = VirtualPath::new("/system/extensions/github").unwrap();
     let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
         std::fs::read_to_string(github_asset_root.join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),
         None,
         &default_host_api_contract_registry().unwrap(),
+        Some(root.clone()),
     )
     .unwrap();
     let manifest = ExtensionManifest::try_from(record.manifest().clone()).unwrap();
-    let package = ExtensionPackage::from_manifest(
-        manifest,
-        VirtualPath::new("/system/extensions/github").unwrap(),
-    )
-    .unwrap();
+    let package = ExtensionPackage::from_manifest(manifest, root).unwrap();
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
     let extension_id = ExtensionId::new("github").unwrap();
@@ -748,7 +756,7 @@ fn sample_scope() -> ResourceScope {
         project_id: None,
         mission_id: None,
         thread_id: None,
-        invocation_id: ironclaw_host_api::InvocationId::new(),
+        invocation_id: ironclaw_host_api::ids::InvocationId::new(),
     }
 }
 

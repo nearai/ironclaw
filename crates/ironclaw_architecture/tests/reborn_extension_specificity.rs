@@ -189,6 +189,19 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "GitHub content API allowlist for skill installation",
     ),
     (
+        "crates/ironclaw_host_runtime/src/sandbox_process/network_allowlist.rs",
+        "github",
+        "default sandboxed-shell egress allowlist includes github.com/\
+         raw.githubusercontent.com/codeload.github.com for ordinary `git clone`/release-\
+         archive workflows — GitHub as a code host, not the github extension",
+    ),
+    (
+        "crates/ironclaw_host_runtime/src/sandbox_process/network_allowlist.rs",
+        "api.github.com",
+        "default sandboxed-shell egress allowlist includes GitHub's content API host for \
+         `gh`/archive-download workflows — GitHub as a code host, not the github extension",
+    ),
+    (
         "crates/ironclaw_host_runtime/src/first_party_tools/skill_management.rs",
         "github",
         "skill-install tool description names GitHub as a skill source",
@@ -1140,11 +1153,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // (Google API hosts) and web-access (Exa MCP) egress it no longer
     // special-cases — the code routes purely on manifest-declared targets.
     (
-        "crates/ironclaw_reborn_composition/src/runtime/local_dev/extension_surface.rs",
+        "crates/ironclaw_extension_host/src/capability_surface.rs",
         "google",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/runtime/local_dev/extension_surface.rs",
+        "crates/ironclaw_extension_host/src/capability_surface.rs",
         "web-access",
     ),
     // lane-4: nearai-slice — the last catalog package (nearai_mcp) is still
@@ -1177,8 +1190,24 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "nearaimcp",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
+        "crates/ironclaw_reborn_composition/src/factory/auth_engine_assembly.rs",
         "nearai_mcp",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/factory/production_backend_assembly.rs",
+        "nearai_mcp",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/factory/production_backend_assembly.rs",
+        "nearaimcp",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/factory/production_build_assembly.rs",
+        "nearai_mcp",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/factory/production_build_assembly.rs",
+        "nearaimcp",
     ),
     (
         "crates/ironclaw_reborn_composition/src/input.rs",
@@ -1229,11 +1258,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "nearai_mcp",
     ),
     // lane-4: migration — one-time forward-migration call sites naming the v1 vocabulary they fold forward — correct-by-design (same pattern the retired-taxonomy gate sanctions); would become a SANCTIONED_PATHS carve if the sites move into a dedicated migration module
-    ("crates/ironclaw_reborn_composition/src/factory.rs", "slack"),
-    (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
-        "nearaimcp",
-    ),
     // lane-4: doc-str — incidental doc-comment / error-string / tool-description examples that NAME an extension but branch on nothing — the code routes by a manifest field (display_name/provider/effects); reword or leave (Ben's call)
     ("crates/ironclaw_filesystem/src/index.rs", "acme"),
     ("crates/ironclaw_host_api/src/capability.rs", "slack"),
@@ -1265,7 +1289,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "google",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
+        "crates/ironclaw_reborn_composition/src/factory/production_backend_assembly.rs",
+        "google",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/factory/runtime_lane_assembly.rs",
         "notion",
     ),
     (
@@ -1297,7 +1325,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     (
-        "crates/ironclaw_reborn_composition/src/root/communication_context.rs",
+        "crates/ironclaw_product/src/communication_context.rs",
         "slack",
     ),
     ("crates/ironclaw_skills/src/selector.rs", "github"),
@@ -1393,6 +1421,37 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
 ];
 
+/// WS0 baseline for the extension-specificity allowlist (target-architecture
+/// epic #3773, workstream #6920): the number of `(path, term)` pairs measured
+/// **on this checkout**, not copied from the design docs.
+///
+/// Measured 2026-07-30 against `origin/main` @ `ae0989c37` by counting the
+/// entries of `ALLOWLIST` above (`ALLOWLIST.len()`, printed by the ratchet
+/// below on failure).
+///
+/// PROPOSAL §11.2.8 shrinks this list to the §8.1 rule-4 set and CHECKLIST
+/// WS12 wants it empty. The staleness half of that discipline already lives in
+/// the gate above (an entry that no longer matches fails); this ceiling is the
+/// other half — the list cannot *grow* untracked either. Lower it in the same
+/// PR that deletes entries so the new floor is locked in.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 130;
+
+/// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
+#[test]
+fn reborn_extension_specificity_allowlist_ratchets_down_only() {
+    assert!(
+        ALLOWLIST.len() <= WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE,
+        "extension-specificity ALLOWLIST grew to {} entries (WS0 baseline {}): this list is \
+         shrink-only (PROPOSAL §11.2.8). Degenericize the code — route on a manifest-declared \
+         capability instead of naming the vendor — rather than allowlisting a new pair. If the \
+         owner has approved a deliberate carve-out, raise \
+         WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE in the same PR with the rationale in the \
+         PR body.",
+        ALLOWLIST.len(),
+        WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE
+    );
+}
+
 /// One `(relative path, matched term)` scanner hit.
 type HitEntry = (String, String);
 
@@ -1436,7 +1495,8 @@ fn reborn_generic_code_names_no_concrete_extension() {
     if !new_violations.is_empty() {
         failures.push(format!(
             "concrete extension names in generic code (fix the code, or — for pre-existing \
-             debt only — add the exact entries below to ALLOWLIST):\n{}",
+             debt only — add the exact entries below to ALLOWLIST, which also requires raising \
+             WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE, a reviewed decision):\n{}",
             new_violations
                 .iter()
                 .map(|(path, term)| format!("    (\"{path}\", \"{term}\"),"))

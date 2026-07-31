@@ -32,29 +32,39 @@ pub(crate) const MAX_RETRY_AFTER_SECS: u64 = 3600;
 /// (try the next provider). The question is: "could this exact same request
 /// succeed if we try again?"
 ///
-/// Retryable: `RequestFailed`, `RateLimited`, `BadGateway`, `InvalidResponse`,
-/// `SessionRenewalFailed`, `Http`, `Io`.
+/// Retryable: `RequestFailed`, `RateLimited`, `BadGateway`,
+/// `StreamInterrupted`, `SessionRenewalFailed`, and `Http`/`Io` only when
+/// their concrete error carries transient connection/status evidence.
 ///
-/// Non-retryable: `AuthFailed`, `SessionExpired`, `ContextLengthExceeded`,
-/// `ModelNotAvailable`, `Json`.
+/// Non-retryable: `InvalidRequest`, `AuthFailed`, `SessionExpired`,
+/// `ContextLengthExceeded`, `ModelNotAvailable`, `QuotaExceeded`, `Json`,
+/// `InvalidResponse`, `EmptyResponse`.
 /// - `SessionExpired` — handled by session renewal layer, not by retry
 /// - `ModelNotAvailable` — the model won't appear between attempts
+/// - `QuotaExceeded` — billing or credits require user action
 /// - `Json` — a serde parse bug, not a transient failure
 ///
 /// See also `circuit_breaker::is_transient()` which answers a different
 /// question: "does this error indicate the backend is degraded?"
 pub fn is_retryable(err: &LlmError) -> bool {
-    matches!(
-        err,
+    match err {
         LlmError::RequestFailed { .. }
-            | LlmError::RateLimited { .. }
-            | LlmError::BadGateway { .. }
-            | LlmError::InvalidResponse { .. }
-            | LlmError::EmptyResponse { .. }
-            | LlmError::SessionRenewalFailed { .. }
-            | LlmError::Http(_)
-            | LlmError::Io(_)
-    )
+        | LlmError::RateLimited { .. }
+        | LlmError::BadGateway { .. }
+        | LlmError::StreamInterrupted { .. }
+        | LlmError::SessionRenewalFailed { .. } => true,
+        LlmError::Http(error) => crate::error::is_transient_http_error(error),
+        LlmError::Io(error) => crate::error::is_transient_io_error(error),
+        LlmError::InvalidRequest { .. }
+        | LlmError::InvalidResponse { .. }
+        | LlmError::EmptyResponse { .. }
+        | LlmError::ContextLengthExceeded { .. }
+        | LlmError::ModelNotAvailable { .. }
+        | LlmError::QuotaExceeded { .. }
+        | LlmError::AuthFailed { .. }
+        | LlmError::SessionExpired { .. }
+        | LlmError::Json(_) => false,
+    }
 }
 
 /// Calculate exponential backoff delay with random jitter.
@@ -141,6 +151,20 @@ pub fn parse_retry_after_value(header: &reqwest::header::HeaderValue) -> Duratio
 }
 
 const DEFAULT_RETRY_AFTER_SECS: u64 = 60;
+
+/// Preserve whether a provider supplied `Retry-After`, except that HTTP 429
+/// retains the historical 60-second floor when the header is absent.
+pub(crate) fn retry_after_for_status(
+    status: u16,
+    header: Option<&reqwest::header::HeaderValue>,
+) -> Option<Duration> {
+    let parsed = header.map(parse_retry_after_value);
+    if status == 429 {
+        parsed.or(Some(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS)))
+    } else {
+        parsed
+    }
+}
 
 /// Configuration for the retry decorator.
 #[derive(Debug, Clone)]
@@ -337,6 +361,10 @@ impl CompletionStreamSink for StreamingAttemptSink {
 
 #[async_trait]
 impl LlmProvider for RetryProvider {
+    fn provider_id(&self) -> String {
+        self.inner.provider_id()
+    }
+
     fn model_name(&self) -> &str {
         self.inner.model_name()
     }
@@ -424,6 +452,14 @@ impl LlmProvider for RetryProvider {
 
     fn effective_model_name(&self, requested_model: Option<&str>) -> String {
         self.inner.effective_model_name(requested_model)
+    }
+
+    fn fallback_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<crate::ModelFallbackRoute, LlmError> {
+        self.inner.fallback_route(fallback_index, requested_model)
     }
 
     fn active_model_name(&self) -> String {
@@ -698,9 +734,9 @@ mod tests {
             provider: "p".into(),
             retry_after: None,
         }));
-        assert!(is_retryable(&LlmError::InvalidResponse {
+        assert!(is_retryable(&LlmError::StreamInterrupted {
             provider: "p".into(),
-            reason: "bad".into(),
+            reason: "connection closed".into(),
         }));
         assert!(is_retryable(&LlmError::SessionRenewalFailed {
             provider: "p".into(),
@@ -727,6 +763,17 @@ mod tests {
             status: 500,
             retry_after: None,
         }));
+        assert!(!is_retryable(&LlmError::InvalidResponse {
+            provider: "p".into(),
+            reason: "bad".into(),
+        }));
+        assert!(!is_retryable(&LlmError::EmptyResponse {
+            provider: "p".into(),
+        }));
+        assert!(!is_retryable(&LlmError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "session file denied"
+        ))));
     }
 
     /// Regression for PR #2753 review: when `BadGateway` carries
@@ -1016,6 +1063,15 @@ mod tests {
         assert_eq!(
             cap_retry_after(Duration::from_secs(0)),
             Duration::from_secs(0)
+        );
+    }
+
+    #[test]
+    fn retry_after_presence_is_preserved_for_gateway_errors() {
+        assert_eq!(retry_after_for_status(503, None), None);
+        assert_eq!(
+            retry_after_for_status(429, None),
+            Some(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS))
         );
     }
 

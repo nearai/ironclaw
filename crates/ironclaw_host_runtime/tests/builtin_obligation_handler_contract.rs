@@ -15,9 +15,29 @@ use ironclaw_capabilities::{
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
-use ironclaw_host_api::*;
+use ironclaw_host_api::result_meta::FailureKind;
+use ironclaw_host_api::{
+    Timestamp,
+    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    audit::AuditStage,
+    capability::{CapabilityDescriptor, CapabilitySet},
+    decision::{Decision, Obligation, Obligations},
+    dispatch::CapabilityDispatchResult,
+    host_port::HostPortCatalog,
+    ids::{
+        AgentId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ProjectId,
+        ResourceReservationId, RunId, SecretHandle, TenantId, UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::{
+        ReservationStatus, ResourceCeiling, ResourceEstimate, ResourceReceipt, ResourceScope,
+        ResourceUsage, SandboxQuota,
+    },
+    runtime::{RuntimeKind, TrustClass},
+    scope::ExecutionContext,
+};
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CapabilitySurfaceVersion,
     DefaultHostRuntime, HostRuntime, RuntimeCapabilityOutcome, RuntimeCredentialAccessSecret,
@@ -34,7 +54,7 @@ use serde_json::json;
 fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
     ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
         ironclaw_host_api::runtime_policy::DeploymentMode::LocalSingleUser,
-        ironclaw_host_api::runtime_policy::RuntimeProfile::LocalDev,
+        ironclaw_host_api::runtime_policy::RuntimeProfile::LocalHost,
     ))
     .unwrap()
 }
@@ -1253,20 +1273,22 @@ impl RuntimeCredentialAccountResolver for AlwaysAuthRequiredResolver {
     async fn resolve_access_secret(
         &self,
         _request: RuntimeCredentialAccountRequest<'_>,
-    ) -> Result<RuntimeCredentialAccessSecret, ironclaw_host_api::CredentialStageError> {
-        Err(ironclaw_host_api::CredentialStageError::AuthRequired)
+    ) -> Result<RuntimeCredentialAccessSecret, ironclaw_host_api::dispatch::CredentialStageError>
+    {
+        Err(ironclaw_host_api::dispatch::CredentialStageError::AuthRequired)
     }
 }
 
 #[derive(Debug)]
-struct FixedHandleResolver(ironclaw_host_api::SecretHandle);
+struct FixedHandleResolver(ironclaw_host_api::ids::SecretHandle);
 
 #[async_trait::async_trait]
 impl RuntimeCredentialAccountResolver for FixedHandleResolver {
     async fn resolve_access_secret(
         &self,
         request: RuntimeCredentialAccountRequest<'_>,
-    ) -> Result<RuntimeCredentialAccessSecret, ironclaw_host_api::CredentialStageError> {
+    ) -> Result<RuntimeCredentialAccessSecret, ironclaw_host_api::dispatch::CredentialStageError>
+    {
         Ok(RuntimeCredentialAccessSecret {
             scope: request.scope.clone(),
             handle: self.0.clone(),
@@ -1277,7 +1299,7 @@ impl RuntimeCredentialAccountResolver for FixedHandleResolver {
 #[derive(Debug)]
 struct SourceScopedHandleResolver {
     source_scope: ResourceScope,
-    handle: ironclaw_host_api::SecretHandle,
+    handle: ironclaw_host_api::ids::SecretHandle,
 }
 
 #[async_trait::async_trait]
@@ -1285,7 +1307,8 @@ impl RuntimeCredentialAccountResolver for SourceScopedHandleResolver {
     async fn resolve_access_secret(
         &self,
         _request: RuntimeCredentialAccountRequest<'_>,
-    ) -> Result<RuntimeCredentialAccessSecret, ironclaw_host_api::CredentialStageError> {
+    ) -> Result<RuntimeCredentialAccessSecret, ironclaw_host_api::dispatch::CredentialStageError>
+    {
         Ok(RuntimeCredentialAccessSecret {
             scope: self.source_scope.clone(),
             handle: self.handle.clone(),
@@ -1401,11 +1424,11 @@ async fn inject_credential_account_once_fails_when_no_resolver_wired() {
     let capability_id = capability_id();
     let estimate = ResourceEstimate::default();
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
-        handle: ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap(),
-        provider: ironclaw_host_api::VendorId::new("github").unwrap(),
-        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+        handle: ironclaw_host_api::ids::SecretHandle::new("github_runtime_token").unwrap(),
+        provider: ironclaw_host_api::ids::VendorId::new("github").unwrap(),
+        setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: Vec::new(),
-        requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
+        requester_extension: ironclaw_host_api::ids::ExtensionId::new("github").unwrap(),
     }];
 
     let err = handler
@@ -1442,11 +1465,11 @@ async fn inject_credential_account_once_fails_when_resolver_returns_auth_require
     let estimate = ResourceEstimate::default();
     let provider_scopes = vec!["https://www.googleapis.com/auth/drive.readonly".to_string()];
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
-        handle: ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap(),
-        provider: ironclaw_host_api::VendorId::new("github").unwrap(),
-        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+        handle: ironclaw_host_api::ids::SecretHandle::new("github_runtime_token").unwrap(),
+        provider: ironclaw_host_api::ids::VendorId::new("github").unwrap(),
+        setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: provider_scopes.clone(),
-        requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
+        requester_extension: ironclaw_host_api::ids::ExtensionId::new("github").unwrap(),
     }];
 
     let err = handler
@@ -1479,8 +1502,8 @@ async fn inject_credential_account_once_fails_when_resolver_returns_auth_require
 async fn inject_credential_account_once_resolves_and_stages_secret() {
     // Happy path: resolver returns Ok(handle), material exists in store,
     // obligation is satisfied, and the staged secret appears in the injection store.
-    let access_handle = ironclaw_host_api::SecretHandle::new("github_access_secret").unwrap();
-    let injection_slot = ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap();
+    let access_handle = ironclaw_host_api::ids::SecretHandle::new("github_access_secret").unwrap();
+    let injection_slot = ironclaw_host_api::ids::SecretHandle::new("github_runtime_token").unwrap();
     let secret_store = Arc::new(ironclaw_secrets::SecretStore::ephemeral());
     // Seed the store with material under the access handle.
     secret_store
@@ -1507,10 +1530,10 @@ async fn inject_credential_account_once_resolves_and_stages_secret() {
     let estimate = ResourceEstimate::default();
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
         handle: injection_slot.clone(),
-        provider: ironclaw_host_api::VendorId::new("github").unwrap(),
-        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+        provider: ironclaw_host_api::ids::VendorId::new("github").unwrap(),
+        setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: Vec::new(),
-        requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
+        requester_extension: ironclaw_host_api::ids::ExtensionId::new("github").unwrap(),
     }];
 
     handler
@@ -1527,8 +1550,8 @@ async fn inject_credential_account_once_resolves_and_stages_secret() {
 
 #[tokio::test]
 async fn inject_credential_account_once_reads_from_resolved_source_scope() {
-    let access_handle = ironclaw_host_api::SecretHandle::new("github_access_secret").unwrap();
-    let injection_slot = ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap();
+    let access_handle = ironclaw_host_api::ids::SecretHandle::new("github_access_secret").unwrap();
+    let injection_slot = ironclaw_host_api::ids::SecretHandle::new("github_runtime_token").unwrap();
     let source_scope =
         ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
     let mut target_scope = source_scope.clone();
@@ -1561,10 +1584,10 @@ async fn inject_credential_account_once_reads_from_resolved_source_scope() {
     let estimate = ResourceEstimate::default();
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
         handle: injection_slot,
-        provider: ironclaw_host_api::VendorId::new("github").unwrap(),
-        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+        provider: ironclaw_host_api::ids::VendorId::new("github").unwrap(),
+        setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: Vec::new(),
-        requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
+        requester_extension: ironclaw_host_api::ids::ExtensionId::new("github").unwrap(),
     }];
 
     handler
@@ -1588,7 +1611,7 @@ async fn inject_credential_account_once_maps_unknown_resolved_secret_to_auth_req
     // This was Failed in earlier PR4233 iterations; aligned with reborn #4231
     // staged-credential semantics so the runtime auth gate fires consistently
     // regardless of which staging lane (obligation vs stager) discovered the gap.
-    let access_handle = ironclaw_host_api::SecretHandle::new("missing_secret").unwrap();
+    let access_handle = ironclaw_host_api::ids::SecretHandle::new("missing_secret").unwrap();
     let secret_store = Arc::new(ironclaw_secrets::SecretStore::ephemeral()); // empty store
     let governor = Arc::new(ironclaw_resources::InMemoryResourceGovernor::new());
     let services = BuiltinObligationServices::new(
@@ -1602,11 +1625,11 @@ async fn inject_credential_account_once_maps_unknown_resolved_secret_to_auth_req
     let capability_id = capability_id();
     let estimate = ResourceEstimate::default();
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
-        handle: ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap(),
-        provider: ironclaw_host_api::VendorId::new("github").unwrap(),
-        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
+        handle: ironclaw_host_api::ids::SecretHandle::new("github_runtime_token").unwrap(),
+        provider: ironclaw_host_api::ids::VendorId::new("github").unwrap(),
+        setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: Vec::new(),
-        requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
+        requester_extension: ironclaw_host_api::ids::ExtensionId::new("github").unwrap(),
     }];
 
     let err = handler

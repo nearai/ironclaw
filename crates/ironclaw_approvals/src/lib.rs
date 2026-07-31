@@ -4,6 +4,7 @@
 //! authorization leases. It does not prompt users, execute capabilities, or
 //! dispatch runtime work.
 
+mod approval_store;
 mod auto_approve;
 mod capability_permission;
 mod cas_record;
@@ -11,16 +12,31 @@ mod policy;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub use test_support::{
+    in_memory_backed_approval_filesystem, in_memory_backed_approval_request_store,
+    in_memory_backed_approvals_filesystem, in_memory_backed_auto_approve_setting_store,
+    in_memory_backed_capability_permission_override_store, in_memory_backed_gate_record_store,
+    in_memory_backed_persistent_approval_policy_store,
+};
 
 use ironclaw_authorization::{CapabilityLease, CapabilityLeaseError, CapabilityLeaseStorePort};
 use ironclaw_events::AuditSink;
 use ironclaw_host_api::{
-    Action, ApprovalDecisionKind, ApprovalRequestId, CapabilityGrant, CapabilityGrantId,
-    CapabilityId, GrantConstraints, InvocationFingerprint, Principal, ResourceScope,
+    action::Action,
+    approval::InvocationFingerprint,
+    audit::ApprovalDecisionKind,
+    capability::{CapabilityGrant, GrantConstraints},
+    ids::{ApprovalRequestId, CapabilityGrantId, CapabilityId},
+    resource::ResourceScope,
+    scope::Principal,
 };
-use ironclaw_run_state::{ApprovalRecord, ApprovalRequestStorePort, ApprovalStatus, RunStateError};
 use thiserror::Error;
 
+pub use approval_store::{
+    ApprovalRecord, ApprovalRequestStore, ApprovalRequestStorePort, ApprovalStatus,
+    ApprovalStoreError, GateRecordStore, GateRecordStorePort,
+};
 pub use auto_approve::{
     AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingInput, AutoApproveSettingKey,
     AutoApproveSettingRecord, AutoApproveSettingStore, AutoApproveSettingStorePort,
@@ -159,7 +175,7 @@ where
             .approvals
             .get(scope, request_id)
             .await?
-            .ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
+            .ok_or(ApprovalStoreError::UnknownApprovalRequest { request_id })?;
         if record.status != ApprovalStatus::Approved {
             return Err(ApprovalResolutionError::NotApproved {
                 status: record.status,
@@ -188,7 +204,7 @@ where
             .approvals
             .get(scope, request_id)
             .await?
-            .ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
+            .ok_or(ApprovalStoreError::UnknownApprovalRequest { request_id })?;
         if record.status != ApprovalStatus::Pending {
             return Err(ApprovalResolutionError::NotPending {
                 status: record.status,
@@ -221,7 +237,7 @@ where
         // record.
         let approved_record = match self.approvals.approve(scope, request_id).await {
             Ok(record) => record,
-            Err(RunStateError::ApprovalNotPending { status, .. }) => {
+            Err(ApprovalStoreError::ApprovalNotPending { status, .. }) => {
                 return Err(ApprovalResolutionError::NotPending { status });
             }
             Err(error) => return Err(error.into()),
@@ -271,14 +287,14 @@ where
     pub async fn deny(
         &self,
         scope: &ResourceScope,
-        request_id: ironclaw_host_api::ApprovalRequestId,
+        request_id: ironclaw_host_api::ids::ApprovalRequestId,
         denial: DenyApproval,
     ) -> Result<ApprovalRecord, ApprovalResolutionError> {
         let record = self
             .approvals
             .get(scope, request_id)
             .await?
-            .ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
+            .ok_or(ApprovalStoreError::UnknownApprovalRequest { request_id })?;
         if record.status != ApprovalStatus::Pending {
             return Err(ApprovalResolutionError::NotPending {
                 status: record.status,
@@ -287,7 +303,7 @@ where
 
         let denied = match self.approvals.deny(scope, request_id).await {
             Ok(denied) => denied,
-            Err(RunStateError::ApprovalNotPending { status, .. }) => {
+            Err(ApprovalStoreError::ApprovalNotPending { status, .. }) => {
                 return Err(ApprovalResolutionError::NotPending { status });
             }
             Err(error) => return Err(error.into()),
@@ -309,11 +325,11 @@ where
     async fn emit_approval_resolved(
         &self,
         scope: &ResourceScope,
-        request: &ironclaw_host_api::ApprovalRequest,
+        request: &ironclaw_host_api::approval::ApprovalRequest,
         resolved_by: Principal,
         decision: ApprovalDecisionKind,
     ) {
-        self.emit_audit_best_effort(ironclaw_host_api::AuditEnvelope::approval_resolved(
+        self.emit_audit_best_effort(ironclaw_host_api::audit::AuditEnvelope::approval_resolved(
             scope,
             request,
             resolved_by,
@@ -322,7 +338,7 @@ where
         .await;
     }
 
-    async fn emit_audit_best_effort(&self, record: ironclaw_host_api::AuditEnvelope) {
+    async fn emit_audit_best_effort(&self, record: ironclaw_host_api::audit::AuditEnvelope) {
         if let Some(sink) = self.audit_sink {
             let _ = sink.emit_audit(record).await;
         }
@@ -371,7 +387,7 @@ pub struct DenyApproval {
 #[derive(Debug, Error)]
 pub enum ApprovalResolutionError {
     #[error("approval store failed: {0}")]
-    RunState(#[from] RunStateError),
+    ApprovalStore(#[from] ApprovalStoreError),
     #[error("approval request is not pending: {status:?}")]
     NotPending { status: ApprovalStatus },
     /// Surfaced by [`retry_lease_issue_for_dispatch`] /

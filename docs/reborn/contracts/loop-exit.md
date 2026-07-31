@@ -23,7 +23,7 @@ AgentLoopDriver
   -> LoopExit claim
   -> TurnRunner validates evidence/policy
   -> TurnRunnerOutcome
-  -> TurnStateStore transition
+  -> ProcessTransitionPort
 ```
 
 `LoopExit` carries typed metadata, bounded host-minted references, and
@@ -78,6 +78,32 @@ The driver-facing variants are fixed for the MVP:
 - Ref lists are bounded and duplicate-free so a driver cannot force unbounded evidence verification work.
 - Usage/cost truth remains in host accounting/projection stores; `LoopExit` may carry only usage-summary refs.
 
+### 4.1 Checkpoint rejection before a trustworthy exit
+
+`CheckpointRejected` is the explicit exception to the model receiving a final
+word. A rejection while writing a pre-model checkpoint means the driver cannot
+produce a trustworthy `LoopExit` and must not run a model or capability from
+the uncheckpointed state. The staged private payload is not a resume point;
+only committed checkpoint metadata is authoritative.
+
+The runner preserves the distinct `checkpoint_rejected` category and records a
+bounded host-authored terminal explanation through the independent turn-state
+row and `Failed` lifecycle event. Product projection revalidates that
+host-authored envelope and never asks a failure-explainer model to paraphrase
+it. No assistant transcript message is created, no partial success is emitted,
+and the rejected run is not retryable. The explanation directs the user to
+start a new run and the operator to inspect checkpoint storage and run-profile
+compatibility.
+
+This contract is pinned by
+`turn_runner_worker_persists_checkpoint_rejection_without_running_uncheckpointed_work`
+in `crates/ironclaw_runner/tests/loop_driver_host.rs`:
+
+```bash
+cargo test -p ironclaw_runner --test loop_driver_host \
+  turn_runner_worker_persists_checkpoint_rejection_without_running_uncheckpointed_work
+```
+
 ---
 
 ## 5. Invalid exit handling
@@ -109,8 +135,12 @@ Later slices may add validation against transcript draft state, checkpoint fresh
 - `LoopExitEvidencePort` and evidence request DTOs for host-owned validation inputs;
 - crate-private `LoopExitValidationPolicy` construction plus public `LoopExitValidationDecision`;
 - one-way mapping to `TurnRunnerOutcome` (invalid exits always map to Failed; valid failed outcomes may carry verified explanation refs and a retry checkpoint id; `LoopExitMapping::RecoveryRequired` is a backward-compat shim);
-- `LoopExitApplier`, which derives validation policy from host-owned evidence and invokes the trusted `TurnRunTransitionPort` with an already-validated `LoopExitMapping`.
+- `LoopExitApplier`, which derives validation policy from host-owned evidence
+  and invokes `ProcessTransitionPort` with the neutral process outcome or
+  suspension produced from the validated exit.
 
-`ApplyValidatedLoopExitRequest` remains the transition-port DTO for already-validated mappings. Driver-facing code must not be able to supply `LoopExitValidationPolicy` directly.
+Driver-facing code must not be able to supply `LoopExitValidationPolicy`
+directly. Agent-loop validation remains outside the process kernel; only its
+validated lifecycle result crosses the process transition port.
 
 This slice deliberately does not wire durable exit-id idempotency storage, transcript draft validation, or product service-graph integration.

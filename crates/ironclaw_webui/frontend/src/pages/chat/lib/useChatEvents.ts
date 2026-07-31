@@ -612,31 +612,42 @@ function applyProjectionItems({
       const messageId = `text-${item.text.id}`;
       const textRunId = item.text.run_id || null;
       setMessages((prev) => {
+        const phaseAware = textRunId
+          ? prev.map((message) =>
+              message?.role === "assistant" &&
+              message.turnRunId === textRunId &&
+              message.isFinalReply === false &&
+              message.id !== messageId
+                ? { ...message, isStreaming: false }
+                : message,
+            )
+          : prev;
         if (
           textRunId &&
-          prev.some((m) => isFinalAssistantForRun(m, textRunId))
+          phaseAware.some((m) => isFinalAssistantForRun(m, textRunId))
         ) {
-          return prev;
+          return phaseAware;
         }
         const timelineMessageId = item.text.id ? `msg-${item.text.id}` : null;
-        const existing = prev.findIndex(
+        const existing = phaseAware.findIndex(
           (m) => m.id === messageId || (timelineMessageId && m.id === timelineMessageId),
         );
         const next = {
-          ...(existing >= 0 ? prev[existing] : {}),
+          ...(existing >= 0 ? phaseAware[existing] : {}),
           id: messageId,
           role: "assistant",
           content: item.text.body || "",
-          timestamp: prev[existing]?.timestamp || new Date().toISOString(),
-          turnRunId: prev[existing]?.turnRunId || textRunId,
+          timestamp: phaseAware[existing]?.timestamp || new Date().toISOString(),
+          turnRunId: phaseAware[existing]?.turnRunId || textRunId,
           isFinalReply: false,
+          isStreaming: true,
         };
         if (existing >= 0) {
-          const copy = [...prev];
+          const copy = [...phaseAware];
           copy[existing] = next;
           return copy;
         }
-        return [...prev, next];
+        return [...phaseAware, next];
       });
     }
 

@@ -4,7 +4,7 @@
 //! Proves the cancel path end-to-end: the model call parks at the vendor-SDK
 //! seam, the test cancels the in-flight run, releases the park, and the run
 //! reaches `TurnStatus::Cancelled` (not `Completed`). Cancellation is observed
-//! by the loop-driver host's default `TurnStateRunCancellationFactory`, not a
+//! by the loop-driver host's default `AgentTurnRunCancellationFactory`, not a
 //! wired coordinator fan-out.
 //!
 //! Also covers C-ERRORS: a leaked-permit regression guard (precedent: PR
@@ -179,11 +179,15 @@ async fn mid_turn_provider_error_reaches_failed_with_model_error_category() {
 /// the persisted `SanitizedFailure` seam through the full production path:
 /// provider `Err` -> `map_provider_error` (`CredentialUnavailable`) -> loop
 /// `HostUnavailableWithDiagnostics{Model}` -> runner
-/// `model_stage_failure_category` -> persisted failure.
+/// `host_stage_failure_category` -> persisted failure.
 #[tokio::test]
 async fn mid_turn_auth_provider_error_reaches_failed_with_credentials_category() {
     let harness = RebornIntegrationHarness::test_default()
         .fail_model_auth()
+        // Recording is additive: placing it after the failing mode must not
+        // replace the selected provider behavior.
+        .record_model_calls_for_test()
+        .with_turn_event_sink()
         .build()
         .await
         .expect("harness builds");
@@ -212,6 +216,26 @@ async fn mid_turn_auth_provider_error_reaches_failed_with_credentials_category()
         detail.contains("Authentication failed"),
         "detail should describe the auth failure, got {detail:?}"
     );
+    harness
+        .assert_interactive_model_provider_call_count(1)
+        .await
+        .expect("invalid credentials must not blindly retry the provider");
+    harness
+        .assert_text_model_provider_call_count(0)
+        .await
+        .expect("terminal auth handling must not invoke a model explainer");
+    harness
+        .assert_only_tools_invoked(&[])
+        .await
+        .expect("terminal auth handling must not dispatch a tool");
+    harness
+        .assert_model_message_content_occurrences("model error observation", 0)
+        .await
+        .expect("the failed model must not be credited with seeing an observation");
+    harness
+        .assert_turn_event_recorded(ironclaw_turns::TurnEventKind::Failed)
+        .await
+        .expect("the credentials failure is durably published");
 }
 
 /// Regression guard, `Failed`-path sibling of

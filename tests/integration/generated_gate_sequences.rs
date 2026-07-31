@@ -35,35 +35,23 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
-use ironclaw_turns::TurnStatus;
+use std::time::Duration;
+
+use ironclaw_product::ProductInboundAck;
+use ironclaw_turns::{TurnRunId, TurnStatus};
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
+use reborn_support::scripted_provider::ParkingModelGate;
 use serde_json::json;
 
 /// The capability the gate guards. Named once so the effect-count assertion
 /// and the scripted call cannot drift apart.
 const GATED_CAPABILITY: &str = "builtin.write_file";
 
-// Where each dimension workstream 9 names is actually exercised.
-//
-// Listing them as a comment rather than inventing an enum per axis: a typed
-// `Ingress` with one variant that nothing matches on is decoration, and it
-// would read as coverage on a scan.
-//
-// | axis | exercised | where |
-// |---|---|---|
-// | lifecycle state | yes | `GateAction` below, enumerated |
-// | policy state | yes | auto-approve on/off, per owner, in the cross-actor case |
-// | auth state | partly | `auth/auth_gate.rs` + the expired-credential resume; not enumerated with the lifecycle axis |
-// | provider outcome | partly | `with_github_network_status` drives 401/5xx in the auth slice; not crossed with gate actions |
-// | operation class | no | read vs idempotent vs non-idempotent write is an E2E fault-matrix axis (`provider_fault_cases.py`) |
-// | ingress | no | one ingress at this tier; WebUI/Slack/Telegram are covered whole-path in E2E |
-// | delivery target | no | same — a delivery target needs a channel, which this tier does not run |
-//
-// The three "no" rows are not oversights: crossing them with the lifecycle
-// axis needs a tier that runs channels and providers, which is the E2E
-// journey suite, not this one. Recorded so the epic is not read as claiming
-// (table above documents the axes; the enum's own doc follows)
+// The complete seven-axis denominator and its selected pairwise crossings live
+// in `tests/e2e/state_machine_coverage.py`. This target supplies the executable
+// lifecycle, actor-isolation, double-submit, and orphan-invariant evidence;
+// channel/provider axes remain mapped to their owning whole-path suites.
 
 /// One dimension of workstream 9's lifecycle axis: what a client can do to a
 /// run parked on an approval gate.
@@ -177,6 +165,9 @@ async fn run_sequence(sequence: &[GateAction]) -> usize {
         .expect("parked run is readable")
         .status;
     observed.record(parked, sequence, 0);
+    h.assert_no_orphan_runs_or_reservations(&[run_id])
+        .await
+        .unwrap_or_else(|err| panic!("{sequence:?} step 0: orphan invariant failed: {err}"));
 
     for (step, action) in sequence.iter().enumerate() {
         // Deliberately unconditional: refusing an action that no longer
@@ -200,6 +191,28 @@ async fn run_sequence(sequence: &[GateAction]) -> usize {
             .expect("run stays readable after every action")
             .status;
         observed.record(status, sequence, step + 1);
+        h.assert_process_ownership(&[run_id])
+            .await
+            .unwrap_or_else(|err| {
+                panic!(
+                    "{sequence:?} step {}: process ownership invariant failed: {err}",
+                    step + 1
+                )
+            });
+        if status.is_terminal()
+            || matches!(
+                status,
+                TurnStatus::BlockedApproval | TurnStatus::BlockedAuth
+            )
+        {
+            h.assert_no_capability_resource_reservations()
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "{sequence:?} step {}: quiescent reservation invariant failed: {err}",
+                        step + 1
+                    )
+                });
+        }
     }
 
     // (3) every sequence settles. Read through `wait_for_terminal` so a run
@@ -217,6 +230,18 @@ async fn run_sequence(sequence: &[GateAction]) -> usize {
     // Asserting `is_terminal()` here would be tautological: `wait_for_terminal`
     // only returns on a terminal status.
     observed.record(final_state.status, sequence, sequence.len());
+    if sequence == [GateAction::Deny] {
+        assert_eq!(
+            final_state.status,
+            TurnStatus::Completed,
+            "a denied capability outcome is model-visible; the conversation should complete"
+        );
+    }
+    h.assert_no_orphan_runs_or_reservations(&[run_id])
+        .await
+        .unwrap_or_else(|err| {
+            panic!("{sequence:?} terminal observation: orphan invariant failed: {err}")
+        });
 
     // (4) no duplicate confirmed effect. The gated capability writes a file;
     // resolving the same gate twice must not write it twice. This is the
@@ -250,8 +275,8 @@ async fn run_sequence(sequence: &[GateAction]) -> usize {
     effects
 }
 
-/// How long a sequence to enumerate. Pull requests get depth 2 (20 sequences,
-/// ~20s); the nightly deep lane raises it.
+/// How long a sequence to enumerate. Pull requests get depth 2 (12 sequences);
+/// the nightly deep lane raises it to depth 3 (39 sequences).
 ///
 /// Parsed strictly rather than with `unwrap_or(2)`: a typo in the workflow
 /// would otherwise silently run the shallow lane while the job name still
@@ -311,6 +336,177 @@ async fn generated_gate_sequences_preserve_lifecycle_invariants() {
         "no sequence performed the gated effect; the <=1 bound above would \
          hold vacuously and this suite would be checking nothing"
     );
+}
+
+/// Representative scheduler interleavings for two submissions racing on the
+/// same durable thread. Both ordered edges matter in addition to a true
+/// simultaneous join: only checking one order can hide a payload-correlated
+/// winner or an admission check performed outside the atomic store boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DoubleSubmitInterleaving {
+    FirstThenSecond,
+    SecondThenFirst,
+    Simultaneous,
+}
+
+const DOUBLE_SUBMIT_INTERLEAVINGS: [DoubleSubmitInterleaving; 3] = [
+    DoubleSubmitInterleaving::FirstThenSecond,
+    DoubleSubmitInterleaving::SecondThenFirst,
+    DoubleSubmitInterleaving::Simultaneous,
+];
+
+fn accepted_and_busy_run(
+    left: ProductInboundAck,
+    right: ProductInboundAck,
+    interleaving: DoubleSubmitInterleaving,
+) -> TurnRunId {
+    match (left, right) {
+        (
+            ProductInboundAck::Accepted {
+                submitted_run_id, ..
+            },
+            ProductInboundAck::RejectedBusy {
+                active_run_id: Some(active_run_id),
+                ..
+            },
+        )
+        | (
+            ProductInboundAck::RejectedBusy {
+                active_run_id: Some(active_run_id),
+                ..
+            },
+            ProductInboundAck::Accepted {
+                submitted_run_id, ..
+            },
+        ) => {
+            assert_eq!(
+                active_run_id, submitted_run_id,
+                "{interleaving:?}: busy acknowledgement named a different active run"
+            );
+            submitted_run_id
+        }
+        (left, right) => panic!(
+            "{interleaving:?}: expected exactly one Accepted and one \
+             RejectedBusy acknowledgement, got {left:?} and {right:?}"
+        ),
+    }
+}
+
+#[tokio::test]
+async fn generated_same_thread_double_submit_interleavings_admit_one_run() {
+    for interleaving in DOUBLE_SUBMIT_INTERLEAVINGS {
+        let group = RebornIntegrationGroup::live_approvals()
+            .await
+            .expect("live-approvals group builds");
+        let gate = ParkingModelGate::new();
+        let workspace_file = format!("double-submit-{interleaving:?}.txt").to_ascii_lowercase();
+        let h = group
+            .thread(format!("double-submit-{interleaving:?}").to_lowercase())
+            .park_model(gate.clone())
+            .script([
+                RebornScriptedReply::tool_call(
+                    GATED_CAPABILITY,
+                    json!({
+                        "path": format!("/workspace/{workspace_file}"),
+                        "content": "one admitted effect"
+                    }),
+                ),
+                RebornScriptedReply::text("winner completes"),
+            ])
+            .build()
+            .await
+            .expect("double-submit thread builds");
+
+        let (left, right) = match interleaving {
+            DoubleSubmitInterleaving::FirstThenSecond => {
+                let left = h
+                    .submit_turn_ack("first payload")
+                    .await
+                    .expect("first submit returns an acknowledgement");
+                tokio::time::timeout(Duration::from_secs(10), gate.wait_until_parked())
+                    .await
+                    .expect("accepted first submit reaches the parked provider");
+                let right = h
+                    .submit_turn_ack("second payload")
+                    .await
+                    .expect("second submit returns an acknowledgement");
+                (left, right)
+            }
+            DoubleSubmitInterleaving::SecondThenFirst => {
+                let right = h
+                    .submit_turn_ack("second payload")
+                    .await
+                    .expect("second-labeled submit returns an acknowledgement");
+                tokio::time::timeout(Duration::from_secs(10), gate.wait_until_parked())
+                    .await
+                    .expect("accepted second-labeled submit reaches the parked provider");
+                let left = h
+                    .submit_turn_ack("first payload")
+                    .await
+                    .expect("first-labeled submit returns an acknowledgement");
+                (left, right)
+            }
+            DoubleSubmitInterleaving::Simultaneous => {
+                let acknowledgements = tokio::join!(
+                    h.submit_turn_ack("first payload"),
+                    h.submit_turn_ack("second payload")
+                );
+                (
+                    acknowledgements
+                        .0
+                        .expect("simultaneous first submit returns an acknowledgement"),
+                    acknowledgements
+                        .1
+                        .expect("simultaneous second submit returns an acknowledgement"),
+                )
+            }
+        };
+
+        let admitted_run = accepted_and_busy_run(left, right, interleaving);
+        tokio::time::timeout(Duration::from_secs(10), gate.wait_until_parked())
+            .await
+            .expect("admitted run reaches the parked provider");
+        h.assert_no_orphan_runs_or_reservations(&[admitted_run])
+            .await
+            .unwrap_or_else(|err| panic!("{interleaving:?}: active invariant failed: {err}"));
+
+        gate.release();
+        let blocked = h
+            .wait_for_status(admitted_run, TurnStatus::BlockedApproval)
+            .await
+            .unwrap_or_else(|err| {
+                panic!("{interleaving:?}: admitted run did not reach its effect gate: {err}")
+            });
+        let gate_ref = blocked
+            .gate_ref
+            .expect("blocked double-submit run names its approval gate");
+        h.assert_no_orphan_runs_or_reservations(&[admitted_run])
+            .await
+            .unwrap_or_else(|err| {
+                panic!("{interleaving:?}: blocked-effect invariant failed: {err}")
+            });
+        h.approve_gate(admitted_run, &gate_ref)
+            .await
+            .unwrap_or_else(|err| {
+                panic!("{interleaving:?}: admitted effect approval failed: {err}")
+            });
+        h.wait_for_status(admitted_run, TurnStatus::Completed)
+            .await
+            .unwrap_or_else(|err| panic!("{interleaving:?}: admitted run did not complete: {err}"));
+        h.assert_no_orphan_runs_or_reservations(&[admitted_run])
+            .await
+            .unwrap_or_else(|err| panic!("{interleaving:?}: terminal invariant failed: {err}"));
+        h.assert_capability_result_count(GATED_CAPABILITY, 1)
+            .await
+            .unwrap_or_else(|err| {
+                panic!("{interleaving:?}: admitted run did not emit exactly one effect: {err}")
+            });
+        h.assert_workspace_file_contains(&workspace_file, "one admitted effect")
+            .await
+            .unwrap_or_else(|err| {
+                panic!("{interleaving:?}: admitted effect read-back failed: {err}")
+            });
+    }
 }
 
 /// The invariant checker is itself checked.
@@ -374,12 +570,166 @@ mod invariant_checker {
     }
 
     #[test]
+    fn double_submit_generator_contains_both_orders_and_a_true_race() {
+        assert_eq!(
+            DOUBLE_SUBMIT_INTERLEAVINGS,
+            [
+                DoubleSubmitInterleaving::FirstThenSecond,
+                DoubleSubmitInterleaving::SecondThenFirst,
+                DoubleSubmitInterleaving::Simultaneous,
+            ],
+            "removing an ordering would silently shrink the interleaving generator"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "expected exactly one Accepted and one RejectedBusy")]
+    fn double_submit_checker_rejects_two_accepted_runs() {
+        use ironclaw_host_api::turn::AcceptedMessageRef;
+
+        let ack = |message: &str| ProductInboundAck::Accepted {
+            accepted_message_ref: AcceptedMessageRef::new(message)
+                .expect("sabotage message ref is valid"),
+            submitted_run_id: TurnRunId::new(),
+        };
+        accepted_and_busy_run(
+            ack("message:sabotage-a"),
+            ack("message:sabotage-b"),
+            DoubleSubmitInterleaving::Simultaneous,
+        );
+    }
+
+    #[test]
     fn accepts_an_ordinary_settling_sequence() {
         observed_with(&[
             TurnStatus::BlockedApproval,
             TurnStatus::Running,
             TurnStatus::Completed,
         ]);
+    }
+
+    #[tokio::test]
+    async fn orphan_checker_rejects_a_live_run_omitted_from_the_expected_set() {
+        let group = RebornIntegrationGroup::live_approvals()
+            .await
+            .expect("live-approvals group builds");
+        let h = group
+            .thread("orphan-checker-sabotage")
+            .script([RebornScriptedReply::tool_call(
+                GATED_CAPABILITY,
+                json!({"path": "/workspace/sabotage.txt", "content": "sabotage"}),
+            )])
+            .build()
+            .await
+            .expect("sabotage thread builds");
+        let (run_id, _) = h
+            .submit_turn_until_blocked("park for orphan sabotage")
+            .await
+            .expect("sabotage run parks");
+
+        let error = h
+            .assert_no_orphan_runs_or_reservations(&[])
+            .await
+            .expect_err("omitting the live run must trip the orphan invariant");
+        assert!(
+            error.to_string().contains("orphan agent-turn process"),
+            "wrong invariant branch fired: {error}"
+        );
+
+        h.cancel_run(run_id)
+            .await
+            .expect("sabotage run cancellation is accepted");
+        h.wait_for_status(run_id, TurnStatus::Cancelled)
+            .await
+            .expect("sabotage run settles after cancellation");
+    }
+
+    #[tokio::test]
+    async fn orphan_checker_rejects_a_capability_resource_hold() {
+        use ironclaw_host_api::{
+            ids::InvocationId,
+            resource::{ResourceEstimate, ResourceScope},
+        };
+
+        let group = RebornIntegrationGroup::live_approvals()
+            .await
+            .expect("live-approvals group builds");
+        let h = group
+            .thread("resource-orphan-checker-sabotage")
+            .build()
+            .await
+            .expect("resource sabotage thread builds");
+        let governor = h
+            .capability_resource_governor_for_test()
+            .expect("production-composed governor is exposed");
+        let reservation = governor
+            .reserve(
+                ResourceScope {
+                    tenant_id: h.binding.tenant_id.clone(),
+                    user_id: h.binding.actor_user_id.clone(),
+                    agent_id: h.binding.agent_id.clone(),
+                    project_id: h.binding.project_id.clone(),
+                    mission_id: None,
+                    thread_id: Some(h.binding.thread_id.clone()),
+                    invocation_id: InvocationId::new(),
+                },
+                ResourceEstimate::default().set_concurrency_slots(1),
+            )
+            .expect("sabotage resource reservation succeeds");
+
+        let error = h
+            .assert_no_orphan_runs_or_reservations(&[])
+            .await
+            .expect_err("a live capability hold must trip the orphan invariant");
+        assert!(
+            error
+                .to_string()
+                .contains("orphan capability resource reservation"),
+            "wrong invariant branch fired: {error}"
+        );
+
+        governor
+            .release(reservation.id)
+            .expect("sabotage reservation releases");
+    }
+
+    #[test]
+    fn orphan_checker_rejects_a_process_with_a_missing_parent() {
+        use ironclaw_host_api::ids::ProcessId;
+        use ironclaw_processes::ProcessKind;
+
+        let process_id = ProcessId::new();
+        let missing_parent = ProcessId::new();
+        let error = reborn_support::assertions::validate_process_ownership(
+            &[(
+                process_id,
+                ProcessKind::CapabilityInvocation,
+                Some(missing_parent),
+            )],
+            &[],
+        )
+        .expect_err("a process whose parent is absent must trip the orphan invariant");
+        assert!(
+            error.to_string().contains("names missing parent"),
+            "wrong invariant branch fired: {error}"
+        );
+    }
+
+    #[test]
+    fn orphan_checker_rejects_an_expected_id_with_the_wrong_process_kind() {
+        use ironclaw_host_api::ids::ProcessId;
+        use ironclaw_processes::ProcessKind;
+
+        let expected_process_id = ProcessId::new();
+        let error = reborn_support::assertions::validate_process_ownership(
+            &[(expected_process_id, ProcessKind::CapabilityInvocation, None)],
+            &[expected_process_id],
+        )
+        .expect_err("the expected agent-turn id under another kind must fail ownership");
+        assert!(
+            error.to_string().contains("not AgentTurn"),
+            "wrong invariant branch fired: {error}"
+        );
     }
 }
 

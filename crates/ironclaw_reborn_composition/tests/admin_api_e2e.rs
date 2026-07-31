@@ -1,7 +1,7 @@
 //! End-to-end coverage for the WebChat v2 admin user-management surface.
 //!
 //! Unlike the crate-tier service tests (which drive `ProductSurface` against
-//! a fake port), this stands up a REAL local-dev `RebornRuntime` with the admin
+//! a fake port), this stands up a REAL standalone `RebornRuntime` with the admin
 //! service wired (identity user-directory + admin secret provisioner + a signed
 //! session-store token minter), composes the full `webui_v2_app` with a real
 //! bearer authenticator, and drives the whole admin surface over HTTP through
@@ -22,11 +22,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
+use ironclaw_host_api::ids::{AgentId, TenantId, UserId};
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
-use ironclaw_host_api::{AgentId, TenantId, UserId};
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse,
@@ -111,11 +111,11 @@ impl WebuiAuthenticator for DualAuthenticator {
     }
 }
 
-fn local_dev_effective_policy() -> EffectiveRuntimePolicy {
+fn local_host_effective_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend: ProcessBackendKind::LocalHost,
         network_mode: NetworkMode::DirectLogged,
@@ -137,10 +137,10 @@ struct AdminHarness {
 
 async fn build_admin_harness() -> AdminHarness {
     let root = tempfile::tempdir().expect("tempdir");
-    let storage_root: PathBuf = root.path().join("local-dev");
+    let storage_root: PathBuf = root.path().join("standalone");
     let build_input =
-        ironclaw_reborn_composition::local_dev_build_input(OPERATOR_USER, storage_root)
-            .with_runtime_policy(local_dev_effective_policy());
+        ironclaw_reborn_composition::local_filesystem_build_input(OPERATOR_USER, storage_root)
+            .with_runtime_policy(local_host_effective_policy());
     build_admin_harness_from(root, build_input).await
 }
 
@@ -148,7 +148,7 @@ async fn build_admin_harness() -> AdminHarness {
 /// `RebornHostBindings` (already carrying its profile, policy, trust, and process
 /// binding). Everything above the substrate — the shared signed session store /
 /// minter / authenticator, the product surface, and the composed router — is
-/// profile-agnostic, so the local-dev and production-shaped runs share it and
+/// profile-agnostic, so the standalone and production-shaped runs share it and
 /// only differ in the build input.
 async fn build_admin_harness_from(
     root: tempfile::TempDir,
@@ -885,7 +885,7 @@ async fn malformed_inputs_are_4xx_not_500() {
 
 // ─── production-profile admin surface (bucket-2 parity: secret provisioner) ──
 //
-// The harness above builds a local-dev runtime. These cover the production
+// The harness above builds a standalone runtime. These cover the production
 // store graph (`local_runtime: None`, `production_runtime: Some`), where the
 // admin user service is wired only when BOTH the identity directory (#6395) and
 // the admin secret provisioner are sourced from that graph. Gated on `libsql`
@@ -940,15 +940,16 @@ async fn build_admin_harness_production() -> AdminHarness {
             .await
             .expect("libsql db"),
     );
-    let events = root.path().join("events.db").to_string_lossy().to_string();
-    let build_input = RebornHostBindings::libsql(
+    let database_path = root.path().join("reborn.db").to_string_lossy().to_string();
+    let build_input = ironclaw_reborn_composition::test_support::libsql_host_bindings_for_test(
         RebornCompositionProfile::Production,
         OPERATOR_USER,
         db,
-        events,
+        database_path,
         None,
         ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
     )
+    .expect("libSQL bindings")
     .with_first_party_bundles(first_party_support::test_first_party_bundles())
     .with_runtime_policy(production_effective_policy())
     .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(Arc::new(

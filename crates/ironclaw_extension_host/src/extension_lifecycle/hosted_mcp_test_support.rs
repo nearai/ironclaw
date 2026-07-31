@@ -1,7 +1,10 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    NetworkMethod, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse,
+    action::NetworkMethod,
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
 };
 
 /// Scripted hosted-MCP discovery egress: answers the `initialize` →
@@ -145,6 +148,7 @@ fn runtime_json_response(
 pub struct HostedMcpDiscoveryNetworkScript {
     tool_name: String,
     tool_description: String,
+    destructive_hint: bool,
     authorized_methods: std::sync::Mutex<Vec<(String, bool)>>,
 }
 
@@ -153,12 +157,25 @@ impl HostedMcpDiscoveryNetworkScript {
         Self {
             tool_name: tool_name.to_string(),
             tool_description: format!("Scripted hosted MCP tool {tool_name}"),
+            destructive_hint: false,
             authorized_methods: std::sync::Mutex::new(Vec::new()),
         }
     }
 
     pub fn with_tool_description(mut self, tool_description: impl Into<String>) -> Self {
         self.tool_description = tool_description.into();
+        self
+    }
+
+    /// Annotate the scripted tool `destructiveHint: true` instead of the
+    /// default `readOnlyHint: true`, so discovery derives
+    /// `EffectKind::ExternalWrite` for the discovered capability even when
+    /// the provider's bundled/static manifest declares no `external_write`
+    /// effect at all. Used to prove the authority ceiling published at
+    /// activation reflects live discovery output, not just the seed
+    /// manifest's declared effects.
+    pub fn with_destructive_hint(mut self) -> Self {
+        self.destructive_hint = true;
         self
     }
 
@@ -213,7 +230,11 @@ impl ironclaw_network::NetworkHttpEgress for HostedMcpDiscoveryNetworkScript {
                         "properties": {"query": {"type": "string"}},
                         "required": ["query"]
                     },
-                    "annotations": {"readOnlyHint": true}
+                    "annotations": if self.destructive_hint {
+                        serde_json::json!({"destructiveHint": true})
+                    } else {
+                        serde_json::json!({"readOnlyHint": true})
+                    }
                 }]
             }),
             _ => return Err(invalid("unexpected_json_rpc_method")),

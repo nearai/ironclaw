@@ -6,7 +6,10 @@ use ironclaw_auth::{
     CredentialAccountStatus, CredentialRecoveryProjection, CredentialRefreshRequest,
     GOOGLE_PROVIDER_ID, ProviderScope, select_latest_duplicate_user_reusable_account,
 };
-use ironclaw_host_api::{ExtensionId, ResourceScope, SecretHandle};
+use ironclaw_host_api::{
+    ids::{ExtensionId, SecretHandle},
+    resource::ResourceScope,
+};
 use thiserror::Error;
 
 use super::account_policy::gsuite_google_account_visible_to_requester;
@@ -32,7 +35,7 @@ pub enum GoogleCredentialError {
     #[error(transparent)]
     Auth(#[from] AuthProductError),
     #[error(transparent)]
-    HostApi(#[from] ironclaw_host_api::HostApiError),
+    HostApi(#[from] ironclaw_host_api::error::HostApiError),
 }
 
 #[derive(Clone)]
@@ -398,7 +401,7 @@ mod tests {
         CredentialRefreshReport, CredentialRefreshRequest, InMemoryAuthProductServices,
         NewCredentialAccount,
     };
-    use ironclaw_host_api::{InvocationId, ThreadId, UserId};
+    use ironclaw_host_api::ids::{InvocationId, ThreadId, UserId};
 
     use super::*;
 

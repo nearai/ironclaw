@@ -1,10 +1,13 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::{Arc, Mutex, MutexGuard},
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, Resolution, ResolutionBatch};
+use ironclaw_host_api::{
+    ids::CapabilityId,
+    resolution::{Resolution, ResolutionBatch},
+};
 use ironclaw_turns::CapabilityActivityId;
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
@@ -20,6 +23,11 @@ use crate::{CapabilityAllowSet, LoopCapabilityPortDecorator, capability_info};
 pub struct CapabilitySurfaceProfileFilter {
     inner: Arc<dyn LoopCapabilityPort>,
     allow_set: Arc<CapabilityAllowSet>,
+    /// Host-synthesized capability ids that bypass `allow_set` narrowing
+    /// (e.g. tool-disclosure bridge meta-tools), mirroring `capability_info`'s
+    /// implicit pass-through. Empty via `new()`; composition root supplies
+    /// them via `with_host_exempt_capability_ids` (#5647).
+    host_exempt_capability_ids: Arc<BTreeSet<CapabilityId>>,
     staged_invocations: Arc<Mutex<HashMap<StagedInvocationKey, Vec<CapabilityId>>>>,
 }
 
@@ -43,8 +51,22 @@ impl CapabilitySurfaceProfileFilter {
         Self {
             inner,
             allow_set,
+            host_exempt_capability_ids: Arc::new(BTreeSet::new()),
             staged_invocations: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn with_host_exempt_capability_ids(
+        mut self,
+        ids: impl IntoIterator<Item = CapabilityId>,
+    ) -> Self {
+        self.host_exempt_capability_ids = Arc::new(ids.into_iter().collect());
+        self
+    }
+
+    fn permits(&self, capability_id: &CapabilityId) -> bool {
+        self.allow_set.permits(capability_id)
+            || self.host_exempt_capability_ids.contains(capability_id)
     }
 }
 
@@ -350,7 +372,7 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
         let mut definitions = self.inner.tool_definitions()?;
         definitions.retain(|definition| {
             provider_capability_permitted(&definition.capability_id, |capability_id| {
-                self.allow_set.permits(capability_id)
+                self.permits(capability_id)
             })
         });
         Ok(definitions)
@@ -360,14 +382,10 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
         &self,
         tool_call: &ProviderToolCall,
     ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
-        // An `All` allow-set permits every capability, so the scope check is a
-        // no-op and folds into the predicate (keeping the delegate-then-scope
-        // skeleton identical to the visible/deny filters).
-        let allow_all = matches!(self.allow_set.as_ref(), CapabilityAllowSet::All);
         delegate_and_scope_tool_call_capability_ids(
             &self.inner,
             tool_call,
-            |capability_id| allow_all || self.allow_set.permits(capability_id),
+            |capability_id| self.permits(capability_id),
             "provider tool call is outside the run-profile surface",
         )
     }
@@ -379,7 +397,7 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
         if !matches!(self.allow_set.as_ref(), CapabilityAllowSet::All) {
             validate_provider_tool_call_capability_scope(
                 self.inner.provider_tool_call_capability_ids(tool_call)?,
-                |capability_id| self.allow_set.permits(capability_id),
+                |capability_id| self.permits(capability_id),
                 "provider tool call is outside the run-profile surface",
             )?;
         }
@@ -394,14 +412,14 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
             validate_provider_tool_call_capability_scope(
                 self.inner
                     .provider_tool_call_capability_ids(&request.tool_call)?,
-                |capability_id| self.allow_set.permits(capability_id),
+                |capability_id| self.permits(capability_id),
                 "provider tool call is outside the run-profile surface",
             )?;
         }
         let candidate = self.inner.register_provider_tool_call(request).await?;
         validate_provider_tool_call_capability_scope(
             candidate_capability_ids(&candidate),
-            |capability_id| self.allow_set.permits(capability_id),
+            |capability_id| self.permits(capability_id),
             "provider tool call is outside the run-profile surface",
         )?;
         record_staged_invocation(&self.staged_invocations, &candidate)?;
@@ -416,7 +434,7 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
         if matches!(self.allow_set.as_ref(), CapabilityAllowSet::Allowlist(_)) {
             surface.descriptors.retain(|descriptor| {
                 provider_capability_permitted(&descriptor.capability_id, |capability_id| {
-                    self.allow_set.permits(capability_id)
+                    self.permits(capability_id)
                 })
             });
         }
@@ -428,7 +446,7 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
         request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         if !invocation_capability_permitted(&self.staged_invocations, &request, |capability_id| {
-            self.allow_set.permits(capability_id)
+            self.permits(capability_id)
         })? {
             return Ok(surface_profile_denied_outcome());
         }
@@ -450,7 +468,7 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
                 invocation_capability_permitted(
                     &self.staged_invocations,
                     invocation,
-                    |capability_id| self.allow_set.permits(capability_id),
+                    |capability_id| self.permits(capability_id),
                 )
             },
             surface_profile_denied_outcome,
@@ -719,7 +737,9 @@ mod tests {
     use std::{collections::HashMap, sync::Mutex};
 
     use ironclaw_host_api::{
-        Blocked, CapabilityId, ProviderToolName, RuntimeKind, TenantId, ThreadId,
+        ids::{CapabilityId, ProviderToolName, TenantId, ThreadId},
+        resolution::Blocked,
+        runtime::RuntimeKind,
     };
     use ironclaw_turns::run_profile::{
         CancellationPolicy, CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceVersion,
@@ -738,7 +758,7 @@ mod tests {
     #[derive(Default)]
     struct SpyPort {
         surface: Mutex<Option<VisibleCapabilitySurface>>,
-        batch_outcome: Mutex<Option<ironclaw_host_api::ResolutionBatch>>,
+        batch_outcome: Mutex<Option<ironclaw_host_api::resolution::ResolutionBatch>>,
         tool_definitions: Mutex<Vec<ProviderToolDefinition>>,
         provider_call_capability_ids:
             Mutex<HashMap<ProviderToolName, ProviderToolCallCapabilityIds>>,
@@ -862,7 +882,7 @@ mod tests {
                 .lock()
                 .expect("batch outcome lock")
                 .clone()
-                .unwrap_or_else(|| ironclaw_host_api::ResolutionBatch {
+                .unwrap_or_else(|| ironclaw_host_api::resolution::ResolutionBatch {
                     resolutions: vec![completed("result:first"), completed("result:second")],
                     stopped_on_suspension: false,
                 }))
@@ -903,6 +923,7 @@ mod tests {
             runtime: RuntimeKind::Wasm,
             safe_name: capability.to_string(),
             safe_description: format!("{capability} description"),
+            description_trust: Default::default(),
             concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
         }
@@ -1086,6 +1107,49 @@ mod tests {
                 ("demo.allowed", "demo__allowed"),
             ]
         );
+    }
+
+    /// #5647: host-exempt ids (bridge meta-tools) bypass the allowlist for
+    /// definitions AND invocation, without admitting any non-exempt id.
+    #[tokio::test]
+    async fn host_exempt_ids_bypass_allowlist_without_widening_it() {
+        let inner = Arc::new(SpyPort::default());
+        *inner
+            .tool_definitions
+            .lock()
+            .expect("tool definitions lock") = vec![
+            provider_definition("ironclaw.tool_search", "tool_search"),
+            provider_definition("demo.allowed", "demo__allowed"),
+            provider_definition("demo.denied", "demo__denied"),
+        ];
+        let filter = CapabilitySurfaceProfileFilter::new(
+            inner.clone(),
+            Arc::new(CapabilityAllowSet::allowlist([capability_id(
+                "demo.allowed",
+            )])),
+        )
+        .with_host_exempt_capability_ids([capability_id("ironclaw.tool_search")]);
+
+        let definitions = filter.tool_definitions().expect("tool definitions");
+        assert_eq!(
+            definitions
+                .iter()
+                .map(|definition| definition.capability_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ironclaw.tool_search", "demo.allowed"]
+        );
+
+        let outcome = filter
+            .invoke_capability(invocation("ironclaw.tool_search", "input:bridge"))
+            .await
+            .expect("outcome");
+        assert!(matches!(outcome, Resolution::Done(_)));
+
+        let outcome = filter
+            .invoke_capability(invocation("demo.denied", "input:denied"))
+            .await
+            .expect("outcome");
+        assert_eq!(denied_reason(&outcome), Some("surface_profile_denied"));
     }
 
     #[tokio::test]
@@ -1420,7 +1484,7 @@ mod tests {
     async fn visible_filter_batches_staged_capability_info_invocation() {
         let inner = Arc::new(SpyPort::default());
         *inner.batch_outcome.lock().expect("batch outcome lock") =
-            Some(ironclaw_host_api::ResolutionBatch {
+            Some(ironclaw_host_api::resolution::ResolutionBatch {
                 resolutions: vec![completed("result:capability-info")],
                 stopped_on_suspension: false,
             });
@@ -1593,7 +1657,7 @@ mod tests {
     async fn batch_partitions_correctly() {
         let inner = Arc::new(SpyPort::default());
         *inner.batch_outcome.lock().expect("batch outcome lock") =
-            Some(ironclaw_host_api::ResolutionBatch {
+            Some(ironclaw_host_api::resolution::ResolutionBatch {
                 resolutions: vec![completed("result:first"), completed("result:second")],
                 stopped_on_suspension: false,
             });
@@ -1639,7 +1703,7 @@ mod tests {
     async fn partial_inner_outcomes_truncate_correctly() {
         let inner = Arc::new(SpyPort::default());
         *inner.batch_outcome.lock().expect("batch outcome lock") =
-            Some(ironclaw_host_api::ResolutionBatch {
+            Some(ironclaw_host_api::resolution::ResolutionBatch {
                 resolutions: vec![completed("result:first"), completed("result:second")],
                 stopped_on_suspension: true,
             });
@@ -1677,7 +1741,7 @@ mod tests {
     async fn stopped_inner_batch_truncates_denials_after_last_allowed_outcome() {
         let inner = Arc::new(SpyPort::default());
         *inner.batch_outcome.lock().expect("batch outcome lock") =
-            Some(ironclaw_host_api::ResolutionBatch {
+            Some(ironclaw_host_api::resolution::ResolutionBatch {
                 resolutions: vec![approval_required("gate:first")],
                 stopped_on_suspension: true,
             });

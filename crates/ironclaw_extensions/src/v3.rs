@@ -20,11 +20,19 @@
 use std::collections::BTreeMap;
 
 use ironclaw_host_api::{
-    ChannelDescriptor, ChannelDescriptorError, EffectKind, ExtensionId,
-    HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostApiError, HostPortCatalog, MemoryDescriptor,
-    NetworkScheme, NetworkTargetPattern, OriginGateMatrix, PermissionMode, RecipeValidationError,
-    RequestedTrustClass, RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource,
-    RuntimeCredentialTarget, VendorAuthRecipe, VendorId,
+    action::{NetworkScheme, NetworkTargetPattern},
+    capability::{
+        EffectKind, OriginGateMatrix, PermissionMode, RuntimeCredentialAccountSetup,
+        RuntimeCredentialRequirementSource,
+    },
+    channel::{ChannelDescriptor, ChannelDescriptorError},
+    error::HostApiError,
+    host_port::{HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog},
+    http::RuntimeCredentialTarget,
+    ids::{ExtensionId, VendorId},
+    memory::MemoryDescriptor,
+    recipe::{RecipeValidationError, VendorAuthRecipe},
+    trust::RequestedTrustClass,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -147,14 +155,14 @@ struct RawToolV3 {
     /// capability's egress allowlist directly; v2's network-effect validation
     /// still applies.
     #[serde(default)]
-    network_targets: Vec<ironclaw_host_api::NetworkTargetPattern>,
+    network_targets: Vec<ironclaw_host_api::action::NetworkTargetPattern>,
     /// Optional per-tool egress cap (bytes). `#[serde(default)]` so tools
     /// without the key parse to `None` (no cap). Threads to the capability's
     /// `NetworkPolicy.max_egress_bytes` at grant issuance.
     #[serde(default)]
     max_egress_bytes: Option<u64>,
     #[serde(default)]
-    resource_profile: Option<ironclaw_host_api::ResourceProfile>,
+    resource_profile: Option<ironclaw_host_api::resource::ResourceProfile>,
 }
 
 fn default_tool_visibility() -> crate::v2::CapabilityVisibility {
@@ -190,7 +198,7 @@ struct RawAudienceV3 {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawMcpV3 {
-    server: ironclaw_host_api::HttpsEndpoint,
+    server: ironclaw_host_api::recipe::HttpsEndpoint,
     #[serde(default)]
     origin_gate_matrix: Option<OriginGateMatrix>,
     namespace: String,
@@ -381,7 +389,7 @@ pub(crate) fn parse_v3(
     let memory_tool_namespace = raw
         .memory
         .is_some()
-        .then_some(ironclaw_host_api::MEMORY_TOOL_ID_NAMESPACE);
+        .then_some(ironclaw_host_api::memory::MEMORY_TOOL_ID_NAMESPACE);
     let mut referenced_vendors: BTreeMap<VendorId, ()> = BTreeMap::new();
     let mut capabilities = Vec::new();
     let mut mcp_template_credentials = None;
@@ -591,6 +599,9 @@ pub(crate) fn parse_v3(
         description: manifest.description.clone(),
         requested_trust: manifest.requested_trust,
         runtime: manifest.runtime.clone(),
+        // No package root is in scope at v3 parse time either; the loader
+        // fabricates one when this is `None`.
+        root: None,
         mcp: mcp.map(|mcp| ResolvedMcpDeclaration {
             server: mcp.server.as_str().to_string(),
             namespace: mcp.namespace,
@@ -630,7 +641,7 @@ fn validate_channel_admin_configuration(
     channel: &ChannelDescriptor,
     descriptor: Option<&ExtensionAdminConfigurationDescriptor>,
 ) -> Result<(), ManifestV3Error> {
-    let require_field = |handle: &ironclaw_host_api::SecretHandle,
+    let require_field = |handle: &ironclaw_host_api::ids::SecretHandle,
                          secret: bool,
                          usage: &str|
      -> Result<(), ManifestV3Error> {
@@ -688,7 +699,7 @@ fn validate_channel_admin_configuration(
                 break;
             };
             if placeholder != "code" {
-                let handle = ironclaw_host_api::SecretHandle::new(placeholder).map_err(
+                let handle = ironclaw_host_api::ids::SecretHandle::new(placeholder).map_err(
                     |error| ManifestV3Error::Invalid {
                         reason: format!(
                             "channel connection placeholder `{{{placeholder}}}` is invalid: {error}"

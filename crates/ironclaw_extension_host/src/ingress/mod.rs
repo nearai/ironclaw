@@ -11,8 +11,9 @@
 //! verification recipe execution (host-side, constant-time; signing secrets
 //! never reach the adapter) → manifest-declared non-secret configuration
 //! resolution for the verified installation → `ChannelAdapter::inbound`
-//! (pure, panic-isolated, bounded input) → outcome handling (durable dedupe +
-//! admission commit before any 2xx).
+//! (pure, panic-isolated, bounded input) → outcome handling (durable admission
+//! before ordinary-message 2xx; durable host-private staging before
+//! provider-batch-fragment 2xx).
 //!
 //! This crate stays transport-neutral: the router consumes
 //! [`IngressRequest`]/[`IngressResponse`] values and composition wraps it in

@@ -2,7 +2,7 @@ use std::{collections::HashMap, hash::Hash, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_event_projections::ProjectionScope;
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::ids::{TenantId, UserId};
 use ironclaw_turns::TurnActor;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};

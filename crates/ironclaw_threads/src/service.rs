@@ -1,21 +1,22 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::ThreadId;
+use ironclaw_host_api::ids::ThreadId;
 
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
-    AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest, ContextMessages,
-    ContextWindow, CreateSummaryArtifactRequest, DeleteToolResultRecordRequest,
-    EnsureThreadRequest, FinalizedAssistantMessageByRunRequest, LatestThreadMessageRequest,
-    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, PutToolResultRecordRequest,
-    ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-    SessionThreadError, SessionThreadRecord, SummaryArtifact, ThreadGoal, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
-    ThreadMessageRecord, ThreadScope, ToolResultRecordChunk, UpdateAssistantDraftRequest,
-    UpdateThreadGoalRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
+    AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
+    BoundedThreadMessages, BoundedThreadMessagesRequest, ContextMessages, ContextWindow,
+    CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
+    FinalizedAssistantMessageByRunRequest, LatestThreadMessageRequest, ListThreadsForScopeRequest,
+    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord, SummaryArtifact,
+    ThreadGoal, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange,
+    ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope, ToolResultRecordChunk,
+    UpdateAssistantDraftRequest, UpdateThreadGoalRequest, UpdateToolResultRecordRequest,
+    UpdateToolResultReferenceRequest,
 };
 
 /// Canonical Reborn session thread and transcript boundary.
@@ -69,7 +70,7 @@ pub trait SessionThreadService: Send + Sync {
                 scope: scope.clone(),
                 thread_id: thread_id.clone(),
                 turn_run_id: request.turn_run_id,
-                content: content.clone(),
+                content: crate::MessageContent::text(content.as_text()),
             })
             .await?;
         if message.status != crate::MessageStatus::Draft {
@@ -166,6 +167,20 @@ pub trait SessionThreadService: Send + Sync {
         &self,
         request: ThreadHistoryRequest,
     ) -> Result<ThreadHistory, SessionThreadError>;
+
+    /// Load a complete history only when it fits the supplied export budget.
+    ///
+    /// Implementations must enforce the budget while reading, rather than
+    /// materializing an unbounded transcript and checking afterward.
+    async fn list_thread_messages_bounded(
+        &self,
+        _request: BoundedThreadMessagesRequest,
+    ) -> Result<BoundedThreadMessages, SessionThreadError> {
+        Err(SessionThreadError::Backend(
+            "bounded thread messages are not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
 
     async fn list_thread_messages_range(
         &self,
@@ -490,6 +505,13 @@ where
         request: ThreadHistoryRequest,
     ) -> Result<ThreadHistory, SessionThreadError> {
         self.as_ref().list_thread_history(request).await
+    }
+
+    async fn list_thread_messages_bounded(
+        &self,
+        request: BoundedThreadMessagesRequest,
+    ) -> Result<BoundedThreadMessages, SessionThreadError> {
+        self.as_ref().list_thread_messages_bounded(request).await
     }
 
     async fn list_thread_messages_range(

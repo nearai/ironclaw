@@ -91,7 +91,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{any, get},
 };
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::ids::UserId;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
 use subtle::ConstantTimeEq;
@@ -256,7 +256,7 @@ pub async fn serve_webui_v2(opts: RebornWebuiServeOptions) -> Result<(), RebornW
 /// Authenticator that compares the bearer token from the request
 /// against a single host-installation token loaded from an environment
 /// variable. Intended for the standalone `ironclaw-reborn` deployment
-/// (single operator, single user) and for local dev.
+/// (single operator, single user) and for standalone.
 ///
 /// Production deployments with multiple users / sessions / OIDC should
 /// use a different `WebuiAuthenticator` impl. This one is deliberately

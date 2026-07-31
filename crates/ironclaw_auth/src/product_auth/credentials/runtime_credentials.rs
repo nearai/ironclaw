@@ -9,8 +9,11 @@ use crate::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{
-    CredentialStageError, ExtensionId, ResourceScope, RuntimeCredentialAccountSetup,
-    RuntimeCredentialAuthRequirement, VendorId,
+    capability::RuntimeCredentialAccountSetup,
+    decision::RuntimeCredentialAuthRequirement,
+    dispatch::CredentialStageError,
+    ids::{ExtensionId, VendorId},
+    resource::ResourceScope,
 };
 
 /// Minimum time remaining before an access token is considered fresh enough

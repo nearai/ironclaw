@@ -18,17 +18,39 @@ use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
-use ironclaw_host_api::FailureKind;
+use ironclaw_host_api::result_meta::FailureKind;
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    Timestamp,
+    action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    capability::{
+        CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
+        OriginGatePolicy, PermissionMode, UNGATED_LOOP_RUN_CAPABILITIES,
+    },
+    dispatch::{DispatchFailureDetail, DispatchInputIssueCode},
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse, RuntimeHttpSavedBody,
+    },
+    ids::{
+        AgentId, CapabilityGrantId, CapabilityId, ExtensionId, PackageId, ProjectId, RunId,
+        TenantId, ThreadId, UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{HostPath, MountAlias, ScopedPath, VirtualPath},
+    resource::{LOCAL_DEFAULT_TENANT_ID, ResourceEstimate},
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_host_runtime::{
-    APPLY_PATCH_CAPABILITY_ID, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
-    CommandExecutionOutput, CommandExecutionRequest, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
-    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
-    HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
+    APPLY_PATCH_CAPABILITY_ID, ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
+    CapabilitySurfacePolicy, CapabilitySurfaceVersion, CommandExecutionOutput,
+    CommandExecutionRequest, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID,
+    HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime, HostRuntimeServices,
+    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
     NATIVE_MEMORY_FIRST_PARTY_PROVIDER, OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
     PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
@@ -799,11 +821,10 @@ async fn scheduled_loop_origin_denies_every_trigger_mutation_at_handler_boundary
         .expect("created trigger id")
         .to_string();
 
-    let run_id = ironclaw_host_api::RunId::new();
+    let run_id = ironclaw_host_api::ids::RunId::new();
     context.run_id = Some(run_id);
-    context.origin = Some(ironclaw_host_api::InvocationOrigin::ScheduledLoopRun(
-        run_id,
-    ));
+    context.origin =
+        Some(ironclaw_host_api::invocation::InvocationOrigin::ScheduledLoopRun(run_id));
     for (capability_id, input) in [
         (
             TRIGGER_CREATE_CAPABILITY_ID,
@@ -901,7 +922,7 @@ async fn builtin_trigger_create_can_inherit_delivery_target_from_trusted_run_con
     let hook = Arc::new(SourceResolvingTriggerCreateHook::new(inherited));
     let runtime = runtime_with_trigger_repository_and_create_hook(repository.clone(), hook.clone());
     let mut context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
-    let run_id = ironclaw_host_api::RunId::new();
+    let run_id = ironclaw_host_api::ids::RunId::new();
     context.run_id = Some(run_id);
 
     let output = invoke_with_context(
@@ -2436,8 +2457,10 @@ async fn builtin_trigger_list_includes_completed_fire_once_triggers() {
             trigger_id: record.trigger_id,
             fire_slot,
             run_id,
-            thread_id: ironclaw_host_api::ThreadId::new("01890f0f-fire-7000-8000-000000000001")
-                .unwrap(),
+            thread_id: ironclaw_host_api::ids::ThreadId::new(
+                "01890f0f-fire-7000-8000-000000000001",
+            )
+            .unwrap(),
             submitted_at: fire_slot,
         })
         .await
@@ -6466,7 +6489,7 @@ async fn builtin_http_defaults_json_body_content_type() {
 
 #[tokio::test]
 async fn builtin_http_fails_closed_when_policy_allows_network_but_runtime_egress_is_missing() {
-    let runtime = runtime_with_policy(local_dev_policy());
+    let runtime = runtime_with_policy(local_host_policy());
     let error = invoke_with_context(
         &runtime,
         HTTP_CAPABILITY_ID,
@@ -7584,7 +7607,7 @@ async fn builtin_coding_blocks_sensitive_resolved_libsql_paths() {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("filesystem.db");
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let filesystem = LibSqlRootFilesystem::new(db);
+    let filesystem = LibSqlRootFilesystem::new(db).expect("filesystem runtime");
     filesystem.run_migrations().await.unwrap();
     filesystem
         .create_dir_all(&VirtualPath::new("/projects/p").unwrap())
@@ -8456,7 +8479,7 @@ fn failure_input_issue<'a>(
     path: &str,
     code: DispatchInputIssueCode,
     case_name: &str,
-) -> &'a ironclaw_host_api::DispatchInputIssue {
+) -> &'a ironclaw_host_api::dispatch::DispatchInputIssue {
     let Some(DispatchFailureDetail::InvalidInput { issues }) = &failure.detail else {
         panic!(
             "{case_name}: expected invalid-input detail, got {:?}",
@@ -8477,7 +8500,7 @@ fn runtime_with_filesystem<F>(filesystem: F) -> impl HostRuntime
 where
     F: RootFilesystem + 'static,
 {
-    runtime_with_filesystem_and_policy(filesystem, local_dev_policy())
+    runtime_with_filesystem_and_policy(filesystem, local_host_policy())
 }
 
 fn runtime_with_filesystem_and_policy<F>(
@@ -8497,7 +8520,7 @@ where
 fn runtime_with_trigger_repository(repository: Arc<dyn TriggerRepository>) -> impl HostRuntime {
     runtime_with_filesystem_policy_and_trigger_repository(
         DiskFilesystem::new(),
-        local_dev_policy(),
+        local_host_policy(),
         repository,
     )
 }
@@ -8527,7 +8550,7 @@ fn runtime_with_trigger_repository_and_create_hook(
     ))
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
     .with_audit_sink(Arc::new(InMemoryAuditSink::new()))
-    .with_runtime_policy(local_dev_policy())
+    .with_runtime_policy(local_host_policy())
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
@@ -8550,7 +8573,7 @@ fn runtime_with_trigger_repository_and_clock(
     ))
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
     .with_audit_sink(Arc::new(InMemoryAuditSink::new()))
-    .with_runtime_policy(local_dev_policy())
+    .with_runtime_policy(local_host_policy())
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
@@ -8642,7 +8665,7 @@ struct DeliveryTargetValidatingTriggerCreateHook {
 
 struct SourceResolvingTriggerCreateHook {
     target: String,
-    seen_run_ids: std::sync::Mutex<Vec<Option<ironclaw_host_api::RunId>>>,
+    seen_run_ids: std::sync::Mutex<Vec<Option<ironclaw_host_api::ids::RunId>>>,
 }
 
 impl SourceResolvingTriggerCreateHook {
@@ -8653,7 +8676,7 @@ impl SourceResolvingTriggerCreateHook {
         }
     }
 
-    fn seen_run_ids(&self) -> Vec<Option<ironclaw_host_api::RunId>> {
+    fn seen_run_ids(&self) -> Vec<Option<ironclaw_host_api::ids::RunId>> {
         self.seen_run_ids.lock().unwrap().clone()
     }
 }
@@ -8662,8 +8685,8 @@ impl SourceResolvingTriggerCreateHook {
 impl TriggerCreateHook for SourceResolvingTriggerCreateHook {
     async fn resolve_implicit_delivery_target(
         &self,
-        _scope: &ironclaw_host_api::ResourceScope,
-        run_id: Option<ironclaw_host_api::RunId>,
+        _scope: &ironclaw_host_api::resource::ResourceScope,
+        run_id: Option<ironclaw_host_api::ids::RunId>,
     ) -> Result<Option<ironclaw_triggers::TriggerDeliveryTargetId>, TriggerError> {
         self.seen_run_ids.lock().unwrap().push(run_id);
         Ok(Some(
@@ -8694,7 +8717,7 @@ impl DeliveryTargetValidatingTriggerCreateHook {
 impl TriggerCreateHook for DeliveryTargetValidatingTriggerCreateHook {
     async fn validate_delivery_target(
         &self,
-        _scope: &ironclaw_host_api::ResourceScope,
+        _scope: &ironclaw_host_api::resource::ResourceScope,
         target: &ironclaw_triggers::TriggerDeliveryTargetId,
     ) -> Result<(), TriggerError> {
         self.validated.lock().unwrap().push(target.to_string());
@@ -9243,7 +9266,7 @@ where
     .with_first_party_capabilities(Arc::new(
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
-    .with_runtime_policy(local_dev_policy())
+    .with_runtime_policy(local_host_policy())
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
@@ -9265,7 +9288,7 @@ where
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
     .with_runtime_http_egress(egress)
-    .with_runtime_policy(local_dev_policy())
+    .with_runtime_policy(local_host_policy())
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
@@ -9293,7 +9316,7 @@ where
     }))
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
     .with_audit_sink(audit_sink)
-    .with_runtime_policy(local_dev_policy())
+    .with_runtime_policy(local_host_policy())
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
@@ -9302,7 +9325,7 @@ fn runtime_with_process_port<T>(process_port: Arc<T>) -> impl HostRuntime
 where
     T: RuntimeProcessPort + 'static,
 {
-    runtime_with_process_port_and_policy(process_port, local_dev_policy())
+    runtime_with_process_port_and_policy(process_port, local_host_policy())
 }
 
 fn runtime_with_process_port_and_policy<T>(
@@ -9374,11 +9397,11 @@ fn runtime_with_policy(policy: EffectiveRuntimePolicy) -> impl HostRuntime {
     .host_runtime_for_local_testing()
 }
 
-fn local_dev_policy() -> EffectiveRuntimePolicy {
+fn local_host_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend: ProcessBackendKind::LocalHost,
         network_mode: NetworkMode::DirectLogged,
@@ -9391,7 +9414,7 @@ fn local_dev_policy() -> EffectiveRuntimePolicy {
 fn tenant_sandbox_process_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         process_backend: ProcessBackendKind::TenantSandbox,
-        ..local_dev_policy()
+        ..local_host_policy()
     }
 }
 
@@ -9543,6 +9566,7 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
         TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
         OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
+        ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,
         LIST_DIR_CAPABILITY_ID,

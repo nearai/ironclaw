@@ -74,6 +74,7 @@ fn parse_oauth_access_token(json: &str) -> Option<String> {
 /// an HTTP 400 whose body matches a context-overflow pattern, and `None`
 /// otherwise. Delegates to the shared `crate::error::context_length_error`
 /// helper so detection stays consistent across direct-HTTP providers.
+#[cfg(test)]
 fn context_length_error_for_status(status_code: u16, response_text: &str) -> Option<LlmError> {
     crate::error::context_length_error(status_code, response_text)
 }
@@ -198,9 +199,10 @@ impl AnthropicOAuthProvider {
 
         if !status.is_success() {
             // Parse Retry-After header before consuming the body.
-            let retry_after = Some(crate::retry::parse_retry_after(
+            let retry_after = crate::retry::retry_after_for_status(
+                status.as_u16(),
                 response.headers().get("retry-after"),
-            ));
+            );
 
             let response_text = response
                 .text()
@@ -233,7 +235,8 @@ impl AnthropicOAuthProvider {
                             provider: "anthropic_oauth".to_string(),
                             reason: e.to_string(),
                         })?;
-                    if retry.status().is_success() {
+                    let retry_status = retry.status();
+                    if retry_status.is_success() {
                         // Persist the refreshed token so subsequent requests
                         // don't hit 401 again (fixes #1136).
                         self.update_token(fresh_token);
@@ -251,34 +254,41 @@ impl AnthropicOAuthProvider {
                             }
                         });
                     }
+                    let retry_after = crate::retry::retry_after_for_status(
+                        retry_status.as_u16(),
+                        retry.headers().get("retry-after"),
+                    );
+                    let retry_text = retry
+                        .text()
+                        .await
+                        .unwrap_or_else(|e| format!("(failed to read error body: {e})"));
                     tracing::warn!(
                         "Anthropic OAuth 401 retry with refreshed token also failed ({})",
-                        retry.status()
+                        retry_status
                     );
+                    return Err(crate::error::map_provider_http_error(
+                        crate::error::ProviderHttpError {
+                            adapter: crate::error::ProductionModelAdapter::AnthropicOauth,
+                            model: &self.active_model_name(),
+                            status: retry_status.as_u16(),
+                            body: &retry_text,
+                            retry_after,
+                        },
+                    ));
                 }
                 return Err(LlmError::AuthFailed {
                     provider: "anthropic_oauth".to_string(),
                 });
             }
-            if status.as_u16() == 429 {
-                return Err(LlmError::RateLimited {
-                    provider: "anthropic_oauth".to_string(),
+            return Err(crate::error::map_provider_http_error(
+                crate::error::ProviderHttpError {
+                    adapter: crate::error::ProductionModelAdapter::AnthropicOauth,
+                    model: &self.active_model_name(),
+                    status: status.as_u16(),
+                    body: &response_text,
                     retry_after,
-                });
-            }
-            // A too-large prompt (HTTP 413, or a 400 whose body says the context
-            // window was exceeded) must map to ContextLengthExceeded so the
-            // loop's context-shrink recovery can compact and retry instead of
-            // borking on a generic RequestFailed.
-            if let Some(error) = context_length_error_for_status(status.as_u16(), &response_text) {
-                tracing::warn!("Anthropic OAuth: context length exceeded");
-                return Err(error);
-            }
-            let truncated = ironclaw_common::truncate_for_preview(&response_text, 512);
-            return Err(LlmError::RequestFailed {
-                provider: "anthropic_oauth".to_string(),
-                reason: format!("HTTP {}: {}", status, truncated),
-            });
+                },
+            ));
         }
 
         let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
@@ -304,6 +314,10 @@ impl AnthropicOAuthProvider {
 
 #[async_trait]
 impl LlmProvider for AnthropicOAuthProvider {
+    fn provider_id(&self) -> String {
+        "anthropic_oauth".to_string()
+    }
+
     async fn complete(&self, mut req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let model = req
             .take_model_override()
@@ -785,6 +799,59 @@ fn extract_response_content(response: &AnthropicResponse) -> ExtractedAnthropicR
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn complete_preserves_missing_retry_after_on_headerless_502() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let base_url = format!(
+            "http://{}",
+            listener.local_addr().expect("loopback address")
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = vec![0_u8; 4096];
+            let _ = socket.read(&mut request).await.expect("read request");
+            let body = r#"{"error":{"message":"upstream unavailable"}}"#;
+            let response = format!(
+                "HTTP/1.1 502 Bad Gateway\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write error response");
+        });
+
+        let mut config = RegistryProviderConfig::generic(
+            crate::registry::ProviderProtocol::Anthropic,
+            "anthropic_oauth",
+            None,
+            base_url,
+            "claude-test",
+        );
+        config.oauth_token = Some(SecretString::from("test-token".to_string()));
+        let provider = AnthropicOAuthProvider::new(&config).expect("provider");
+        let error = provider
+            .complete(CompletionRequest::new(vec![ChatMessage::user("hello")]))
+            .await
+            .expect_err("scripted provider error");
+        server.await.expect("loopback server");
+
+        assert!(matches!(
+            error,
+            LlmError::BadGateway {
+                provider,
+                status: 502,
+                retry_after: None,
+            } if provider == "anthropic_oauth"
+        ));
+    }
 
     #[test]
     fn context_overflow_413_maps_to_context_length_exceeded() {

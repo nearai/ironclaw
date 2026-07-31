@@ -184,7 +184,7 @@ mod tests {
     fn policy_with_provider(extension_id: &str) -> MemoryBindingPolicy {
         MemoryBindingPolicy::resolve(MemoryBindingInput {
             provider: Some(extension_id.to_string()),
-            ..MemoryBindingInput::native_default(MemoryDeploymentProfile::LocalDev)
+            ..MemoryBindingInput::native_default(MemoryDeploymentProfile::Standalone)
         })
         .expect("policy resolves")
     }
@@ -246,16 +246,16 @@ mod tests {
 
     fn marker_invocation() -> ironclaw_memory::MemoryInvocation {
         ironclaw_memory::MemoryInvocation {
-            scope: ironclaw_host_api::ResourceScope {
-                tenant_id: ironclaw_host_api::TenantId::new("tenant-swap").unwrap(),
-                user_id: ironclaw_host_api::UserId::new("user-swap").unwrap(),
+            scope: ironclaw_host_api::resource::ResourceScope {
+                tenant_id: ironclaw_host_api::ids::TenantId::new("tenant-swap").unwrap(),
+                user_id: ironclaw_host_api::ids::UserId::new("user-swap").unwrap(),
                 agent_id: None,
                 project_id: None,
                 mission_id: None,
                 thread_id: None,
-                invocation_id: ironclaw_host_api::InvocationId::new(),
+                invocation_id: ironclaw_host_api::ids::InvocationId::new(),
             },
-            correlation_id: ironclaw_host_api::CorrelationId::new(),
+            correlation_id: ironclaw_host_api::ids::CorrelationId::new(),
         }
     }
 

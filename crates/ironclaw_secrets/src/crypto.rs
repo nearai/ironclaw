@@ -12,7 +12,7 @@ use hkdf::Hkdf;
 use secrecy::{ExposeSecret, SecretString};
 use sha2::Sha256;
 
-use ironclaw_host_api::{ResourceScope, SecretHandle};
+use ironclaw_host_api::{ids::SecretHandle, resource::ResourceScope};
 
 use crate::SecretError;
 use crate::legacy_store::DecryptedSecret;
@@ -40,11 +40,11 @@ pub struct SecretsCrypto {
 /// Validate raw master-key bytes against the same rules [`SecretsCrypto::new`]
 /// enforces, without constructing a crypto instance.
 ///
-/// Callers that resolve key material from a *named* source (a local-dev key
+/// Callers that resolve key material from a *named* source (a standalone key
 /// file, the `SECRETS_MASTER_KEY` env var) use this to fail loud with a
 /// source-naming error instead of the opaque [`SecretError::InvalidMasterKey`]
 /// that surfaces when an already-wrapped key reaches `new` several layers
-/// deep. See `ironclaw_reborn_composition::factory::resolve_local_dev_secret_master_key`.
+/// deep. See `ironclaw_reborn_composition::factory::resolve_standalone_secret_master_key`.
 pub fn validate_master_key_material(bytes: &[u8]) -> Result<(), SecretError> {
     if bytes.len() < KEY_SIZE {
         return Err(SecretError::InvalidMasterKey);

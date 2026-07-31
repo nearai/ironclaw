@@ -5,7 +5,7 @@ use ironclaw_extensions::{
     ManifestSource,
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
-use ironclaw_host_api::{ExtensionId, RuntimeKind, VirtualPath};
+use ironclaw_host_api::{ids::ExtensionId, path::VirtualPath, runtime::RuntimeKind};
 use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef, ProductSurfaceFailure};
 
 use crate::product_extension_host_api_contract_registry;
@@ -153,6 +153,31 @@ pub fn imported_extension_package(
     files: Vec<(String, Vec<u8>)>,
     reserved_bundled_ids: &[String],
 ) -> Result<AvailableExtensionPackage, ProductSurfaceFailure> {
+    extension_package_from_files(files, reserved_bundled_ids, ManifestSource::InstalledLocal)
+}
+
+/// Build a registry-installed extension package from already verified files.
+///
+/// Registry clients own signature, provenance, size, and digest verification.
+/// This boundary still applies every extension-host invariant: reserved-id
+/// rejection, manifest validation, declared-asset completeness, and WASI
+/// component validation.
+pub fn registry_extension_package(
+    files: Vec<(String, Vec<u8>)>,
+    reserved_bundled_ids: &[String],
+) -> Result<AvailableExtensionPackage, ProductSurfaceFailure> {
+    extension_package_from_files(
+        files,
+        reserved_bundled_ids,
+        ManifestSource::RegistryInstalled,
+    )
+}
+
+fn extension_package_from_files(
+    files: Vec<(String, Vec<u8>)>,
+    reserved_bundled_ids: &[String],
+    source: ManifestSource,
+) -> Result<AvailableExtensionPackage, ProductSurfaceFailure> {
     let manifest_toml = files
         .iter()
         .find(|(path, _)| path == "manifest.toml")
@@ -172,14 +197,17 @@ pub fn imported_extension_package(
             reason: format!("host API contract registry rejected imported extension: {error}"),
         }
     })?;
-    // Uploads are always validated as InstalledLocal. Only binary-compiled
-    // packages may claim the HostBundled trust/runtime tier.
+    // Uploaded and registry packages are both untrusted host inputs. Only
+    // binary-compiled packages may claim the HostBundled trust/runtime tier.
+    // The extension id (and so the package root) is only known once the
+    // manifest is parsed, so this first pass carries no root.
     let record = ExtensionManifestRecord::from_toml(
         manifest_toml,
-        ManifestSource::InstalledLocal,
+        source,
         &host_ports,
         None,
         &contracts,
+        None,
     )
     .map_err(map_binding_error)?;
     let runtime_kind = record.manifest().runtime.kind();
@@ -197,6 +225,18 @@ pub fn imported_extension_package(
     }
     let id = extension_id.as_str();
     let root = VirtualPath::new(format!("/system/extensions/{id}")).map_err(map_binding_error)?;
+    // Attach the now-known root to the resolved contract without reparsing
+    // the TOML (REC-2: `from_resolved` rebuilds from the already-validated
+    // contract).
+    let mut resolved_with_root = record.resolved().clone();
+    resolved_with_root.root = Some(root.clone());
+    let record = ExtensionManifestRecord::from_resolved(
+        record.raw_toml(),
+        source,
+        resolved_with_root,
+        record.manifest_hash().cloned(),
+    )
+    .map_err(map_binding_error)?;
     let surface_kinds = surface_kinds_from_manifest_record(&record, id)?;
     let manifest = record
         .manifest()
@@ -243,7 +283,7 @@ pub fn imported_extension_package(
         )?,
         manifest_toml: record.raw_toml().to_string(),
         resolved_manifest: Arc::new(record.resolved().clone()),
-        source: ManifestSource::InstalledLocal,
+        source,
         package,
         cleanup_requirements: Vec::new(),
         surface_kinds,
@@ -281,7 +321,7 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_extensions::ManifestSource;
     use ironclaw_filesystem::{DirEntry, FileStat, FilesystemOperation, InMemoryBackend};
-    use ironclaw_host_api::RuntimeKind;
+    use ironclaw_host_api::runtime::RuntimeKind;
 
     use crate::{AvailableExtensionAssetContent, AvailableExtensionCatalog};
 
@@ -623,6 +663,7 @@ prompt_doc_ref = "prompts/run.md"
                 &host_ports,
                 None,
                 &contracts,
+                None,
             )
             .unwrap_or_else(|error| panic!("test-tools/{label} manifest must validate: {error}"));
             assert_eq!(record.manifest().runtime.kind(), RuntimeKind::Wasm);
@@ -636,6 +677,13 @@ prompt_doc_ref = "prompts/run.md"
                 .expect("complete wasm tool bundle must import");
         assert_eq!(package.source, ManifestSource::InstalledLocal);
         assert_eq!(package.package_ref.id.as_str(), "uploaded-tool");
+        // The two-pass root attach (parse with root=None to learn the id,
+        // then rebuild via `from_resolved` with the id-derived root) must
+        // survive onto the resolved contract, not just `package.package.root`.
+        assert_eq!(
+            package.resolved_manifest.root,
+            Some(VirtualPath::new("/system/extensions/uploaded-tool").unwrap())
+        );
     }
 
     #[tokio::test]

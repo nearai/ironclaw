@@ -9,6 +9,7 @@ import {
 } from "../lib/api";
 import { ANON_SCOPE, authScope, setAuthScope } from "../lib/auth-scope";
 import { clearAllPins } from "../lib/pin-store";
+import { clearChatCommandsCache } from "../pages/chat/hooks/useChatCommands";
 import { clearHistoryCache } from "../pages/chat/hooks/useHistory";
 import { clearAllDrafts } from "../pages/chat/lib/draft-store";
 
@@ -236,6 +237,7 @@ export function useAuthSession() {
       clearHistoryCache();
       clearAllDrafts();
       clearAllPins();
+      clearChatCommandsCache();
     }
     lastScopeRef.current = nextScope;
   }, [session]);
@@ -293,6 +295,9 @@ export function useAuthSession() {
     // Projects surface is hidden until the server sets
     // IRONCLAW_REBORN_PROJECTS, while the surface is being finished.
     rebornProjectsEnabled: Boolean(session?.features?.reborn_projects),
+    regressionArtifactExportEnabled: Boolean(
+      session?.features?.regression_artifact_export,
+    ),
     globalAutoApproveEnabled: Boolean(session?.features?.global_auto_approve),
     signIn,
     signOut,

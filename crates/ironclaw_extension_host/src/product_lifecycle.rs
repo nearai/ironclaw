@@ -16,9 +16,14 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilitySurfaceKind, ExtensionId, InstallationState, ProductSurfaceCaller,
-    ProductSurfaceError, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
-    UserId, VendorId, VirtualPath,
+    decision::RuntimeCredentialAuthRequirement,
+    http::RuntimeHttpEgress,
+    ids::{ExtensionId, UserId, VendorId},
+    path::VirtualPath,
+    product_surface::{ProductSurfaceCaller, ProductSurfaceError},
+    resource::ResourceScope,
+    state::InstallationState,
+    surface::CapabilitySurfaceKind,
 };
 use ironclaw_product::{
     ChannelConnectionService, ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
@@ -123,7 +128,7 @@ where
 // lifecycle service models the installed extension set, while active_registry
 // is the model-visible capability surface read by host runtime dispatch.
 // install/remove keep the lifecycle set durable; activate/remove are the only
-// local-dev writers that should mirror lifecycle-managed packages into or out
+// standalone writers that should mirror lifecycle-managed packages into or out
 // of active_registry. Production and multi-tenant reuse require scoped storage
 // and registry ownership first; tracked in #4091.
 pub struct ExtensionLifecycleManager {
@@ -160,7 +165,12 @@ pub struct ExtensionLifecycleManager {
     /// per-request cap into N x 64 MiB of pressure before any lifecycle lock
     /// applies (#5499 review finding #3).
     import_decode_semaphore: Arc<Semaphore>,
-    /// The tenant operator identity (#5459 P1). In local-dev this is the base
+    /// Serializes registry package publication with the lifecycle operations
+    /// it coordinates. The ordinary lifecycle lock remains the state writer;
+    /// this outer lock only prevents two catalog clients from replacing the
+    /// same package between catalog publication and install.
+    registry_install_lock: Arc<Mutex<()>>,
+    /// The tenant operator identity (#5459 P1). In standalone this is the base
     /// owner user (`IRONCLAW_REBORN_WEBUI_USER_ID` semantics). Lifecycle
     /// installs by every caller, including this user, make or join the member
     /// set [`InstallationOwner::Users`]. Tenant-wide deployment state belongs
@@ -232,6 +242,7 @@ impl ExtensionLifecycleManager {
             channel_config: std::sync::OnceLock::new(),
             discovery_runtime_ports: std::sync::OnceLock::new(),
             import_decode_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES)),
+            registry_install_lock: Arc::new(Mutex::new(())),
             tenant_operator_user_id,
             removal_cleanup: Arc::new(ExtensionRemovalCleanupRegistry::empty()),
             account_setups: ExtensionAccountSetupRegistry::default(),
@@ -291,6 +302,10 @@ impl ExtensionLifecycleManager {
         &self,
     ) -> Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort> {
         Arc::clone(&self.installation_store)
+    }
+
+    pub async fn reserved_bundled_extension_ids(&self) -> Vec<String> {
+        self.catalog.read().await.reserved_bundled_ids().to_vec()
     }
 
     /// Attach the generic extension host so lifecycle mutations publish the
@@ -406,6 +421,7 @@ impl ExtensionLifecycleManager {
                     &host_ports,
                     None,
                     &contracts,
+                    Some(package.root.clone()),
                 )
                 .map_err(|error| ProductSurfaceFailure::InvalidBindingRequest {
                     reason: format!("bundled extension manifest is invalid: {error}"),
@@ -661,7 +677,7 @@ impl ExtensionLifecycleManager {
         &self,
     ) -> Result<Vec<ActiveExtensionCapability>, ProductSurfaceFailure> {
         // #5459 P1: carry each enabled installation's owner onto its
-        // capabilities so the per-request grant minting in the local-dev
+        // capabilities so the per-request grant minting in the standalone
         // capability surface can filter user-private extensions to their
         // owner. The registry itself stays global; owner is joined here.
         let owner_by_extension = project_installation_owners(
@@ -946,6 +962,163 @@ impl ExtensionLifecycleManager {
                 count: 1,
             },
         ))
+    }
+
+    /// Publish and install a package whose registry client has already
+    /// verified signature, provenance, size, and artifact digests.
+    ///
+    /// The package still enters through the extension-host validation
+    /// boundary before this method. A forced replacement uses the ordinary
+    /// removal/install convergence points and restores the previous inline
+    /// catalog package if the replacement install fails.
+    pub async fn install_registry_package(
+        &self,
+        package: AvailableExtensionPackage,
+        force: bool,
+        caller: &UserId,
+        scope: &ResourceScope,
+    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+        if package.source != ironclaw_extensions::ManifestSource::RegistryInstalled {
+            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                reason: "registry install requires a registry-validated package".to_string(),
+            });
+        }
+        let _registry_guard = self.registry_install_lock.lock().await;
+        let package_ref = package.package_ref.clone();
+        let extension_id = package.package.id.clone();
+        let previous = {
+            let catalog = self.catalog.read().await;
+            catalog.resolve(&package_ref).ok()
+        };
+        if let Some(previous) = &previous {
+            let matches = previous.manifest_toml == package.manifest_toml
+                && previous.assets == package.assets;
+            if matches {
+                return self
+                    .install_and_activate_registry_package(package_ref, caller)
+                    .await;
+            }
+            if !force {
+                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                    reason: format!(
+                        "extension {} already exists in the catalog; retry with force to replace it",
+                        extension_id.as_str()
+                    ),
+                });
+            }
+            if previous.source == ironclaw_extensions::ManifestSource::HostBundled {
+                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                    reason: format!(
+                        "extension {} is host-bundled and cannot be replaced by a registry package",
+                        extension_id.as_str()
+                    ),
+                });
+            }
+        }
+
+        let previous_installation = self.search_installation(&extension_id).await?;
+        let had_installation = previous_installation.is_some()
+            || self
+                .installation_store
+                .get_manifest(&extension_id)
+                .await
+                .map_err(map_extension_installation_error)?
+                .is_some();
+        if had_installation && previous.is_none() {
+            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} has installed state but no restorable catalog package",
+                    extension_id.as_str()
+                ),
+            });
+        }
+        let was_active = self
+            .active_extensions
+            .snapshot()
+            .get_extension(&extension_id)
+            .is_some();
+        if had_installation {
+            if !force {
+                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                    reason: format!(
+                        "extension {} is already installed; retry with force to replace it",
+                        extension_id.as_str()
+                    ),
+                });
+            }
+            self.remove(package_ref.clone(), scope, Some(caller))
+                .await?;
+        }
+
+        {
+            let mut catalog = self.catalog.write().await;
+            catalog.extend(AvailableExtensionCatalog::from_packages(vec![package]));
+        }
+        match self
+            .install_and_activate_registry_package(package_ref.clone(), caller)
+            .await
+        {
+            Ok(response) => Ok(response),
+            Err(original_error) => {
+                if let Err(cleanup_error) =
+                    self.remove(package_ref.clone(), scope, Some(caller)).await
+                {
+                    return Err(compensation_failure(
+                        "registry install failed and replacement cleanup also failed",
+                        original_error,
+                        cleanup_error,
+                    ));
+                }
+                {
+                    let mut catalog = self.catalog.write().await;
+                    catalog.remove(&package_ref);
+                    if let Some(previous) = previous {
+                        catalog.restore(previous);
+                    }
+                }
+                if had_installation {
+                    let restore = self.install(package_ref.clone(), caller).await;
+                    if let Err(restore_error) = restore {
+                        return Err(compensation_failure(
+                            "registry replacement failed and the previous install could not be restored",
+                            original_error,
+                            restore_error,
+                        ));
+                    }
+                    if let Some(installation) = &previous_installation
+                        && let Err(restore_error) = self.restore_installation(installation).await
+                    {
+                        return Err(compensation_failure(
+                            "registry replacement failed and the previous installation scope could not be restored",
+                            original_error,
+                            restore_error,
+                        ));
+                    }
+                    if was_active
+                        && let Err(restore_error) = self
+                            .activate(package_ref, ExtensionActivationMode::Static, caller)
+                            .await
+                    {
+                        return Err(compensation_failure(
+                            "registry replacement failed and the previous activation could not be restored",
+                            original_error,
+                            restore_error,
+                        ));
+                    }
+                }
+                Err(original_error)
+            }
+        }
+    }
+
+    async fn install_and_activate_registry_package(
+        &self,
+        package_ref: LifecyclePackageRef,
+        caller: &UserId,
+    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+        self.install(package_ref.clone(), caller).await?;
+        self.activate(package_ref, ExtensionActivationMode::Static, caller)
+            .await
     }
 
     pub async fn install(
@@ -1381,7 +1554,7 @@ impl ExtensionLifecycleManager {
         }
 
         let visible_capability_ids = package_visible_capability_ids(&active_package);
-        let account_setup = ironclaw_host_api::ExtensionId::new(package_ref.id.as_str())
+        let account_setup = ironclaw_host_api::ids::ExtensionId::new(package_ref.id.as_str())
             .ok()
             .and_then(|id| self.account_setups.descriptor(&id));
         let message = activation_success_message(
@@ -1440,7 +1613,7 @@ impl ExtensionLifecycleManager {
         &self,
         package_ref: LifecyclePackageRef,
         scope: &ResourceScope,
-        authenticated_actor_user_id: Option<&ironclaw_host_api::UserId>,
+        authenticated_actor_user_id: Option<&ironclaw_host_api::ids::UserId>,
     ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
         let (removed_extension_id, _) = extension_ids_from_package_ref(&package_ref)?;
         // Record only whether this invocation began while local removal state
@@ -2659,7 +2832,7 @@ fn activation_success_message(
 /// connection-template capability).
 fn hosted_mcp_discovery_network_policy(
     package: &ExtensionPackage,
-) -> Option<ironclaw_host_api::NetworkPolicy> {
+) -> Option<ironclaw_host_api::action::NetworkPolicy> {
     let ironclaw_extensions::ExtensionRuntime::Mcp { url: Some(url), .. } =
         &package.manifest.runtime
     else {
@@ -2667,9 +2840,9 @@ fn hosted_mcp_discovery_network_policy(
     };
     let parsed = url::Url::parse(url).ok()?;
     let host = parsed.host_str()?;
-    Some(ironclaw_host_api::NetworkPolicy {
-        allowed_targets: vec![ironclaw_host_api::NetworkTargetPattern {
-            scheme: Some(ironclaw_host_api::NetworkScheme::Https),
+    Some(ironclaw_host_api::action::NetworkPolicy {
+        allowed_targets: vec![ironclaw_host_api::action::NetworkTargetPattern {
+            scheme: Some(ironclaw_host_api::action::NetworkScheme::Https),
             host_pattern: host.to_string(),
             port: parsed.port(),
         }],
@@ -2989,7 +3162,12 @@ mod tests {
         ManifestSource, SharedExtensionRegistry,
     };
     use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{HostPortCatalog, InvocationId, ResourceScope, UserId, VirtualPath};
+    use ironclaw_host_api::{
+        host_port::HostPortCatalog,
+        ids::{InvocationId, UserId},
+        path::VirtualPath,
+        resource::ResourceScope,
+    };
     use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef};
     use ironclaw_trust::{HostTrustPolicy, InvalidationBus};
 
@@ -3263,6 +3441,7 @@ output_schema_ref = "schemas/search.output.json"
             &contracts,
         )
         .expect("fixture manifest");
+        let root = VirtualPath::new("/system/extensions/fixture").expect("extension root");
         let resolved_manifest = Arc::new(
             ExtensionManifestRecord::from_toml(
                 manifest_toml,
@@ -3270,12 +3449,12 @@ output_schema_ref = "schemas/search.output.json"
                 &HostPortCatalog::empty(),
                 None,
                 &contracts,
+                Some(root.clone()),
             )
             .expect("resolved fixture manifest")
             .resolved()
             .clone(),
         );
-        let root = VirtualPath::new("/system/extensions/fixture").expect("extension root");
         let package = ExtensionPackage::from_manifest_toml(manifest, root, manifest_toml)
             .expect("fixture package");
         AvailableExtensionPackage {

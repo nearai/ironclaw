@@ -261,7 +261,10 @@ fn is_transient_validator_error(error: &OutboundError) -> bool {
         | OutboundError::PreferenceTargetMissing { .. }
         | OutboundError::SubscriptionScopeMismatch
         | OutboundError::AccessDenied
-        | OutboundError::DeliveryNotFound => false,
+        | OutboundError::DeliveryNotFound
+        | OutboundError::ReplyAttachmentIntentsSealed
+        | OutboundError::ReplyAttachmentIntentConflict
+        | OutboundError::ReplyAttachmentIntentLimitExceeded => false,
     }
 }
 
@@ -272,7 +275,7 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::Utc;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnScope};
 
     use super::*;

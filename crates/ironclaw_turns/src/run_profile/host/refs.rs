@@ -1,6 +1,6 @@
 //! Bounded loop-ref newtypes and the shared trait-impl macros that back them.
 
-use ironclaw_host_api::INPUT_ENCODE_HUMAN_SUMMARY;
+use ironclaw_host_api::dispatch::INPUT_ENCODE_HUMAN_SUMMARY;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::run_context::LoopRunContext;
@@ -96,10 +96,6 @@ impl LoopCheckpointStateRef {
 impl_bounded_ref_traits!(LoopCheckpointStateRef);
 
 impl LoopCheckpointStateRef {
-    pub(crate) fn legacy_unknown() -> Self {
-        Self("checkpoint:unknown".to_string())
-    }
-
     pub fn for_run(context: &LoopRunContext, token: impl Into<String>) -> Result<Self, String> {
         let token = validate_loop_opaque_token(token.into(), "loop checkpoint state token", 96)?;
         Self::new(format!("checkpoint:{}:{token}", context.run_id))
@@ -196,11 +192,26 @@ impl LoopSafeSummary {
         Self("model gateway failed".to_string())
     }
 
+    /// Fixed fallback for a host-rejected checkpoint whose producer did not
+    /// supply a valid bounded cause.
+    pub fn checkpoint_rejected() -> Self {
+        Self("checkpoint was rejected and no safe explanation was available".to_string())
+    }
+
     /// Sanitized summary for a primary model call that exceeded its timeout.
     /// Infallible because the literal is known to satisfy
     /// [`validate_loop_safe_summary`].
     pub fn model_gateway_timed_out() -> Self {
         Self("model gateway timed out".to_string())
+    }
+
+    /// Fixed host-authored cause for a failed assistant transcript write.
+    ///
+    /// This carries no backend detail: transcript errors may contain raw reply
+    /// text or credentials and occur after the durability boundary needed for
+    /// another model call.
+    pub fn assistant_transcript_write_failed() -> Self {
+        Self("assistant transcript write failed".to_string())
     }
 
     pub fn as_str(&self) -> &str {

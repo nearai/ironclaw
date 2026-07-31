@@ -15,8 +15,8 @@ pub mod redaction;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-pub use crate::ProtocolAuthFailure;
-pub use crate::ProtocolHttpEgressError;
+pub use crate::product_adapter_error::ProtocolAuthFailure;
+pub use crate::product_adapter_error::ProtocolHttpEgressError;
 pub use auth::{AuthRequirement, ProtocolAuthEvidence, VerifiedAuthClaim};
 #[cfg(feature = "host-auth-mint")]
 pub use auth::{
@@ -27,8 +27,9 @@ pub use auth::{
 };
 pub use capabilities::{ProductAdapterCapabilities, ProductCapabilityFlag};
 pub use channel_adapter::{
-    AttachmentRef, ChannelAdapter, ChannelContext, ChannelError, DeliveryReport, ImmediateResponse,
-    InboundOutcome, MAX_IMMEDIATE_RESPONSE_BYTES, MAX_REPLY_CONTEXT_BYTES,
+    ChannelAdapter, ChannelAttachmentRef, ChannelContext, ChannelError, DeliveryReport,
+    ImmediateResponse, InboundBatchFragment, InboundOutcome, MAX_IMMEDIATE_RESPONSE_BYTES,
+    MAX_INBOUND_BATCH_REF_BYTES, MAX_INBOUND_BATCH_SETTLE_MILLIS, MAX_REPLY_CONTEXT_BYTES,
     NormalizedInboundMessage, OutboundEnvelope, OutboundPart, OutboundTarget, PartDeliveryOutcome,
     TargetCandidate, TargetQuery, VerifiedInbound,
 };

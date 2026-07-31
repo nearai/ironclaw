@@ -9,8 +9,11 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, ExtensionId, ProviderToolName, RuntimeKind};
-use ironclaw_host_api::{Resolution, ResolutionBatch};
+use ironclaw_host_api::resolution::{Resolution, ResolutionBatch};
+use ironclaw_host_api::{
+    ids::{CapabilityId, ExtensionId, ProviderToolName},
+    runtime::RuntimeKind,
+};
 use ironclaw_host_runtime::READ_FILE_CAPABILITY_ID;
 use ironclaw_loop_host::{
     DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, build_spawn_subagent_parameters_schema,
@@ -268,6 +271,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
             runtime: RuntimeKind::FirstParty,
             safe_name: self.primary_tool_name().to_string(),
             safe_description: "Echo a test payload".to_string(),
+            description_trust: Default::default(),
             concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: json!({"type": "object"}),
         }];
@@ -278,6 +282,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
                 runtime: RuntimeKind::FirstParty,
                 safe_name: DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID.to_string(),
                 safe_description: "Spawn a child subagent run and wait for its result".to_string(),
+                description_trust: Default::default(),
                 concurrency_hint: ConcurrencyHint::Exclusive,
                 parameters_schema: build_spawn_subagent_parameters_schema(&[]),
             });
@@ -322,7 +327,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
             && self.approval_calls.fetch_add(1, Ordering::SeqCst) == 0
         {
             return Ok(resolution::failed(
-                ironclaw_host_api::FailureKind::InputEncode,
+                ironclaw_host_api::result_meta::FailureKind::InputEncode,
                 "capability input failed validation".to_string(),
                 ironclaw_turns::run_profile::CapabilityFailureDetail::Diagnostic {
                     text: "capability input failed validation".to_string(),

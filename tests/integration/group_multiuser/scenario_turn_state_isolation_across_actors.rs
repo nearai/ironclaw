@@ -1,21 +1,11 @@
-//! C-MULTIUSER scenario: per-actor TURN/RUN-STATE isolation on the shared
-//! `TurnStateRowStore`. Unlike the thread/memory/approval stores, the
-//! group's turn_store is built with a construction-time-fixed mount view
-//! (`owner_turn_state_filesystem` in `ironclaw_reborn_composition::factory`,
-//! mirroring production's `HostedSingleTenant`/local-dev composition), so ALL
-//! actors' run records physically share ONE snapshot file. The only thing
-//! keeping one actor's run
-//! state from another's eyes is the store's own logical gate:
-//! `record.scope == request.scope` in `ironclaw_turns::memory`'s
-//! `get_run_state`/`resume_turn_once`/`request_cancel_once`. No existing
-//! scenario drives that gate directly — `scenario_two_actors_own_threads` and
-//! `group_journeys::scenario_multi_actor_gate_isolation` prove run-ids are
-//! distinct and gate refs don't cross, but never call `get_run_state` with a
-//! MISMATCHED actor's scope against another actor's real `run_id`.
+//! C-MULTIUSER scenario: per-actor run projection isolation over one shared
+//! process journal. The negative assertions query another actor's process id
+//! through the reader's own scope and require the journal projection to reject
+//! it.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
-use ironclaw_turns::{GetRunStateRequest, TurnError, TurnRunId, TurnScope, TurnStateStore};
+use ironclaw_turns::{AgentTurnRuntimePort, GetRunStateRequest, TurnError, TurnRunId, TurnScope};
 
 pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // ── Actor A (default actor): complete a turn over the shared turn_store ──
@@ -48,15 +38,17 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 
     // Positive pins: each actor reads back its OWN run under its OWN scope,
     // and gets genuinely ITS record back (not just any `Ok(_)`).
-    assert_own_run_state_readable(a.turn_store.as_ref(), a.turn_scope.clone(), run_a, "A").await?;
-    assert_own_run_state_readable(b.turn_store.as_ref(), b.turn_scope.clone(), run_b, "B").await?;
+    assert_own_run_state_readable(a.turn_runtime.as_ref(), a.turn_scope.clone(), run_a, "A")
+        .await?;
+    assert_own_run_state_readable(b.turn_runtime.as_ref(), b.turn_scope.clone(), run_b, "B")
+        .await?;
 
     // Negative pins, SYMMETRIC both ways: the store's scope-equality gate must
     // reject a request for the OTHER actor's run_id under the reader's OWN
     // scope — the one mechanism actually enforcing isolation given the shared
     // physical snapshot file (see module doc).
     assert_cannot_read_other_run_state(
-        a.turn_store.as_ref(),
+        a.turn_runtime.as_ref(),
         a.turn_scope.clone(),
         run_b,
         "A",
@@ -64,7 +56,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     )
     .await?;
     assert_cannot_read_other_run_state(
-        b.turn_store.as_ref(),
+        b.turn_runtime.as_ref(),
         b.turn_scope.clone(),
         run_a,
         "B",
@@ -76,7 +68,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
 }
 
 async fn assert_own_run_state_readable(
-    turn_store: &impl TurnStateStore,
+    turn_store: &impl AgentTurnRuntimePort,
     scope: TurnScope,
     run_id: TurnRunId,
     actor_name: &str,
@@ -96,7 +88,7 @@ async fn assert_own_run_state_readable(
 }
 
 async fn assert_cannot_read_other_run_state(
-    turn_store: &impl TurnStateStore,
+    turn_store: &impl AgentTurnRuntimePort,
     reader_scope: TurnScope,
     other_run_id: TurnRunId,
     reader_name: &str,

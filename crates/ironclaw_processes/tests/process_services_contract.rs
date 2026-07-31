@@ -7,8 +7,18 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::*;
+use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
+use ironclaw_host_api::{
+    capability::CapabilitySet,
+    ids::{
+        CapabilityId, ExtensionId, InvocationId, ProcessId, ProjectId, ResourceReservationId,
+        TenantId, UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::RuntimeKind,
+};
 use ironclaw_processes::*;
 use serde_json::json;
 use tokio::{sync::Notify, time::timeout};
@@ -38,15 +48,39 @@ async fn process_services_wire_background_results_to_host() {
         Some(json!({"ok": true}))
     );
     assert_eq!(
-        services
-            .process_store()
-            .get(&scope, process_id)
+        capability_process_record(services.process_runtime().as_ref(), &scope, process_id)
             .await
             .unwrap()
             .unwrap()
             .status,
         ProcessStatus::Completed
     );
+}
+
+#[tokio::test]
+async fn background_manager_recovers_queued_processes_present_at_startup() {
+    let services = in_mem_process_services();
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    submit_capability_process(
+        services.process_runtime().as_ref(),
+        process_start(process_id, invocation_id, scope.clone()),
+    )
+    .await
+    .unwrap();
+
+    let _manager = services.background_manager(Arc::new(SuccessExecutor));
+    let host = services.host().with_poll_interval(Duration::from_millis(5));
+    let result = timeout(
+        Duration::from_secs(1),
+        host.await_result(&scope, process_id),
+    )
+    .await
+    .expect("queued process is recovered")
+    .expect("queued process completes");
+
+    assert_eq!(result.status, ProcessStatus::Completed);
 }
 
 #[tokio::test]
@@ -63,6 +97,9 @@ async fn process_services_share_cancellation_registry_between_host_and_manager()
         .await
         .unwrap();
 
+    timeout(Duration::from_millis(200), executor.wait_for_start())
+        .await
+        .unwrap();
     let host = services.host().with_poll_interval(Duration::from_millis(5));
     host.kill(&scope, process_id).await.unwrap();
 
@@ -82,7 +119,7 @@ async fn process_services_share_cancellation_registry_between_host_and_manager()
 
 #[tokio::test]
 async fn filesystem_process_services_store_output_refs() {
-    let services = ProcessServices::filesystem(engine_filesystem());
+    let services = in_mem_process_services();
     let manager = services.background_manager(Arc::new(SuccessExecutor));
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
@@ -147,9 +184,7 @@ async fn background_manager_passes_spawn_mounts_and_reservation_to_executor() {
     assert_eq!(reservation.scope, request.scope);
     assert_eq!(reservation.estimate, estimate);
     assert_eq!(
-        services
-            .process_store()
-            .get(&scope, process_id)
+        capability_process_record(services.process_runtime().as_ref(), &scope, process_id)
             .await
             .unwrap()
             .expect("process record must be persisted")
@@ -176,6 +211,7 @@ impl ProcessExecutor for SuccessExecutor {
 #[derive(Default)]
 struct CancellationAwareExecutor {
     cancellations: AtomicUsize,
+    started: Notify,
     notified: Notify,
 }
 
@@ -212,6 +248,10 @@ impl ProcessExecutor for RecordingHandoffExecutor {
 }
 
 impl CancellationAwareExecutor {
+    async fn wait_for_start(&self) {
+        self.started.notified().await;
+    }
+
     async fn wait_for_cancellation(&self) {
         loop {
             let notified = self.notified.notified();
@@ -229,6 +269,7 @@ impl ProcessExecutor for CancellationAwareExecutor {
         &self,
         request: ProcessExecutionRequest,
     ) -> Result<ProcessExecutionResult, ProcessExecutionError> {
+        self.started.notify_one();
         request.cancellation.cancelled().await;
         self.cancellations.fetch_add(1, Ordering::SeqCst);
         self.notified.notify_waiters();
@@ -270,20 +311,6 @@ fn process_start(
     }
 }
 
-fn engine_filesystem() -> Arc<ScopedFilesystem<DiskFilesystem>> {
-    let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = DiskFilesystem::new();
-    fs.mount_local(
-        VirtualPath::new("/engine").unwrap(),
-        HostPath::from_path_buf(storage),
-    )
-    .unwrap();
-    scoped_processes_filesystem(
-        Arc::new(fs),
-        "/engine/tenants/tenant1/users/user1/processes",
-    )
-}
-
 fn scoped_processes_filesystem<F>(backend: Arc<F>, target_root: &str) -> Arc<ScopedFilesystem<F>>
 where
     F: RootFilesystem,
@@ -309,8 +336,7 @@ fn sample_scope(invocation_id: InvocationId, tenant: &str, user: &str) -> Resour
     }
 }
 
-fn in_mem_process_services()
--> ProcessServices<ProcessStore<InMemoryBackend>, ProcessResultStore<InMemoryBackend>> {
+fn in_mem_process_services() -> ProcessServices {
     ProcessServices::filesystem(scoped_processes_filesystem(
         Arc::new(InMemoryBackend::new()),
         "/engine/tenants/tenant1/users/user1/processes",

@@ -180,7 +180,7 @@ display_name = "Slack messages"
 inbound = true
 outbound = true
 conversation_model = "continuous"
-commands = ["status"]
+commands = ["model", "status"]
 
 [channel.connection]
 provider = "slack"
@@ -223,11 +223,54 @@ scheme = "https"
 host = "slack.com"
 methods = ["post"]
 credential_handle = "slack_bot_token"
+paths = [
+  "/api/chat.postMessage",
+  "/api/chat.delete",
+  "/api/conversations.open",
+  "/api/files.completeUploadExternal",
+]
+request_body_limit_bytes = 262144
+response_body_limit_bytes = 262144
+
+[[channel.egress]]
+scheme = "https"
+host = "slack.com"
+methods = ["get"]
+credential_handle = "slack_bot_token"
+paths = [
+  "/api/files.info",
+  "/api/files.getUploadURLExternal",
+]
+request_body_limit_bytes = 0
+response_body_limit_bytes = 262144
+
+# Private downloads remain under Slack's exact file host and prefix. The bot
+# credential is injected by the host and the response cap matches the shared
+# per-file attachment budget.
+[[channel.egress]]
+scheme = "https"
+host = "files.slack.com"
+methods = ["get"]
+credential_handle = "slack_bot_token"
+path_prefixes = ["/files-pri/"]
+request_body_limit_bytes = 0
+response_body_limit_bytes = 5242880
+
+# External upload tickets are pre-authorized by Slack. File bytes carry no bot
+# credential and are limited to the same per-file attachment budget.
+[[channel.egress]]
+scheme = "https"
+host = "files.slack.com"
+methods = ["post"]
+path_prefixes = ["/upload/"]
+request_body_limit_bytes = 5242880
+response_body_limit_bytes = 262144
 
 [channel.presentation]
 supports_markdown = true
 supports_threads = true
 max_message_chars = 40000
+command_prefix = "/ironclaw "
 
 # ---- auth surface: recipe data, zero extension code ------------------------
 

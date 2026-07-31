@@ -1,7 +1,7 @@
 //! Context for observer hook points (`after_model`, `after_capability`,
 //! `after_checkpoint`).
 
-use ironclaw_host_api::{ExtensionId, TenantId};
+use ironclaw_host_api::ids::{ExtensionId, TenantId};
 
 /// Read-only context handed to an observer hook. As with the other points,
 /// `#[non_exhaustive]` so additional fields can land without breaking authors.

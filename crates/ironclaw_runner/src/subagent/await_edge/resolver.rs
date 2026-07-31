@@ -1,4 +1,4 @@
-// arch-exempt: large_file, pre-existing size; #6263 only migrated 2 test-double lines to in_memory_turn_state_store(), plan #6263
+// arch-exempt: large_file, pre-existing size; #6263 only migrated 2 test-double lines to in_memory_agent_turn_runtime(), plan #6263
 //! Per-child/per-settle-group settle path (§2, §5.2, §5.5, §8.1) — the
 //! direct successor to `SubagentCompletionObserver` (deleted with this
 //! module). Owner-recovery/reconstruction/framing helpers below are ported
@@ -8,25 +8,30 @@
 //! changed. Boot/lazy recovery split out to `boot_recovery.rs` (plan-review
 //! fix — keeps this file to the reactive settle path only).
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
-use ironclaw_host_api::{CapabilityId, UserId};
-use ironclaw_loop_host::{AwaitEdgeSettler, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, ResolveOutcome};
+#[cfg(test)]
+use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_host_api::ids::UserId;
+#[cfg(test)]
+use ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID;
+use ironclaw_loop_host::{AwaitEdgeSettler, ResolveOutcome};
+#[cfg(test)]
+use ironclaw_threads::ThreadHistoryRequest;
 use ironclaw_threads::{
-    LatestThreadMessageRequest, MessageKind, MessageStatus, SessionThreadService,
-    ThreadHistoryRequest, ThreadScope, ToolResultSafeSummary, UpdateToolResultReferenceRequest,
+    LatestThreadMessageRequest, MessageKind, MessageStatus, SessionThreadService, ThreadScope,
+    ToolResultSafeSummary, UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::{
-    GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest,
-    TurnActor, TurnCoordinator, TurnError, TurnLifecycleEvent, TurnRunId, TurnRunRecord, TurnScope,
-    TurnSpawnTreeStateStore, TurnStatus,
+    AgentTurnSpawnTreeRuntimePort, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
+    ResumeTurnRequest, TurnCoordinator, TurnError, TurnLifecycleEvent, TurnRunId, TurnRunRecord,
+    TurnScope, TurnStatus,
     run_profile::{AgentLoopHostError, LoopRunContext},
 };
+#[cfg(test)]
+use ironclaw_turns::{GateRef, TurnActor};
 
-use super::{
-    AwaitEdge, AwaitEdgeState, EdgeTerminalKind,
-    store::{AwaitEdgeStore, CloseCrashHooks},
-};
+use super::{AwaitEdge, AwaitEdgeState, EdgeTerminalKind, store::AwaitEdgeStore};
 use crate::subagent::spawn_result::{
     SpawnedChildRunPayload, SubagentSpawnMode as PayloadSpawnMode,
     SubagentSpawnStatus as PayloadSpawnStatus, SubagentTerminalEventKind,
@@ -36,13 +41,9 @@ use crate::subagent::untrusted_text::{
     sanitize_tool_result_summary, sanitize_untrusted_terminal_reason, wrap_untrusted_subagent_text,
 };
 
-pub struct AwaitEdgeResolver<
-    S: SessionThreadService + ?Sized,
-    F: ironclaw_filesystem::RootFilesystem + ?Sized,
-> {
-    store: Arc<AwaitEdgeStore<F>>,
-    goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
-    turn_state_store: Arc<dyn TurnSpawnTreeStateStore>,
+pub struct AwaitEdgeResolver<S: SessionThreadService + ?Sized> {
+    store: Arc<AwaitEdgeStore>,
+    agent_turn_runtime: RwLock<Arc<dyn AgentTurnSpawnTreeRuntimePort>>,
     // Deferred-bind, mirroring `coordinator` below: most callers have a
     // result writer in hand immediately (`new_unbound`, the common case),
     // but `ironclaw_reborn_composition::runtime` constructs its result
@@ -59,15 +60,13 @@ pub struct AwaitEdgeResolver<
     thread_service: Arc<S>,
 }
 
-impl<S, F> AwaitEdgeResolver<S, F>
+impl<S> AwaitEdgeResolver<S>
 where
     S: SessionThreadService + ?Sized,
-    F: ironclaw_filesystem::RootFilesystem + ?Sized,
 {
     pub fn new_unbound(
-        store: Arc<AwaitEdgeStore<F>>,
-        goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
-        turn_state_store: Arc<dyn TurnSpawnTreeStateStore>,
+        store: Arc<AwaitEdgeStore>,
+        agent_turn_runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
         result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
         thread_service: Arc<S>,
     ) -> Self {
@@ -76,8 +75,7 @@ where
         let _ = result_writer_cell.set(result_writer);
         Self {
             store,
-            goal_store,
-            turn_state_store,
+            agent_turn_runtime: RwLock::new(agent_turn_runtime),
             result_writer: result_writer_cell,
             coordinator: OnceLock::new(),
             thread_service,
@@ -90,15 +88,13 @@ where
     /// writer is only available after this resolver is already erased into
     /// `Arc<dyn AwaitEdgeSettler>`.
     pub fn new_unbound_deferred_result_writer(
-        store: Arc<AwaitEdgeStore<F>>,
-        goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
-        turn_state_store: Arc<dyn TurnSpawnTreeStateStore>,
+        store: Arc<AwaitEdgeStore>,
+        agent_turn_runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
         thread_service: Arc<S>,
     ) -> Self {
         Self {
             store,
-            goal_store,
-            turn_state_store,
+            agent_turn_runtime: RwLock::new(agent_turn_runtime),
             result_writer: OnceLock::new(),
             coordinator: OnceLock::new(),
             thread_service,
@@ -112,6 +108,29 @@ where
             .set(coordinator)
             .map_err(|_| TurnError::InvalidRequest {
                 reason: "await-edge resolver coordinator already bound".to_string(),
+            })
+    }
+
+    pub fn bind_turn_tree_store(
+        &self,
+        store: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
+    ) -> Result<(), TurnError> {
+        let mut current = self
+            .agent_turn_runtime
+            .write()
+            .map_err(|_| TurnError::Unavailable {
+                reason: "await-edge resolver turn tree store lock poisoned".to_string(),
+            })?;
+        *current = store;
+        Ok(())
+    }
+
+    fn agent_turn_runtime(&self) -> Result<Arc<dyn AgentTurnSpawnTreeRuntimePort>, TurnError> {
+        self.agent_turn_runtime
+            .read()
+            .map(|store| Arc::clone(&*store))
+            .map_err(|_| TurnError::Unavailable {
+                reason: "await-edge resolver turn tree store lock poisoned".to_string(),
             })
     }
 
@@ -134,10 +153,6 @@ where
             .ok_or_else(|| TurnError::Unavailable {
                 reason: "await-edge resolver result writer is not bound".to_string(),
             })
-    }
-
-    pub(super) fn store(&self) -> &Arc<AwaitEdgeStore<F>> {
-        &self.store
     }
 
     // ─── Owner-recovery (ported near-verbatim) ────────────────────────────
@@ -175,7 +190,7 @@ where
             });
         }
         match self
-            .turn_state_store
+            .agent_turn_runtime()?
             .get_run_state(GetRunStateRequest {
                 scope: event.scope.clone(),
                 run_id: event.run_id,
@@ -241,9 +256,15 @@ where
                 ),
             })
     }
+}
 
+#[cfg(test)]
+impl<S> AwaitEdgeResolver<S>
+where
+    S: SessionThreadService + ?Sized,
+{
     /// Rebuild a lost/never-written edge purely from the child's run record +
-    /// thread metadata — a pure data transformation, zero `turn_state_store`
+    /// thread metadata — a pure data transformation, zero `agent_turn_runtime`
     /// calls for the parent. The live parent-record lookup this used to do
     /// was reached from the same synchronous `TurnCommittedEventObserver`
     /// callback the child's own commit invokes, and deadlocked re-entering
@@ -366,10 +387,15 @@ where
             settled_at: None,
         }))
     }
+}
 
+impl<S> AwaitEdgeResolver<S>
+where
+    S: SessionThreadService + ?Sized,
+{
     /// Returns the parent's `LoopRunContext` straight off the edge —
     /// captured once at open/reconstruct time (see `AwaitEdge::parent_run_context`'s
-    /// doc comment). Deliberately does **not** re-query `turn_state_store`
+    /// doc comment). Deliberately does **not** re-query `agent_turn_runtime`
     /// for the parent's record: doing so from inside the synchronous
     /// `TurnCommittedEventObserver` callback the child's own commit invokes
     /// deadlocks (verified against the live e2e harness — a second
@@ -525,7 +551,7 @@ where
     }
 
     /// Drives one child terminal event through settle -> (group-ready?) ->
-    /// write-result -> resume -> release -> prune -> delete.
+    /// write-result -> resume -> consume.
     pub async fn handle_child_terminal(
         &self,
         event: &TurnLifecycleEvent,
@@ -548,7 +574,7 @@ where
             return Ok(ResolveOutcome::NotApplicable);
         };
         let Some(child_record) = self
-            .turn_state_store
+            .agent_turn_runtime()?
             .get_run_record(&event.scope, event.run_id)
             .await?
         else {
@@ -571,16 +597,7 @@ where
             .map_err(store_error)?
             .is_none()
         {
-            let Some(edge) = self
-                .reconstruct_edge(&child_record, parent_run_id, &event)
-                .await?
-            else {
-                return Ok(ResolveOutcome::NotApplicable);
-            };
-            self.store
-                .open(&child_scope, parent_run_id, event.run_id, edge)
-                .await
-                .map_err(store_error)?;
+            return Ok(ResolveOutcome::NotApplicable);
         }
 
         self.settle_and_maybe_drain(
@@ -730,75 +747,24 @@ where
         self.resume_parent(&edge, parent_run_id, driving_child_run_id)
             .await?;
 
-        for (member_child_run_id, member_edge) in &group {
-            self.goal_store
-                .delete_goal(child_scope, *member_child_run_id)
-                .await
-                .map_err(|error| TurnError::Unavailable {
-                    reason: error.safe_summary,
-                })?;
-            self.close_edge(
-                child_scope,
-                parent_run_id,
-                member_edge.tree_root_run_id,
-                *member_child_run_id,
-            )
-            .await?;
+        for (member_child_run_id, _) in &group {
+            self.close_edge(child_scope, parent_run_id, *member_child_run_id)
+                .await?;
         }
 
         Ok(ResolveOutcome::Resumed)
     }
 
-    /// §2/§5.5's full close sequence for one edge: release tri-state ->
-    /// `Released`, prune the reservation's dedup entry, `delete_if_version`.
-    /// `tree_root_run_id` (the edge's own, not necessarily `parent_run_id` —
-    /// they diverge for a depth>1 nested spawn) is what
-    /// `release_tree_descendants` requires to identify the spawn-tree root;
-    /// passing the immediate parent for a nested spawn makes that call
-    /// return `InvalidRequest` (external review finding on this PR — latent
-    /// today since `max_depth` is 1, but the close path is depth-agnostic).
+    /// Atomically consume one settled dependency and release its child tree
+    /// reservation in the process journal.
     pub(super) async fn close_edge(
         &self,
         scope: &TurnScope,
         parent_run_id: TurnRunId,
-        tree_root_run_id: TurnRunId,
         child_run_id: TurnRunId,
     ) -> Result<(), TurnError> {
-        let turn_state_store = Arc::clone(&self.turn_state_store);
-        let scope_for_release = scope.clone();
-        let turn_state_store_for_prune = Arc::clone(&self.turn_state_store);
-        let scope_for_prune = scope.clone();
         self.store
-            .close_with_release(
-                scope,
-                parent_run_id,
-                child_run_id,
-                move || {
-                    let turn_state_store = Arc::clone(&turn_state_store);
-                    let scope = scope_for_release;
-                    async move {
-                        turn_state_store
-                            .release_tree_descendants(&scope, tree_root_run_id, 1, child_run_id)
-                            .await
-                            .map_err(|error| super::AwaitEdgeStoreError::Backend {
-                                reason: error.to_string(),
-                            })
-                    }
-                },
-                move || {
-                    let turn_state_store = Arc::clone(&turn_state_store_for_prune);
-                    let scope = scope_for_prune;
-                    async move {
-                        turn_state_store
-                            .prune_released_child(&scope, tree_root_run_id, child_run_id)
-                            .await
-                            .map_err(|error| super::AwaitEdgeStoreError::Backend {
-                                reason: error.to_string(),
-                            })
-                    }
-                },
-                CloseCrashHooks::default(),
-            )
+            .consume(scope, parent_run_id, child_run_id)
             .await
             .map_err(|error| TurnError::Unavailable {
                 reason: error.to_string(),
@@ -902,7 +868,7 @@ mod tests {
     }
 
     // ─── reconstruct_edge (FIX A): pure data transformation off cached
-    // `SubagentThreadMetadata`, zero `turn_state_store` calls for the
+    // `SubagentThreadMetadata`, zero `agent_turn_runtime` calls for the
     // parent ──────────────────────────────────────────────────────────
 
     struct ReconResultWriter;
@@ -923,10 +889,13 @@ mod tests {
     fn recon_scoped_fs()
     -> Arc<ironclaw_filesystem::ScopedFilesystem<ironclaw_filesystem::InMemoryBackend>> {
         use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-        use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+        use ironclaw_host_api::{
+            mount::{MountGrant, MountPermissions, MountView},
+            path::{MountAlias, VirtualPath},
+        };
         let mounts = MountView::new(vec![MountGrant::new(
-            MountAlias::new("/turns").unwrap(),
-            VirtualPath::new("/turns").unwrap(),
+            MountAlias::new("/processes").unwrap(),
+            VirtualPath::new("/processes").unwrap(),
             MountPermissions::read_write_list_delete(),
         )])
         .unwrap();
@@ -938,30 +907,21 @@ mod tests {
 
     fn recon_resolver(
         thread_service: Arc<ironclaw_threads::InMemorySessionThreadService>,
-    ) -> AwaitEdgeResolver<
-        ironclaw_threads::InMemorySessionThreadService,
-        ironclaw_filesystem::InMemoryBackend,
-    > {
-        let store = Arc::new(AwaitEdgeStore::new(recon_scoped_fs()));
-        let goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore> =
-            Arc::new(crate::subagent::goal_store::in_memory_backed_subagent_goal_store());
-        let turn_state_store: Arc<dyn TurnSpawnTreeStateStore> =
-            Arc::new(ironclaw_turns::test_support::in_memory_turn_state_store());
+    ) -> AwaitEdgeResolver<ironclaw_threads::InMemorySessionThreadService> {
+        let store = Arc::new(AwaitEdgeStore::new(Arc::new(
+            ironclaw_processes::ProcessJournalStore::new(recon_scoped_fs()),
+        )));
+        let agent_turn_runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort> =
+            Arc::new(ironclaw_turns::test_support::in_memory_agent_turn_runtime());
         let result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter> =
             Arc::new(ReconResultWriter);
-        AwaitEdgeResolver::new_unbound(
-            store,
-            goal_store,
-            turn_state_store,
-            result_writer,
-            thread_service,
-        )
+        AwaitEdgeResolver::new_unbound(store, agent_turn_runtime, result_writer, thread_service)
     }
 
     fn recon_child_record(
-        tenant_id: &ironclaw_host_api::TenantId,
-        agent_id: &ironclaw_host_api::AgentId,
-        child_thread_id: &ironclaw_host_api::ThreadId,
+        tenant_id: &ironclaw_host_api::ids::TenantId,
+        agent_id: &ironclaw_host_api::ids::AgentId,
+        child_thread_id: &ironclaw_host_api::ids::ThreadId,
         child_run_id: TurnRunId,
         parent_run_id: TurnRunId,
         resolved_run_profile: ironclaw_turns::run_profile::ResolvedRunProfile,
@@ -1025,9 +985,9 @@ mod tests {
 
     async fn recon_seed_thread(
         thread_service: &ironclaw_threads::InMemorySessionThreadService,
-        tenant_id: &ironclaw_host_api::TenantId,
-        agent_id: &ironclaw_host_api::AgentId,
-        child_thread_id: &ironclaw_host_api::ThreadId,
+        tenant_id: &ironclaw_host_api::ids::TenantId,
+        agent_id: &ironclaw_host_api::ids::AgentId,
+        child_thread_id: &ironclaw_host_api::ids::ThreadId,
         owner_user_id: &UserId,
         metadata_json: Option<String>,
     ) {
@@ -1056,10 +1016,12 @@ mod tests {
     // matches the metadata-cached one).
     #[tokio::test]
     async fn reconstruct_edge_builds_edge_from_cached_metadata() {
-        let tenant_id = ironclaw_host_api::TenantId::new("recon-tenant-t1").unwrap();
-        let agent_id = ironclaw_host_api::AgentId::new("recon-agent-t1").unwrap();
-        let child_thread_id = ironclaw_host_api::ThreadId::new("recon-child-thread-t1").unwrap();
-        let parent_thread_id = ironclaw_host_api::ThreadId::new("recon-parent-thread-t1").unwrap();
+        let tenant_id = ironclaw_host_api::ids::TenantId::new("recon-tenant-t1").unwrap();
+        let agent_id = ironclaw_host_api::ids::AgentId::new("recon-agent-t1").unwrap();
+        let child_thread_id =
+            ironclaw_host_api::ids::ThreadId::new("recon-child-thread-t1").unwrap();
+        let parent_thread_id =
+            ironclaw_host_api::ids::ThreadId::new("recon-parent-thread-t1").unwrap();
         let owner_user_id = UserId::new("recon-owner-t1").unwrap();
         let parent_run_id = TurnRunId::new();
         let child_run_id = TurnRunId::new();
@@ -1135,10 +1097,12 @@ mod tests {
     // `Ok(None)`, never reconstruct against the wrong parent.
     #[tokio::test]
     async fn reconstruct_edge_fails_closed_on_parent_run_id_mismatch() {
-        let tenant_id = ironclaw_host_api::TenantId::new("recon-tenant-t2").unwrap();
-        let agent_id = ironclaw_host_api::AgentId::new("recon-agent-t2").unwrap();
-        let child_thread_id = ironclaw_host_api::ThreadId::new("recon-child-thread-t2").unwrap();
-        let parent_thread_id = ironclaw_host_api::ThreadId::new("recon-parent-thread-t2").unwrap();
+        let tenant_id = ironclaw_host_api::ids::TenantId::new("recon-tenant-t2").unwrap();
+        let agent_id = ironclaw_host_api::ids::AgentId::new("recon-agent-t2").unwrap();
+        let child_thread_id =
+            ironclaw_host_api::ids::ThreadId::new("recon-child-thread-t2").unwrap();
+        let parent_thread_id =
+            ironclaw_host_api::ids::ThreadId::new("recon-parent-thread-t2").unwrap();
         let owner_user_id = UserId::new("recon-owner-t2").unwrap();
         let parent_run_id = TurnRunId::new();
         let wrong_parent_run_id = TurnRunId::new();
@@ -1199,9 +1163,10 @@ mod tests {
     // a fabricated edge.
     #[tokio::test]
     async fn reconstruct_edge_returns_none_for_absent_or_malformed_metadata() {
-        let tenant_id = ironclaw_host_api::TenantId::new("recon-tenant-t3").unwrap();
-        let agent_id = ironclaw_host_api::AgentId::new("recon-agent-t3").unwrap();
-        let child_thread_id = ironclaw_host_api::ThreadId::new("recon-child-thread-t3").unwrap();
+        let tenant_id = ironclaw_host_api::ids::TenantId::new("recon-tenant-t3").unwrap();
+        let agent_id = ironclaw_host_api::ids::AgentId::new("recon-agent-t3").unwrap();
+        let child_thread_id =
+            ironclaw_host_api::ids::ThreadId::new("recon-child-thread-t3").unwrap();
         let owner_user_id = UserId::new("recon-owner-t3").unwrap();
         let parent_run_id = TurnRunId::new();
         let child_run_id = TurnRunId::new();
@@ -1270,10 +1235,12 @@ mod tests {
     // values).
     #[tokio::test]
     async fn reconstruct_edge_anti_tamper_pin_overrides_metadata_scope_with_trusted_anchor() {
-        let tenant_id = ironclaw_host_api::TenantId::new("recon-tenant-t4").unwrap();
-        let agent_id = ironclaw_host_api::AgentId::new("recon-agent-t4").unwrap();
-        let child_thread_id = ironclaw_host_api::ThreadId::new("recon-child-thread-t4").unwrap();
-        let parent_thread_id = ironclaw_host_api::ThreadId::new("recon-parent-thread-t4").unwrap();
+        let tenant_id = ironclaw_host_api::ids::TenantId::new("recon-tenant-t4").unwrap();
+        let agent_id = ironclaw_host_api::ids::AgentId::new("recon-agent-t4").unwrap();
+        let child_thread_id =
+            ironclaw_host_api::ids::ThreadId::new("recon-child-thread-t4").unwrap();
+        let parent_thread_id =
+            ironclaw_host_api::ids::ThreadId::new("recon-parent-thread-t4").unwrap();
         let owner_user_id = UserId::new("recon-owner-t4").unwrap();
         let parent_run_id = TurnRunId::new();
         let child_run_id = TurnRunId::new();
@@ -1282,8 +1249,8 @@ mod tests {
         // Attacker-controlled thread metadata claims a different
         // tenant/thread than the trusted child run record — this must never
         // win.
-        let attacker_tenant = ironclaw_host_api::TenantId::new("attacker-tenant-t4").unwrap();
-        let attacker_thread = ironclaw_host_api::ThreadId::new("attacker-thread-t4").unwrap();
+        let attacker_tenant = ironclaw_host_api::ids::TenantId::new("attacker-tenant-t4").unwrap();
+        let attacker_thread = ironclaw_host_api::ids::ThreadId::new("attacker-thread-t4").unwrap();
         tampered_context.scope =
             TurnScope::new(attacker_tenant.clone(), None, None, attacker_thread.clone());
 
@@ -1345,214 +1312,528 @@ mod tests {
         );
     }
 
-    // `close_edge` must release capacity via the edge's own `tree_root_run_id`,
-    // not `parent_run_id` -- they diverge for depth>1 nesting (external
-    // review, PR #5819; latent today since max_depth == 1). Mutation: use
-    // `parent_run_id` instead -> RED (`mid_run_id` isn't the tree root).
+    #[derive(Default)]
+    struct RecordingResumeCoordinator {
+        resumes: std::sync::Mutex<Vec<ResumeTurnRequest>>,
+    }
+
+    impl RecordingResumeCoordinator {
+        fn resumes(&self) -> Vec<ResumeTurnRequest> {
+            self.resumes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingUpdateWriter {
+        updates: std::sync::Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl RecordingUpdateWriter {
+        fn updates(&self) -> Vec<serde_json::Value> {
+            self.updates
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ironclaw_loop_host::LoopCapabilityResultWriter for RecordingUpdateWriter {
+        async fn write_capability_result(
+            &self,
+            _write: ironclaw_loop_host::CapabilityResultWrite<'_>,
+        ) -> Result<ironclaw_loop_host::CapabilityWriteResult, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                ironclaw_turns::run_profile::AgentLoopHostErrorKind::InvalidInvocation,
+                "write is not used by await-edge update test",
+            ))
+        }
+
+        async fn update_capability_result(
+            &self,
+            _run_context: &LoopRunContext,
+            _result_ref: &ironclaw_turns::LoopResultRef,
+            output: serde_json::Value,
+        ) -> Result<u64, AgentLoopHostError> {
+            let byte_len = serde_json::to_vec(&output)
+                .map_err(|error| {
+                    AgentLoopHostError::new(
+                        ironclaw_turns::run_profile::AgentLoopHostErrorKind::Unavailable,
+                        error.to_string(),
+                    )
+                })?
+                .len() as u64;
+            self.updates
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(output);
+            Ok(byte_len)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TurnCoordinator for RecordingResumeCoordinator {
+        async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+            Ok(TurnRunId::new())
+        }
+
+        async fn submit_turn(
+            &self,
+            _request: ironclaw_turns::SubmitTurnRequest,
+        ) -> Result<ironclaw_turns::SubmitTurnResponse, TurnError> {
+            Err(TurnError::InvalidRequest {
+                reason: "submit is not used by await-edge drain test".to_string(),
+            })
+        }
+
+        async fn resume_turn(
+            &self,
+            request: ResumeTurnRequest,
+        ) -> Result<ironclaw_turns::ResumeTurnResponse, TurnError> {
+            let run_id = request.run_id;
+            self.resumes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request);
+            Ok(ironclaw_turns::ResumeTurnResponse {
+                run_id,
+                status: TurnStatus::Queued,
+                event_cursor: ironclaw_turns::EventCursor(9),
+            })
+        }
+
+        async fn retry_turn(
+            &self,
+            request: ironclaw_turns::RetryTurnRequest,
+        ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+            Err(TurnError::RunNotRetryable {
+                run_id: request.run_id,
+            })
+        }
+
+        async fn cancel_run(
+            &self,
+            _request: ironclaw_turns::CancelRunRequest,
+        ) -> Result<ironclaw_turns::CancelRunResponse, TurnError> {
+            Err(TurnError::InvalidRequest {
+                reason: "cancel is not used by await-edge drain test".to_string(),
+            })
+        }
+
+        async fn get_run_state(
+            &self,
+            _request: GetRunStateRequest,
+        ) -> Result<ironclaw_turns::TurnRunState, TurnError> {
+            Err(TurnError::ScopeNotFound)
+        }
+    }
+
     #[tokio::test]
-    async fn close_edge_releases_capacity_using_tree_root_not_immediate_parent() {
-        use ironclaw_turns::{
-            DefaultTurnCoordinator, SubmitChildRunRequest, SubmitTurnRequest, TurnSpawnTreePort,
+    async fn mixed_status_group_updates_each_result_resumes_once_and_consumes_every_edge() {
+        use chrono::Utc;
+        use ironclaw_host_api::ids::ProcessId;
+        use ironclaw_loop_host::{AwaitedChildSetRecord, SpawnSubagentMode, SubagentKindId};
+        use ironclaw_processes::{
+            ProcessDependencyPort, ProcessDependencySubmission, ProcessJournalStore, ProcessKind,
+            ProcessOperationId, ProcessSubmissionPort, SubmitProcessRequest,
+        };
+        use ironclaw_threads::{
+            AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
+            EnsureThreadRequest, MessageContent, SessionThreadService, ThreadHistoryRequest,
+            ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
         };
 
-        let state_store = Arc::new(ironclaw_turns::test_support::in_memory_turn_state_store());
-        let coordinator = DefaultTurnCoordinator::new(Arc::clone(&state_store));
-        let tenant_id = ironclaw_host_api::TenantId::new("close-edge-tree-root-tenant").unwrap();
-        let agent_id = ironclaw_host_api::AgentId::new("close-edge-tree-root-agent").unwrap();
-        let owner = UserId::new("close-edge-tree-root-owner").unwrap();
-        let actor = TurnActor::new(owner.clone());
+        let process_store = Arc::new(ProcessJournalStore::new(recon_scoped_fs()));
+        let dependencies = Arc::clone(&process_store)
+            as Arc<dyn ProcessDependencyPort<Error = ironclaw_processes::ProcessJournalStoreError>>;
+        let edge_store = Arc::new(AwaitEdgeStore::new(dependencies));
+        let thread_service = Arc::new(ironclaw_threads::InMemorySessionThreadService::default());
+        let runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort> =
+            Arc::new(ironclaw_turns::test_support::in_memory_agent_turn_runtime());
+        let recording_writer = Arc::new(RecordingUpdateWriter::default());
+        let writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter> =
+            Arc::clone(&recording_writer)
+                as Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>;
+        let resolver = Arc::new(AwaitEdgeResolver::new_unbound(
+            Arc::clone(&edge_store),
+            runtime,
+            writer,
+            Arc::clone(&thread_service),
+        ));
+        let coordinator = Arc::new(RecordingResumeCoordinator::default());
+        resolver
+            .bind_coordinator(Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>)
+            .expect("bind coordinator");
 
-        let root_scope = TurnScope::new_with_owner(
+        let tenant_id = ironclaw_host_api::ids::TenantId::new("drain-tenant").expect("tenant");
+        let user_id = UserId::new("drain-user").expect("user");
+        let agent_id = ironclaw_host_api::ids::AgentId::new("drain-agent").expect("agent");
+        let parent_thread_id =
+            ironclaw_host_api::ids::ThreadId::new("drain-parent-thread").expect("parent thread");
+        let parent_scope = TurnScope::new_with_owner(
             tenant_id.clone(),
             Some(agent_id.clone()),
             None,
-            ironclaw_host_api::ThreadId::new("close-edge-root-thread").unwrap(),
-            Some(owner.clone()),
+            parent_thread_id.clone(),
+            Some(user_id.clone()),
         );
-        let root_run_id = match coordinator
-            .submit_turn(SubmitTurnRequest {
-                requested_model: None,
-                scope: root_scope.clone(),
-                actor: actor.clone(),
-                accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("msg:tr-root")
-                    .unwrap(),
-                source_binding_ref: ironclaw_turns::SourceBindingRef::new("source:tr-root")
-                    .unwrap(),
-                reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
-                    "reply:tr-root",
-                )
-                .unwrap(),
-                requested_run_profile: None,
-                idempotency_key: IdempotencyKey::new("idem:tr-root").unwrap(),
-                received_at: chrono::Utc::now(),
-                requested_run_id: None,
-                parent_run_id: None,
-                subagent_depth: 0,
-                spawn_tree_root_run_id: None,
-                product_context: None,
+        let parent_run_id = TurnRunId::new();
+        let parent_process_id = ProcessId::from_uuid(parent_run_id.as_uuid());
+        process_store
+            .submit_process(SubmitProcessRequest {
+                process_id: parent_process_id,
+                process_kind: ProcessKind::AgentTurn,
+                scope: parent_scope.to_resource_scope(),
+                exclusive_within_scope: false,
+                operation_id: None,
+                owner_user_id: Some(user_id.clone()),
+                concurrency_class: None,
+                parent_process_id: None,
+                root_process_id: None,
+                spawn_tree_descendant_cap: None,
+                dependency: None,
+                checkpoint_ref: None,
+                input: None,
+                created_at: Utc::now(),
+                metadata: serde_json::Value::Null,
             })
             .await
-            .unwrap()
-        {
-            ironclaw_turns::SubmitTurnResponse::Accepted { run_id, .. } => run_id,
-        };
+            .expect("submit parent process");
 
-        let mid_scope = TurnScope::new_with_owner(
-            tenant_id.clone(),
-            Some(agent_id.clone()),
-            None,
-            ironclaw_host_api::ThreadId::new("close-edge-mid-thread").unwrap(),
-            Some(owner.clone()),
-        );
-        let mid_run_id = match coordinator
-            .submit_child_run(SubmitChildRunRequest {
-                parent_scope: root_scope.clone(),
-                parent_run_id: root_run_id,
-                child_scope: mid_scope.clone(),
-                actor: actor.clone(),
-                accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("msg:tr-mid")
-                    .unwrap(),
-                source_binding_ref: ironclaw_turns::SourceBindingRef::new("source:tr-mid").unwrap(),
-                reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
-                    "reply:tr-mid",
-                )
-                .unwrap(),
-                requested_run_profile: None,
-                idempotency_key: IdempotencyKey::new("idem:tr-mid").unwrap(),
-                received_at: chrono::Utc::now(),
-                requested_run_id: None,
-                spawn_tree_descendant_cap: 16,
+        let parent_thread_scope = ThreadScope {
+            tenant_id: tenant_id.clone(),
+            agent_id: agent_id.clone(),
+            project_id: None,
+            owner_user_id: Some(user_id.clone()),
+            mission_id: None,
+        };
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: parent_thread_scope.clone(),
+                thread_id: Some(parent_thread_id.clone()),
+                created_by_actor_id: user_id.to_string(),
+                title: None,
+                metadata_json: None,
             })
             .await
-            .unwrap()
-        {
-            ironclaw_turns::SubmitTurnResponse::Accepted { run_id, .. } => run_id,
-        };
+            .expect("ensure parent thread");
 
-        let leaf_scope = TurnScope::new_with_owner(
-            tenant_id.clone(),
-            Some(agent_id.clone()),
-            None,
-            ironclaw_host_api::ThreadId::new("close-edge-leaf-thread").unwrap(),
-            Some(owner.clone()),
-        );
-        let leaf_run_id = match coordinator
-            .submit_child_run(SubmitChildRunRequest {
-                parent_scope: mid_scope.clone(),
-                parent_run_id: mid_run_id,
-                child_scope: leaf_scope.clone(),
-                actor: actor.clone(),
-                accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("msg:tr-leaf")
-                    .unwrap(),
-                source_binding_ref: ironclaw_turns::SourceBindingRef::new("source:tr-leaf")
-                    .unwrap(),
-                reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
-                    "reply:tr-leaf",
-                )
-                .unwrap(),
-                requested_run_profile: None,
-                idempotency_key: IdempotencyKey::new("idem:tr-leaf").unwrap(),
-                received_at: chrono::Utc::now(),
-                requested_run_id: None,
-                spawn_tree_descendant_cap: 16,
-            })
-            .await
-            .unwrap()
-        {
-            ironclaw_turns::SubmitTurnResponse::Accepted { run_id, .. } => run_id,
-        };
-
-        // Precondition sanity, documenting the exact contract `close_edge`
-        // must respect: `mid_run_id` is NOT the canonical tree root for this
-        // lineage, so calling `release_tree_descendants` with it directly
-        // must fail.
-        let direct_call_with_wrong_id = state_store
-            .release_tree_descendants(&leaf_scope, mid_run_id, 1, TurnRunId::new())
-            .await;
-        assert!(
-            matches!(
-                direct_call_with_wrong_id,
-                Err(TurnError::InvalidRequest { .. })
-            ),
-            "expected release_tree_descendants to reject a non-root id, got {direct_call_with_wrong_id:?}"
-        );
-
-        // Open + settle a Settled edge for (parent_run_id=mid_run_id,
-        // child_run_id=leaf_run_id) with `tree_root_run_id: root_run_id` --
-        // exactly what a real depth>1 spawn's `record_awaited_child` would
-        // cache.
-        let store = Arc::new(AwaitEdgeStore::new(recon_scoped_fs()));
-        let parent_context = ironclaw_agent_loop::test_support::test_run_context("tr-parent");
-        let edge = AwaitEdge {
-            child_scope: leaf_scope.clone(),
-            child_thread_id: ironclaw_host_api::ThreadId::new("close-edge-leaf-thread").unwrap(),
-            parent_thread_id: mid_scope.thread_id.clone(),
-            parent_run_context: parent_context,
-            tree_root_run_id: root_run_id,
-            gate_ref: GateRef::new("gate:tr-leaf").unwrap(),
-            source_binding_ref: ironclaw_turns::SourceBindingRef::new("subagent-source:tr-leaf")
-                .unwrap(),
-            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(
-                "subagent-reply:tr-leaf",
-            )
-            .unwrap(),
-            subagent_kind: ironclaw_loop_host::SubagentKindId::new("general").unwrap(),
-            spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
-            result_ref: ironclaw_turns::LoopResultRef::new("result:subagent.tr-leaf").unwrap(),
-            mode: ironclaw_loop_host::SpawnSubagentMode::Blocking,
-            state: AwaitEdgeState::Open,
-            terminal_kind: None,
-            terminal_byte_len: None,
-            terminal_reason: None,
-            reservation_release: crate::subagent::await_edge::ReservationReleaseState::Unclaimed,
-            created_at: chrono::Utc::now(),
-            settled_at: None,
-        };
-        store
-            .open(&leaf_scope, mid_run_id, leaf_run_id, edge)
-            .await
-            .unwrap();
-        store
-            .settle(
-                &leaf_scope,
-                mid_run_id,
-                leaf_run_id,
+        let mut parent_context =
+            ironclaw_agent_loop::test_support::test_run_context("drain-parent");
+        parent_context.scope = parent_scope.clone();
+        parent_context.thread_id = parent_thread_id.clone();
+        parent_context.run_id = parent_run_id;
+        parent_context.actor = Some(TurnActor::new(user_id.clone()));
+        let gate_ref = GateRef::new("gate:mixed-status-group").expect("gate");
+        let child_cases = [
+            (
+                "completed",
                 EdgeTerminalKind::Completed,
                 None,
+                "completed child output",
+            ),
+            (
+                "failed",
+                EdgeTerminalKind::Failed,
+                Some("sanitized child failure".to_string()),
+                "failed child output",
+            ),
+        ];
+        let mut children = Vec::new();
+
+        for (label, terminal_kind, terminal_reason, final_text) in child_cases {
+            let child_run_id = TurnRunId::new();
+            let child_thread_id =
+                ironclaw_host_api::ids::ThreadId::new(format!("drain-child-{label}"))
+                    .expect("child thread");
+            let child_scope = TurnScope::new_with_owner(
+                tenant_id.clone(),
+                Some(agent_id.clone()),
                 None,
+                child_thread_id.clone(),
+                Some(user_id.clone()),
+            );
+            let result_ref = ironclaw_turns::LoopResultRef::new(format!("result:drain-{label}"))
+                .expect("result ref");
+            thread_service
+                .ensure_thread(EnsureThreadRequest {
+                    scope: parent_thread_scope.clone(),
+                    thread_id: Some(child_thread_id.clone()),
+                    created_by_actor_id: user_id.to_string(),
+                    title: None,
+                    metadata_json: None,
+                })
+                .await
+                .expect("ensure child thread");
+            thread_service
+                .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+                    scope: parent_thread_scope.clone(),
+                    thread_id: child_thread_id.clone(),
+                    turn_run_id: child_run_id.to_string(),
+                    content: MessageContent::text(final_text),
+                })
+                .await
+                .expect("append child final output");
+            thread_service
+                .append_tool_result_reference(AppendToolResultReferenceRequest {
+                    scope: parent_thread_scope.clone(),
+                    thread_id: parent_thread_id.clone(),
+                    turn_run_id: parent_run_id.to_string(),
+                    result_ref: result_ref.as_str().to_string(),
+                    safe_summary: ToolResultSafeSummary::new("subagent still running")
+                        .expect("initial summary"),
+                    provider_call: None,
+                    model_observation: None,
+                })
+                .await
+                .expect("append parent result placeholder");
+
+            let submitted = AwaitedChildSetRecord {
+                gate_ref: gate_ref.clone(),
+                parent_run_context: parent_context.clone(),
+                tree_root_run_id: parent_run_id,
+                child_scope: child_scope.clone(),
+                child_run_id,
+                child_thread_id: child_thread_id.clone(),
+                source_binding_ref: ironclaw_turns::SourceBindingRef::new(format!(
+                    "source:drain-{label}"
+                ))
+                .expect("source"),
+                reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(format!(
+                    "reply:drain-{label}"
+                ))
+                .expect("reply"),
+                subagent_kind: SubagentKindId::new("general").expect("kind"),
+                spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
+                    .expect("capability"),
+                result_ref: result_ref.clone(),
+                mode: SpawnSubagentMode::Blocking,
+            };
+            process_store
+                .submit_process(SubmitProcessRequest {
+                    process_id: ProcessId::from_uuid(child_run_id.as_uuid()),
+                    process_kind: ProcessKind::AgentTurn,
+                    scope: child_scope.to_resource_scope(),
+                    exclusive_within_scope: false,
+                    operation_id: Some(ProcessOperationId::from_trusted(format!(
+                        "drain-child-{label}"
+                    ))),
+                    owner_user_id: Some(user_id.clone()),
+                    concurrency_class: None,
+                    parent_process_id: Some(parent_process_id),
+                    root_process_id: Some(parent_process_id),
+                    spawn_tree_descendant_cap: Some(2),
+                    dependency: Some(ProcessDependencySubmission {
+                        dependent_process_id: parent_process_id,
+                        root_process_id: parent_process_id,
+                        group_ref: Some(gate_ref.as_str().to_string()),
+                        metadata: serde_json::to_value(submitted).expect("edge metadata"),
+                    }),
+                    checkpoint_ref: None,
+                    input: None,
+                    created_at: Utc::now(),
+                    metadata: serde_json::Value::Null,
+                })
+                .await
+                .expect("submit child process");
+            if terminal_kind == EdgeTerminalKind::Completed {
+                edge_store
+                    .settle(
+                        &child_scope,
+                        parent_run_id,
+                        child_run_id,
+                        terminal_kind,
+                        Some(17),
+                        terminal_reason.clone(),
+                    )
+                    .await
+                    .expect("settle edge")
+                    .expect("edge exists");
+            }
+            children.push((child_scope, child_run_id, result_ref, terminal_kind));
+        }
+
+        let group = edge_store
+            .list_group(&children[0].0, parent_run_id, &gate_ref)
+            .await
+            .expect("list settle group");
+        assert_eq!(group.len(), 2);
+        assert!(
+            group
+                .iter()
+                .any(|(_, edge)| edge.state == AwaitEdgeState::Settled)
+        );
+        assert!(
+            group
+                .iter()
+                .any(|(_, edge)| edge.state == AwaitEdgeState::Open)
+        );
+        assert_eq!(
+            edge_store
+                .list_unclosed_for_scope(&children[0].0)
+                .await
+                .expect("list unclosed edges")
+                .len(),
+            2
+        );
+        let open_edge = edge_store
+            .peek(&children[1].0, parent_run_id, children[1].1)
+            .await
+            .expect("peek open edge")
+            .expect("open edge exists");
+        assert_eq!(open_edge.state, AwaitEdgeState::Open);
+        edge_store
+            .close(&children[1].0, parent_run_id, children[1].1)
+            .await
+            .expect("closing an open edge is a no-op");
+        assert!(
+            crate::loop_exit_applier::AwaitDependentRunEvidenceStore::has_awaited_child_gate(
+                edge_store.as_ref(),
+                &children[0].0,
+                parent_run_id,
+                &ironclaw_turns::LoopGateRef::new(gate_ref.as_str()).expect("loop gate ref"),
             )
             .await
-            .unwrap();
-
-        let goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore> =
-            Arc::new(crate::subagent::goal_store::in_memory_backed_subagent_goal_store());
-        let turn_state_store: Arc<dyn TurnSpawnTreeStateStore> = state_store;
-        let result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter> =
-            Arc::new(ReconResultWriter);
-        let thread_service = Arc::new(ironclaw_threads::InMemorySessionThreadService::default());
-        let resolver = AwaitEdgeResolver::new_unbound(
-            store,
-            goal_store,
-            turn_state_store,
-            result_writer,
-            thread_service,
+            .expect("query blocking gate evidence")
+        );
+        let partial_recovery = crate::subagent::await_edge::boot_recovery::recover_scope(
+            &resolver,
+            edge_store.as_ref(),
+            &children[0].0,
+        )
+        .await;
+        assert_eq!(partial_recovery.failed, 0);
+        assert_eq!(partial_recovery.resumed, 0);
+        assert_eq!(partial_recovery.drained, 0);
+        assert_eq!(
+            edge_store
+                .peek(&children[0].0, parent_run_id, children[0].1)
+                .await
+                .expect("peek recovery-settled edge")
+                .expect("settled edge remains while sibling is open")
+                .state,
+            AwaitEdgeState::Settled
         );
 
-        resolver
-            .close_edge(&leaf_scope, mid_run_id, root_run_id, leaf_run_id)
+        let failed = &children[1];
+        let outcome = resolver
+            .settle_and_maybe_drain(
+                &failed.0,
+                parent_run_id,
+                failed.1,
+                EdgeTerminalKind::Failed,
+                &TurnLifecycleEvent {
+                    cursor: ironclaw_turns::EventCursor(8),
+                    scope: failed.0.clone(),
+                    occurred_at: Some(Utc::now()),
+                    owner_user_id: Some(user_id.clone()),
+                    run_id: failed.1,
+                    status: TurnStatus::Failed,
+                    kind: ironclaw_turns::TurnEventKind::Failed,
+                    blocked_gate: None,
+                    sanitized_reason: Some("sanitized child failure".to_string()),
+                    retryable: Some(false),
+                    detail: None,
+                },
+            )
             .await
-            .expect(
-                "close_edge must release descendant capacity using the edge's own \
-                 tree_root_run_id, not parent_run_id",
+            .expect("settle and drain group");
+        assert_eq!(outcome, ResolveOutcome::Resumed);
+        let updates = recording_writer.updates();
+        assert_eq!(updates.len(), 1, "only the open child result is staged");
+        assert!(
+            updates[0].to_string().contains("\"failed\""),
+            "staged terminal payload records the child's failed status: {updates:?}"
+        );
+        let resumes = coordinator.resumes();
+        assert_eq!(resumes.len(), 1);
+        assert_eq!(resumes[0].scope, parent_scope);
+        assert_eq!(
+            resumes[0].precondition,
+            ResumeTurnPrecondition::BlockedDependentRunGate
+        );
+        assert_eq!(resumes[0].gate_resolution_ref, gate_ref);
+
+        for (child_scope, child_run_id, _, _) in &children {
+            assert!(
+                edge_store
+                    .peek(child_scope, parent_run_id, *child_run_id)
+                    .await
+                    .expect("peek consumed edge")
+                    .is_none(),
+                "every edge must be consumed after one group drain"
             );
+            edge_store
+                .close(child_scope, parent_run_id, *child_run_id)
+                .await
+                .expect("closing an already consumed edge is idempotent");
+        }
+        edge_store
+            .abandon(&children[0].0, parent_run_id, children[0].1)
+            .await
+            .expect("abandon replay is idempotent");
+        let recovery = crate::subagent::await_edge::boot_recovery::recover_scope(
+            &resolver,
+            edge_store.as_ref(),
+            &children[0].0,
+        )
+        .await;
+        assert_eq!(recovery.failed, 0);
+        assert_eq!(recovery.resumed, 0);
+        let recovery_driver = crate::subagent::await_edge::boot_recovery::ScopeRecoveryDriver::new(
+            Arc::clone(&resolver),
+            Arc::clone(&edge_store),
+        );
+        ironclaw_loop_host::AwaitEdgeWriter::check_scope_recovered(
+            &recovery_driver,
+            &children[0].0,
+        )
+        .await
+        .expect("scope recovery driver completes");
+        ironclaw_loop_host::AwaitEdgeWriter::abandon_awaited_child(
+            &recovery_driver,
+            &children[0].0,
+            parent_run_id,
+            children[0].1,
+        )
+        .await
+        .expect("scope recovery driver abandon replay");
+
+        let parent_thread = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: parent_thread_scope,
+                thread_id: parent_thread_id,
+            })
+            .await
+            .expect("read parent thread");
+        let summaries = parent_thread
+            .messages
+            .iter()
+            .filter_map(|message| message.content.as_deref())
+            .filter_map(|content| ToolResultReferenceEnvelope::from_json_str(content).ok())
+            .map(|envelope| envelope.safe_summary.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(summaries.len(), 2);
+        assert!(
+            summaries
+                .iter()
+                .any(|summary| summary.contains("completed")),
+            "completed child keeps its own terminal status: {summaries:?}"
+        );
+        assert!(
+            summaries.iter().any(|summary| summary.contains("failed")),
+            "failed child keeps its own terminal status: {summaries:?}"
+        );
     }
 }
 
 #[async_trait::async_trait]
-impl<S, F> AwaitEdgeSettler for AwaitEdgeResolver<S, F>
+impl<S> AwaitEdgeSettler for AwaitEdgeResolver<S>
 where
     S: SessionThreadService + ?Sized + 'static,
-    F: ironclaw_filesystem::RootFilesystem + ?Sized + 'static,
 {
     async fn on_child_terminal(
         &self,
@@ -1566,6 +1847,13 @@ where
         // priority over trait methods of the same name), not infinite
         // recursion into this trait method.
         AwaitEdgeResolver::bind_coordinator(self, coordinator)
+    }
+
+    fn bind_turn_tree_store(
+        &self,
+        store: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
+    ) -> Result<(), TurnError> {
+        AwaitEdgeResolver::bind_turn_tree_store(self, store)
     }
 
     fn bind_result_writer(
@@ -1583,10 +1871,9 @@ where
 }
 
 #[async_trait::async_trait]
-impl<S, F> ironclaw_turns::TurnCommittedEventObserver for AwaitEdgeResolver<S, F>
+impl<S> ironclaw_turns::TurnCommittedEventObserver for AwaitEdgeResolver<S>
 where
     S: SessionThreadService + ?Sized,
-    F: ironclaw_filesystem::RootFilesystem + ?Sized,
 {
     fn observes_state(&self, state: &ironclaw_turns::TurnRunState) -> bool {
         state.status.is_terminal()
@@ -1725,6 +2012,7 @@ fn event_kind_from_terminal_status(
 /// Background mode has no live status to consult from a reconstruction path
 /// (the old live-status heuristic is gone), so it falls back to the same
 /// derived-token format the spawn path itself uses for that mode.
+#[cfg(test)]
 fn recovered_gate_ref(
     metadata: &ironclaw_loop_host::SubagentThreadMetadata,
     child_record: &TurnRunRecord,
@@ -1739,6 +2027,7 @@ fn recovered_gate_ref(
     }
 }
 
+#[cfg(test)]
 fn parse_optional_subagent_thread_metadata(
     raw: Option<&str>,
     child_run_id: TurnRunId,
@@ -1777,6 +2066,7 @@ fn parse_optional_subagent_thread_metadata(
     }
 }
 
+#[cfg(test)]
 fn thread_scope_from_turn_scope(
     scope: &TurnScope,
     event: &TurnLifecycleEvent,

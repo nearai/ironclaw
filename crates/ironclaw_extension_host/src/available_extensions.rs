@@ -6,8 +6,11 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilityId, CapabilitySurfaceKind, ChannelConnectionStrategy, ExtensionId, HostPortCatalog,
-    VendorId, VirtualPath,
+    channel::ChannelConnectionStrategy,
+    host_port::HostPortCatalog,
+    ids::{CapabilityId, ExtensionId, VendorId},
+    path::VirtualPath,
+    surface::CapabilitySurfaceKind,
 };
 use ironclaw_product::{
     ChannelConnectionRequirement, LifecycleChannelDirections,
@@ -17,7 +20,7 @@ use ironclaw_product::{
     RebornChannelConnectStrategy,
 };
 use ironclaw_product::{ProductCapabilityFlag, ProductSurfaceKind};
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 use toml::Value;
 
 use crate::ExtensionRemovalCleanupRequirement;
@@ -112,7 +115,7 @@ pub struct AvailableExtensionPackage {
     /// The channel surface's declared `[channel.presentation]` (markdown +
     /// message cap), cached at construction like `channel_directions`. Fed into
     /// prompt construction via the lifecycle summary (OUT-11).
-    pub channel_presentation: Option<ironclaw_host_api::ChannelPresentation>,
+    pub channel_presentation: Option<ironclaw_host_api::channel::ChannelPresentation>,
     pub assets: Vec<AvailableExtensionAsset>,
     /// Bespoke onboarding copy carried down from a migrated inventory bundle
     /// (`ironclaw_first_party_extensions::packages`). `None` for packages whose
@@ -153,7 +156,11 @@ impl AvailableExtensionPackage {
             name: self.package.manifest.name.clone(),
             version: self.package.manifest.version.clone(),
             description: self.package.manifest.description.clone(),
-            source: LifecycleExtensionSource::HostBundled,
+            source: match self.source {
+                ManifestSource::HostBundled => LifecycleExtensionSource::HostBundled,
+                ManifestSource::InstalledLocal => LifecycleExtensionSource::Installed,
+                ManifestSource::RegistryInstalled => LifecycleExtensionSource::Registry,
+            },
             runtime_kind: runtime_kind(&self.package.manifest.runtime),
             surface_kinds: self.surface_kinds.clone(),
             channel_directions: self.channel_directions,
@@ -433,6 +440,7 @@ impl AvailableExtensionCatalog {
                 &host_ports,
                 None,
                 &contracts,
+                Some(package.package.root.clone()),
             )
             .map_err(|error| ProductSurfaceFailure::InvalidBindingRequest {
                 reason: format!(
@@ -463,10 +471,58 @@ impl AvailableExtensionCatalog {
         }
     }
 
+    pub(crate) fn remove(
+        &mut self,
+        package_ref: &LifecyclePackageRef,
+    ) -> Option<Arc<AvailableExtensionPackage>> {
+        let index = self
+            .packages
+            .iter()
+            .position(|package| &package.package_ref == package_ref)?;
+        Some(self.packages.remove(index))
+    }
+
+    pub(crate) fn restore(&mut self, package: Arc<AvailableExtensionPackage>) {
+        if let Some(existing) = self
+            .packages
+            .iter_mut()
+            .find(|existing| existing.package_ref == package.package_ref)
+        {
+            *existing = package;
+        } else {
+            self.packages.push(package);
+        }
+    }
+
     pub async fn from_filesystem_root<F>(
         fs: &F,
         root: &VirtualPath,
         reserved_bundled_ids: &[String],
+    ) -> Result<Self, ProductSurfaceFailure>
+    where
+        F: RootFilesystem + ?Sized,
+    {
+        let manifest_sources = BTreeMap::new();
+        Self::from_filesystem_root_with_manifest_sources(
+            fs,
+            root,
+            reserved_bundled_ids,
+            &manifest_sources,
+        )
+        .await
+    }
+
+    /// Reload materialized packages while preserving the durable manifest
+    /// source recorded at install time.
+    ///
+    /// A filesystem path alone cannot distinguish a local upload from a
+    /// registry install. The installation store is the authority for that
+    /// provenance; absent records remain fail-closed as `InstalledLocal`.
+    pub async fn from_filesystem_root_with_manifest_sources<F>(
+        fs: &F,
+        root: &VirtualPath,
+        reserved_bundled_ids: &[String],
+        manifest_sources: &BTreeMap<ExtensionId, ManifestSource>,
     ) -> Result<Self, ProductSurfaceFailure>
     where
         F: RootFilesystem + ?Sized,
@@ -477,6 +533,7 @@ impl AvailableExtensionCatalog {
                 root,
                 ManifestSource::InstalledLocal,
                 reserved_bundled_ids,
+                manifest_sources,
             )
             .await?,
         ))
@@ -491,9 +548,16 @@ impl AvailableExtensionCatalog {
     where
         F: RootFilesystem + ?Sized,
     {
+        let manifest_sources = BTreeMap::new();
         Ok(Self::from_packages(
-            load_filesystem_packages(fs, root, ManifestSource::HostBundled, reserved_bundled_ids)
-                .await?,
+            load_filesystem_packages(
+                fs,
+                root,
+                ManifestSource::HostBundled,
+                reserved_bundled_ids,
+                &manifest_sources,
+            )
+            .await?,
         ))
     }
 
@@ -717,6 +781,7 @@ fn bundled_extension_package(
         &host_ports,
         None,
         &contracts,
+        Some(root.clone()),
     )
     .map_err(|error| ProductSurfaceFailure::InvalidBindingRequest {
         reason: format!("bundled {label} extension manifest is invalid: {error}"),
@@ -880,7 +945,7 @@ fn channel_directions_from_manifest_record(
 /// `channel_directions` and fed into prompt construction (OUT-11).
 fn channel_presentation_from_manifest_record(
     record: &ExtensionManifestRecord,
-) -> Option<ironclaw_host_api::ChannelPresentation> {
+) -> Option<ironclaw_host_api::channel::ChannelPresentation> {
     record
         .resolved()
         .channel
@@ -922,8 +987,9 @@ pub fn bytes_asset(path: &str, bytes: &[u8]) -> AvailableExtensionAsset {
 async fn load_filesystem_packages<F>(
     fs: &F,
     root: &VirtualPath,
-    stamp: ManifestSource,
+    default_stamp: ManifestSource,
     reserved_bundled_ids: &[String],
+    manifest_sources: &BTreeMap<ExtensionId, ManifestSource>,
 ) -> Result<Vec<AvailableExtensionPackage>, ProductSurfaceFailure>
 where
     F: RootFilesystem + ?Sized,
@@ -963,7 +1029,23 @@ where
         if reserved_host_bundled_extension_id(&extension_id, reserved_bundled_ids) {
             continue;
         }
-        match load_filesystem_package(fs, entry, &host_ports, &contracts, stamp).await {
+        let package = match manifest_sources.get(&extension_id) {
+            Some(ManifestSource::HostBundled) => {
+                Err(ProductSurfaceFailure::InvalidBindingRequest {
+                    reason: format!(
+                        "persisted manifest source for materialized extension '{}' cannot be host-bundled",
+                        extension_id.as_str()
+                    ),
+                })
+            }
+            Some(source) => {
+                load_filesystem_package(fs, entry, &host_ports, &contracts, *source).await
+            }
+            None => {
+                load_filesystem_package(fs, entry, &host_ports, &contracts, default_stamp).await
+            }
+        };
+        match package {
             Ok(Some(package)) => packages.push(package),
             Ok(None) => {}
             // Per-entry validation failure is fail-open: a stale materialized
@@ -1017,9 +1099,15 @@ where
             reason: format!("available extension manifest is not UTF-8: {error}"),
         }
     })?;
-    let record =
-        ExtensionManifestRecord::from_toml(manifest_toml, stamp, host_ports, None, contracts)
-            .map_err(map_binding_error)?;
+    let record = ExtensionManifestRecord::from_toml(
+        manifest_toml,
+        stamp,
+        host_ports,
+        None,
+        contracts,
+        Some(entry.path.clone()),
+    )
+    .map_err(map_binding_error)?;
     let surface_kinds = surface_kinds_from_manifest_record(&record, entry.name.as_str())?;
     let channel_directions = channel_directions_from_manifest_record(&record, entry.name.as_str())?;
     let channel_presentation = channel_presentation_from_manifest_record(&record);
@@ -1045,17 +1133,11 @@ where
         )?,
         manifest_toml: record.raw_toml().to_string(),
         resolved_manifest: Arc::new(record.resolved().clone()),
-        // Everything discovered on the filesystem is `InstalledLocal`, per
-        // the `ManifestSource` contract ("Locally installed extension under
-        // `/system/extensions/`"). `HostBundled` — the only tier eligible
-        // for first-party/system trust — is reserved for extensions
-        // compiled into the host binary (`from_first_party_assets`), whose
-        // reserved ids the scan skips above. Uploaded tool bundles
-        // materialize under this root, so stamping discovery `HostBundled`
-        // would let a process restart launder an untrusted upload into
-        // first-party trust (#5459 review: import → restart → install).
-        // `stamp` is `InstalledLocal` on every production path; only the
-        // test-support fixture constructor passes `HostBundled`.
+        // Production discovery defaults to `InstalledLocal`, but a durable
+        // installation manifest may preserve the narrower
+        // `RegistryInstalled` source. `HostBundled` remains reserved for
+        // compiled inventory whose ids are skipped above. This prevents both
+        // upload -> restart trust laundering and registry provenance loss.
         source: stamp,
         package,
         cleanup_requirements: Vec::new(),
@@ -1142,9 +1224,11 @@ mod tests {
         FilesystemOperation, InMemoryBackend,
     };
     use ironclaw_host_api::{
-        EffectKind, HostPortCatalog, OriginGatePolicy, PermissionMode,
-        RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource,
-        UNGATED_LOOP_RUN_CAPABILITIES,
+        capability::{
+            EffectKind, OriginGatePolicy, PermissionMode, RuntimeCredentialAccountSetup,
+            RuntimeCredentialRequirementSource, UNGATED_LOOP_RUN_CAPABILITIES,
+        },
+        host_port::HostPortCatalog,
     };
 
     use super::*;
@@ -1710,7 +1794,7 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
         assert_eq!(template.runtime_credentials.len(), 1);
         assert_eq!(
             template.runtime_credentials[0].handle,
-            ironclaw_host_api::SecretHandle::new("llm_nearai_api_key").unwrap()
+            ironclaw_host_api::ids::SecretHandle::new("llm_nearai_api_key").unwrap()
         );
     }
 
@@ -2046,6 +2130,11 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
             Some(40_000),
             "slack declares max_message_chars = 40000"
         );
+        assert_eq!(
+            presentation.command_prefix.as_deref(),
+            Some("/ironclaw "),
+            "slack declares a command_prefix so channel help renders /ironclaw-namespaced"
+        );
         let directions = summary
             .channel_directions
             .expect("unified slack summary carries channel directions");
@@ -2062,13 +2151,13 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
                 .as_ref()
                 .expect("slack channel descriptor")
                 .commands,
-            ["status"],
-            "shipping Slack exposes only the exact status command"
+            ["model", "status"],
+            "shipping Slack exposes exactly the model and status commands"
         );
     }
 
     #[test]
-    fn bundled_telegram_package_declares_status_only() {
+    fn bundled_telegram_package_declares_model_and_status_commands() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram").unwrap();
@@ -2081,8 +2170,19 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
                 .as_ref()
                 .expect("telegram channel descriptor")
                 .commands,
-            ["status"],
-            "shipping Telegram exposes only the exact status command"
+            ["model", "status"],
+            "shipping Telegram exposes exactly the model and status commands"
+        );
+        assert_eq!(
+            package
+                .resolved_manifest
+                .channel
+                .as_ref()
+                .expect("telegram channel descriptor")
+                .presentation
+                .command_prefix,
+            None,
+            "telegram stays prefix-free; its channel help renders bare /model, /status"
         );
     }
 
@@ -2342,6 +2442,68 @@ handle = "web_token"
                 .map(|asset| asset.path.as_str())
                 .collect::<Vec<_>>(),
             vec!["manifest.toml", "wasm/fixture.wasm"]
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_catalog_preserves_persisted_registry_source() {
+        let fs = InMemoryBackend::default();
+        let extension = test_extension_package();
+        for asset in &extension.assets {
+            let path = extension_asset_path(&extension.package.id, &asset.path).unwrap();
+            let AvailableExtensionAssetContent::Bytes(bytes) = &asset.content;
+            fs.write_file(&path, bytes).await.unwrap();
+        }
+        let manifest_sources = BTreeMap::from([(
+            ExtensionId::new("fixture").expect("fixture id"),
+            ManifestSource::RegistryInstalled,
+        )]);
+
+        let catalog = AvailableExtensionCatalog::from_filesystem_root_with_manifest_sources(
+            &fs,
+            &VirtualPath::new("/system/extensions").unwrap(),
+            &[],
+            &manifest_sources,
+        )
+        .await
+        .unwrap();
+        let package = catalog
+            .search("fixture")
+            .next()
+            .expect("registry package reloads");
+
+        assert_eq!(package.source, ManifestSource::RegistryInstalled);
+        assert_eq!(package.summary().source, LifecycleExtensionSource::Registry);
+    }
+
+    #[tokio::test]
+    async fn filesystem_catalog_skips_persisted_host_bundled_source_per_entry() {
+        let fs = InMemoryBackend::default();
+        write_valid_filesystem_extension(&fs, "forged-bundled").await;
+        write_valid_filesystem_extension(&fs, "valid-installed").await;
+        let manifest_sources = BTreeMap::from([(
+            ExtensionId::new("forged-bundled").expect("fixture id"),
+            ManifestSource::HostBundled,
+        )]);
+
+        let catalog = AvailableExtensionCatalog::from_filesystem_root_with_manifest_sources(
+            &fs,
+            &VirtualPath::new("/system/extensions").unwrap(),
+            &[],
+            &manifest_sources,
+        )
+        .await
+        .expect("one rejected entry must not abort the catalog");
+
+        assert_eq!(
+            catalog.search("forged-bundled").count(),
+            0,
+            "persisted host-bundled provenance must remain fail-closed"
+        );
+        assert_eq!(
+            catalog.search("valid-installed").count(),
+            1,
+            "unrelated valid extensions must remain available"
         );
     }
 
@@ -2613,6 +2775,7 @@ output_schema_ref = "schemas/write.output.json"
             &capability_provider_contracts(),
         )
         .expect("manifest");
+        let fixture_root = VirtualPath::new("/system/extensions/fixture").unwrap();
         let resolved_manifest = Arc::new(
             ExtensionManifestRecord::from_toml(
                 MANIFEST,
@@ -2620,16 +2783,13 @@ output_schema_ref = "schemas/write.output.json"
                 &HostPortCatalog::empty(),
                 None,
                 &capability_provider_contracts(),
+                Some(fixture_root.clone()),
             )
             .expect("resolved manifest")
             .resolved()
             .clone(),
         );
-        let package = ExtensionPackage::from_manifest(
-            manifest,
-            VirtualPath::new("/system/extensions/fixture").unwrap(),
-        )
-        .expect("package");
+        let package = ExtensionPackage::from_manifest(manifest, fixture_root).expect("package");
         AvailableExtensionPackage {
             package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
                 .unwrap(),

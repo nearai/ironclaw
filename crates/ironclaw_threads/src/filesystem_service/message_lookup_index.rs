@@ -1,9 +1,15 @@
 use ironclaw_filesystem::{CasExpectation, ContentType, Entry, RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{ScopedPath, ThreadId};
+use ironclaw_host_api::{
+    ids::{InvocationId, ThreadId},
+    path::ScopedPath,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{MessageKind, SessionThreadError, ThreadMessageId, ThreadMessageRecord, ThreadScope};
+use crate::{
+    CapabilityDisplayPreviewEnvelope, MessageKind, SessionThreadError, ThreadMessageId,
+    ThreadMessageRecord, ThreadScope,
+};
 
 use super::{
     PutError, deserialize, put_with_cas, scoped_path, serialize_pretty, thread_root_string,
@@ -61,7 +67,118 @@ where
             )
             .await?;
         }
+        if message.kind == MessageKind::User {
+            self.write_if_absent(
+                scope,
+                &first_user_index_path(scope, thread_id)?,
+                thread_id,
+                message.message_id,
+            )
+            .await?;
+        }
+        if message.kind == MessageKind::CapabilityDisplayPreview
+            && let (Some(turn_run_id), Some(invocation_id)) = (
+                message.turn_run_id.as_deref(),
+                CapabilityDisplayPreviewEnvelope::invocation_id_from_json(
+                    message.content.as_deref(),
+                )
+                .map_err(SessionThreadError::Serialization)?,
+            )
+        {
+            self.write(
+                scope,
+                &capability_preview_index_path(scope, thread_id, turn_run_id, invocation_id)?,
+                thread_id,
+                message.message_id,
+            )
+            .await?;
+        }
         Ok(())
+    }
+
+    pub(super) fn entries_for_message(
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message: &ThreadMessageRecord,
+    ) -> Result<Vec<(ScopedPath, Entry, CasExpectation)>, SessionThreadError> {
+        let mut entries = Vec::new();
+        let mut push = |path: ScopedPath, expectation: CasExpectation| {
+            let record = MessageLookupIndexRecord {
+                thread_id: thread_id.clone(),
+                message_id: message.message_id,
+            };
+            let body = serialize_pretty(&record)?;
+            entries.push((
+                path,
+                Entry::bytes(body).with_content_type(ContentType::json()),
+                expectation,
+            ));
+            Ok::<(), SessionThreadError>(())
+        };
+        if message.kind == MessageKind::Assistant
+            && let Some(turn_run_id) = message.turn_run_id.as_deref()
+        {
+            push(
+                assistant_run_index_path(scope, thread_id, turn_run_id)?,
+                CasExpectation::Any,
+            )?;
+        }
+        if message.kind == MessageKind::ToolResultReference
+            && let (Some(turn_run_id), Some(result_ref)) = (
+                message.turn_run_id.as_deref(),
+                message.tool_result_ref.as_deref(),
+            )
+        {
+            push(
+                tool_result_index_path(scope, thread_id, turn_run_id, result_ref)?,
+                CasExpectation::Any,
+            )?;
+        }
+        if message.kind == MessageKind::User {
+            push(
+                first_user_index_path(scope, thread_id)?,
+                CasExpectation::Absent,
+            )?;
+        }
+        if message.kind == MessageKind::CapabilityDisplayPreview
+            && let (Some(turn_run_id), Some(invocation_id)) = (
+                message.turn_run_id.as_deref(),
+                CapabilityDisplayPreviewEnvelope::invocation_id_from_json(
+                    message.content.as_deref(),
+                )
+                .map_err(SessionThreadError::Serialization)?,
+            )
+        {
+            push(
+                capability_preview_index_path(scope, thread_id, turn_run_id, invocation_id)?,
+                CasExpectation::Any,
+            )?;
+        }
+        Ok(entries)
+    }
+
+    pub(super) async fn read_first_user(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<Option<ThreadMessageId>, SessionThreadError> {
+        self.read(scope, thread_id, &first_user_index_path(scope, thread_id)?)
+            .await
+    }
+
+    pub(super) async fn read_capability_preview(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        turn_run_id: &str,
+        invocation_id: InvocationId,
+    ) -> Result<Option<ThreadMessageId>, SessionThreadError> {
+        self.read(
+            scope,
+            thread_id,
+            &capability_preview_index_path(scope, thread_id, turn_run_id, invocation_id)?,
+        )
+        .await
     }
 
     pub(super) async fn read_assistant_run(
@@ -134,6 +251,67 @@ where
             PutError::Other(error) => error,
         })
     }
+
+    async fn write_if_absent(
+        &self,
+        scope: &ThreadScope,
+        path: &ScopedPath,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<(), SessionThreadError> {
+        let record = MessageLookupIndexRecord {
+            thread_id: thread_id.clone(),
+            message_id,
+        };
+        let body = serialize_pretty(&record)?;
+        let entry = Entry::bytes(body).with_content_type(ContentType::json());
+        match put_with_cas(
+            self.filesystem,
+            &scope.to_resource_scope(),
+            path,
+            entry,
+            CasExpectation::Absent,
+        )
+        .await
+        {
+            Ok(()) | Err(PutError::VersionMismatch) => Ok(()),
+            Err(PutError::Other(error)) => Err(error),
+        }
+    }
+}
+
+fn first_user_index_path(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&format!(
+        "{}/indexes/first-user.json",
+        thread_root_string(scope, thread_id)
+    ))
+}
+
+fn capability_preview_index_path(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+    turn_run_id: &str,
+    invocation_id: InvocationId,
+) -> Result<ScopedPath, SessionThreadError> {
+    #[derive(Serialize)]
+    struct CapabilityPreviewIndexKey<'a> {
+        turn_run_id: &'a str,
+        invocation_id: InvocationId,
+    }
+    let key = lookup_index_key(
+        "capability-preview",
+        &CapabilityPreviewIndexKey {
+            turn_run_id,
+            invocation_id,
+        },
+    )?;
+    scoped_path(&format!(
+        "{}/indexes/capability-previews/{key}.json",
+        thread_root_string(scope, thread_id)
+    ))
 }
 
 fn assistant_run_index_path(

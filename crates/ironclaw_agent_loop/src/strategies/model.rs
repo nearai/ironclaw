@@ -22,9 +22,8 @@ fn _assert_object_safe(_: &dyn ModelStrategy) {}
 /// Reference baseline `ModelStrategy`: track the executor-managed fallback
 /// index in `state.model_state.fallback_index`.
 ///
-/// In the skeleton the executor never advances `fallback_index`, so this
-/// always returns `Primary`. The `Fallback` arm is wired through for a future
-/// model-route-chain implementation.
+/// The executor advances `fallback_index` only after an explicit recovery
+/// alteration, and the host returns authoritative route evidence on success.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultModelStrategy;
 
@@ -40,8 +39,7 @@ impl ModelStrategy for DefaultModelStrategy {
 
 /// Strategy hint to the host about which already-resolved route to use.
 ///
-/// In the skeleton, `Primary` is the only value strategies produce. `Fallback`
-/// is reserved for the deferred `ModelRouteChain` follow-up.
+/// `Fallback` selects a pre-resolved entry from the host's ordered chain.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ModelPreference {
@@ -58,7 +56,7 @@ pub(crate) enum ModelPreference {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{TenantId, ThreadId};
+    use ironclaw_host_api::ids::{TenantId, ThreadId};
     use ironclaw_turns::{
         AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
         run_profile::{

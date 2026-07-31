@@ -4,7 +4,7 @@
 //!
 //! This test lives in its own integration-test binary so cargo executes it
 //! sequentially with respect to lib unit tests.  The lib unit tests include
-//! `local_dev_runtime_*` tests with hard 3-second `RunTimeout` budgets; if
+//! `standalone_runtime_*` tests with hard 3-second `RunTimeout` budgets; if
 //! this production-runtime build runs in the same binary it starves those
 //! tests on parallel CPU-heavy builds.
 //!
@@ -15,9 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_host_api::ProductSurfaceCaller;
+use ironclaw_host_api::product_surface::ProductSurfaceCaller;
 use ironclaw_host_api::{
-    AgentId, TenantId, UserId,
+    ids::{AgentId, TenantId, UserId},
     runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -31,7 +31,7 @@ use ironclaw_product::{
     AUTOMATIONS_VIEW, ProductListAutomationsRequest, RebornListAutomationsResponse,
 };
 use ironclaw_reborn_composition::{
-    RebornCompositionProfile, RebornHostBindings, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornRuntimeProcessBinding, build_reborn_runtime,
 };
 
@@ -76,14 +76,15 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
     );
 
     let input = RebornRuntimeInput::from_build_input(
-        RebornHostBindings::libsql(
+        ironclaw_reborn_composition::test_support::libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "runtime-automation-prod-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
+        .expect("libSQL bindings")
         .with_first_party_bundles(first_party_support::test_first_party_bundles())
         .with_runtime_policy(EffectiveRuntimePolicy {
             deployment: DeploymentMode::HostedMultiTenant,
@@ -124,10 +125,10 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
     // An empty list is fine — the key invariant is that the service is wired
     // (no 503) so the request reaches the repository rather than returning
     // ServiceUnavailable.
-    let result = ironclaw_host_api::ProductSurface::query(
+    let result = ironclaw_host_api::product_surface::ProductSurface::query(
         bundle.as_ref(),
         caller,
-        ironclaw_host_api::ProductSurfaceQueryRequest {
+        ironclaw_host_api::product_surface::ProductSurfaceQueryRequest {
             view_id: AUTOMATIONS_VIEW.id.to_string(),
             input: serde_json::to_value(ProductListAutomationsRequest::default())
                 .expect("automation list params"),

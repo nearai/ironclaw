@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use ironclaw::testing::fault_injection::*;
+//! use ironclaw_llm::testing::fault_injection::*;
 //!
 //! // Fail twice with transient errors, then succeed
 //! let injector = FaultInjector::sequence([

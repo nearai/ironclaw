@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation, RootFilesystem};
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 use ironclaw_memory_native::{
     ChunkConfig, DefaultPromptWriteSafetyPolicy, DocumentMetadata,
     InMemoryMemoryDocumentRepository, MemoryAppendOutcome, MemoryBackend,

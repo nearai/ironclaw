@@ -11,7 +11,10 @@ use crate::{
     RebornUserProfileUpdate, RebornUserRole, RebornUserStatus, SurfaceKind,
 };
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+use ironclaw_host_api::{
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+};
 
 fn store_on(root: Arc<InMemoryBackend>) -> RebornIdentityStore<InMemoryBackend> {
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(

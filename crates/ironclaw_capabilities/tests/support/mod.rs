@@ -16,7 +16,31 @@ use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode,
     ProcessBackendKind, RuntimeProfile, SecretMode,
 };
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    action::{Action, NetworkPolicy},
+    approval::{ApprovalRequest, InvocationFingerprint},
+    authorized::Authorized,
+    capability::{
+        CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
+        RuntimeCredentialAccountSetup,
+    },
+    decision::{Decision, Obligation, Obligations, RuntimeCredentialAuthRequirement},
+    dispatch::{CapabilityDispatchResult, CapabilityDispatcher, DispatchError},
+    host_port::HostPortCatalog,
+    ids::{
+        ApprovalRequestId, CapabilityGrantId, CapabilityId, ExtensionId, InvocationId, ProductKind,
+        ResourceReservationId, SecretHandle, UserId, VendorId,
+    },
+    invocation::InvocationOrigin,
+    mount::MountView,
+    path::VirtualPath,
+    resource::{
+        ReservationStatus, ResourceEstimate, ResourceReceipt, ResourceScope, ResourceUsage,
+    },
+    runtime::{RuntimeKind, TrustClass},
+    runtime_policy::EffectiveRuntimePolicy,
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_trust::{
     AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustError, TrustPolicy,
     TrustPolicyInput, TrustProvenance,
@@ -43,8 +67,8 @@ static DEFAULT_TRUST_POLICY: LazyLock<StaticTrustPolicy> = LazyLock::new(|| Stat
 static DEFAULT_RUNTIME_POLICY: LazyLock<EffectiveRuntimePolicy> =
     LazyLock::new(|| EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend: ProcessBackendKind::LocalHost,
         network_mode: NetworkMode::DirectLogged,

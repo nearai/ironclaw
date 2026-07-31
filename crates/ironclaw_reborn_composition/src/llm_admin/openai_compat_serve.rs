@@ -1,4 +1,4 @@
-// arch-exempt: large_file, §4.4.1 mechanical inline of the redundant LocalDevRootFilesystem alias -> CompositeRootFilesystem (de-prefix, no logic change), plan #6168
+// arch-exempt: large_file, §4.4.1 mechanical inline of the redundant local-root filesystem alias -> CompositeRootFilesystem (no logic change), plan #6168
 //! Reborn host composition for OpenAI-compatible API routes.
 //!
 //! The route crate owns DTOs and HTTP handlers, but the Reborn host owns the
@@ -13,8 +13,12 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    AgentId, BoundProductSurface, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
-    ProductSurfaceStreamRequest, ProjectId, TenantId, ThreadId, VirtualPath,
+    ids::{AgentId, ProjectId, TenantId, ThreadId},
+    path::VirtualPath,
+    product_surface::{
+        BoundProductSurface, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
+        ProductSurfaceStreamRequest,
+    },
 };
 use ironclaw_product::{
     LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, RebornTimelineRequest,

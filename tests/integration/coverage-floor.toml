@@ -55,16 +55,44 @@
 
 [global]
 enforce = true
-# Recaptured locally from the current main-line Reborn integration inventory:
-# aggregate 304733 / 377084 = 80.81%. The previous baseline was captured before
-# the current main-line coverage inventory expanded; this records that legitimate
-# denominator shift without changing any crate-specific floor (none are enabled).
-floor_percent = 80.81
+# Recaptured from PR #6886's successful merged CI artifact at df5081ad4 after
+# the generated lifecycle, restart, and double-submit coverage additions:
+# aggregate 315436 / 368757 = 85.54%.
+floor_percent = 85.54
 tolerance_percent = 0.5
-captured_total_lines = 377084
-captured_date = "2026-07-25"
-captured_from = "3af839354"
+captured_total_lines = 368757
+captured_date = "2026-07-30"
+captured_from = "df5081ad4539e14da07a3b041735c35e6a795ac8"
 
-# No [[crate]] entries at initial landing — opt-in, added as owners choose to
-# ratchet a crate they care about (e.g. ironclaw_reborn_composition,
-# ironclaw_product) as a fast-follow, not blocking this landing.
+[[crate]]
+name = "ironclaw_runner"
+floor_percent = 86.87
+floor_covered_lines = 14669
+tolerance_percent = 0.5
+tolerance_lines = 20
+captured_total_lines = 16887
+captured_date = "2026-07-30"
+rationale = "Protects generated lifecycle, restart, and double-submit runner orchestration after the process-journal migration."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+
+[[crate]]
+name = "ironclaw_processes"
+floor_percent = 88.07
+floor_covered_lines = 5839
+tolerance_percent = 0.5
+tolerance_lines = 20
+captured_total_lines = 6630
+captured_date = "2026-07-30"
+rationale = "Protects generated per-transition ownership checks in the process journal state machine."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+
+[[crate]]
+name = "ironclaw_turns"
+floor_percent = 86.21
+floor_covered_lines = 9453
+tolerance_percent = 0.5
+tolerance_lines = 20
+captured_total_lines = 10965
+captured_date = "2026-07-30"
+rationale = "Protects generated restart, same-thread admission, retry, and process-projection behavior."
+issue = "https://github.com/nearai/ironclaw/issues/6524"

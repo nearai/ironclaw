@@ -1,11 +1,15 @@
 use ironclaw_host_api::{
-    CapabilityId, RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
-    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeKind, SecretHandle,
+    http::{
+        RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+        RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+    },
+    ids::{CapabilityId, SecretHandle},
+    runtime::RuntimeKind,
 };
 use ironclaw_network::is_rfc3986_unreserved_segment;
 use ironclaw_safety::redaction_values_for_secret;
 use ironclaw_secrets::{SecretMaterial, SecretStoreError, SecretStorePort};
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, zeroize::Zeroize};
 use std::sync::LazyLock;
 
 use crate::obligations::RuntimeSecretInjectionStore;
@@ -122,6 +126,16 @@ where
     let mut credential_materials = Vec::new();
     let mut parsed_url = None;
     let credential_injections = std::mem::take(&mut request.credential_injections);
+    let post_injection_body_limit = credential_injections
+        .iter()
+        .filter_map(|injection| match &injection.target {
+            RuntimeCredentialTarget::BodyJsonPointer {
+                post_injection_body_limit_bytes,
+                ..
+            } => *post_injection_body_limit_bytes,
+            _ => None,
+        })
+        .min();
     for injection in &credential_injections {
         let value = match credential_value_for_injection(
             &mut credential_materials,
@@ -160,6 +174,17 @@ where
     }
     if let Some(url) = parsed_url {
         request.url = url.to_string();
+    }
+    if post_injection_body_limit.is_some_and(|limit| request.body.len() as u64 > limit) {
+        let request_bytes = request.body.len() as u64;
+        restore_staged_secrets(secret_injections, request, &mut credential_materials);
+        request.credential_injections = credential_injections;
+        request.body.zeroize();
+        return Err(RuntimeHttpEgressError::Request {
+            reason: "post-injection request body exceeds its approved limit".to_string(),
+            request_bytes,
+            response_bytes: 0,
+        });
     }
     Ok(redaction_values)
 }
@@ -462,7 +487,7 @@ fn apply_credential_injection(
                 }
             }
         }
-        RuntimeCredentialTarget::BodyJsonPointer { pointer } => {
+        RuntimeCredentialTarget::BodyJsonPointer { pointer, .. } => {
             let mut parsed: serde_json::Value =
                 serde_json::from_slice(&request.body).map_err(|_| {
                     RuntimeHttpEgressError::Credential {
@@ -573,8 +598,11 @@ mod tests {
     use super::*;
     use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
     use ironclaw_host_api::{
-        InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind, TenantId,
-        Timestamp, UserId,
+        Timestamp,
+        action::{NetworkMethod, NetworkPolicy},
+        ids::{InvocationId, TenantId, UserId},
+        resource::ResourceScope,
+        runtime::RuntimeKind,
     };
     use ironclaw_secrets::{
         SecretLease, SecretLeaseId, SecretMetadata, SecretStore, SecretStoreError,
@@ -907,9 +935,11 @@ mod tests {
 mod path_placeholder_tests {
     use super::*;
     use ironclaw_host_api::{
-        CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, ResourceScope,
-        RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeHttpEgressRequest, RuntimeKind,
-        TenantId, UserId,
+        action::{NetworkMethod, NetworkPolicy},
+        http::{RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeHttpEgressRequest},
+        ids::{CapabilityId, InvocationId, TenantId, UserId},
+        resource::ResourceScope,
+        runtime::RuntimeKind,
     };
     use ironclaw_secrets::SecretStore;
 
@@ -1002,6 +1032,7 @@ mod path_placeholder_tests {
                 source: RuntimeCredentialSource::SecretStoreLease,
                 target: RuntimeCredentialTarget::BodyJsonPointer {
                     pointer: pointer.to_string(),
+                    post_injection_body_limit_bytes: None,
                 },
                 required: true,
             });

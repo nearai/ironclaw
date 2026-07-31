@@ -36,7 +36,7 @@ impl HostUserProfileSource for EmptyUserProfileSource {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{TenantId, ThreadId};
+    use ironclaw_host_api::ids::{TenantId, ThreadId};
     use ironclaw_turns::{
         RunProfileResolver, TurnId, TurnRunId, TurnScope,
         run_profile::{InMemoryRunProfileResolver, RunProfileResolutionRequest},

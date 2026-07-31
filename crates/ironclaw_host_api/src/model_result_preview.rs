@@ -1,7 +1,7 @@
 //! The model-visible tool-result CONTENT preview — the correct vehicle for the
 //! #5838 first-look inline preview across the capability-result collapse.
 //!
-//! [`crate::SafeSummary`] is a *caption* type: short (512 bytes), single-line,
+//! [`crate::safe_summary::SafeSummary`] is a *caption* type: short (512 bytes), single-line,
 //! delimiter-free. It was never the right home for tool-result CONTENT — routing
 //! a first-look preview through it drops every legitimate result that contains a
 //! `{`/`[`/`/` (all structured/JSON output) or the ordinary word "Secretary"
@@ -24,7 +24,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::HostApiError;
+use crate::error::HostApiError;
 
 /// Maximum size of a model-visible result preview, in bytes. Mirrors
 /// `ironclaw_threads::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES` (24 KiB) — the

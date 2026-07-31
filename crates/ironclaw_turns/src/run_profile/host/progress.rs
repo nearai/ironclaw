@@ -3,14 +3,14 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use serde::{Deserialize, Serialize};
 
 use crate::CapabilityActivityId;
 use crate::run_profile::compaction::{CompactionInitiator, LoopCompactionPort};
 use crate::run_profile::system_inference::SystemInferenceTaskId;
 
-use ironclaw_host_api::FailureKind;
+use ironclaw_host_api::result_meta::FailureKind;
 
 use super::capability::LoopCapabilityPort;
 use super::checkpoint::{LoopCheckpointKind, LoopCheckpointPort};
@@ -99,6 +99,8 @@ pub enum LoopProgressEvent {
     CompactionLeakDetected {
         task_id: SystemInferenceTaskId,
         reason_kind: LoopSafeSummary,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        redacted_leak_count: u32,
     },
     GoalRefreshStarted {
         task_id: SystemInferenceTaskId,
@@ -180,6 +182,7 @@ pub enum LoopRecoveryClass {
     ModelContextOverflow,
     ModelContentFiltered,
     ModelInvalidOutput,
+    ModelOutputTruncated,
     ModelUnavailable,
     ModelInternal,
     ModelStaleRequest,
@@ -196,6 +199,7 @@ impl LoopRecoveryClass {
             Self::ModelContextOverflow => "model_context_overflow",
             Self::ModelContentFiltered => "model_content_filtered",
             Self::ModelInvalidOutput => "model_invalid_output",
+            Self::ModelOutputTruncated => "model_output_truncated",
             Self::ModelUnavailable => "model_unavailable",
             Self::ModelInternal => "model_internal",
             Self::ModelStaleRequest => "model_stale_request",
@@ -225,6 +229,10 @@ impl LoopRecoveryDisposition {
             Self::ModelVisible => "model_visible",
         }
     }
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

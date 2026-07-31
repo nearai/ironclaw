@@ -13,8 +13,12 @@ use ironclaw_filesystem::{
     ScopedFilesystem, VersionedEntry, cas_update,
 };
 use ironclaw_host_api::{
-    ExtensionId, HostPortCatalog, MountAlias, MountGrant, MountPermissions, MountView,
-    ResourceScope, ScopedPath, SecretHandle, UserId, VirtualPath, sha256_digest_token,
+    approval::sha256_digest_token,
+    host_port::HostPortCatalog,
+    ids::{ExtensionId, SecretHandle, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, ScopedPath, VirtualPath},
+    resource::ResourceScope,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -177,12 +181,20 @@ impl ExtensionManifestRecord {
     /// The single manifest parse entry point: dispatches on the declared
     /// `schema_version` (v2 or v3) and normalizes both into the same
     /// resolved model.
+    /// `root` is the extension's package root, when the caller already knows
+    /// it (e.g. materializing a filesystem/import package at a stable path).
+    /// It is an explicit required parameter — not a `with_root()` builder —
+    /// so every call site is forced to decide `Some(root)` or `None` rather
+    /// than silently inheriting a default a site forgot to set. `None`
+    /// callers accept the loader's historical `/system/extensions/{id}`
+    /// fabrication (`CompositionExtensionLoader::load`).
     pub fn from_toml(
         raw_toml: impl Into<String>,
         source: ManifestSource,
         host_port_catalog: &HostPortCatalog,
         manifest_hash: Option<ManifestHash>,
         contracts: &HostApiContractRegistry,
+        root: Option<VirtualPath>,
     ) -> Result<Self, ExtensionInstallationError> {
         let raw_toml = raw_toml.into();
         let probe: SchemaVersionProbe = toml::from_str(&raw_toml).map_err(|error| {
@@ -190,19 +202,20 @@ impl ExtensionManifestRecord {
                 reason: format!("failed to parse extension manifest: {error}"),
             }
         })?;
-        let (manifest, resolved) = if probe.schema_version == crate::v3::MANIFEST_SCHEMA_VERSION_V3
-        {
-            crate::v3::parse_v3(&raw_toml, source, host_port_catalog).map_err(|error| {
-                ExtensionInstallationError::InvalidManifest {
-                    reason: error.to_string(),
-                }
-            })?
-        } else {
-            let manifest =
-                ExtensionManifestV2::parse(&raw_toml, source, host_port_catalog, contracts)?;
-            let resolved = ResolvedExtensionManifest::from_v2(&manifest);
-            (manifest, resolved)
-        };
+        let (manifest, mut resolved) =
+            if probe.schema_version == crate::v3::MANIFEST_SCHEMA_VERSION_V3 {
+                crate::v3::parse_v3(&raw_toml, source, host_port_catalog).map_err(|error| {
+                    ExtensionInstallationError::InvalidManifest {
+                        reason: error.to_string(),
+                    }
+                })?
+            } else {
+                let manifest =
+                    ExtensionManifestV2::parse(&raw_toml, source, host_port_catalog, contracts)?;
+                let resolved = ResolvedExtensionManifest::from_v2(&manifest);
+                (manifest, resolved)
+            };
+        resolved.root = root;
         Ok(Self {
             raw_toml,
             manifest,
@@ -1151,6 +1164,8 @@ impl ExtensionInstallationStore {
                     &self.host_ports,
                     wire.manifest_hash,
                     &self.contracts,
+                    // Legacy pre-REC-1 row: no root was ever persisted for it.
+                    None,
                 )?
                 .with_removal_cleanup_requirements(wire.removal_cleanup_requirements);
                 match self
@@ -3507,7 +3522,7 @@ fn map_extension_state_cas_error(
 #[cfg(test)]
 mod tests {
     use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{ExtensionId, HostPortCatalog, VirtualPath};
+    use ironclaw_host_api::{host_port::HostPortCatalog, ids::ExtensionId, path::VirtualPath};
 
     use super::*;
     use crate::ManifestSource;
@@ -3674,6 +3689,7 @@ mod tests {
             &HostPortCatalog::empty(),
             hash.map(|value| ManifestHash::new(value).expect("hash")),
             &capability_provider_contracts(),
+            None,
         )
         .expect("manifest record")
     }
@@ -3714,7 +3730,7 @@ mod tests {
             serde_json::from_value(json).expect("legacy row without owner deserializes");
         assert_eq!(legacy.owner(), &InstallationOwner::Tenant);
 
-        let alice = ironclaw_host_api::UserId::new("alice").expect("user id");
+        let alice = ironclaw_host_api::ids::UserId::new("alice").expect("user id");
         let private = ExtensionInstallation::new(
             ExtensionInstallationId::new("fixture".to_string()).expect("installation id"),
             ExtensionId::new("fixture".to_string()).expect("extension id"),
@@ -3744,8 +3760,8 @@ mod tests {
     /// at construction (a row nobody could see, operate, or remove).
     #[test]
     fn slot_iteration_user_owner_rows_load_as_singleton_member_set() {
-        let alice = ironclaw_host_api::UserId::new("alice").expect("user id");
-        let bob = ironclaw_host_api::UserId::new("bob").expect("user id");
+        let alice = ironclaw_host_api::ids::UserId::new("alice").expect("user id");
+        let bob = ironclaw_host_api::ids::UserId::new("bob").expect("user id");
         let legacy: InstallationOwner =
             serde_json::from_str(r#"{"kind":"user","user_id":"alice"}"#)
                 .expect("slot-iteration owner row loads");
@@ -3765,8 +3781,8 @@ mod tests {
 
     #[test]
     fn caller_membership_join_and_leave_are_idempotent_domain_transitions() {
-        let alice = ironclaw_host_api::UserId::new("alice").expect("user id");
-        let bob = ironclaw_host_api::UserId::new("bob").expect("user id");
+        let alice = ironclaw_host_api::ids::UserId::new("alice").expect("user id");
+        let bob = ironclaw_host_api::ids::UserId::new("bob").expect("user id");
 
         assert_eq!(
             InstallationOwner::Tenant

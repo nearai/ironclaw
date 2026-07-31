@@ -2,7 +2,7 @@
 //! branch. The old in-memory branch is gone from normal builds, so this test now
 //! always compiles with the production-shaped durable service.
 
-//! Regression (issue #5378): the local-dev / hosted-single-tenant product-auth
+//! Regression (issue #5378): the standalone / hosted-single-tenant product-auth
 //! composition must wrap the credential-account service in
 //! `ProviderBackedCredentialAccountService` so the runtime token-refresh path is
 //! provider-backed.
@@ -30,20 +30,23 @@ use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId,
     CredentialRefreshRequest,
 };
-use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
+use ironclaw_host_api::{
+    ids::{InvocationId, UserId},
+    resource::ResourceScope,
+};
 use ironclaw_reborn_composition::{RebornRuntimeInput, build_reborn_runtime};
 
 #[tokio::test]
-async fn local_dev_product_auth_refresh_is_provider_backed_not_stub() {
+async fn standalone_product_auth_refresh_is_provider_backed_not_stub() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = build_reborn_runtime(RebornRuntimeInput::from_build_input(
-        ironclaw_reborn_composition::local_dev_build_input(
+        ironclaw_reborn_composition::local_filesystem_build_input(
             "refresh-composition-owner",
             dir.path().to_path_buf(),
         ),
     ))
     .await
-    .expect("local-dev runtime should build");
+    .expect("standalone runtime should build");
 
     let product_auth = runtime.product_auth_for_test();
     let account_service = product_auth.credential_account_service();
@@ -73,7 +76,7 @@ async fn local_dev_product_auth_refresh_is_provider_backed_not_stub() {
     assert!(
         matches!(error, AuthProductError::CredentialMissing),
         "expected CredentialMissing (the provider-backed wrapper performs an \
-         account lookup first), but got {error:?}. local-dev product-auth refresh \
+         account lookup first), but got {error:?}. standalone product-auth refresh \
          fell back to the raw FilesystemAuthProductServices stub — the credential \
          account service was not wrapped in ProviderBackedCredentialAccountService. \
          Regression: issue #5378."

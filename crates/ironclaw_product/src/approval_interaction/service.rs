@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_approvals::ApprovalStatus;
 use ironclaw_approvals::{
     DenyApproval, LeaseApproval, PersistentApprovalAction, PersistentApprovalPolicyInput,
     PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort, ToolPermissionOverrideKey,
     ToolPermissionOverrideStorePort,
 };
-use ironclaw_host_api::{Action, CapabilityId, Principal, ResourceScope};
-use ironclaw_run_state::ApprovalStatus;
+use ironclaw_host_api::{
+    action::Action, ids::CapabilityId, resource::ResourceScope, scope::Principal,
+};
 use ironclaw_turns::{
     GateRef, GateResumeDisposition, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator,
     TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
@@ -286,7 +288,7 @@ impl DefaultApprovalInteractionService {
             capability_id,
             grantee,
             approved_by: Principal::User(request.actor.user_id.clone()),
-            constraints: ironclaw_host_api::GrantConstraints {
+            constraints: ironclaw_host_api::capability::GrantConstraints {
                 max_invocations: None,
                 ..terms.constraints
             },

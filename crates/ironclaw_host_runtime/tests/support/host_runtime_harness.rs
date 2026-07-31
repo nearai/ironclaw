@@ -13,6 +13,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::LeaseApproval;
+use ironclaw_approvals::{ApprovalRecord, ApprovalRequestStorePort, ApprovalStoreError};
 use ironclaw_authorization::{
     CapabilityLeaseStore, GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer,
     in_memory_backed_capability_lease_store,
@@ -32,9 +33,41 @@ use ironclaw_filesystem::{
     DiskFilesystem, Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, RootFilesystem,
     ScopedFilesystem,
 };
-use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
-use ironclaw_host_api::*;
+use ironclaw_host_api::result_meta::FailureKind;
+use ironclaw_host_api::{
+    Timestamp,
+    action::{Action, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    approval::ApprovalRequest,
+    audit::AuditEnvelope,
+    capability::{
+        CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
+    },
+    decision::{Decision, Obligation, Obligations},
+    host_port::HostPortCatalog,
+    http::{
+        RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse,
+    },
+    ids::{
+        AgentId, ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId,
+        InvocationId, MissionId, PackageId, ProcessId, ProjectId, ResourceReservationId, RunId,
+        SecretHandle, TenantId, ThreadId, UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{HostPath, MountAlias, VirtualPath},
+    resource::{
+        CapabilityHostResult, ResourceEstimate, ResourceReceipt, ResourceReservation,
+        ResourceScope, ResourceUsage,
+    },
+    runtime::{RuntimeKind, TrustClass},
+    runtime_policy::{
+        ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
+        NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
+    },
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CapabilitySurfaceVersion,
     CommandExecutionOutput, CommandExecutionRequest, DefaultHostRuntime, HostRuntime,
@@ -48,15 +81,13 @@ use ironclaw_network::{
 };
 use ironclaw_processes::{
     BackgroundFailureStage, BackgroundProcessManager, ProcessError, ProcessExecutionRequest,
-    ProcessExecutionResult, ProcessExecutor, ProcessResultStore, ProcessResultStorePort,
-    ProcessStart, ProcessStatus, ProcessStore, ProcessStorePort,
+    ProcessExecutionResult, ProcessExecutor, ProcessInvocationError, ProcessInvocationRecord,
+    ProcessInvocationStart, ProcessInvocationStatePort, ProcessInvocationStatus,
+    ProcessJournalStore, ProcessResultStore, ProcessResultStorePort, ProcessRuntimePort,
+    ProcessServices, ProcessStart, ProcessStatus,
 };
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
-};
-use ironclaw_run_state::{
-    ApprovalRecord, ApprovalRequestStorePort, RunRecord, RunStart, RunStateApprovalStorePort,
-    RunStateError, RunStateStorePort, RunStatus,
 };
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptExecutionRequest,
@@ -107,20 +138,16 @@ impl HostPolicyFacts for PermissiveHostPolicyFacts {
     }
 }
 
-/// Construct an [`Arc<ScopedFilesystem<LibSqlRootFilesystem>>`] that exposes
-/// the `/turns` mount alias over a libSQL-backed [`RootFilesystem`]. Mirrors
-/// the production composition shape: the `/turns` alias rewrites to a
-/// tenant/user-scoped target inside `/engine`, and the filesystem backend
-/// supplies durable storage. Used by tests that previously constructed
-/// `LibSqlTurnStateStore` directly.
-pub(crate) async fn libsql_scoped_turns_fs(
+/// Construct a libSQL-backed scoped filesystem exposing the canonical process
+/// journal mount used by production composition.
+pub(crate) async fn libsql_scoped_processes_fs(
     db: Arc<libsql::Database>,
 ) -> Arc<ScopedFilesystem<LibSqlRootFilesystem>> {
-    let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(db).expect("filesystem runtime"));
     filesystem.run_migrations().await.unwrap();
     let view = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/turns").unwrap(),
-        VirtualPath::new("/engine/tenants/tenant1/users/user1/turns").unwrap(),
+        MountAlias::new("/processes").unwrap(),
+        VirtualPath::new("/engine/processes").unwrap(),
         MountPermissions::read_write_list_delete(),
     )])
     .unwrap();
@@ -148,22 +175,21 @@ impl TurnRunWakeNotifier for RecordingTurnRunWakeNotifier {
     }
 }
 
-pub(crate) async fn assert_services_use_combined_store_for_atomic_approval_block<
+pub(crate) async fn assert_services_persist_approval_and_block_invocation<
     F: RootFilesystem + 'static,
     G: ResourceGovernor + 'static,
-    S: ProcessStorePort + 'static,
-    R: ProcessResultStorePort + 'static,
 >(
-    services: HostRuntimeServices<F, G, S, R>,
+    services: HostRuntimeServices<F, G>,
     message: &str,
 ) {
-    let combined_store = Arc::new(InMemoryRecordingCombinedRunStateApprovalStore::new());
+    let stores = Arc::new(RecordingInvocationApprovalStores::new());
     let services = services
         .with_trust_policy(Arc::new(local_manifest_trust_policy(
             "script",
             vec![EffectKind::DispatchCapability],
         )))
-        .with_run_state_approval_store(Arc::clone(&combined_store))
+        .with_invocation_state(Arc::clone(&stores))
+        .with_approval_requests(Arc::clone(&stores))
         .with_script_runtime(Arc::new(ScriptRuntime::new(
             ScriptRuntimeConfig::for_testing(),
             EchoScriptBackend,
@@ -183,24 +209,23 @@ pub(crate) async fn assert_services_use_combined_store_for_atomic_approval_block
 
     match outcome {
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
-            assert_eq!(combined_store.combined_calls(), 1);
-            assert_eq!(combined_store.separate_save_calls(), 0);
-            let run_record = RunStateStorePort::get(
-                combined_store.as_ref(),
+            assert_eq!(stores.save_calls(), 1);
+            let run_record = ProcessInvocationStatePort::get(
+                stores.as_ref(),
                 &context.resource_scope,
                 context.invocation_id,
             )
             .await
             .unwrap()
             .expect("run record persisted");
-            assert_eq!(run_record.status, RunStatus::BlockedApproval);
+            assert_eq!(run_record.status, ProcessInvocationStatus::BlockedApproval);
             assert_eq!(
                 run_record.approval_request_id,
                 Some(gate.approval_request_id)
             );
             assert!(
                 ApprovalRequestStorePort::get(
-                    combined_store.as_ref(),
+                    stores.as_ref(),
                     &context.resource_scope,
                     gate.approval_request_id,
                 )
@@ -233,43 +258,37 @@ pub(crate) fn assert_completed_outcome(
     }
 }
 
-pub(crate) type InMemoryHostRuntimeServices = HostRuntimeServices<
-    DiskFilesystem,
-    InMemoryResourceGovernor,
-    ProcessStore<InMemoryBackend>,
-    ProcessResultStore<InMemoryBackend>,
->;
+pub(crate) type InMemoryHostRuntimeServices =
+    HostRuntimeServices<DiskFilesystem, InMemoryResourceGovernor>;
 
-pub(crate) struct InMemoryRecordingCombinedRunStateApprovalStore {
-    pub(crate) runs: ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>,
+pub(crate) struct RecordingInvocationApprovalStores {
+    pub(crate) runs:
+        ironclaw_processes::ProcessInvocationStateStore<ironclaw_filesystem::InMemoryBackend>,
     pub(crate) approvals:
-        ironclaw_run_state::ApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
-    pub(crate) combined_calls: AtomicUsize,
-    pub(crate) separate_save_calls: AtomicUsize,
+        ironclaw_approvals::ApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
+    pub(crate) save_calls: AtomicUsize,
 }
 
-impl InMemoryRecordingCombinedRunStateApprovalStore {
+impl RecordingInvocationApprovalStores {
     pub(crate) fn new() -> Self {
         Self {
-            runs: ironclaw_run_state::in_memory_backed_run_state_store(),
-            approvals: ironclaw_run_state::in_memory_backed_approval_request_store(),
-            combined_calls: AtomicUsize::new(0),
-            separate_save_calls: AtomicUsize::new(0),
+            runs: ironclaw_processes::in_memory_backed_process_invocation_state_store(),
+            approvals: ironclaw_approvals::in_memory_backed_approval_request_store(),
+            save_calls: AtomicUsize::new(0),
         }
     }
 
-    pub(crate) fn combined_calls(&self) -> usize {
-        self.combined_calls.load(Ordering::SeqCst)
-    }
-
-    pub(crate) fn separate_save_calls(&self) -> usize {
-        self.separate_save_calls.load(Ordering::SeqCst)
+    pub(crate) fn save_calls(&self) -> usize {
+        self.save_calls.load(Ordering::SeqCst)
     }
 }
 
 #[async_trait]
-impl RunStateStorePort for InMemoryRecordingCombinedRunStateApprovalStore {
-    async fn start(&self, start: RunStart) -> Result<RunRecord, RunStateError> {
+impl ProcessInvocationStatePort for RecordingInvocationApprovalStores {
+    async fn start(
+        &self,
+        start: ProcessInvocationStart,
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.runs.start(start).await
     }
 
@@ -278,7 +297,7 @@ impl RunStateStorePort for InMemoryRecordingCombinedRunStateApprovalStore {
         scope: &ResourceScope,
         invocation_id: InvocationId,
         approval: ApprovalRequest,
-    ) -> Result<RunRecord, RunStateError> {
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.runs
             .block_approval(scope, invocation_id, approval)
             .await
@@ -289,7 +308,7 @@ impl RunStateStorePort for InMemoryRecordingCombinedRunStateApprovalStore {
         scope: &ResourceScope,
         invocation_id: InvocationId,
         error_kind: String,
-    ) -> Result<RunRecord, RunStateError> {
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.runs.block_auth(scope, invocation_id, error_kind).await
     }
 
@@ -297,7 +316,7 @@ impl RunStateStorePort for InMemoryRecordingCombinedRunStateApprovalStore {
         &self,
         scope: &ResourceScope,
         invocation_id: InvocationId,
-    ) -> Result<RunRecord, RunStateError> {
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.runs.complete(scope, invocation_id).await
     }
 
@@ -306,7 +325,7 @@ impl RunStateStorePort for InMemoryRecordingCombinedRunStateApprovalStore {
         scope: &ResourceScope,
         invocation_id: InvocationId,
         error_kind: String,
-    ) -> Result<RunRecord, RunStateError> {
+    ) -> Result<ProcessInvocationRecord, ProcessInvocationError> {
         self.runs.fail(scope, invocation_id, error_kind).await
     }
 
@@ -314,26 +333,26 @@ impl RunStateStorePort for InMemoryRecordingCombinedRunStateApprovalStore {
         &self,
         scope: &ResourceScope,
         invocation_id: InvocationId,
-    ) -> Result<Option<RunRecord>, RunStateError> {
+    ) -> Result<Option<ProcessInvocationRecord>, ProcessInvocationError> {
         self.runs.get(scope, invocation_id).await
     }
 
     async fn records_for_scope(
         &self,
         scope: &ResourceScope,
-    ) -> Result<Vec<RunRecord>, RunStateError> {
+    ) -> Result<Vec<ProcessInvocationRecord>, ProcessInvocationError> {
         self.runs.records_for_scope(scope).await
     }
 }
 
 #[async_trait]
-impl ApprovalRequestStorePort for InMemoryRecordingCombinedRunStateApprovalStore {
+impl ApprovalRequestStorePort for RecordingInvocationApprovalStores {
     async fn save_pending(
         &self,
         scope: ResourceScope,
         request: ApprovalRequest,
-    ) -> Result<ApprovalRecord, RunStateError> {
-        self.separate_save_calls.fetch_add(1, Ordering::SeqCst);
+    ) -> Result<ApprovalRecord, ApprovalStoreError> {
+        self.save_calls.fetch_add(1, Ordering::SeqCst);
         self.approvals.save_pending(scope, request).await
     }
 
@@ -341,7 +360,7 @@ impl ApprovalRequestStorePort for InMemoryRecordingCombinedRunStateApprovalStore
         &self,
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
-    ) -> Result<Option<ApprovalRecord>, RunStateError> {
+    ) -> Result<Option<ApprovalRecord>, ApprovalStoreError> {
         self.approvals.get(scope, request_id).await
     }
 
@@ -349,7 +368,7 @@ impl ApprovalRequestStorePort for InMemoryRecordingCombinedRunStateApprovalStore
         &self,
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
-    ) -> Result<ApprovalRecord, RunStateError> {
+    ) -> Result<ApprovalRecord, ApprovalStoreError> {
         self.approvals.approve(scope, request_id).await
     }
 
@@ -357,7 +376,7 @@ impl ApprovalRequestStorePort for InMemoryRecordingCombinedRunStateApprovalStore
         &self,
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
-    ) -> Result<ApprovalRecord, RunStateError> {
+    ) -> Result<ApprovalRecord, ApprovalStoreError> {
         self.approvals.deny(scope, request_id).await
     }
 
@@ -365,42 +384,24 @@ impl ApprovalRequestStorePort for InMemoryRecordingCombinedRunStateApprovalStore
         &self,
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
-    ) -> Result<ApprovalRecord, RunStateError> {
+    ) -> Result<ApprovalRecord, ApprovalStoreError> {
         self.approvals.discard_pending(scope, request_id).await
     }
 
     async fn records_for_scope(
         &self,
         scope: &ResourceScope,
-    ) -> Result<Vec<ApprovalRecord>, RunStateError> {
+    ) -> Result<Vec<ApprovalRecord>, ApprovalStoreError> {
         self.approvals.records_for_scope(scope).await
-    }
-}
-
-#[async_trait]
-impl RunStateApprovalStorePort for InMemoryRecordingCombinedRunStateApprovalStore {
-    async fn save_pending_and_block_approval(
-        &self,
-        scope: ResourceScope,
-        invocation_id: InvocationId,
-        approval: ApprovalRequest,
-    ) -> Result<RunRecord, RunStateError> {
-        self.combined_calls.fetch_add(1, Ordering::SeqCst);
-        self.approvals
-            .save_pending(scope.clone(), approval.clone())
-            .await?;
-        self.runs
-            .block_approval(&scope, invocation_id, approval)
-            .await
     }
 }
 
 pub(crate) struct ApprovalResumeFixture {
     pub(crate) services: InMemoryHostRuntimeServices,
     pub(crate) run_state:
-        Arc<ironclaw_run_state::RunStateStore<ironclaw_filesystem::InMemoryBackend>>,
+        Arc<ironclaw_processes::ProcessInvocationStateStore<ironclaw_filesystem::InMemoryBackend>>,
     pub(crate) approval_requests:
-        Arc<ironclaw_run_state::ApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>>,
+        Arc<ironclaw_approvals::ApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>>,
     pub(crate) capability_leases: Arc<CapabilityLeaseStore<InMemoryBackend>>,
     pub(crate) events: InMemoryEventSink,
 }
@@ -413,8 +414,8 @@ pub(crate) fn approval_resume_fixture_with_manifest(
     manifest: &str,
     trust_effects: Vec<EffectKind>,
 ) -> ApprovalResumeFixture {
-    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
-    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let run_state = Arc::new(ironclaw_processes::in_memory_backed_process_invocation_state_store());
+    let approval_requests = Arc::new(ironclaw_approvals::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
@@ -429,7 +430,7 @@ pub(crate) fn approval_resume_fixture_with_manifest(
         "script",
         trust_effects,
     )))
-    .with_run_state(Arc::clone(&run_state))
+    .with_invocation_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
     .with_script_runtime(Arc::new(ScriptRuntime::new(
@@ -462,7 +463,7 @@ pub(crate) fn resume_runtime_with_empty_registry(
         "script",
         vec![EffectKind::DispatchCapability],
     )))
-    .with_run_state(Arc::clone(&fixture.run_state))
+    .with_invocation_state(Arc::clone(&fixture.run_state))
     .with_approval_requests(Arc::clone(&fixture.approval_requests))
     .with_capability_leases(Arc::clone(&fixture.capability_leases))
     .with_script_runtime(Arc::new(ScriptRuntime::new(
@@ -488,7 +489,7 @@ pub(crate) fn resume_runtime_with_policy(
         "script",
         vec![EffectKind::DispatchCapability, EffectKind::Network],
     )))
-    .with_run_state(Arc::clone(&fixture.run_state))
+    .with_invocation_state(Arc::clone(&fixture.run_state))
     .with_approval_requests(Arc::clone(&fixture.approval_requests))
     .with_capability_leases(Arc::clone(&fixture.capability_leases))
     .with_script_runtime(Arc::new(ScriptRuntime::new(
@@ -512,7 +513,7 @@ pub(crate) async fn assert_blocked_approval_run(
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(run.status, RunStatus::BlockedApproval);
+    assert_eq!(run.status, ProcessInvocationStatus::BlockedApproval);
     assert_eq!(run.approval_request_id, Some(approval_request_id));
     assert_eq!(run.error_kind, None);
 }
@@ -1022,6 +1023,7 @@ pub(crate) struct SpawnObligationFixture {
     pub(crate) authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
     pub(crate) handler: Arc<BuiltinObligationHandler>,
     pub(crate) process_manager: Arc<BackgroundProcessManager>,
+    pub(crate) process_services: ProcessServices,
     pub(crate) process_store: Arc<ProcessObligationLifecycleStore>,
     pub(crate) governor: Arc<InMemoryResourceGovernor>,
     pub(crate) context: ExecutionContext,
@@ -1038,7 +1040,7 @@ impl SpawnObligationFixture {
             "script",
             vec![EffectKind::DispatchCapability, EffectKind::Network],
         );
-        let runtime_policy = local_dev_runtime_policy();
+        let runtime_policy = standalone_runtime_policy();
         let host = CapabilityHost::new(
             self.registry.as_ref(),
             self.dispatcher.as_ref(),
@@ -1103,7 +1105,7 @@ pub(crate) async fn spawn_obligation_fixture_with_process_store_and_result_store
     result_store: Arc<R>,
 ) -> SpawnObligationFixture
 where
-    P: ProcessStorePort + 'static,
+    P: ProcessRuntimePort + 'static,
     R: ProcessResultStorePort + 'static,
 {
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
@@ -1144,12 +1146,19 @@ where
                 handle: secret_handle,
             },
         ]));
+    let process_services =
+        ProcessServices::new(Arc::clone(&inner_process_store), Arc::clone(&result_store));
     let process_store =
         Arc::new(obligation_services.process_obligation_lifecycle_store(inner_process_store));
+    process_store
+        .register_journal_observer(process_store.process_runtime().as_ref())
+        .expect("process obligation observer should register");
     let cleanup_process_store = Arc::clone(&process_store);
+    let submission_lifecycle: Arc<dyn ironclaw_processes::ProcessSubmissionLifecycle> =
+        process_store.clone();
     let process_manager = Arc::new(
-        BackgroundProcessManager::new(Arc::clone(&process_store), Arc::new(executor))
-            .with_result_store(result_store)
+        BackgroundProcessManager::new(process_services.clone(), Arc::new(executor))
+            .with_submission_lifecycle(submission_lifecycle)
             .with_error_handler(move |failure| {
                 let reconcile = match failure.stage {
                     BackgroundFailureStage::StoreComplete => true,
@@ -1176,6 +1185,7 @@ where
         authorizer,
         handler,
         process_manager,
+        process_services,
         process_store,
         governor,
         context,
@@ -1274,25 +1284,26 @@ pub(crate) fn result_store_failing_writes() -> (
     (store, backend)
 }
 
-/// Real `ProcessStore` over a [`FaultInjecting`] backend armed to
-/// fail the terminal status transition's write, replacing the whole-trait
-/// `FailingTerminalProcessStore` fake. `start`'s record write is the 1st
-/// backend write and succeeds; the terminal transition (`complete` or `fail`,
-/// whichever the manager issues for the executor outcome) is the 2nd write and
-/// is faulted, surfacing as `ProcessError::Filesystem`. `get` /
-/// `records_for_scope` still read the live `Running` record.
+/// Real `ProcessJournalStore` over a [`FaultInjecting`] backend armed to
+/// fail the terminal status transition's materialized process-row write,
+/// replacing the whole-trait `FailingTerminalProcessStore` fake. Submission
+/// writes the process row once, claiming writes it a second time, and the
+/// terminal transition (`complete` or `fail`) performs the third write.
 pub(crate) fn terminal_failing_process_store() -> (
-    Arc<ProcessStore<FaultInjecting<InMemoryBackend>>>,
+    Arc<ProcessJournalStore<FaultInjecting<InMemoryBackend>>>,
     Arc<FaultInjecting<InMemoryBackend>>,
 ) {
     let backend = Arc::new(
         FaultInjecting::new(InMemoryBackend::new()).with_fault(
             Fault::on(FilesystemOperation::WriteFile)
-                .nth(2)
+                .path("processes/materialized/process/")
+                .nth(3)
                 .backend("injected terminal transition write failure"),
         ),
     );
-    let store = Arc::new(ProcessStore::new(scoped_processes_fs(backend.clone())));
+    let store = Arc::new(ProcessJournalStore::new(scoped_processes_fs(
+        backend.clone(),
+    )));
     (store, backend)
 }
 
@@ -1432,7 +1443,7 @@ impl ironclaw_processes::ProcessManager for FailingSpawnManager {
 }
 
 pub(crate) async fn wait_for_status(
-    store: &dyn ProcessStorePort,
+    store: &ProcessObligationLifecycleStore,
     scope: &ResourceScope,
     process_id: ProcessId,
     status: ProcessStatus,
@@ -1489,10 +1500,14 @@ pub(crate) async fn wait_for_result_store_write(backend: &FaultInjecting<InMemor
 }
 
 pub(crate) async fn wait_for_terminal_transition_write(backend: &FaultInjecting<InMemoryBackend>) {
-    // `start`'s record write is the 1st backend write; the faulted terminal
-    // status transition is the 2nd.
+    // Submission and claim precede the faulted terminal process-row write.
     for _ in 0..100 {
-        if backend.count(FilesystemOperation::WriteFile) >= 2 {
+        let process_writes = backend
+            .recorded_paths(FilesystemOperation::WriteFile)
+            .into_iter()
+            .filter(|path| path.as_str().contains("processes/materialized/process/"))
+            .count();
+        if process_writes >= 3 {
             return;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1840,11 +1855,11 @@ pub(crate) fn network_denied_runtime_policy() -> EffectiveRuntimePolicy {
     }
 }
 
-pub(crate) fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
+pub(crate) fn standalone_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend: ProcessBackendKind::LocalHost,
         network_mode: NetworkMode::DirectLogged,

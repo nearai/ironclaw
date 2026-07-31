@@ -5,9 +5,11 @@ use std::{
 
 use ironclaw_approvals::LeaseApproval;
 use ironclaw_host_api::{
-    Action, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-    ExtensionId, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern, PackageId,
-    Principal,
+    action::{Action, NetworkPolicy, NetworkTargetPattern},
+    capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
+    ids::{CapabilityGrantId, CapabilityId, ExtensionId, PackageId},
+    mount::MountView,
+    scope::Principal,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -18,25 +20,25 @@ const BUILTIN_CAPABILITY_POLICY_TOML: &str = include_str!("builtin_capability_po
 
 #[derive(Debug, Error)]
 pub(crate) enum BuiltinCapabilityPolicyError {
-    #[error("local-dev capability policy TOML is invalid: {0}")]
+    #[error("standalone capability policy TOML is invalid: {0}")]
     InvalidToml(#[from] toml::de::Error),
-    #[error("local-dev capability policy has no grants")]
+    #[error("standalone capability policy has no grants")]
     EmptyGrants,
-    #[error("local-dev capability policy has duplicate grant for {capability}")]
+    #[error("standalone capability policy has duplicate grant for {capability}")]
     DuplicateGrant { capability: CapabilityId },
-    #[error("local-dev capability policy is missing grant for {capability}")]
+    #[error("standalone capability policy is missing grant for {capability}")]
     MissingGrant { capability: CapabilityId },
-    #[error("local-dev capability policy has empty effect set for {target}")]
+    #[error("standalone capability policy has empty effect set for {target}")]
     EmptyEffects { target: String },
-    #[error("local-dev capability policy has duplicate effect {effect:?} for {target}")]
+    #[error("standalone capability policy has duplicate effect {effect:?} for {target}")]
     DuplicateEffect { target: String, effect: EffectKind },
-    #[error("local-dev capability policy provider id is invalid as an extension id: {0}")]
-    InvalidProviderExtensionId(#[source] ironclaw_host_api::HostApiError),
-    #[error("local-dev capability policy provider manifest path is empty")]
+    #[error("standalone capability policy provider id is invalid as an extension id: {0}")]
+    InvalidProviderExtensionId(#[source] ironclaw_host_api::error::HostApiError),
+    #[error("standalone capability policy provider manifest path is empty")]
     EmptyProviderManifestPath,
-    #[error("local-dev capability policy provider manifest path must be absolute")]
+    #[error("standalone capability policy provider manifest path must be absolute")]
     NonAbsoluteProviderManifestPath,
-    #[error("local-dev capability policy is invalid: {reason}")]
+    #[error("standalone capability policy is invalid: {reason}")]
     CachedInvalid { reason: String },
 }
 
@@ -167,7 +169,7 @@ impl BuiltinCapabilityPolicy {
                     Err(BuiltinCapabilityPolicyError::MissingGrant { .. }) => {
                         tracing::debug!(
                             %capability,
-                            "local-dev spawn capability approval is using default lease terms"
+                            "standalone spawn capability approval is using default lease terms"
                         );
                         constraint_terms(
                             &self.approval_defaults.spawn_capability,
@@ -201,7 +203,7 @@ pub(crate) fn builtin_one_shot_lease_approval(constraints: GrantConstraints) -> 
     LeaseApproval {
         issued_by: Principal::HostRuntime,
         constraints: GrantConstraints {
-            // Local-dev leases are single-use (max_invocations = 1).
+            // Standalone leases are single-use (max_invocations = 1).
             // Wall-clock expiry is intentionally None: the policy file does
             // not configure an expires_at ceiling, and a short hard-coded
             // timeout would race against slow human approval flows. The
@@ -464,7 +466,7 @@ pub(crate) fn dev_wildcard_network_policy() -> NetworkPolicy {
             host_pattern: "*".to_string(),
             port: None,
         }],
-        // Local-dev shell is intentionally broad for developer CLI workflows,
+        // Standalone shell is intentionally broad for developer CLI workflows,
         // but it still uses the coarse host-local guard so cloud metadata,
         // link-local, multicast, loopback, and private IP targets remain
         // blocked by the shared network policy enforcer.
@@ -633,7 +635,7 @@ mod tests {
         );
 
         // Trace Commons capabilities must be granted here or they vanish from
-        // the model-visible tool surface in local-dev (REPL/serve) runs.
+        // the model-visible tool surface in standalone (REPL/serve) runs.
         let onboard = policy
             .grant(&CapabilityId::new("builtin.trace_commons.onboard").expect("capability id"))
             .expect("trace_commons.onboard grant");

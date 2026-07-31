@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExtensionId, ProviderToolName, ResourceEstimate, RuntimeKind,
+    capability::EffectKind,
+    ids::{CapabilityId, ExtensionId, ProviderToolName},
+    resource::ResourceEstimate,
+    runtime::RuntimeKind,
 };
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView, ConcurrencyHint,
@@ -252,6 +255,7 @@ impl SyntheticSurfaceCapabilitySnapshot {
                     runtime: RuntimeKind::System,
                     safe_name: self.provider_tool_name.as_str().to_string(),
                     safe_description: self.safe_description.clone(),
+                    description_trust: Default::default(),
                     concurrency_hint: ConcurrencyHint::SafeForParallel,
                     parameters_schema: self.parameters_schema.clone(),
                 })

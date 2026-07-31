@@ -117,7 +117,7 @@ impl Default for SkillActivationSelectorConfig {
             regex_activation_enabled: true,
             // Library default stays the legacy full-body contract; the Reborn
             // composition seam opts into `Listing` (see
-            // `ironclaw_reborn_composition::runtime::local_dev_selector_config`
+            // `ironclaw_reborn_composition::runtime::skill_activation_selector_config`
             // and the `IRONCLAW_REBORN_SKILL_INJECTION` env switch).
             injection_mode: SkillInjectionMode::Full,
         }
@@ -1736,7 +1736,7 @@ fn content_hash(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId};
     use ironclaw_loop_host::{SkillBundleId, SkillFilePath};
     use ironclaw_skills::SkillTrust;
     use ironclaw_turns::{
@@ -2013,7 +2013,7 @@ mod tests {
                 TenantId::new("tenant-a").unwrap(),
                 Some(AgentId::new("agent-a").unwrap()),
                 Some(ProjectId::new("project-a").unwrap()),
-                ironclaw_host_api::ThreadId::new(thread_id).unwrap(),
+                ironclaw_host_api::ids::ThreadId::new(thread_id).unwrap(),
             ),
             TurnId::new(),
             TurnRunId::new(),
@@ -2021,7 +2021,7 @@ mod tests {
         )
         .with_accepted_message_ref(AcceptedMessageRef::new(accepted_message).unwrap())
         .with_actor(TurnActor::new(
-            ironclaw_host_api::UserId::new("user-a").unwrap(),
+            ironclaw_host_api::ids::UserId::new("user-a").unwrap(),
         ))
     }
 

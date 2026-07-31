@@ -7,8 +7,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    HostApiError, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-    ScopedPath, TenantId, UserId, VirtualPath,
+    error::HostApiError,
+    ids::{InvocationId, TenantId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, ScopedPath, VirtualPath},
+    resource::ResourceScope,
 };
 
 use super::*;
@@ -18,6 +21,8 @@ use crate::{
     FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexName, IndexPolicy,
     IndexSpec, MountDescriptor, Page, RecordKind, SeqNo, StorageClass, TxnCapability,
 };
+#[cfg(feature = "test-support")]
+use crate::{Fault, FaultInjecting, FaultKind};
 
 fn test_scope() -> ResourceScope {
     ResourceScope {
@@ -186,7 +191,7 @@ async fn describe_path_uses_composite_mount_backend_capabilities() {
         )
         .unwrap();
     let placement = root.describe_path(&virtual_path).await.unwrap();
-    assert_eq!(placement.capabilities.txn(), TxnCapability::Cas);
+    assert_eq!(placement.capabilities.txn(), TxnCapability::MultiKey);
     assert_eq!(
         placement.path,
         VirtualPath::new("/engine/tenants/t1/users/u1/turns/state.json").unwrap()
@@ -408,6 +413,122 @@ async fn ensure_index_succeeds_with_write() {
 }
 
 #[tokio::test]
+async fn create_subtree_atomic_denies_before_dispatch_when_write_is_missing() {
+    let scoped = scoped_in_memory(no_op(true, false, true, false));
+    let error = scoped
+        .create_subtree_atomic(
+            &test_scope(),
+            &ScopedPath::new("/workspace/attachments/message-1").unwrap(),
+            vec![ScopedAtomicSubtreeEntry {
+                path: ScopedPath::new("/workspace/attachments/message-1/0-alpha.txt").unwrap(),
+                entry: Entry::bytes(b"alpha".to_vec()),
+            }],
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        FilesystemError::PermissionDenied {
+            operation: FilesystemOperation::CreateSubtreeAtomic,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn create_subtree_atomic_resolves_one_composite_mount_and_publishes_all_entries() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let mut root = CompositeRootFilesystem::new();
+    root.mount(
+        descriptor_for("/engine", backend.as_ref(), "workspace"),
+        Arc::clone(&backend),
+    )
+    .unwrap();
+    let scoped = ScopedFilesystem::with_fixed_view(
+        Arc::new(root),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").unwrap(),
+            VirtualPath::new("/engine/project-1").unwrap(),
+            no_op(true, true, true, false),
+        )])
+        .unwrap(),
+    );
+
+    let versions = scoped
+        .create_subtree_atomic(
+            &test_scope(),
+            &ScopedPath::new("/workspace/attachments/message-1").unwrap(),
+            vec![
+                ScopedAtomicSubtreeEntry {
+                    path: ScopedPath::new("/workspace/attachments/message-1/0-alpha.txt").unwrap(),
+                    entry: Entry::bytes(b"alpha".to_vec()),
+                },
+                ScopedAtomicSubtreeEntry {
+                    path: ScopedPath::new("/workspace/attachments/message-1/1-beta.txt").unwrap(),
+                    entry: Entry::bytes(b"beta".to_vec()),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        versions,
+        vec![
+            RecordVersion::from_backend(1),
+            RecordVersion::from_backend(1)
+        ]
+    );
+    assert_eq!(
+        backend
+            .read_file(
+                &VirtualPath::new("/engine/project-1/attachments/message-1/0-alpha.txt").unwrap(),
+            )
+            .await
+            .unwrap(),
+        b"alpha"
+    );
+}
+
+#[tokio::test]
+#[cfg(feature = "test-support")]
+async fn ensure_index_retries_retryable_backend_contention() {
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::EnsureIndex)
+                .nth(1)
+                .returning(FaultKind::BackendBusy),
+        ),
+    );
+    let scoped = ScopedFilesystem::with_fixed_view(
+        Arc::clone(&backend),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").unwrap(),
+            VirtualPath::new("/engine/scoped_test").unwrap(),
+            no_op(false, true, false, false),
+        )])
+        .unwrap(),
+    );
+    let spec = IndexSpec::new(
+        IndexName::new("by_scope").unwrap(),
+        vec![IndexKey::new("scope").unwrap()],
+        IndexKind::Exact,
+    );
+
+    scoped
+        .ensure_index(
+            &test_scope(),
+            &ScopedPath::new("/workspace").unwrap(),
+            &spec,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(backend.count(FilesystemOperation::EnsureIndex), 2);
+}
+
+#[tokio::test]
 async fn append_batch_denies_when_write_missing() {
     let scoped = scoped_in_memory(no_op(true, false, true, false));
     let err = scoped
@@ -546,23 +667,13 @@ async fn begin_denies_when_write_missing() {
 }
 
 #[tokio::test]
-async fn begin_with_write_propagates_backend_unsupported() {
+async fn begin_with_write_returns_in_memory_multi_key_transaction() {
     let scoped = scoped_in_memory(no_op(false, true, false, false));
-    let err = expect_err(
-        scoped
-            .begin(&test_scope(), &ScopedPath::new("/workspace").unwrap())
-            .await,
-    );
-    assert!(
-        matches!(
-            err,
-            FilesystemError::Unsupported {
-                operation: FilesystemOperation::BeginTxn,
-                ..
-            }
-        ),
-        "expected Unsupported (gate let it through), got {err:?}"
-    );
+    let txn = scoped
+        .begin(&test_scope(), &ScopedPath::new("/workspace").unwrap())
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
 }
 
 #[tokio::test]

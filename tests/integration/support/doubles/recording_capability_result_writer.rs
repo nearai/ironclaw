@@ -1,5 +1,5 @@
 /// Test double substituting the production `LoopCapabilityResultWriter` impl
-/// (`StagedCapabilityIo`, `crates/ironclaw_reborn_composition/src/runtime/local_dev.rs`).
+/// (`StagedCapabilityIo`, `crates/ironclaw_reborn_composition/src/runtime/standalone.rs`).
 ///
 /// Also implements `LoopCapabilityInputResolver`, delegating straight to
 /// `input_resolver` (no recording — only result writes are recorded).
@@ -17,7 +17,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityWriteResult, LoopCapabilityInputResolver,
     LoopCapabilityResultWriter,

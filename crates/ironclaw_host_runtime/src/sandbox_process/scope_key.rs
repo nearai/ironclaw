@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use ironclaw_host_api::ResourceScope;
+use ironclaw_host_api::resource::ResourceScope;
 
 use crate::sandbox_process::key_codec::{digest_hex, encode_parts};
 
@@ -41,7 +41,8 @@ impl RebornSandboxScopeKey {
     }
 
     pub fn container_name_prefix(&self) -> String {
-        format!("ironclaw-reborn-sandbox-{}", &self.digest[..24])
+        let digest_prefix = self.digest.get(..24).unwrap_or(self.digest.as_str());
+        format!("ironclaw-reborn-sandbox-{digest_prefix}")
     }
 }
 
@@ -49,7 +50,8 @@ impl RebornSandboxScopeKey {
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        AgentId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+        ids::{AgentId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
+        resource::ResourceScope,
     };
 
     fn scope(

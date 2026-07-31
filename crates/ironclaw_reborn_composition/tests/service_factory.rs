@@ -1,4 +1,4 @@
-// arch-exempt: large_file, pre-existing ~1.9K-line service test suite; this change is a net-zero rename of build_local_dev_secret_store_for_test call sites with no cases added, plan #6168
+// arch-exempt: large_file, pre-existing ~1.9K-line service test suite; this change is a net-zero rename of build_standalone_secret_store_for_test call sites with no cases added, plan #6168
 //
 // Decomposition of this suite travels with the composition god-crate shrink
 // (#6168); do not add unrelated cases here.
@@ -12,20 +12,33 @@ use deadpool_postgres::tokio_postgres;
 use ironclaw_auth::{OAuthClientId, OAuthRedirectUri};
 use ironclaw_auth::{RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest};
 use ironclaw_host_api::{
-    AuditMode, DeploymentMode, EffectKind, FilesystemBackendKind, NetworkMode, PackageId,
-    ProcessBackendKind, RuntimeKind, RuntimeProfile, SecretMode,
-    runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy},
+    action::NetworkPolicy,
+    capability::{CapabilityGrant, CapabilitySet, GrantConstraints},
+    ids::{CapabilityGrantId, CapabilityId, ExtensionId, RunId, UserId},
+    mount::MountView,
+    resource::ResourceEstimate,
+    result_meta::FailureKind,
+    runtime::TrustClass,
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_api::{
-    CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId,
-    FailureKind, GrantConstraints, MountView, NetworkPolicy, Principal, ResourceEstimate, RunId,
-    TrustClass, UserId,
+    capability::EffectKind,
+    ids::PackageId,
+    runtime::RuntimeKind,
+    runtime_policy::{
+        AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode, ProcessBackendKind,
+        RuntimeProfile, SecretMode, {ApprovalPolicy, EffectiveRuntimePolicy},
+    },
 };
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, RuntimeCapabilityOutcome, SHELL_CAPABILITY_ID,
     SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, VisibleCapabilityRequest,
 };
+use ironclaw_processes::ProcessTransitionPort;
 use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
+use ironclaw_reborn_composition::test_support::{
+    libsql_host_bindings_for_test, libsql_host_bindings_with_resolved_secret_master_key_for_test,
+};
 use ironclaw_reborn_composition::{
     RebornBuildError, RebornCompositionProfile, RebornRuntime, RebornRuntimeError,
     RebornRuntimeInput,
@@ -37,6 +50,7 @@ use ironclaw_reborn_composition::{
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus,
 };
+use ironclaw_runner::runtime::ProcessRuntimeSystem;
 use ironclaw_runner::turn_scheduler::{
     SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
     TurnRunSchedulerConfig, TurnRunSchedulerHandle,
@@ -44,10 +58,7 @@ use ironclaw_runner::turn_scheduler::{
 use ironclaw_secrets::SecretMaterial;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
-use ironclaw_turns::{
-    runner::{ClaimedTurnRun, TurnRunTransitionPort},
-    test_support::in_memory_turn_state_store,
-};
+use ironclaw_turns::runner::ClaimedTurnRun;
 use postgres_support::assert_postgres_accepts_connections;
 use secrecy::SecretString;
 use serde_json::Value;
@@ -110,7 +121,7 @@ impl TurnRunExecutor for NoopTurnRunExecutor {
     async fn execute_claimed_run(
         &self,
         _claimed: ClaimedTurnRun,
-        _transitions: Arc<dyn TurnRunTransitionPort>,
+        _transitions: Arc<dyn ProcessTransitionPort<Error = ironclaw_turns::TurnError>>,
     ) -> Result<(), TurnRunExecutorError> {
         Ok(())
     }
@@ -161,8 +172,8 @@ fn hosted_secure_default_runtime_policy() -> EffectiveRuntimePolicy {
 fn local_only_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
+        requested_profile: RuntimeProfile::LocalHost,
+        resolved_profile: RuntimeProfile::LocalHost,
         filesystem_backend: FilesystemBackendKind::HostWorkspace,
         process_backend: ProcessBackendKind::LocalHost,
         network_mode: NetworkMode::DirectLogged,
@@ -194,15 +205,15 @@ fn network_denied_runtime_policy() -> EffectiveRuntimePolicy {
     }
 }
 
-fn local_dev_builtin_visible_request() -> VisibleCapabilityRequest {
+fn local_host_builtin_visible_request() -> VisibleCapabilityRequest {
     let grants = CapabilitySet {
         grants: vec![
-            local_dev_grant("builtin.echo", vec![EffectKind::DispatchCapability]),
-            local_dev_grant(
+            local_host_grant("builtin.echo", vec![EffectKind::DispatchCapability]),
+            local_host_grant(
                 "builtin.http",
                 vec![EffectKind::DispatchCapability, EffectKind::Network],
             ),
-            local_dev_grant(
+            local_host_grant(
                 "builtin.http.save",
                 vec![
                     EffectKind::DispatchCapability,
@@ -256,7 +267,7 @@ fn production_builtin_visible_request() -> VisibleCapabilityRequest {
 fn production_process_capability_execution_context() -> ExecutionContext {
     let grants = CapabilitySet {
         grants: vec![
-            local_dev_grant(
+            local_host_grant(
                 SHELL_CAPABILITY_ID,
                 vec![
                     EffectKind::DispatchCapability,
@@ -267,7 +278,7 @@ fn production_process_capability_execution_context() -> ExecutionContext {
                     EffectKind::Network,
                 ],
             ),
-            local_dev_grant(
+            local_host_grant(
                 SPAWN_SUBAGENT_CAPABILITY_ID,
                 vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess],
             ),
@@ -399,7 +410,7 @@ async fn assert_process_capabilities_unavailable_for_processless_runtime(
     );
 }
 
-fn local_dev_grant(capability: &str, allowed_effects: Vec<EffectKind>) -> CapabilityGrant {
+fn local_host_grant(capability: &str, allowed_effects: Vec<EffectKind>) -> CapabilityGrant {
     CapabilityGrant {
         id: CapabilityGrantId::new(),
         capability: CapabilityId::new(capability).unwrap(),
@@ -440,15 +451,15 @@ async fn invoke_trigger_management(
 fn trigger_management_execution_context() -> ExecutionContext {
     let grants = CapabilitySet {
         grants: vec![
-            local_dev_grant(
+            local_host_grant(
                 ironclaw_host_runtime::TRIGGER_CREATE_CAPABILITY_ID,
                 vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
             ),
-            local_dev_grant(
+            local_host_grant(
                 ironclaw_host_runtime::TRIGGER_LIST_CAPABILITY_ID,
                 vec![EffectKind::DispatchCapability],
             ),
-            local_dev_grant(
+            local_host_grant(
                 ironclaw_host_runtime::TRIGGER_REMOVE_CAPABILITY_ID,
                 vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
             ),
@@ -472,10 +483,14 @@ fn empty_trust_policy() -> Arc<HostTrustPolicy> {
 }
 
 fn live_wake_notifier() -> (Arc<SchedulerTurnRunWakeNotifier>, TurnRunSchedulerHandle) {
-    let transitions: Arc<dyn TurnRunTransitionPort> = Arc::new(in_memory_turn_state_store());
+    let processes = ProcessRuntimeSystem::in_memory_ephemeral().expect("process system");
     let executor: Arc<dyn TurnRunExecutor> = Arc::new(NoopTurnRunExecutor);
-    let handle =
-        TurnRunScheduler::new(transitions, executor, TurnRunSchedulerConfig::default()).start();
+    let handle = TurnRunScheduler::new_with_process_runtime(
+        processes.runtime(),
+        executor,
+        TurnRunSchedulerConfig::default(),
+    )
+    .start();
     (handle.wake_notifier(), handle)
 }
 
@@ -605,14 +620,17 @@ async fn disabled_returns_empty_services() {
 }
 
 #[tokio::test]
-async fn local_dev_builds_services_without_production_claim() {
+async fn standalone_builds_services_without_production_claim() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
-        ironclaw_reborn_composition::local_dev_build_input("test-owner", dir.path().to_path_buf())
-            .with_runtime_policy(
-                ironclaw_reborn_composition::local_dev_runtime_policy()
-                    .expect("local-dev runtime policy resolves"),
-            ),
+        ironclaw_reborn_composition::local_filesystem_build_input(
+            "test-owner",
+            dir.path().to_path_buf(),
+        )
+        .with_runtime_policy(
+            ironclaw_reborn_composition::standalone_runtime_policy()
+                .expect("standalone runtime policy resolves"),
+        ),
     )
     .await
     .unwrap();
@@ -684,14 +702,17 @@ impl ironclaw_host_runtime::SandboxCommandTransport for ProductionReadySandboxTr
 }
 
 #[tokio::test]
-async fn local_dev_product_auth_entrypoint_redacts_manual_token_submit() {
+async fn standalone_product_auth_entrypoint_redacts_manual_token_submit() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
-        ironclaw_reborn_composition::local_dev_build_input("test-owner", dir.path().to_path_buf())
-            .with_runtime_policy(
-                ironclaw_reborn_composition::local_dev_runtime_policy()
-                    .expect("local-dev runtime policy resolves"),
-            ),
+        ironclaw_reborn_composition::local_filesystem_build_input(
+            "test-owner",
+            dir.path().to_path_buf(),
+        )
+        .with_runtime_policy(
+            ironclaw_reborn_composition::standalone_runtime_policy()
+                .expect("standalone runtime policy resolves"),
+        ),
     )
     .await
     .unwrap();
@@ -744,9 +765,9 @@ async fn local_dev_product_auth_entrypoint_redacts_manual_token_submit() {
 
 fn auth_scope(user: &str) -> ironclaw_auth::AuthProductScope {
     ironclaw_auth::AuthProductScope::new(
-        ironclaw_host_api::ResourceScope::local_default(
-            ironclaw_host_api::UserId::new(user).unwrap(),
-            ironclaw_host_api::InvocationId::new(),
+        ironclaw_host_api::resource::ResourceScope::local_default(
+            ironclaw_host_api::ids::UserId::new(user).unwrap(),
+            ironclaw_host_api::ids::InvocationId::new(),
         )
         .unwrap(),
         ironclaw_auth::AuthSurface::Web,
@@ -755,20 +776,23 @@ fn auth_scope(user: &str) -> ironclaw_auth::AuthProductScope {
 }
 
 #[tokio::test]
-async fn local_dev_runtime_policy_exposes_http_capability() {
+async fn standalone_runtime_policy_exposes_http_capability() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
-        ironclaw_reborn_composition::local_dev_build_input("test-owner", dir.path().to_path_buf())
-            .with_runtime_policy(local_only_runtime_policy()),
+        ironclaw_reborn_composition::local_filesystem_build_input(
+            "test-owner",
+            dir.path().to_path_buf(),
+        )
+        .with_runtime_policy(local_only_runtime_policy()),
     )
     .await
     .unwrap();
     let runtime = services
         .host_runtime_for_test()
-        .expect("local dev exposes host runtime");
+        .expect("standalone exposes host runtime");
 
     let surface = runtime
-        .visible_capabilities(local_dev_builtin_visible_request())
+        .visible_capabilities(local_host_builtin_visible_request())
         .await
         .unwrap();
     let visible_ids = surface
@@ -780,29 +804,32 @@ async fn local_dev_runtime_policy_exposes_http_capability() {
     assert!(visible_ids.contains(&"builtin.echo"));
     assert!(
         visible_ids.contains(&"builtin.http"),
-        "local-dev service should expose host HTTP when the runtime policy allows network"
+        "standalone service should expose host HTTP when the runtime policy allows network"
     );
     assert!(
         visible_ids.contains(&"builtin.http.save"),
-        "local-dev service should expose saved-body HTTP when network and filesystem are allowed"
+        "standalone service should expose saved-body HTTP when network and filesystem are allowed"
     );
 }
 
 #[tokio::test]
-async fn local_dev_runtime_policy_hides_http_capability() {
+async fn standalone_runtime_policy_hides_http_capability() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
-        ironclaw_reborn_composition::local_dev_build_input("test-owner", dir.path().to_path_buf())
-            .with_runtime_policy(network_denied_runtime_policy()),
+        ironclaw_reborn_composition::local_filesystem_build_input(
+            "test-owner",
+            dir.path().to_path_buf(),
+        )
+        .with_runtime_policy(network_denied_runtime_policy()),
     )
     .await
     .unwrap();
     let runtime = services
         .host_runtime_for_test()
-        .expect("local dev exposes host runtime");
+        .expect("standalone exposes host runtime");
 
     let surface = runtime
-        .visible_capabilities(local_dev_builtin_visible_request())
+        .visible_capabilities(local_host_builtin_visible_request())
         .await
         .unwrap();
     let visible_ids = surface
@@ -814,11 +841,11 @@ async fn local_dev_runtime_policy_hides_http_capability() {
     assert!(visible_ids.contains(&"builtin.echo"));
     assert!(
         !visible_ids.contains(&"builtin.http"),
-        "local-dev service must forward the supplied runtime policy before visible-surface filtering"
+        "standalone service must forward the supplied runtime policy before visible-surface filtering"
     );
     assert!(
         !visible_ids.contains(&"builtin.http.save"),
-        "local-dev service must hide saved-body HTTP when network is denied"
+        "standalone service must hide saved-body HTTP when network is denied"
     );
 }
 
@@ -829,14 +856,15 @@ async fn production_defaults_first_party_trust_policy() {
     let (notifier, handle) = live_wake_notifier();
 
     let services = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
         .with_runtime_process_binding(test_sandbox_process_binding()),
@@ -859,14 +887,15 @@ async fn production_requires_process_binding_for_defaulted_first_party_trust_pol
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier),
     )
@@ -890,14 +919,15 @@ async fn production_google_oauth_config_uses_factory_built_product_auth_ports() 
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_vendor_oauth_client(
             "google",
             ironclaw_reborn_composition::OAuthClientConfig {
@@ -927,14 +957,15 @@ async fn production_factory_built_product_auth_manual_token_round_trips() {
     let (notifier, handle) = live_wake_notifier();
 
     let services = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
@@ -991,14 +1022,15 @@ async fn production_rejects_empty_trust_policy() {
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(empty_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier),
@@ -1023,14 +1055,15 @@ async fn production_self_mints_turn_wake_wiring() {
     let db = libsql_db_at(dir.path().join("reborn.db")).await;
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_runtime_process_binding(test_sandbox_process_binding()),
@@ -1051,14 +1084,15 @@ async fn production_requires_runtime_policy() {
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_turn_run_wake_notifier(notifier),
     )
@@ -1082,14 +1116,15 @@ async fn production_rejects_local_only_runtime_policy() {
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(local_only_runtime_policy())
         .with_turn_run_wake_notifier(notifier),
@@ -1114,7 +1149,7 @@ async fn production_rejects_local_only_runtime_policy() {
     );
     assert_eq!(
         RebornReadinessDiagnostic::from_production_wiring_report(
-            RebornCompositionProfile::LocalDev,
+            RebornCompositionProfile::Standalone,
             &report,
         )
         .len(),
@@ -1167,7 +1202,7 @@ async fn production_rejects_memory_libsql_event_store() {
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
@@ -1175,6 +1210,7 @@ async fn production_rejects_memory_libsql_event_store() {
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier),
@@ -1204,13 +1240,14 @@ async fn production_libsql_resolved_secret_master_key_rejects_invalid_env_key() 
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql_with_resolved_secret_master_key(
+        libsql_host_bindings_with_resolved_secret_master_key_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
@@ -1229,7 +1266,7 @@ async fn production_libsql_resolved_secret_master_key_rejects_invalid_env_key() 
 }
 
 /// With no cached dotfile and no `SECRETS_MASTER_KEY` env var,
-/// `resolve_local_dev_secret_master_key` (`src/factory.rs`) tries the OS
+/// `resolve_standalone_secret_master_key` (`src/factory.rs`) tries the OS
 /// keychain before generating a fresh key.
 ///
 /// - Under `IRONCLAW_DISABLE_OS_KEYCHAIN` the keychain lookup returns
@@ -1244,7 +1281,7 @@ async fn production_libsql_resolved_secret_master_key_rejects_invalid_env_key() 
 ///   binary is a separate crate the `forbid` doesn't reach, and already uses
 ///   the `EnvVarGuard`/`SECRETS_MASTER_KEY_ENV_LOCK` convention for this.
 #[tokio::test]
-async fn local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile() {
+async fn standalone_secret_store_falls_through_suppressed_keychain_to_dotfile() {
     let _guard = SECRETS_MASTER_KEY_ENV_LOCK.lock().await;
     let _env = EnvVarGuard::set("IRONCLAW_DISABLE_OS_KEYCHAIN", "1");
     let dir = tempfile::tempdir().unwrap();
@@ -1256,12 +1293,12 @@ async fn local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile() {
     );
 
     let mut composite = ironclaw_filesystem::CompositeRootFilesystem::new();
-    ironclaw_reborn_composition::test_support::build_default_local_dev_database_roots_for_test(
+    ironclaw_reborn_composition::test_support::build_default_database_roots_for_test(
         root,
         &mut composite,
     )
     .await
-    .expect("build default local-dev db roots");
+    .expect("build default standalone db roots");
     let composite = std::sync::Arc::new(composite);
     let scoped = ironclaw_reborn_composition::wrap_scoped(std::sync::Arc::clone(&composite));
 
@@ -1290,18 +1327,20 @@ async fn local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile() {
 #[tokio::test]
 async fn production_libsql_services_wire_first_party_runtime_http_egress() {
     let dir = tempfile::tempdir().unwrap();
-    let db = libsql_db_at(dir.path().join("reborn.db")).await;
+    let database_path = dir.path().join("reborn.db");
+    let db = libsql_db_at(database_path.clone()).await;
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            database_path.to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
@@ -1321,18 +1360,20 @@ async fn production_libsql_services_wire_first_party_runtime_http_egress() {
 #[tokio::test]
 async fn production_libsql_services_migrate_trigger_repository_before_runtime_injection() {
     let dir = tempfile::tempdir().unwrap();
-    let db = libsql_db_at(dir.path().join("reborn.db")).await;
+    let database_path = dir.path().join("reborn.db");
+    let db = libsql_db_at(database_path.clone()).await;
     let (notifier, handle) = live_wake_notifier();
 
     let services = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             Arc::clone(&db),
-            dir.path().join("events.db").to_string_lossy(),
+            database_path.to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
@@ -1360,22 +1401,25 @@ async fn production_libsql_services_migrate_trigger_repository_before_runtime_in
 }
 
 #[tokio::test]
-async fn local_dev_services_dispatch_trigger_management_through_composed_runtime() {
+async fn standalone_services_dispatch_trigger_management_through_composed_runtime() {
     let dir = tempfile::tempdir().unwrap();
     let services = build_runtime_for_test(
-        ironclaw_reborn_composition::local_dev_build_input("test-owner", dir.path().to_path_buf())
-            .with_runtime_policy(local_only_minimal_approval_policy()),
+        ironclaw_reborn_composition::local_filesystem_build_input(
+            "test-owner",
+            dir.path().to_path_buf(),
+        )
+        .with_runtime_policy(local_only_minimal_approval_policy()),
     )
     .await
-    .expect("local-dev services should build with trigger management runtime");
+    .expect("standalone services should build with trigger management runtime");
 
     // The Tools-settings global auto-approve switch is authoritative for
     // first-party tool dispatch; turn it on for the dispatch scope so
     // these trigger management calls exercise the dispatch path instead of
     // stopping at the per-tool approval gate.
     let auto_approve = services
-        .local_dev_auto_approve_settings_for_test()
-        .expect("local-dev exposes auto-approve settings for test");
+        .standalone_auto_approve_settings_for_test()
+        .expect("standalone exposes auto-approve settings for test");
     let auto_approve_scope = trigger_management_execution_context().resource_scope;
     auto_approve
         .set(ironclaw_approvals::AutoApproveSettingInput {
@@ -1388,7 +1432,7 @@ async fn local_dev_services_dispatch_trigger_management_through_composed_runtime
 
     let runtime = services
         .host_runtime_for_test()
-        .expect("local-dev build exposes host runtime");
+        .expect("standalone build exposes host runtime");
     let created = invoke_trigger_management(
         runtime.as_ref(),
         ironclaw_host_runtime::TRIGGER_CREATE_CAPABILITY_ID,
@@ -1404,8 +1448,8 @@ async fn local_dev_services_dispatch_trigger_management_through_composed_runtime
         .expect("created trigger id")
         .to_string();
 
-    let local_dev_db = libsql_db_at(dir.path().join("reborn-local-dev.db")).await;
-    assert_eq!(libsql_trigger_record_count(&local_dev_db).await, 1);
+    let standalone_db = libsql_db_at(dir.path().join("reborn-local-dev.db")).await;
+    assert_eq!(libsql_trigger_record_count(&standalone_db).await, 1);
 
     let listed = invoke_trigger_management(
         runtime.as_ref(),
@@ -1548,14 +1592,15 @@ async fn production_libsql_secure_default_builds_without_process_port() {
     let (notifier, handle) = live_wake_notifier();
 
     let services = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(hosted_secure_default_runtime_policy())
         .with_turn_run_wake_notifier(notifier),
@@ -1582,14 +1627,15 @@ async fn production_libsql_services_require_process_port_for_first_party_runtime
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::Production,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
@@ -1650,14 +1696,15 @@ async fn migration_dry_run_validates_libsql_shape() {
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::MigrationDryRun,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier)
@@ -1692,14 +1739,15 @@ async fn migration_dry_run_requires_libsql_process_port_for_first_party_runtime(
     let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
-        RebornHostBindings::libsql(
+        libsql_host_bindings_for_test(
             RebornCompositionProfile::MigrationDryRun,
             "test-owner",
             db,
-            dir.path().join("events.db").to_string_lossy(),
+            dir.path().join("reborn.db").to_string_lossy(),
             None,
             test_master_key(),
         )
+        .expect("libSQL bindings")
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier),

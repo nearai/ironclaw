@@ -30,22 +30,25 @@ use ironclaw_extension_host::ingress::{
 };
 use ironclaw_extension_host::{DeploymentChannelBinding, DeploymentChannelRegistry, SnapshotWatch};
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::ChannelInboundProductSurface;
+use ironclaw_host_api::product_surface::ChannelInboundProductSurface;
 use ironclaw_host_api::recipe::IngressVerificationRecipe;
 use ironclaw_host_api::{
-    AgentId, ExtensionId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
-    RecipeSecretField, ResourceScope, SecretHandle, TenantId, ThreadId, UserId, VirtualPath,
+    ids::{AgentId, ExtensionId, ProjectId, SecretHandle, TenantId, ThreadId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    recipe::RecipeSecretField,
+    resource::ResourceScope,
 };
 use ironclaw_outbound::{CommunicationPreferenceRepository, DeliveredGateRouteStore};
 use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, ExternalEventId, ProductAdapterId,
-    ProductInboundAck, ProductInboundEnvelope,
+    ProductInboundAck, ProductInboundEnvelope, ProjectFilesystemReader,
 };
 use ironclaw_product::{
     ApprovalInteractionService, ApprovalPromptContextSource, AuthInteractionService,
     BlockedAuthFlowCanceller, BlockedAuthPromptSource, ChannelConnectionNoticePolicy,
     ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
-    DeliveryCoordinator, IdempotencyLedger, PreferenceTargetCodec,
+    DeliveryCoordinator, IdempotencyLedger, InboundAttachmentLander, PreferenceTargetCodec,
     ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
     ProductSurfaceFailure, RebornFilesystemIdempotencyLedger, ResolvedProductActorUser,
@@ -120,7 +123,7 @@ pub fn default_channel_workflow_storage_roots(
     tenant_id: &TenantId,
     extension_id: &str,
 ) -> Result<ChannelWorkflowStorageRoots, String> {
-    let tenant = ironclaw_host_api::resource_scope_path_segment(tenant_id.as_str());
+    let tenant = ironclaw_host_api::resource::resource_scope_path_segment(tenant_id.as_str());
     let base = format!("/tenants/{tenant}/shared/channel-extensions/{extension_id}");
     Ok(ChannelWorkflowStorageRoots {
         idempotency: VirtualPath::new(format!("{base}/product-workflow/idempotency"))
@@ -252,6 +255,9 @@ pub struct ChannelHostIdentity {
 /// then ingress-only (turns run; nothing watches them for channel replies).
 pub struct ChannelHostDeliveryDeps {
     pub coordinator: Arc<DeliveryCoordinator>,
+    /// Canonical project-filesystem authority the delivery coordinator
+    /// materializes `/workspace/...` references through.
+    pub project_filesystem: Arc<dyn ProjectFilesystemReader>,
     pub outbound_store: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
     pub route_store: Arc<dyn DeliveredGateRouteStore>,
     pub communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
@@ -269,60 +275,62 @@ pub struct ChannelHostDeliveryDeps {
 /// execution fails closed with retryable service unavailability.
 #[derive(Clone, Default)]
 struct SharedCommandSurface {
-    cell: Arc<std::sync::OnceLock<Arc<dyn ironclaw_host_api::ProductSurface>>>,
+    cell: Arc<std::sync::OnceLock<Arc<dyn ironclaw_host_api::product_surface::ProductSurface>>>,
 }
 
 impl SharedCommandSurface {
-    fn set(&self, surface: Arc<dyn ironclaw_host_api::ProductSurface>) -> bool {
+    fn set(&self, surface: Arc<dyn ironclaw_host_api::product_surface::ProductSurface>) -> bool {
         self.cell.set(surface).is_ok()
     }
 }
 
 #[async_trait]
-impl ironclaw_host_api::ProductSurface for SharedCommandSurface {
+impl ironclaw_host_api::product_surface::ProductSurface for SharedCommandSurface {
     async fn invoke(
         &self,
-        caller: ironclaw_host_api::ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+        caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
+        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
     ) -> Result<
-        ironclaw_host_api::ProductSurfaceInvokeResponse,
-        ironclaw_host_api::ProductSurfaceError,
+        ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
     > {
         match self.cell.get() {
             Some(surface) => surface.invoke(caller, request).await,
-            None => Err(ironclaw_host_api::ProductSurfaceError::service_unavailable(
-                true,
-            )),
+            None => Err(
+                ironclaw_host_api::product_surface::ProductSurfaceError::service_unavailable(true),
+            ),
         }
     }
 
     async fn query(
         &self,
-        caller: ironclaw_host_api::ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ironclaw_host_api::ProductSurfaceError>
-    {
+        caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
+        request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
+    ) -> Result<
+        ironclaw_host_api::product_surface::ProductSurfaceQueryPage,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
+    > {
         match self.cell.get() {
             Some(surface) => surface.query(caller, request).await,
-            None => Err(ironclaw_host_api::ProductSurfaceError::service_unavailable(
-                true,
-            )),
+            None => Err(
+                ironclaw_host_api::product_surface::ProductSurfaceError::service_unavailable(true),
+            ),
         }
     }
 
     async fn stream_events(
         &self,
-        caller: ironclaw_host_api::ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceStreamRequest,
+        caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
+        request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
     ) -> Result<
-        ironclaw_host_api::ProductSurfaceStreamResponse,
-        ironclaw_host_api::ProductSurfaceError,
+        ironclaw_host_api::product_surface::ProductSurfaceStreamResponse,
+        ironclaw_host_api::product_surface::ProductSurfaceError,
     > {
         match self.cell.get() {
             Some(surface) => surface.stream_events(caller, request).await,
-            None => Err(ironclaw_host_api::ProductSurfaceError::service_unavailable(
-                true,
-            )),
+            None => Err(
+                ironclaw_host_api::product_surface::ProductSurfaceError::service_unavailable(true),
+            ),
         }
     }
 }
@@ -336,6 +344,9 @@ pub struct GenericChannelHostDeps {
     pub workflow_state: Arc<dyn ChannelWorkflowStateFactory>,
     pub thread_service: Arc<dyn SessionThreadService>,
     pub turn_coordinator: Arc<dyn TurnCoordinator>,
+    /// Lands inbound attachment bytes into the project filesystem before the
+    /// turn starts, so the turn itself begins byte-free with workspace refs.
+    pub inbound_attachments: Arc<dyn InboundAttachmentLander>,
     pub approval_interaction: Option<Arc<dyn ApprovalInteractionService>>,
     pub auth_interaction: Option<Arc<dyn AuthInteractionService>>,
     pub identity: ChannelHostIdentity,
@@ -343,12 +354,15 @@ pub struct GenericChannelHostDeps {
     /// on auth-declaring channel extensions resolve through it. `None`
     /// (composition paths without the durable store) falls back to the
     /// operator-actor policy.
-    pub identity_lookup: Option<Arc<dyn ironclaw_host_api::RebornUserIdentityLookup>>,
+    pub identity_lookup:
+        Option<Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>>,
     pub delivery: Option<ChannelHostDeliveryDeps>,
     /// Pairing services for `WebGeneratedCode` channel extensions: drives the
     /// sink's pre-admission consume gate and identity-based actor resolution
     /// for extensions that pair without an OAuth vendor.
     pub channel_pairing: Option<Arc<crate::channel_pairing::ChannelPairingRegistry>>,
+    /// Admin-users directory backing channel-command role gating.
+    pub admin_users: Arc<dyn ironclaw_product::AdminUserService>,
 }
 
 /// What the assembly last reconciled for one extension id.
@@ -466,7 +480,7 @@ impl GenericChannelHostAssembly {
     /// authority under already-running channel graphs.
     pub fn set_product_command_surface(
         &self,
-        surface: Arc<dyn ironclaw_host_api::ProductSurface>,
+        surface: Arc<dyn ironclaw_host_api::product_surface::ProductSurface>,
     ) -> bool {
         self.command_surface.set(surface)
     }
@@ -572,6 +586,7 @@ impl GenericChannelHostAssembly {
             Some(identity.operator_user_id.clone()),
         );
         Some(RunDeliveryServices {
+            project_filesystem: Arc::clone(&delivery.project_filesystem),
             binding_service: Arc::new(TriggeredNoopConversationBindingService),
             thread_service: Arc::clone(&self.deps.thread_service),
             turn_coordinator: Arc::clone(&self.deps.turn_coordinator),
@@ -740,11 +755,14 @@ impl GenericChannelHostAssembly {
 
         let (binding, workflow_state) = self.build_binding(source, extras).await?;
 
-        let inbound = Arc::new(DefaultInboundTurnService::new(
-            Arc::clone(&binding),
-            Arc::clone(&self.deps.thread_service),
-            Arc::clone(&self.deps.turn_coordinator),
-        ));
+        let inbound = Arc::new(
+            DefaultInboundTurnService::new(
+                Arc::clone(&binding),
+                Arc::clone(&self.deps.thread_service),
+                Arc::clone(&self.deps.turn_coordinator),
+            )
+            .with_inbound_attachments(Arc::clone(&self.deps.inbound_attachments)),
+        );
         let mut workflow = DefaultProductSurface::new(
             inbound,
             Arc::clone(&workflow_state.ledger),
@@ -759,10 +777,23 @@ impl GenericChannelHostAssembly {
         if let Some(delivery) = &self.deps.delivery {
             workflow = workflow.with_delivered_gate_routes(Arc::clone(&delivery.route_store));
         }
+        // Channel-command admission's admin-audience gate: the same
+        // per-extension provider identity `build_binding`'s actor resolver
+        // uses above, so the actor a command's role is resolved for is
+        // always the same actor the conversation binding resolved.
+        let (command_role_provider, command_role_lookup) = self.provider_identity_lookup(source);
+        let command_roles = Arc::new(crate::channel_command_roles::ChannelActorRoleResolver::new(
+            command_role_provider,
+            command_role_lookup,
+            Arc::clone(&self.deps.admin_users),
+            self.deps.identity.tenant_id.clone(),
+            self.deps.identity.operator_user_id.clone(),
+        ));
         workflow = workflow
             .with_product_command_admission_service(Arc::new(
                 ironclaw_product::DirectConversationCommandAdmission::new(
                     channel.commands.iter().map(String::as_str),
+                    command_roles,
                 )
                 .map_err(|error| {
                     format!(
@@ -800,7 +831,7 @@ impl GenericChannelHostAssembly {
                 pairing,
                 observer
                     .clone()
-                    .map(ChannelPairingOutcomeObserver::RunDelivery),
+                    .map(|observer| observer as Arc<dyn ChannelPairingOutcomeObserver>),
             );
         }
         let sink = Arc::new(sink);
@@ -817,6 +848,45 @@ impl GenericChannelHostAssembly {
             #[cfg(any(test, feature = "test-support"))]
             observer: observer.map(|observer| observer as Arc<dyn PostAdmissionObserver>),
         }))
+    }
+
+    /// Provider identity + optional identity-lookup binding used to resolve a
+    /// verified inbound actor to a bound IronClaw user for this extension:
+    /// the OAuth vendor when the extension declares vendor auth, the
+    /// extension id when it pairs via `WebGeneratedCode` without a vendor, or
+    /// no lookup (the operator-actor policy) otherwise. Shared by
+    /// [`Self::build_binding`]'s conversation-binding actor resolver and
+    /// [`Self::build_generic_graph`]'s channel-command role resolver so both
+    /// read exactly the same per-extension policy instead of two copies that
+    /// can drift.
+    fn provider_identity_lookup(
+        &self,
+        source: &HostedChannelSource,
+    ) -> (
+        String,
+        Option<Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>>,
+    ) {
+        let pairing_extension = self
+            .deps
+            .channel_pairing
+            .as_ref()
+            .is_some_and(|registry| registry.get(source.extension_id()).is_some());
+        match (
+            self.deps.identity_lookup.as_ref(),
+            source.resolved().auth.first(),
+        ) {
+            (Some(lookup), Some(auth)) => {
+                (auth.vendor.as_str().to_string(), Some(Arc::clone(lookup)))
+            }
+            // Pairing-strategy channels have no OAuth vendor; verified
+            // inbound actors resolve through the bindings the pairing
+            // consume wrote, keyed by the extension id as provider. Unbound
+            // actors fail closed instead of inheriting the operator.
+            (Some(lookup), None) if pairing_extension => {
+                (source.extension_id().to_string(), Some(Arc::clone(lookup)))
+            }
+            _ => (source.extension_id().to_string(), None),
+        }
     }
 
     /// The per-extension conversation-binding service over durable state at
@@ -840,7 +910,7 @@ impl GenericChannelHostAssembly {
             project_id: identity.project_id.clone(),
             mission_id: None,
             thread_id: None,
-            invocation_id: ironclaw_host_api::InvocationId::new(),
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         };
         let workflow_state = self.deps.workflow_state.build(&roots, ledger_scope).await?;
 
@@ -855,34 +925,16 @@ impl GenericChannelHostAssembly {
         // an auth vendor keep the operator-actor policy: the ingress
         // verification secret gates who reaches the installation and no
         // binding can exist to resolve.
-        let pairing_extension = self
-            .deps
-            .channel_pairing
-            .as_ref()
-            .is_some_and(|registry| registry.get(source.extension_id()).is_some());
-        let actor_user_resolver: Arc<dyn ProductActorUserResolver> = match (
-            self.deps.identity_lookup.as_ref(),
-            source.resolved().auth.first(),
-        ) {
-            (Some(lookup), Some(auth)) => Arc::new(
+        let (provider, provider_lookup) = self.provider_identity_lookup(source);
+        let actor_user_resolver: Arc<dyn ProductActorUserResolver> = match provider_lookup {
+            Some(lookup) => Arc::new(
                 crate::provider_identity::ProviderIdentityActorResolver::for_any_actor_kind(
-                    auth.vendor.as_str(),
+                    provider,
                     source.extension_id(),
-                    Arc::clone(lookup),
+                    lookup,
                 ),
             ),
-            // Pairing-strategy channels have no OAuth vendor; verified
-            // inbound actors resolve through the bindings the pairing
-            // consume wrote, keyed by the extension id as provider. Unbound
-            // actors fail closed instead of inheriting the operator.
-            (Some(lookup), None) if pairing_extension => Arc::new(
-                crate::provider_identity::ProviderIdentityActorResolver::for_any_actor_kind(
-                    source.extension_id(),
-                    source.extension_id(),
-                    Arc::clone(lookup),
-                ),
-            ),
-            _ => Arc::new(OperatorActorUserResolver {
+            None => Arc::new(OperatorActorUserResolver {
                 operator_user_id: identity.operator_user_id.clone(),
             }),
         };
@@ -969,6 +1021,7 @@ impl GenericChannelHostAssembly {
             Some(identity.operator_user_id.clone()),
         );
         let services = RunDeliveryServices {
+            project_filesystem: Arc::clone(&delivery.project_filesystem),
             binding_service: binding,
             thread_service: Arc::clone(&self.deps.thread_service),
             turn_coordinator: Arc::clone(&self.deps.turn_coordinator),
@@ -995,13 +1048,18 @@ impl GenericChannelHostAssembly {
             .as_ref()
             .map(|channel| channel.commands.as_slice())
             .unwrap_or_default();
+        let command_prefix = source
+            .resolved()
+            .channel
+            .as_ref()
+            .and_then(|channel| channel.presentation.command_prefix.as_deref());
         let observer = Arc::new(
             RunDeliveryObserver::with_settings_and_connection_notices(
                 services,
                 delivery.settings,
                 connection_notices.clone(),
             )
-            .with_enabled_commands(enabled_commands.iter().map(String::as_str)),
+            .with_enabled_commands(enabled_commands.iter().map(String::as_str), command_prefix),
         );
         Ok(Arc::new(RunDeliveryPostAdmissionObserver {
             observer,
@@ -1041,6 +1099,22 @@ impl GenericChannelHostAssembly {
             ReconciledChannel::Generic { observer, .. } => observer.clone(),
             _ => None,
         }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    use std::sync::Arc;
+
+    use ironclaw_product::InboundAttachmentLander;
+
+    use super::GenericChannelHostAssembly;
+
+    /// Return the exact attachment lander captured by production assembly.
+    pub fn inbound_attachment_lander(
+        assembly: &GenericChannelHostAssembly,
+    ) -> Arc<dyn InboundAttachmentLander> {
+        Arc::clone(&assembly.deps.inbound_attachments)
     }
 }
 
@@ -1200,8 +1274,9 @@ impl PostAdmissionObserver for RunDeliveryPostAdmissionObserver {
     }
 }
 
-impl RunDeliveryPostAdmissionObserver {
-    pub async fn observe_pairing_outcome(
+#[async_trait]
+impl ChannelPairingOutcomeObserver for RunDeliveryPostAdmissionObserver {
+    async fn observe_pairing_outcome(
         &self,
         conversation: ExternalConversationRef,
         event_id: ExternalEventId,

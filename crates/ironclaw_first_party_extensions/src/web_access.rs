@@ -7,9 +7,15 @@ use std::{
 
 use futures_util::FutureExt as _;
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
-    ResourceScope, ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgress,
-    RuntimeHttpEgressError, RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest, RuntimeKind,
+    action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    dispatch::RuntimeDispatchErrorKind,
+    http::{
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressReasonCode,
+        RuntimeHttpEgressRequest,
+    },
+    ids::{CapabilityId, InvocationId},
+    resource::{ResourceScope, ResourceUsage},
+    runtime::RuntimeKind,
 };
 use serde_json::{Value, json};
 use url::{Host, Url};
@@ -851,7 +857,7 @@ async fn call_exa_mcp_tool(
 async fn execute_runtime_http(
     request: RuntimeHttpEgressRequest,
     egress: Arc<dyn RuntimeHttpEgress>,
-) -> Result<ironclaw_host_api::RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+) -> Result<ironclaw_host_api::http::RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
     std::panic::AssertUnwindSafe(egress.execute(request))
         .catch_unwind()
         .await
@@ -1269,7 +1275,10 @@ fn operation_error() -> WebAccessDispatchError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{InvocationId, RuntimeHttpEgressResponse, UserId};
+    use ironclaw_host_api::{
+        http::RuntimeHttpEgressResponse,
+        ids::{InvocationId, UserId},
+    };
     use std::sync::Mutex as StdMutex;
 
     fn scope() -> ResourceScope {

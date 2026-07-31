@@ -15,10 +15,15 @@ use ironclaw_events::{
 };
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
-    ActionResultSummary, ActionSummary, AgentId, AuditEnvelope, AuditEventId, AuditStage,
-    CapabilityId, CorrelationId, DecisionSummary, ExtensionId, InvocationId, MountAlias,
-    MountGrant, MountPermissions, MountView, ProjectId, ResourceScope, RuntimeKind, TenantId,
-    UserId, VirtualPath,
+    audit::{ActionResultSummary, ActionSummary, AuditEnvelope, AuditStage, DecisionSummary},
+    ids::{
+        AgentId, AuditEventId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ProjectId,
+        TenantId, UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
+    runtime::RuntimeKind,
 };
 use ironclaw_reborn_event_store::{FilesystemDurableAuditLog, FilesystemDurableEventLog};
 

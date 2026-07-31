@@ -32,7 +32,9 @@ use std::sync::Arc;
 
 use ironclaw_auth::{AuthProductScope, AuthSurface, OAuthProviderIdentity};
 use ironclaw_host_api::{
-    AgentId, InvocationId, ProductSurfaceCaller, ResourceScope, TenantId, UserId,
+    ids::{AgentId, InvocationId, TenantId, UserId},
+    product_surface::ProductSurfaceCaller,
+    resource::ResourceScope,
 };
 use ironclaw_product::ChannelConnectionService;
 
@@ -43,7 +45,9 @@ use ironclaw_extension_host::channel_dm_provisioning::ChannelDmTargetProvisionin
 use ironclaw_extension_host::channel_identity_binding::{
     ChannelIdentityBindingConfig, bind_channel_identities_for_callback,
 };
-use ironclaw_host_api::{ChannelIdentityPostBindFactory, RebornUserIdentityLookup};
+use ironclaw_host_api::{
+    channel_identity::ChannelIdentityPostBindFactory, user_identity::RebornUserIdentityLookup,
+};
 
 /// Identity inputs for [`build_channel_connection_for_test`]. Plain strings
 /// so harness callers outside this crate don't need the id newtypes;
@@ -112,7 +116,7 @@ pub fn build_channel_connection_for_test(
             Some(Arc::clone(&installation_store)),
             Arc::clone(&identity_store) as Arc<dyn RebornUserIdentityLookup>,
             Arc::clone(&identity_store)
-                as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingDeleteStore>,
+                as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingDeleteStore>,
             credential_cleanup,
             account_status_reader,
             Some(runtime.channel_dm_target_store.clone()),
@@ -150,9 +154,9 @@ pub fn build_channel_connection_for_test(
         installation_store: Some(installation_store),
         channel_config: Some(runtime.channel_config_service.clone()),
         binding_store: Arc::clone(&identity_store)
-            as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingStore>,
+            as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingStore>,
         rollback_store: Arc::clone(&identity_store)
-            as Arc<dyn ironclaw_host_api::RebornUserIdentityBindingDeleteStore>,
+            as Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityBindingDeleteStore>,
         post_bind_factory,
         overrides: Vec::new(),
     };
@@ -278,18 +282,18 @@ impl ChannelConnectionTestBundle {
     /// active-binding predicate as
     /// [`Self::has_any_active_identity_binding`] for EACH of `user_ids`, but
     /// through ONE fresh `FilesystemChannelIdentityStore` over ONE fresh
-    /// local-dev root filesystem reopened at `storage_root` — fully
+    /// standalone root filesystem reopened at `storage_root` — fully
     /// independent of the live runtime's in-memory handles. This is the
     /// integration-tier approximation of a process restart: it proves the
     /// durable binding is reconstructible the way production reconstructs it
     /// on boot (`build_runtime` →
-    /// `FilesystemChannelIdentityStore::new` over the composed local-dev
+    /// `FilesystemChannelIdentityStore::new` over the composed standalone
     /// root). Results come back in `user_ids` order; the single reopen means
     /// a positive probe and its non-vacuity control read the same
     /// reconstructed store. Tests only.
     ///
     /// `libsql`-only, matching the factory seam it opens: the local-default
-    /// reopen path composes the libsql local-dev backend, so a wider gate
+    /// reopen path composes the libsql standalone backend, so a wider gate
     /// would silently probe a fresh in-memory store on non-libsql builds.
     pub async fn active_identity_bindings_after_reopen(
         &self,
@@ -297,7 +301,7 @@ impl ChannelConnectionTestBundle {
         storage_root: &std::path::Path,
         user_ids: &[&UserId],
     ) -> Result<Vec<bool>, String> {
-        let filesystem = crate::factory::open_local_dev_root_filesystem_for_test(storage_root)
+        let filesystem = crate::factory::open_standalone_root_filesystem_for_test(storage_root)
             .await
             .map_err(|error| error.to_string())?;
         let store = Arc::new(

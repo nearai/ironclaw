@@ -911,6 +911,7 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         "crates/ironclaw_loop_host/src/capability_port.rs",
         "crates/ironclaw_loop_host/src/capability_port/provider_validation.rs",
         "crates/ironclaw_loop_host/src/capability_port/surface_snapshot.rs",
+        "crates/ironclaw_loop_host/src/external_tool_capability.rs",
         "crates/ironclaw_loop_host/src/subagent_spawn_port.rs",
         // The model gateway is the LLM wire boundary. Executor helpers may
         // rebuild provider calls only from stored replay metadata.
@@ -923,10 +924,9 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         "crates/ironclaw_runner/src/tool_disclosure.rs",
         "crates/ironclaw_runner/src/tool_disclosure_port.rs",
         // Composition-local protocol surfaces that reconstruct provider-shaped
-        // output or local-dev provider tools.
+        // output or synthetic provider tools.
         "crates/ironclaw_reborn_composition/src/llm_admin/openai_compat_serve.rs",
-        "crates/ironclaw_reborn_composition/src/runtime/local_dev/external_tool_capability.rs",
-        "crates/ironclaw_reborn_composition/src/runtime/local_dev/synthetic_capability.rs",
+        "crates/ironclaw_loop_host/src/synthetic_capability.rs",
         "crates/ironclaw_reborn_composition/src/observability/trace_capture.rs",
     ]);
     let violations = uses
@@ -999,25 +999,25 @@ fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
     // otherwise have to live in the CLI or root app, which the dep rules
     // forbid).
     let composition_runtime = root.join("crates/ironclaw_reborn_composition/src/runtime.rs");
-    let composition_local_dev_runtime =
-        root.join("crates/ironclaw_reborn_composition/src/runtime/local_dev.rs");
+    let composition_capability_host =
+        root.join("crates/ironclaw_reborn_composition/src/runtime/capability_host.rs");
     assert!(
         composition_runtime.exists(),
         "expected Reborn runtime assembly at {}",
         composition_runtime.display()
     );
     assert!(
-        composition_local_dev_runtime.exists(),
-        "expected local-dev runtime assembly at {}",
-        composition_local_dev_runtime.display()
+        composition_capability_host.exists(),
+        "expected capability-host runtime assembly at {}",
+        composition_capability_host.display()
     );
     let composition_runtime_source = std::fs::read_to_string(&composition_runtime)
         .expect("composition runtime.rs must be readable");
     let composition_runtime_sources = format!(
         "{}\n{}",
         composition_runtime_source,
-        std::fs::read_to_string(&composition_local_dev_runtime)
-            .expect("composition runtime/local_dev.rs must be readable")
+        std::fs::read_to_string(&composition_capability_host)
+            .expect("composition runtime/capability_host.rs must be readable")
     );
     for required in [
         "pub async fn build_reborn_runtime",
@@ -2379,8 +2379,18 @@ fn collect_forbidden_turns_identifier_uses(
         if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
             continue;
         }
-        let contents = std::fs::read_to_string(&path)
+        if path
+            .components()
+            .any(|component| component.as_os_str() == "process_projection")
+            || path.file_name().and_then(|name| name.to_str()) == Some("process_projection.rs")
+        {
+            continue;
+        }
+        let mut contents = std::fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+        if path.file_name().and_then(|name| name.to_str()) == Some("lib.rs") {
+            contents = strip_process_projection_reexport_block(&contents);
+        }
         for pattern in ["InvocationId", "ProcessId"] {
             if contents.contains(pattern) {
                 violations.push(format!(
@@ -2390,6 +2400,29 @@ fn collect_forbidden_turns_identifier_uses(
             }
         }
     }
+}
+
+fn strip_process_projection_reexport_block(contents: &str) -> String {
+    let mut stripped = String::new();
+    let mut skipping = false;
+    for line in contents.lines() {
+        if line
+            .trim_start()
+            .starts_with("pub use process_projection::{")
+        {
+            skipping = true;
+            continue;
+        }
+        if skipping {
+            if line.trim_start() == "};" {
+                skipping = false;
+            }
+            continue;
+        }
+        stripped.push_str(line);
+        stripped.push('\n');
+    }
+    stripped
 }
 
 fn collect_forbidden_string_uses(
@@ -2629,7 +2662,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
                 "ironclaw_scripts",
@@ -2685,7 +2718,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_first_party_extensions",
                 "ironclaw_first_party_extension_ports",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
                 "ironclaw_scripts",
@@ -2732,7 +2765,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_scripts",
                 "ironclaw_secrets",
@@ -2772,7 +2805,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
                 "ironclaw_scripts",
@@ -2807,7 +2840,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_runner",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
                 "ironclaw_scripts",
@@ -2883,7 +2916,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
                 "ironclaw_scripts",
@@ -2892,6 +2925,31 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_threads",
                 "ironclaw_trust",
                 "ironclaw_tui",
+                "ironclaw_turns",
+                "ironclaw_wasm",
+            ],
+        },
+        BoundaryRule {
+            // Shared libSQL runtime owns connection mechanics only. It must
+            // remain below every adapter that consumes its read/write lanes.
+            crate_name: "ironclaw_libsql_runtime",
+            forbidden: vec![
+                "ironclaw_approvals",
+                "ironclaw_authorization",
+                "ironclaw_capabilities",
+                "ironclaw_dispatcher",
+                "ironclaw_events",
+                "ironclaw_filesystem",
+                "ironclaw_host_runtime",
+                "ironclaw_mcp",
+                "ironclaw_network",
+                "ironclaw_processes",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_triggers",
                 "ironclaw_turns",
                 "ironclaw_wasm",
             ],
@@ -2911,7 +2969,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],
@@ -2934,7 +2992,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_mcp",
                 "ironclaw_processes",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],
@@ -2955,7 +3013,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],
@@ -2976,7 +3034,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],
@@ -2995,7 +3053,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],
@@ -3023,7 +3081,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],
@@ -3055,7 +3113,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
                 "ironclaw_scripts",
@@ -3108,7 +3166,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
                 "ironclaw_scripts",
@@ -3143,7 +3201,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_safety",
                 "ironclaw_scripts",
                 "ironclaw_secrets",
@@ -3183,7 +3241,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
                 "ironclaw_scripts",
@@ -3212,7 +3270,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],
@@ -3235,7 +3293,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],
@@ -3254,7 +3312,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_secrets",
                 "ironclaw_wasm",
@@ -3273,26 +3331,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_processes",
                 "ironclaw_resources",
-                "ironclaw_run_state",
-                "ironclaw_scripts",
-                "ironclaw_wasm",
-            ],
-        },
-        BoundaryRule {
-            crate_name: "ironclaw_run_state",
-            forbidden: vec![
-                "ironclaw_authorization",
                 "ironclaw_approvals",
-                "ironclaw_capabilities",
-                "ironclaw_dispatcher",
-                "ironclaw_events",
-                "ironclaw_extensions",
-                "ironclaw_host_runtime",
-                "ironclaw_secrets",
-                "ironclaw_network",
-                "ironclaw_mcp",
-                "ironclaw_processes",
-                "ironclaw_resources",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],
@@ -3319,7 +3358,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_processes",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 // ironclaw_safety is permitted: thread/transcript storage
                 // validates provider-originated replay metadata before it can
                 // be persisted or exposed back to a model-visible context.
@@ -3358,7 +3397,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_secrets",
                 "ironclaw_network",
                 "ironclaw_mcp",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],
@@ -3371,7 +3410,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_capabilities",
                 "ironclaw_dispatcher",
                 "ironclaw_extensions",
-                // ironclaw_filesystem is permitted: TurnStateRowStore
+                // ironclaw_filesystem is permitted for agent-turn projections.
                 // routes turn-coordination persistence through ScopedFilesystem
                 // under the universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).
@@ -3380,8 +3419,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_mcp",
                 "ironclaw_memory",
                 "ironclaw_network",
-                "ironclaw_processes",
-                "ironclaw_run_state",
+                // ironclaw_processes is permitted during the process-journal
+                // kernel migration: turns adapts its existing turn-run store
+                // to the canonical process lifecycle vocabulary owned there.
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_secrets",
                 "ironclaw_wasm",
@@ -3406,7 +3447,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_processes",
                 "ironclaw_runner",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_secrets",
                 "ironclaw_wasm",
@@ -3452,7 +3493,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_traces",
                 "ironclaw_webui",
                 "ironclaw_resources",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
                 "ironclaw_scripts",
@@ -3486,7 +3527,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_mcp",
                 "ironclaw_processes",
-                "ironclaw_run_state",
+                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],
@@ -3512,6 +3553,25 @@ struct LayerMatrixException {
     removes_in: &'static str,
     reason: &'static str,
 }
+
+/// WS0 baseline for the §11.2.2 exception ratchet (target-architecture epic
+/// #3773, workstream #6920): the number of standing layer-matrix exceptions
+/// measured **on this checkout**, not copied from the design docs.
+///
+/// Measured 2026-07-30 against `origin/main` @ `ae0989c37` by counting the
+/// entries of `LAYER_MATRIX_EXCEPTIONS` below — the recount agreed with the 20
+/// the target-architecture PROPOSAL/CHECKLIST document:
+///
+/// ```text
+/// rg -c "^    LayerMatrixException \{" \
+///   crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs
+/// ```
+///
+/// The target is the empty list (PROPOSAL §11.2.2, CHECKLIST WS12). This
+/// number is therefore a ceiling that only ever moves **down**: when a wave
+/// deletes exceptions, lower it in the same PR so the new floor is locked in.
+/// The ratchet below refuses growth; it cannot make the list shrink on its own.
+const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 20;
 
 const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
     LayerMatrixException {
@@ -3655,6 +3715,120 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         reason: "product-auth owns the recipe-driven blocked-gate OAuth flow driver while it still receives TurnScope/TurnRunId from the turn gate prompt seam",
     },
 ];
+
+/// The tracking metadata every exception must carry to be removable: the edge
+/// it names, when it was taken on, the milestone that deletes it, and why it
+/// exists. Returns the first missing field, or `None` when the entry is fully
+/// tracked. Placeholders are treated as missing — "TBD" is not a milestone.
+fn exception_tracking_defect(exception: &LayerMatrixException) -> Option<&'static str> {
+    const PLACEHOLDERS: &[&str] = &["tbd", "todo", "unknown", "n/a", "na", "none", "?", "-"];
+    let untracked = |value: &str| {
+        let trimmed = value.trim();
+        trimmed.is_empty() || PLACEHOLDERS.contains(&trimmed.to_ascii_lowercase().as_str())
+    };
+    [
+        ("crate_name", exception.crate_name),
+        ("dependency_name", exception.dependency_name),
+        ("introduced", exception.introduced),
+        ("removes_in", exception.removes_in),
+        ("reason", exception.reason),
+    ]
+    .into_iter()
+    .find_map(|(field, value)| untracked(value).then_some(field))
+}
+
+/// §11.2.2 exception ratchet (PROPOSAL §11.2 item 2, CHECKLIST WS10), armed at
+/// the WS0 baseline. Two properties hold on every commit from here to WS12's
+/// empty list:
+///
+/// 1. **Shrink-only.** The list cannot grow past the recorded baseline, so a
+///    new exception cannot land untracked by quietly appending one more entry.
+/// 2. **Every entry is removable.** Each carries a `removes_in` milestone plus
+///    the edge/date/reason a reviewer needs — §11.2.2's "adding one requires
+///    `removes_in` + an owning issue". The owning-issue half arrives with
+///    WS10's §11.2.2 row, which adds the field once the list is short enough
+///    for exceptions to be genuinely exceptional.
+///
+/// The complementary staleness half — an exception whose edge no longer exists
+/// must be deleted — is enforced by
+/// `reborn_workspace_crates_declare_layers_and_follow_layer_matrix` above, so
+/// the two together mean the list can only move toward empty.
+#[test]
+fn reborn_layer_matrix_exceptions_ratchet_down_only() {
+    assert!(
+        LAYER_MATRIX_EXCEPTIONS.len() <= WS0_LAYER_MATRIX_EXCEPTION_BASELINE,
+        "layer-matrix exceptions grew to {} (WS0 baseline {}): the restructure's exception \
+         list is shrink-only on its way to empty (PROPOSAL §11.2.2). Remove the edge instead \
+         of allowlisting it — or, if the owner has approved a genuinely new exception, raise \
+         WS0_LAYER_MATRIX_EXCEPTION_BASELINE in the same PR with the rationale in the PR body.",
+        LAYER_MATRIX_EXCEPTIONS.len(),
+        WS0_LAYER_MATRIX_EXCEPTION_BASELINE
+    );
+
+    let untracked = LAYER_MATRIX_EXCEPTIONS
+        .iter()
+        .filter_map(|exception| {
+            exception_tracking_defect(exception).map(|field| {
+                format!(
+                    "    {} -> {}: missing `{}`",
+                    exception.crate_name, exception.dependency_name, field
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        untracked.is_empty(),
+        "layer-matrix exceptions without tracking metadata (every entry needs a `removes_in` \
+         milestone and a stated reason so it can be retired — PROPOSAL §11.2.2):\n{}",
+        untracked.join("\n")
+    );
+}
+
+/// Positive + negative fixtures for the tracking predicate above (WS10: every
+/// new ratchet lands with regression fixtures, so the guardrail fails loudly on
+/// its own regressions rather than silently passing everything).
+#[test]
+fn reborn_layer_matrix_exception_tracking_self_test() {
+    let tracked = LayerMatrixException {
+        crate_name: "ironclaw_example",
+        dependency_name: "ironclaw_other",
+        introduced: "2026-07-30",
+        removes_in: "W7",
+        reason: "fixture",
+    };
+    assert_eq!(exception_tracking_defect(&tracked), None);
+
+    let blank_milestone = LayerMatrixException {
+        removes_in: "   ",
+        ..tracked
+    };
+    assert_eq!(
+        exception_tracking_defect(&blank_milestone),
+        Some("removes_in"),
+        "a blank milestone must be reported as untracked"
+    );
+
+    let placeholder_milestone = LayerMatrixException {
+        removes_in: "TBD",
+        ..tracked
+    };
+    assert_eq!(
+        exception_tracking_defect(&placeholder_milestone),
+        Some("removes_in"),
+        "a placeholder milestone must be reported as untracked"
+    );
+
+    let blank_reason = LayerMatrixException {
+        reason: "",
+        ..tracked
+    };
+    assert_eq!(
+        exception_tracking_defect(&blank_reason),
+        Some("reason"),
+        "a blank reason must be reported as untracked"
+    );
+}
 
 fn layer_matrix_exception(
     crate_name: &str,

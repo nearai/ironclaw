@@ -182,7 +182,7 @@ impl HostIdentityContextBuildError {
             Self::UnknownIdentityFile | Self::InvalidIdentityFile | Self::PolicyDenied => {
                 AgentLoopHostErrorKind::PolicyDenied
             }
-            Self::ContextBudgetExceeded => AgentLoopHostErrorKind::BudgetExceeded,
+            Self::ContextBudgetExceeded => AgentLoopHostErrorKind::ContextOverflow,
             Self::BudgetMisconfigured | Self::Internal => AgentLoopHostErrorKind::Internal,
         };
         AgentLoopHostError::new(kind, self.to_string())
@@ -355,7 +355,7 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use ironclaw_host_api::{TenantId, ThreadId};
+    use ironclaw_host_api::ids::{TenantId, ThreadId};
     use ironclaw_turns::{
         RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
         run_profile::{InMemoryRunProfileResolver, LoopRunContext, PersonalContextPolicy},

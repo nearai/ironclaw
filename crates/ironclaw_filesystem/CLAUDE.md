@@ -115,19 +115,14 @@ boundary. The current rule is codified in
    and do not treat a store's absence from this list as license to write a
    new local retry loop instead of calling `cas_update`.
 
-   - `ironclaw_turns` runner-lease sidecar (`turn_state_row_store/runner_lease.rs`,
-     landed independently in #5232) drives its per-run lease records through
-     a local `put_with_cas` + `cas_retry_backoff` retry loop; the main
-     turn-state snapshot RMW already goes through `cas_update`. Migration
-     tracked as follow-up #5274 (runner-lease CAS consolidation).
    - `ironclaw_threads::filesystem_service` drives `write_new_message`,
      `reserve_sequence_via_thread_record` (the legacy fallback for backends
      without native sequence reservation; `reserve_sequence` itself is now
      row-native), `apply_message_update`, `append_capability_display_preview`,
      `create_summary_artifact`, and the
-     `message_sequence_index.rs`/`message_lookup_index.rs` writers through a
-     local `put_with_cas` retry loop (only `ensure_thread` was migrated onto
-     `cas_update`). These loops are already lock-free (no per-path mutex),
+     message-row and lookup-projection writers through a local `put_with_cas`
+     retry loop (only `ensure_thread` was migrated onto `cas_update`). These
+     loops are already lock-free (no per-path mutex),
      so they are not the convoy hazard `cas_update` was introduced to fix;
      migration to `cas_update`'s fail-closed semantics is a deferred
      follow-up tracked as a sibling to #5274.
@@ -146,17 +141,29 @@ boundary. The current rule is codified in
    parse `Entry::body` to evaluate filters. Everything queryable lives in
    `Entry::indexed`. This keeps the indexing contract portable across SQL,
    filesystem-sidecar, and HSM backends.
-5. **Encryption-at-rest is a backend decorator.** `EncryptedBackend`
+5. **Request queries are bounded index traversals.** Ordered request paths
+   use `query_ordered`, name the declared exact/prefix index, and carry a
+   keyset cursor. Backends fail closed when the equality-filter prefix,
+   ordering key, and tie-breaker are not covered by that declaration. Do not
+   reconstruct a materialized view by listing directories, offset-walking all
+   rows, or sorting a full result set during a request or normal startup.
+   Exact/prefix declarations install write-maintained ordered projections but
+   never backfill rows already present, including in-memory, libSQL, and
+   PostgreSQL backends. Historical backfills are explicit migration
+   operations. Equality keys that identify the tenant/domain partition must
+   lead the declared index; a path predicate applied after a global ordering
+   key does not satisfy this rule.
+6. **Encryption-at-rest is a backend decorator.** `EncryptedBackend`
    (forthcoming) wraps an inner backend and encrypts `Entry::body` plus any
    `IndexValue::Bytes` projection while letting scalar indexed projections
    (`scope`, `status`, …) pass through unencrypted. `SecretStore` and other
    sensitive-data stores never own encryption code — they write plaintext
    `Entry` values through a `ScopedFilesystem` whose mount happens to be
    wrapped in encryption.
-6. **No raw host paths leak.** Backends translate `VirtualPath` /
+7. **No raw host paths leak.** Backends translate `VirtualPath` /
    `ScopedPath` to host paths internally and never carry host paths in
    public types or error display output.
-7. **Tenant/user virtual-path scoping is preserved.** Multi-tenant
+8. **Tenant/user virtual-path scoping is preserved.** Multi-tenant
    deployments rely on the path prefix to route to per-tenant mounts. New
    persistence behavior must keep the scope keys in the path, not
    exclusively in `Entry::indexed`.

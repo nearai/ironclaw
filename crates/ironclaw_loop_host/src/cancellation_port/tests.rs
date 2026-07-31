@@ -6,20 +6,20 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::run_profile::{LoopCancelReasonKind, LoopCancellationPort};
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GetRunStateRequest,
-    ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileResolver,
-    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnAdmissionPolicy, TurnError, TurnId, TurnRunId, TurnRunState, TurnRunWake,
-    TurnRunWakeNotifier, TurnScope, TurnStateStore, TurnStatus, run_profile::AgentLoopHostError,
+    AcceptedMessageRef, AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, EventCursor,
+    GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
+    RunProfileResolver, RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
+    TurnActor, TurnAdmissionPolicy, TurnError, TurnId, TurnRunId, TurnRunState, TurnRunWake,
+    TurnRunWakeNotifier, TurnScope, TurnStatus, run_profile::AgentLoopHostError,
 };
 
 use super::{
-    AlwaysAliveLoopCancellationPort, AlwaysAliveRunCancellationFactory, RunCancellationFactory,
-    RunCancellationHandle, RunCancellationObservationKind, RunStateLoopCancellationPort,
-    TurnStateRunCancellationFactory,
+    AgentTurnRunCancellationFactory, AlwaysAliveLoopCancellationPort,
+    AlwaysAliveRunCancellationFactory, RunCancellationFactory, RunCancellationHandle,
+    RunCancellationObservationKind, RunStateLoopCancellationPort,
 };
 
 struct TestLiveCancellationFactory;
@@ -35,22 +35,22 @@ impl RunCancellationFactory for TestLiveCancellationFactory {
     }
 }
 
-struct StaticTurnStateStore {
+struct StaticAgentTurnRuntime {
     state: TurnRunState,
 }
 
-impl StaticTurnStateStore {
+impl StaticAgentTurnRuntime {
     fn new(state: TurnRunState) -> Self {
         Self { state }
     }
 }
 
-struct CountingTurnStateStore {
+struct CountingAgentTurnRuntime {
     state: TurnRunState,
     get_run_state_calls: AtomicUsize,
 }
 
-impl CountingTurnStateStore {
+impl CountingAgentTurnRuntime {
     fn new(state: TurnRunState) -> Self {
         Self {
             state,
@@ -64,7 +64,7 @@ impl CountingTurnStateStore {
 }
 
 #[async_trait]
-impl TurnStateStore for CountingTurnStateStore {
+impl AgentTurnRuntimePort for CountingAgentTurnRuntime {
     async fn submit_turn(
         &self,
         _request: SubmitTurnRequest,
@@ -106,7 +106,7 @@ impl TurnStateStore for CountingTurnStateStore {
 }
 
 #[async_trait]
-impl TurnStateStore for StaticTurnStateStore {
+impl AgentTurnRuntimePort for StaticAgentTurnRuntime {
     async fn submit_turn(
         &self,
         _request: SubmitTurnRequest,
@@ -328,7 +328,7 @@ async fn always_alive_factory_is_identified_as_inert_fallback() {
 async fn turn_state_factory_seeds_already_cancel_requested_run() {
     let state = test_run_state(TurnStatus::CancelRequested);
     let factory =
-        TurnStateRunCancellationFactory::new(Arc::new(StaticTurnStateStore::new(state.clone())));
+        AgentTurnRunCancellationFactory::new(Arc::new(StaticAgentTurnRuntime::new(state.clone())));
 
     let handle = factory
         .handle_for_run(&state.scope, state.run_id)
@@ -344,8 +344,8 @@ async fn turn_state_factory_seeds_already_cancel_requested_run() {
 #[tokio::test]
 async fn turn_state_factory_seeds_claimed_cancel_requested_run_without_store_read() {
     let state = test_run_state(TurnStatus::CancelRequested);
-    let store = Arc::new(CountingTurnStateStore::new(state.clone()));
-    let factory = TurnStateRunCancellationFactory::new(store.clone());
+    let store = Arc::new(CountingAgentTurnRuntime::new(state.clone()));
+    let factory = AgentTurnRunCancellationFactory::new(store.clone());
 
     let handle = factory.handle_for_claimed_run(&state).await.unwrap();
 
@@ -360,8 +360,8 @@ async fn turn_state_factory_seeds_claimed_cancel_requested_run_without_store_rea
 #[tokio::test]
 async fn turn_state_factory_claimed_running_run_skips_store_read_and_registers() {
     let state = test_run_state(TurnStatus::Running);
-    let store = Arc::new(CountingTurnStateStore::new(state.clone()));
-    let factory = TurnStateRunCancellationFactory::new(store.clone())
+    let store = Arc::new(CountingAgentTurnRuntime::new(state.clone()));
+    let factory = AgentTurnRunCancellationFactory::new(store.clone())
         .with_poll_interval(Duration::from_secs(60));
 
     let handle = factory.handle_for_claimed_run(&state).await.unwrap();
@@ -375,7 +375,7 @@ async fn turn_state_factory_claimed_running_run_skips_store_read_and_registers()
 async fn turn_state_factory_flips_registered_handle_from_cancel_wake() {
     let state = test_run_state(TurnStatus::Running);
     let factory =
-        TurnStateRunCancellationFactory::new(Arc::new(StaticTurnStateStore::new(state.clone())))
+        AgentTurnRunCancellationFactory::new(Arc::new(StaticAgentTurnRuntime::new(state.clone())))
             .with_poll_interval(Duration::from_secs(60));
     let handle = factory
         .handle_for_run(&state.scope, state.run_id)
@@ -398,8 +398,8 @@ async fn turn_state_factory_flips_registered_handle_from_cancel_wake() {
 #[tokio::test]
 async fn turn_state_factory_reads_run_state_once_when_registering_running_run() {
     let state = test_run_state(TurnStatus::Running);
-    let store = Arc::new(CountingTurnStateStore::new(state.clone()));
-    let factory = TurnStateRunCancellationFactory::new(store.clone())
+    let store = Arc::new(CountingAgentTurnRuntime::new(state.clone()));
+    let factory = AgentTurnRunCancellationFactory::new(store.clone())
         .with_poll_interval(Duration::from_secs(60));
 
     let handle = factory
@@ -416,7 +416,7 @@ async fn turn_state_factory_reads_run_state_once_when_registering_running_run() 
 async fn turn_state_factory_prunes_run_after_cancel_wake() {
     let state = test_run_state(TurnStatus::Running);
     let factory =
-        TurnStateRunCancellationFactory::new(Arc::new(StaticTurnStateStore::new(state.clone())))
+        AgentTurnRunCancellationFactory::new(Arc::new(StaticAgentTurnRuntime::new(state.clone())))
             .with_poll_interval(Duration::from_secs(60));
     let _handle = factory
         .handle_for_run(&state.scope, state.run_id)
@@ -436,11 +436,11 @@ async fn turn_state_factory_prunes_run_after_cancel_wake() {
     assert_eq!(factory.registered_run_count(), 0);
 }
 
-struct MutableTurnStateStore {
+struct MutableAgentTurnRuntime {
     state: std::sync::Mutex<TurnRunState>,
 }
 
-impl MutableTurnStateStore {
+impl MutableAgentTurnRuntime {
     fn new(state: TurnRunState) -> Self {
         Self {
             state: std::sync::Mutex::new(state),
@@ -453,7 +453,7 @@ impl MutableTurnStateStore {
 }
 
 #[async_trait]
-impl TurnStateStore for MutableTurnStateStore {
+impl AgentTurnRuntimePort for MutableAgentTurnRuntime {
     async fn submit_turn(
         &self,
         _request: SubmitTurnRequest,
@@ -495,8 +495,8 @@ impl TurnStateStore for MutableTurnStateStore {
 #[tokio::test]
 async fn turn_state_factory_polling_fallback_fires_without_wake() {
     let initial = test_run_state(TurnStatus::Running);
-    let store = Arc::new(MutableTurnStateStore::new(initial.clone()));
-    let factory = TurnStateRunCancellationFactory::new(store.clone())
+    let store = Arc::new(MutableAgentTurnRuntime::new(initial.clone()));
+    let factory = AgentTurnRunCancellationFactory::new(store.clone())
         .with_poll_interval(Duration::from_millis(5));
     let handle = factory
         .handle_for_run(&initial.scope, initial.run_id)
@@ -521,7 +521,7 @@ async fn turn_state_factory_polling_fallback_fires_without_wake() {
 async fn turn_state_factory_prunes_run_after_terminal_wake() {
     let state = test_run_state(TurnStatus::Running);
     let factory =
-        TurnStateRunCancellationFactory::new(Arc::new(StaticTurnStateStore::new(state.clone())))
+        AgentTurnRunCancellationFactory::new(Arc::new(StaticAgentTurnRuntime::new(state.clone())))
             .with_poll_interval(Duration::from_secs(60));
     let handle = factory
         .handle_for_run(&state.scope, state.run_id)

@@ -9,16 +9,23 @@ use crate::{
     ProductProjectionItem,
 };
 use async_trait::async_trait;
+use ironclaw_approvals::{ApprovalRecord, ApprovalRequestStorePort, ApprovalStoreError};
 use ironclaw_event_projections::{
     CapabilityActivityProjection, ProjectionSnapshot, ThreadTimeline,
 };
 use ironclaw_events::{InMemoryDurableEventLog, RuntimeEvent};
 use ironclaw_host_api::{
-    Action, AgentId, ApprovalRequest, ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId,
-    InvocationId, NetworkMethod, NetworkScheme, NetworkTarget, Principal, ProcessId,
-    ResourceEstimate, ResourceScope, RuntimeKind, ScopedPath, TenantId, ThreadId, UserId,
+    action::{Action, NetworkMethod, NetworkScheme, NetworkTarget},
+    approval::ApprovalRequest,
+    ids::{
+        AgentId, ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, InvocationId,
+        ProcessId, TenantId, ThreadId, UserId,
+    },
+    path::ScopedPath,
+    resource::{ResourceEstimate, ResourceScope},
+    runtime::RuntimeKind,
+    scope::Principal,
 };
-use ironclaw_run_state::{ApprovalRecord, ApprovalRequestStorePort, RunStateError};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor as TurnEventCursor,
     GateRef, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
@@ -245,8 +252,8 @@ impl ApprovalRequestStorePort for FailingApprovalRequestStore {
         &self,
         _scope: ResourceScope,
         _request: ApprovalRequest,
-    ) -> Result<ApprovalRecord, RunStateError> {
-        Err(RunStateError::Backend(
+    ) -> Result<ApprovalRecord, ApprovalStoreError> {
+        Err(ApprovalStoreError::Backend(
             "approval store unavailable".to_string(),
         ))
     }
@@ -255,8 +262,8 @@ impl ApprovalRequestStorePort for FailingApprovalRequestStore {
         &self,
         _scope: &ResourceScope,
         _request_id: ApprovalRequestId,
-    ) -> Result<Option<ApprovalRecord>, RunStateError> {
-        Err(RunStateError::Backend(
+    ) -> Result<Option<ApprovalRecord>, ApprovalStoreError> {
+        Err(ApprovalStoreError::Backend(
             "approval store unavailable".to_string(),
         ))
     }
@@ -265,8 +272,8 @@ impl ApprovalRequestStorePort for FailingApprovalRequestStore {
         &self,
         _scope: &ResourceScope,
         _request_id: ApprovalRequestId,
-    ) -> Result<ApprovalRecord, RunStateError> {
-        Err(RunStateError::Backend(
+    ) -> Result<ApprovalRecord, ApprovalStoreError> {
+        Err(ApprovalStoreError::Backend(
             "approval store unavailable".to_string(),
         ))
     }
@@ -275,8 +282,8 @@ impl ApprovalRequestStorePort for FailingApprovalRequestStore {
         &self,
         _scope: &ResourceScope,
         _request_id: ApprovalRequestId,
-    ) -> Result<ApprovalRecord, RunStateError> {
-        Err(RunStateError::Backend(
+    ) -> Result<ApprovalRecord, ApprovalStoreError> {
+        Err(ApprovalStoreError::Backend(
             "approval store unavailable".to_string(),
         ))
     }
@@ -284,8 +291,8 @@ impl ApprovalRequestStorePort for FailingApprovalRequestStore {
     async fn records_for_scope(
         &self,
         _scope: &ResourceScope,
-    ) -> Result<Vec<ApprovalRecord>, RunStateError> {
-        Err(RunStateError::Backend(
+    ) -> Result<Vec<ApprovalRecord>, ApprovalStoreError> {
+        Err(ApprovalStoreError::Backend(
             "approval store unavailable".to_string(),
         ))
     }

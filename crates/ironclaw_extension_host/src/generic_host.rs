@@ -32,8 +32,12 @@ use ironclaw_extensions::{
     ExtensionPackage, ResolvedExtensionManifest,
 };
 use ironclaw_host_api::{
-    ExtensionHostAssemblyConfig, RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest,
-    RestrictedEgressResponse, ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult, VirtualPath,
+    extension::ExtensionHostAssemblyConfig,
+    path::VirtualPath,
+    tool_adapter::{
+        RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
+        ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
+    },
 };
 use ironclaw_host_runtime::{ExtensionLaneToolBinder, ExtensionToolBindError};
 use ironclaw_product::{
@@ -127,7 +131,7 @@ pub async fn boot_installation_records(
 async fn effective_channel_config(
     _installation_store: &Arc<dyn ExtensionInstallationStorePort>,
     channel_config: Option<&Arc<ChannelConfigService>>,
-    extension_id: &ironclaw_host_api::ExtensionId,
+    extension_id: &ironclaw_host_api::ids::ExtensionId,
 ) -> Result<Vec<(String, String)>, BootInstallationRecordsError> {
     match channel_config {
         Some(channel_config) => channel_config
@@ -140,7 +144,7 @@ async fn effective_channel_config(
 
 fn boot_installation_record(
     installation_id: &str,
-    extension_id: &ironclaw_host_api::ExtensionId,
+    extension_id: &ironclaw_host_api::ids::ExtensionId,
     resolved: &ResolvedExtensionManifest,
     config: Vec<(String, String)>,
 ) -> InstallationRecord {
@@ -266,7 +270,7 @@ impl ExtensionLoader for CompositionExtensionLoader {
         // Rebuild the validated package from the resolved contract — no TOML
         // reparse; the manifest source re-checks come from the persisted
         // record.
-        let extension_id = ironclaw_host_api::ExtensionId::new(&ctx.extension_id)
+        let extension_id = ironclaw_host_api::ids::ExtensionId::new(&ctx.extension_id)
             .map_err(|error| load_error(format!("invalid extension id: {error}")))?;
         let source = match self
             .installation_store
@@ -279,8 +283,8 @@ impl ExtensionLoader for CompositionExtensionLoader {
             // least source that admits the contract's requested trust —
             // `to_internal` re-checks source-vs-trust either way.
             None => match ctx.resolved.requested_trust {
-                ironclaw_host_api::RequestedTrustClass::FirstPartyRequested
-                | ironclaw_host_api::RequestedTrustClass::SystemRequested => {
+                ironclaw_host_api::trust::RequestedTrustClass::FirstPartyRequested
+                | ironclaw_host_api::trust::RequestedTrustClass::SystemRequested => {
                     ironclaw_extensions::ManifestSource::HostBundled
                 }
                 _ => ironclaw_extensions::ManifestSource::InstalledLocal,
@@ -305,8 +309,7 @@ impl ExtensionLoader for CompositionExtensionLoader {
 
         let manifest = ExtensionManifest::try_from(manifest_v2)
             .map_err(|error| load_error(format!("manifest rebuild failed: {error}")))?;
-        let root = VirtualPath::new(format!("/system/extensions/{}", ctx.extension_id))
-            .map_err(|error| load_error(format!("extension root invalid: {error}")))?;
+        let root = resolve_package_root(ctx.resolved.root.as_ref(), &ctx.extension_id)?;
         let package = ExtensionPackage::from_manifest(manifest, root)
             .map_err(|error| load_error(format!("package rebuild failed: {error}")))?;
         let adapter = self
@@ -335,6 +338,22 @@ impl ExtensionLoader for CompositionExtensionLoader {
 
 fn load_error(reason: String) -> BindError {
     BindError::Load { reason }
+}
+
+/// Use the package root persisted with the resolved contract when one is
+/// present. Fall back to fabricating `/system/extensions/{id}` for rows
+/// persisted before `ResolvedExtensionManifest::root` existed (back-compat
+/// with pre-existing installations) — this is the ONLY reason the fallback
+/// exists; do not remove it.
+fn resolve_package_root(
+    resolved_root: Option<&VirtualPath>,
+    extension_id: &str,
+) -> Result<VirtualPath, BindError> {
+    match resolved_root {
+        Some(root) => Ok(root.clone()),
+        None => VirtualPath::new(format!("/system/extensions/{extension_id}"))
+            .map_err(|error| load_error(format!("extension root invalid: {error}"))),
+    }
 }
 
 /// Entrypoint over a lane-bound tool adapter (wasm / mcp / script /
@@ -400,16 +419,16 @@ impl ToolAdapter for SettlingToolAdapter {
                 .governor
                 .reserve(scope, estimate)
                 .map_err(|_| ToolError::Failed {
-                    kind: ironclaw_host_api::RuntimeDispatchErrorKind::Resource,
+                    kind: ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::Resource,
                     safe_summary: None,
                     model_visible_cause: None,
                 })?,
         };
         match self.inner.invoke(call, ports).await {
             Ok(result) => {
-                let usage = ironclaw_host_api::ResourceUsage {
+                let usage = ironclaw_host_api::resource::ResourceUsage {
                     output_bytes: result.output_bytes,
-                    ..ironclaw_host_api::ResourceUsage::default()
+                    ..ironclaw_host_api::resource::ResourceUsage::default()
                 };
                 if self.governor.reconcile(reservation.id, usage).is_err() {
                     release_reservation(self.governor.as_ref(), reservation.id);
@@ -426,7 +445,7 @@ impl ToolAdapter for SettlingToolAdapter {
 
 fn release_reservation(
     governor: &dyn ResourceGovernor,
-    reservation_id: ironclaw_host_api::ResourceReservationId,
+    reservation_id: ironclaw_host_api::ids::ResourceReservationId,
 ) {
     if let Err(error) = governor.release(reservation_id) {
         tracing::warn!(
@@ -494,7 +513,7 @@ impl EgressFactory for DenyAllEgressFactory {
         &self,
         _extension_id: &str,
         _installation_id: &str,
-        _declared: &[ironclaw_host_api::ChannelEgressDescriptor],
+        _declared: &[ironclaw_host_api::channel::ChannelEgressDescriptor],
     ) -> Arc<dyn RestrictedEgress> {
         Arc::new(DenyAllRestrictedEgress)
     }
@@ -523,7 +542,7 @@ mod tests {
         ManifestSource,
     };
     use ironclaw_filesystem::DiskFilesystem;
-    use ironclaw_host_api::ExtensionHostAssemblyConfig;
+    use ironclaw_host_api::extension::ExtensionHostAssemblyConfig;
     use ironclaw_host_api::ids::{CapabilityId, ExtensionId};
     use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
     use ironclaw_processes::ProcessServices;
@@ -596,6 +615,7 @@ input_schema_ref = "schemas/echo.input.json"
             &ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
             None,
             &ironclaw_host_runtime::default_host_api_contract_registry().expect("contracts"),
+            None,
         )
         .expect("fixture manifest resolves");
         let extension_id = ExtensionId::new(id).expect("extension id");
@@ -626,6 +646,28 @@ input_schema_ref = "schemas/echo.input.json"
             CapabilitySurfaceVersion::new("surface-v1").expect("surface version"),
         )
         .extension_lane_tool_binder()
+    }
+
+    #[test]
+    fn resolve_package_root_uses_the_persisted_root_when_present() {
+        let persisted =
+            VirtualPath::new("/system/extensions/actually-persisted-root").expect("persisted root");
+        let resolved =
+            resolve_package_root(Some(&persisted), "foo").expect("persisted root resolves");
+        assert_eq!(
+            resolved, persisted,
+            "a persisted root must win over the fabricated fallback, even when \
+             it does not match the fabricated `/system/extensions/{{id}}` shape"
+        );
+    }
+
+    #[test]
+    fn resolve_package_root_fabricates_the_legacy_path_when_none() {
+        let resolved = resolve_package_root(None, "legacy-ext").expect("legacy fallback resolves");
+        assert_eq!(
+            resolved,
+            VirtualPath::new("/system/extensions/legacy-ext").expect("fabricated root")
+        );
     }
 
     /// H.5 / MIG-4: durable installation records hydrate into the generic
@@ -668,7 +710,7 @@ input_schema_ref = "schemas/echo.input.json"
 
     async fn filesystem_installation_store_for_test() -> ExtensionInstallationStore {
         use ironclaw_filesystem::InMemoryBackend;
-        use ironclaw_host_api::{HostPortCatalog, VirtualPath};
+        use ironclaw_host_api::{host_port::HostPortCatalog, path::VirtualPath};
 
         ExtensionInstallationStore::load_at(
             Arc::new(InMemoryBackend::new()),

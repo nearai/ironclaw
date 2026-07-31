@@ -25,7 +25,7 @@ use crate::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_events::{SecurityAuditEvent, SecurityAuditSink, SecurityBoundary, SecurityDecision};
-use ironclaw_host_api::ExtensionId;
+use ironclaw_host_api::ids::ExtensionId;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
@@ -532,7 +532,7 @@ pub struct RebornProductAuthServices {
     auth_engine: Option<Arc<crate::AuthEngine>>,
     /// One recipe-driven blocked-gate OAuth driver covering every vendor.
     oauth_gate_driver: Option<Arc<OAuthGateFlowDriver>>,
-    /// Optional read projection for WebUI/local-dev auth interactions.
+    /// Optional read projection for WebUI/standalone auth interactions.
     ///
     /// `RebornProductAuthServices` may still support OAuth callbacks,
     /// manual-token setup, credential refresh, and continuation dispatch
@@ -894,7 +894,7 @@ impl RebornProductAuthServices {
     /// silently start failing the moment any caller clones the `Arc` first).
     ///
     /// `scope` must be the process's own boot-time owner scope (composition
-    /// derives it from `local_dev_nearai_mcp_owner_scope`), never a
+    /// derives it from `standalone_nearai_mcp_owner_scope`), never a
     /// per-request, per-thread, or per-user scope — the fallback selector
     /// reuses it as the credential lookup target for every matching SSO
     /// caller. This rejects a mission/thread-scoped value as a fail-closed
@@ -920,12 +920,12 @@ impl RebornProductAuthServices {
         Ok(self)
     }
 
-    /// Enable WebUI/local-dev/composition auth-flow projection source.
+    /// Enable WebUI/standalone/composition auth-flow projection source.
     ///
     /// Exported `pub` so integration-test harnesses outside the crate can wire
     /// an in-memory fake, and so the production composition factory can attach
     /// its configured flow projection. Not part of the stable product API;
-    /// callers outside WebUI/local-dev or composition adapter wiring should use
+    /// callers outside WebUI/standalone or composition adapter wiring should use
     /// higher-level product-auth surfaces instead.
     #[doc(hidden)]
     pub fn with_flow_record_source(mut self, source: Arc<dyn AuthFlowRecordSource>) -> Self {
@@ -938,7 +938,7 @@ impl RebornProductAuthServices {
     pub async fn cancel_blocked_auth_flow(
         &self,
         scope: &TurnScope,
-        owner_user_id: &ironclaw_host_api::UserId,
+        owner_user_id: &ironclaw_host_api::ids::UserId,
         run_id: TurnRunId,
         gate_ref: &str,
     ) -> Result<(), AuthProductError> {
@@ -1455,17 +1455,16 @@ impl RebornProductAuthServices {
 
     fn setup_pkce_secret_handle(
         flow_id: AuthFlowId,
-    ) -> Result<ironclaw_host_api::SecretHandle, AuthProductError> {
-        ironclaw_host_api::SecretHandle::new(format!("product-auth-setup-pkce-{flow_id}")).map_err(
-            |error| {
+    ) -> Result<ironclaw_host_api::ids::SecretHandle, AuthProductError> {
+        ironclaw_host_api::ids::SecretHandle::new(format!("product-auth-setup-pkce-{flow_id}"))
+            .map_err(|error| {
                 tracing::warn!(
                     flow_id = %flow_id,
                     error = %error,
                     "failed to build setup PKCE secret handle"
                 );
                 AuthProductError::BackendUnavailable
-            },
-        )
+            })
     }
 
     /// Durably store a setup flow's raw PKCE verifier under its per-flow
@@ -1850,7 +1849,7 @@ impl RebornProductAuthServices {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn local_dev_in_memory(
+    pub fn in_memory_for_test(
         continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
     ) -> Self {
         let services = Arc::new(crate::InMemoryAuthProductServices::new());

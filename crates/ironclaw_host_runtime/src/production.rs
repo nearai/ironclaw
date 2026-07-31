@@ -1,3 +1,4 @@
+// arch-exempt: large_file, process-journal invocation projection migration, plan #6168
 //! Production composition of the [`HostRuntime`] contract.
 //!
 //! [`DefaultHostRuntime`] is the contract-level service that upper turn/loop
@@ -16,6 +17,7 @@
 use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
+use ironclaw_approvals::{ApprovalRequestStorePort, ApprovalStoreError};
 use ironclaw_approvals::{
     PersistentApprovalAction, PersistentApprovalPolicyKey, PersistentApprovalPolicyStorePort,
     PersistentApprovalScope,
@@ -28,21 +30,24 @@ use ironclaw_capabilities::{
 use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityDispatcher, CapabilityId, DenyReason, FailureKind, InvocationId,
-    Principal, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
-    runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
+    approval::sha256_digest_token,
+    decision::{DenyReason, RuntimeCredentialAuthRequirement},
+    dispatch::CapabilityDispatcher,
+    ids::{ApprovalRequestId, CapabilityId, InvocationId, SecretHandle},
+    resource::ResourceScope,
+    result_meta::FailureKind,
+    runtime::RuntimeKind,
+    runtime_policy::EffectiveRuntimePolicy,
+    scope::Principal,
 };
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_process_sandbox::{
     PROCESS_SANDBOX_CAPABILITY_ID, SandboxProcessPlan, ValidatedSandboxProcessPlan,
 };
 use ironclaw_processes::{
-    ProcessCancellationRegistry, ProcessError, ProcessHost, ProcessManager, ProcessResultStorePort,
-    ProcessStart, ProcessStatus, ProcessStorePort,
-};
-use ironclaw_run_state::{
-    ApprovalRequestStorePort, RunStateApprovalStorePort, RunStateError, RunStateStorePort,
-    RunStatus,
+    ProcessError, ProcessInvocationError, ProcessInvocationStatePort, ProcessInvocationStatus,
+    ProcessKind, ProcessManager, ProcessRuntimePort, ProcessServices, ProcessStart, ProcessStatus,
+    map_process_journal_error, process_record_from_snapshot,
 };
 use ironclaw_secrets::SecretStorePort;
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
@@ -112,22 +117,16 @@ pub struct DefaultHostRuntime {
     authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
     trust_policy: Arc<dyn TrustPolicy>,
     // arch-exempt: optional_arc, store ports are absent in minimal/test runtime graphs, plan #4539
-    run_state: Option<Arc<dyn RunStateStorePort>>,
+    invocation_state: Option<Arc<dyn ProcessInvocationStatePort>>,
     // arch-exempt: optional_arc, store ports are absent in minimal/test runtime graphs, plan #4539
     approval_requests: Option<Arc<dyn ApprovalRequestStorePort>>,
-    // arch-exempt: optional_arc, combined store port is absent in minimal/test runtime graphs, plan #4539
-    run_state_approval_store: Option<Arc<dyn RunStateApprovalStorePort>>,
     // arch-exempt: optional_arc, capability leases are absent in minimal/test runtime graphs, plan #4539
     capability_leases: Option<Arc<dyn CapabilityLeaseStorePort>>,
     // arch-exempt: optional_arc, minimal/test compositions intentionally disable persistent approval replay, plan #4539
     // Until the product revoke control plane is split out.
     persistent_approval_policies: Option<Arc<dyn PersistentApprovalPolicyStorePort>>,
     process_manager: Option<Arc<dyn ProcessManager>>,
-    // arch-exempt: optional_arc, process stores are absent unless process execution is wired, plan #4539
-    process_store: Option<Arc<dyn ProcessStorePort>>,
-    // arch-exempt: optional_arc, process stores are absent unless process execution is wired, plan #4539
-    process_result_store: Option<Arc<dyn ProcessResultStorePort>>,
-    process_cancellation_registry: Option<Arc<ProcessCancellationRegistry>>,
+    process_services: Option<ProcessServices>,
     surface_filesystem: Option<Arc<dyn RootFilesystem>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     obligation_handler: Option<Arc<dyn CapabilityObligationHandler>>,
@@ -159,10 +158,8 @@ impl DefaultHostRuntime {
     /// capability dispatch is denied until composition attaches a concrete
     /// policy with [`Self::with_trust_policy`] or [`Self::with_trust_policy_dyn`].
     ///
-    /// Callers must additionally attach either a combined
-    /// [`RunStateApprovalStorePort`] via
-    /// [`with_run_state_approval_store`](Self::with_run_state_approval_store),
-    /// or separate stores via [`with_run_state`](Self::with_run_state) and
+    /// Callers must additionally attach invocation and approval stores via
+    /// [`with_invocation_state`](Self::with_invocation_state) and
     /// [`with_approval_requests`](Self::with_approval_requests), before
     /// invoking any capability whose authorizer may return
     /// `RequireApproval`. Without those stores the capability host fails
@@ -197,15 +194,12 @@ impl DefaultHostRuntime {
             dispatcher,
             authorizer,
             trust_policy: Arc::new(HostTrustPolicy::fail_closed()),
-            run_state: None,
+            invocation_state: None,
             approval_requests: None,
-            run_state_approval_store: None,
             capability_leases: None,
             persistent_approval_policies: None,
             process_manager: None,
-            process_store: None,
-            process_result_store: None,
-            process_cancellation_registry: None,
+            process_services: None,
             surface_filesystem: None,
             runtime_health: None,
             obligation_handler: None,
@@ -243,11 +237,13 @@ impl DefaultHostRuntime {
         self
     }
 
-    /// Attaches the run-state store used to record invocation lifecycle.
+    /// Attaches the process invocation-state port used to record lifecycle.
     // arch-exempt: optional_arc, store ports are absent in minimal/test runtime graphs, plan #4539
-    pub fn with_run_state(mut self, run_state: Arc<dyn RunStateStorePort>) -> Self {
-        self.run_state = Some(run_state);
-        self.run_state_approval_store = None;
+    pub fn with_invocation_state(
+        mut self,
+        invocation_state: Arc<dyn ProcessInvocationStatePort>,
+    ) -> Self {
+        self.invocation_state = Some(invocation_state);
         self
     }
 
@@ -258,20 +254,6 @@ impl DefaultHostRuntime {
         approval_requests: Arc<dyn ApprovalRequestStorePort>,
     ) -> Self {
         self.approval_requests = Some(approval_requests);
-        self.run_state_approval_store = None;
-        self
-    }
-
-    /// Attaches a combined durable run-state/approval-request store with an
-    /// atomic approval-block transition.
-    // arch-exempt: optional_arc, combined store port is absent in minimal/test runtime graphs, plan #4539
-    pub fn with_run_state_approval_store(
-        mut self,
-        store: Arc<dyn RunStateApprovalStorePort>,
-    ) -> Self {
-        self.run_state = Some(store.clone());
-        self.approval_requests = Some(store.clone());
-        self.run_state_approval_store = Some(store);
         self
     }
 
@@ -302,30 +284,8 @@ impl DefaultHostRuntime {
         self
     }
 
-    /// Attaches the process store used for status and cancellation fanout.
-    // arch-exempt: optional_arc, process stores are absent unless process execution is wired, plan #4539
-    pub fn with_process_store(mut self, process_store: Arc<dyn ProcessStorePort>) -> Self {
-        self.process_store = Some(process_store);
-        self
-    }
-
-    /// Attaches the process result store used to persist cancellation results.
-    // arch-exempt: optional_arc, process stores are absent unless process execution is wired, plan #4539
-    pub fn with_process_result_store(
-        mut self,
-        process_result_store: Arc<dyn ProcessResultStorePort>,
-    ) -> Self {
-        self.process_result_store = Some(process_result_store);
-        self
-    }
-
-    /// Attaches the process cancellation registry used to notify running
-    /// background executors when `cancel_work` kills a process record.
-    pub fn with_process_cancellation_registry(
-        mut self,
-        registry: Arc<ProcessCancellationRegistry>,
-    ) -> Self {
-        self.process_cancellation_registry = Some(registry);
+    pub fn with_process_services(mut self, process_services: ProcessServices) -> Self {
+        self.process_services = Some(process_services);
         self
     }
 
@@ -711,12 +671,15 @@ impl HostRuntime for DefaultHostRuntime {
                     Some("auth gate denied by user".to_string()),
                 ),
             )),
-            Err(CapabilityInvocationError::RunState(error)) => {
-                Err(unavailable_from_run_state(*error))
+            Err(CapabilityInvocationError::InvocationState(error)) => {
+                Err(unavailable_from_invocation_state(*error))
             }
-            Err(CapabilityInvocationError::ResumeStoreMissing { .. }) => {
-                Err(HostRuntimeError::unavailable("run-state store unavailable"))
+            Err(CapabilityInvocationError::ApprovalStore(error)) => {
+                Err(unavailable_from_approval_store(*error))
             }
+            Err(CapabilityInvocationError::ResumeStoreMissing { .. }) => Err(
+                HostRuntimeError::unavailable("invocation-state store unavailable"),
+            ),
             Err(error) => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
                 error,
                 capability_id,
@@ -831,18 +794,12 @@ impl HostRuntime for DefaultHostRuntime {
         let mut outcome = CancelRuntimeWorkOutcome::default();
         let mut process_invocations = Vec::new();
 
-        if let Some(process_store) = &self.process_store {
-            let records = process_store
-                .records_for_scope(&request.scope)
+        if let Some(process_services) = &self.process_services {
+            let process_runtime = process_services.process_runtime();
+            let records = capability_process_records(process_runtime.as_ref(), &request.scope)
                 .await
                 .map_err(unavailable_from_process_error)?;
-            let mut process_host = ProcessHost::new(process_store.as_ref());
-            if let Some(registry) = &self.process_cancellation_registry {
-                process_host = process_host.with_cancellation_registry(Arc::clone(registry));
-            }
-            if let Some(result_store) = &self.process_result_store {
-                process_host = process_host.with_result_store_dyn(Arc::clone(result_store));
-            }
+            let process_host = process_services.host();
 
             for record in records {
                 if record.status != ProcessStatus::Running {
@@ -862,15 +819,15 @@ impl HostRuntime for DefaultHostRuntime {
             }
         }
 
-        if let Some(run_state) = &self.run_state {
-            let records = run_state
+        if let Some(invocation_state) = &self.invocation_state {
+            let records = invocation_state
                 .records_for_scope(&request.scope)
                 .await
-                .map_err(unavailable_from_run_state)?;
+                .map_err(unavailable_from_invocation_state)?;
             outcome.unsupported.extend(
                 records
                     .into_iter()
-                    .filter(|record| record.status == RunStatus::Running)
+                    .filter(|record| record.status == ProcessInvocationStatus::Running)
                     .filter(|record| !process_invocations.contains(&record.invocation_id))
                     .map(|record| RuntimeWorkId::Invocation(record.invocation_id)),
             );
@@ -892,16 +849,16 @@ impl HostRuntime for DefaultHostRuntime {
         let mut active_work = Vec::new();
         let registry = self.registry.snapshot();
 
-        if let Some(run_state) = &self.run_state {
-            let records = run_state
+        if let Some(invocation_state) = &self.invocation_state {
+            let records = invocation_state
                 .records_for_scope(&request.scope)
                 .await
-                .map_err(unavailable_from_run_state)?;
+                .map_err(unavailable_from_invocation_state)?;
 
             active_work.extend(
                 records
                     .into_iter()
-                    .filter(|record| record.status == RunStatus::Running)
+                    .filter(|record| record.status == ProcessInvocationStatus::Running)
                     .map(|record| {
                         let runtime = registry
                             .get_capability(&record.capability_id)
@@ -915,9 +872,9 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
-        if let Some(process_store) = &self.process_store {
-            let records = process_store
-                .records_for_scope(&request.scope)
+        if let Some(process_services) = &self.process_services {
+            let process_runtime = process_services.process_runtime();
+            let records = capability_process_records(process_runtime.as_ref(), &request.scope)
                 .await
                 .map_err(unavailable_from_process_error)?;
             let mut process_invocations = Vec::new();
@@ -987,15 +944,11 @@ impl DefaultHostRuntime {
             // coerces to `&dyn HostPolicyFacts`.
             self,
         );
-        if let Some(run_state_approval_store) = &self.run_state_approval_store {
-            host = host.with_run_state_approval_store(run_state_approval_store.as_ref());
-        } else {
-            if let Some(run_state) = &self.run_state {
-                host = host.with_run_state(run_state.as_ref());
-            }
-            if let Some(approval_requests) = &self.approval_requests {
-                host = host.with_approval_requests(approval_requests.as_ref());
-            }
+        if let Some(invocation_state) = &self.invocation_state {
+            host = host.with_invocation_state(invocation_state.as_ref());
+        }
+        if let Some(approval_requests) = &self.approval_requests {
+            host = host.with_approval_requests(approval_requests.as_ref());
         }
         if let Some(capability_leases) = &self.capability_leases {
             host = host.with_capability_leases(capability_leases.as_ref());
@@ -1015,19 +968,19 @@ impl DefaultHostRuntime {
     /// claiming leases or dispatching.
     async fn resume_actor_preflight_guard(
         &self,
-        context: &ironclaw_host_api::ExecutionContext,
+        context: &ironclaw_host_api::scope::ExecutionContext,
         capability_id: &CapabilityId,
     ) -> Result<Option<RuntimeCapabilityOutcome>, HostRuntimeError> {
         context
             .validate()
             .map_err(|error| HostRuntimeError::invalid_request(error.to_string()))?;
-        let Some(run_state) = self.run_state.as_ref() else {
+        let Some(invocation_state) = self.invocation_state.as_ref() else {
             return Ok(None);
         };
-        let Some(record) = run_state
+        let Some(record) = invocation_state
             .get(&context.resource_scope, context.invocation_id)
             .await
-            .map_err(unavailable_from_run_state)?
+            .map_err(unavailable_from_invocation_state)?
         else {
             return Ok(None);
         };
@@ -1115,10 +1068,10 @@ impl DefaultHostRuntime {
         scope: &ResourceScope,
         invocation_id: InvocationId,
     ) {
-        let Some(run_state) = self.run_state.as_ref() else {
+        let Some(invocation_state) = self.invocation_state.as_ref() else {
             return;
         };
-        if let Err(error) = run_state
+        if let Err(error) = invocation_state
             .fail(scope, invocation_id, "Dispatch".to_string())
             .await
         {
@@ -1126,7 +1079,7 @@ impl DefaultHostRuntime {
                 invocation_id = %invocation_id,
                 capability_id = %failure.capability_id,
                 failure_kind = failure.kind.as_str(),
-                transition_error = %unavailable_from_run_state(error),
+                transition_error = %unavailable_from_invocation_state(error),
                 "terminal dispatch failure could not transition run state; failure is returned to caller",
             );
         }
@@ -1137,13 +1090,13 @@ impl DefaultHostRuntime {
         scope: &ResourceScope,
         invocation_id: InvocationId,
     ) -> Result<Option<ApprovalRequestId>, HostRuntimeError> {
-        let Some(run_state) = self.run_state.as_ref() else {
+        let Some(invocation_state) = self.invocation_state.as_ref() else {
             return Ok(None);
         };
-        let record = run_state
+        let record = invocation_state
             .get(scope, invocation_id)
             .await
-            .map_err(unavailable_from_run_state)?;
+            .map_err(unavailable_from_invocation_state)?;
         Ok(record.and_then(|record| record.approval_request_id))
     }
 }
@@ -1227,9 +1180,9 @@ impl ironclaw_capabilities::HostPolicyFacts for DefaultHostRuntime {
     async fn persistent_grants(
         &self,
         capability_id: &CapabilityId,
-        context: &ironclaw_host_api::ExecutionContext,
+        context: &ironclaw_host_api::scope::ExecutionContext,
         action: ironclaw_capabilities::PolicyAction,
-    ) -> Vec<ironclaw_host_api::CapabilityGrant> {
+    ) -> Vec<ironclaw_host_api::capability::CapabilityGrant> {
         let Some(policies) = self.persistent_approval_policies.as_ref() else {
             return Vec::new();
         };
@@ -1279,26 +1232,39 @@ impl ironclaw_capabilities::HostPolicyFacts for DefaultHostRuntime {
     }
 }
 
-/// Maps a [`RunStateError`] to a sanitized [`HostRuntimeError::Unavailable`].
+/// Maps a [`ProcessInvocationError`] to a sanitized [`HostRuntimeError::Unavailable`].
+fn unavailable_from_invocation_state(error: ProcessInvocationError) -> HostRuntimeError {
+    let reason = match error {
+        ProcessInvocationError::UnknownInvocation { .. } => "process invocation not found",
+        ProcessInvocationError::InvocationAlreadyExists { .. } => {
+            "process invocation already exists"
+        }
+        ProcessInvocationError::Serialization(_) => "process invocation serialization failed",
+        ProcessInvocationError::Deserialization(_) => "process invocation deserialization failed",
+        ProcessInvocationError::Backend(_) => "process invocation backend unavailable",
+    };
+    HostRuntimeError::unavailable(reason)
+}
+
+/// Maps an approval-store error to a sanitized [`HostRuntimeError::Unavailable`].
 ///
-/// `RunStateError::InvalidPath` and `Filesystem` carry raw filesystem
+/// `ApprovalStoreError::InvalidPath` and `Filesystem` carry raw filesystem
 /// strings; `Serialization`/`Deserialization` carry serde internals. Forward
 /// the redacted variant discriminator instead of `error.to_string()` so the
 /// boundary stays infrastructure-opaque to upper services.
-// arch-exempt: large_file, host runtime production wiring; +1 arm for RunStateError::GateRecordAlreadyExists (#6243 left this match non-exhaustive), plan #6175
-fn unavailable_from_run_state(error: RunStateError) -> HostRuntimeError {
+fn unavailable_from_approval_store(error: ApprovalStoreError) -> HostRuntimeError {
     let reason = match error {
-        RunStateError::UnknownInvocation { .. } => "run-state record not found",
-        RunStateError::InvocationAlreadyExists { .. } => "run-state record already exists",
-        RunStateError::UnknownApprovalRequest { .. } => "approval request not found",
-        RunStateError::ApprovalRequestAlreadyExists { .. } => "approval request already exists",
-        RunStateError::GateRecordAlreadyExists { .. } => "gate record already exists",
-        RunStateError::ApprovalNotPending { .. } => "approval request not pending",
-        RunStateError::InvalidPath(_) => "run-state storage path invalid",
-        RunStateError::Filesystem(_) => "run-state filesystem unavailable",
-        RunStateError::Serialization(_) => "run-state serialization failed",
-        RunStateError::Deserialization(_) => "run-state deserialization failed",
-        RunStateError::Backend(_) => "run-state backend unavailable",
+        ApprovalStoreError::UnknownApprovalRequest { .. } => "approval request not found",
+        ApprovalStoreError::ApprovalRequestAlreadyExists { .. } => {
+            "approval request already exists"
+        }
+        ApprovalStoreError::GateRecordAlreadyExists { .. } => "gate record already exists",
+        ApprovalStoreError::ApprovalNotPending { .. } => "approval request not pending",
+        ApprovalStoreError::InvalidPath(_) => "approval storage path invalid",
+        ApprovalStoreError::Filesystem(_) => "approval filesystem unavailable",
+        ApprovalStoreError::Serialization(_) => "approval-store serialization failed",
+        ApprovalStoreError::Deserialization(_) => "approval-store deserialization failed",
+        ApprovalStoreError::Backend(_) => "approval-store backend unavailable",
     };
     HostRuntimeError::unavailable(reason)
 }
@@ -1318,7 +1284,6 @@ fn unavailable_from_process_error(error: ProcessError) -> HostRuntimeError {
         }
         ProcessError::Resource(_) => "process resource lifecycle failed",
         ProcessError::ResourceCleanupFailed { .. } => "process resource cleanup failed",
-        ProcessError::ProcessResultStoreUnavailable => "process result store unavailable",
         ProcessError::ProcessResultUnavailable { .. } => "process result unavailable",
         ProcessError::InvalidStoredRecord { .. } => "process stored record invalid",
         ProcessError::InvalidPath(_) => "process storage path invalid",
@@ -1327,6 +1292,20 @@ fn unavailable_from_process_error(error: ProcessError) -> HostRuntimeError {
         ProcessError::Deserialization(_) => "process deserialization failed",
     };
     HostRuntimeError::unavailable(reason)
+}
+
+async fn capability_process_records(
+    processes: &dyn ProcessRuntimePort,
+    scope: &ResourceScope,
+) -> Result<Vec<ironclaw_processes::ProcessRecord>, ProcessError> {
+    processes
+        .process_snapshots(scope)
+        .await
+        .map_err(map_process_journal_error)?
+        .into_iter()
+        .filter(|snapshot| snapshot.process_kind == ProcessKind::CapabilityInvocation)
+        .map(process_record_from_snapshot)
+        .collect()
 }
 
 fn required_runtime_backends(registry: &ExtensionRegistry) -> Vec<RuntimeKind> {
@@ -1398,10 +1377,10 @@ fn completed_outcome_from(
 /// a false-positive `AuthRequired` for capabilities whose product-auth account
 /// is already connected.
 pub(crate) fn capability_credential_requirements(
-    descriptor: &ironclaw_host_api::CapabilityDescriptor,
+    descriptor: &ironclaw_host_api::capability::CapabilityDescriptor,
 ) -> (
     Vec<SecretHandle>,
-    Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
+    Vec<ironclaw_host_api::decision::RuntimeCredentialAuthRequirement>,
 ) {
     let provider = descriptor.provider.clone();
     let mut required_secrets = Vec::new();
@@ -1424,7 +1403,7 @@ pub(crate) fn capability_credential_requirements(
         // for capabilities whose product-auth account is already connected.
         if matches!(
             cred.source,
-            ironclaw_host_api::RuntimeCredentialRequirementSource::SecretHandle
+            ironclaw_host_api::capability::RuntimeCredentialRequirementSource::SecretHandle
         ) {
             required_secrets.push(cred.handle.clone());
         }
@@ -1438,7 +1417,7 @@ pub(crate) fn capability_credential_requirements(
 fn auth_required_outcome(
     capability_id: CapabilityId,
     required_secrets: Vec<SecretHandle>,
-    credential_requirements: Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
+    credential_requirements: Vec<ironclaw_host_api::decision::RuntimeCredentialAuthRequirement>,
 ) -> RuntimeCapabilityOutcome {
     RuntimeCapabilityOutcome::AuthRequired(RuntimeAuthGate {
         gate_id: stable_auth_gate_id(&capability_id, &required_secrets, &credential_requirements),
@@ -1501,8 +1480,10 @@ fn stable_auth_gate_id(
 /// `RuntimeCredentialAccountSetup` variant fails the build here rather than
 /// silently hashing to an existing token. OAuth setup scopes use the same
 /// injective [`canonical_scope_list`] encoding as `provider_scopes`.
-fn stable_setup_token(setup: &ironclaw_host_api::RuntimeCredentialAccountSetup) -> String {
-    use ironclaw_host_api::RuntimeCredentialAccountSetup as Setup;
+fn stable_setup_token(
+    setup: &ironclaw_host_api::capability::RuntimeCredentialAccountSetup,
+) -> String {
+    use ironclaw_host_api::capability::RuntimeCredentialAccountSetup as Setup;
     match setup {
         Setup::ManualToken => "manual_token".to_string(),
         Setup::OAuth { scopes } => format!("oauth:{}", canonical_scope_list(scopes)),
@@ -1537,7 +1518,9 @@ fn spawned_process_outcome_from(
     }
 }
 
-fn persistent_approval_grantees(context: &ironclaw_host_api::ExecutionContext) -> Vec<Principal> {
+fn persistent_approval_grantees(
+    context: &ironclaw_host_api::scope::ExecutionContext,
+) -> Vec<Principal> {
     let mut grantees = vec![
         Principal::Extension(context.extension_id.clone()),
         Principal::User(context.user_id.clone()),
@@ -1680,17 +1663,21 @@ fn failure_from(
             // rendered in Debug, run-state rows, or runtime events.
             let (scrubbed, _) = model_visible_cause_scrubber().redact_all_secrets(&raw_cause);
             if failure.detail.is_none() && raw_cause_needs_detail {
-                failure =
-                    failure.with_detail(ironclaw_host_api::DispatchFailureDetail::Diagnostic {
+                failure = failure.with_detail(
+                    ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic {
                         text: bounded_diagnostic_text(&scrubbed),
-                    });
+                    },
+                );
             }
             failure = failure.with_model_visible_cause(scrubbed);
         }
         None if failure.detail.is_none() => {
-            failure = failure.with_detail(ironclaw_host_api::DispatchFailureDetail::Diagnostic {
-                text: ironclaw_host_api::ModelDiagnostic::unavailable().into_inner(),
-            });
+            failure = failure.with_detail(
+                ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic {
+                    text: ironclaw_host_api::result_meta::ModelDiagnostic::unavailable()
+                        .into_inner(),
+                },
+            );
         }
         None => {}
     }
@@ -1700,7 +1687,7 @@ fn failure_from(
 fn bounded_diagnostic_text(value: &str) -> String {
     let mut end = value
         .len()
-        .min(ironclaw_host_api::MODEL_DIAGNOSTIC_MAX_BYTES);
+        .min(ironclaw_host_api::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES);
     while end > 0 && !value.is_char_boundary(end) {
         end -= 1;
     }
@@ -1755,14 +1742,15 @@ fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String
         } => Some(dispatch_failure_message(safe_summary.as_deref(), *kind)),
         InvocationFingerprint { .. } => Some("invocation fingerprint failed".to_string()),
         Lease(_) => Some("capability lease store unavailable".to_string()),
-        RunState(_) => Some("run-state store unavailable".to_string()),
+        ApprovalStore(_) => Some("approval store unavailable".to_string()),
+        InvocationState(_) => Some("process invocation store unavailable".to_string()),
         Process(_) => Some("process manager unavailable".to_string()),
     }
 }
 
 fn dispatch_failure_message(
     safe_summary: Option<&str>,
-    kind: ironclaw_host_api::DispatchFailureKind,
+    kind: ironclaw_host_api::dispatch::DispatchFailureKind,
 ) -> String {
     // This message is the PUBLIC label: persisted into run-state rows and
     // published on the runtime event sink before any downstream validation
@@ -1823,7 +1811,8 @@ pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> FailureKin
         | CapabilityInvocationError::ResumeStoreMissing { .. }
         | CapabilityInvocationError::ProcessManagerMissing { .. } => FailureKind::Backend,
         CapabilityInvocationError::Lease(_)
-        | CapabilityInvocationError::RunState(_)
+        | CapabilityInvocationError::ApprovalStore(_)
+        | CapabilityInvocationError::InvocationState(_)
         | CapabilityInvocationError::Process(_) => FailureKind::Backend,
         // The dispatch lane carries the unified vocabulary losslessly: every
         // precise mechanism name (MethodMissing, NetworkDenied, Guest, …)
@@ -1839,7 +1828,7 @@ mod tests {
     //! mappings.
     //!
     //! The dispatch failure kinds come from typed
-    //! [`ironclaw_host_api::DispatchFailureKind`] values. Their display
+    //! [`ironclaw_host_api::dispatch::DispatchFailureKind`] values. Their display
     //! strings remain part of the public observability contract, but runtime
     //! failure mapping stays type-directed instead of reparsing strings.
 
@@ -1850,9 +1839,11 @@ mod tests {
     };
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
     use ironclaw_host_api::{
-        CapabilityId, DispatchFailureKind, ExtensionId, HostPortCatalog,
-        RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, SecretHandle, VendorId,
-        VirtualPath,
+        decision::RuntimeCredentialAuthRequirement,
+        dispatch::{DispatchFailureKind, RuntimeDispatchErrorKind},
+        host_port::HostPortCatalog,
+        ids::{CapabilityId, ExtensionId, SecretHandle, VendorId},
+        path::VirtualPath,
     };
 
     fn cap() -> CapabilityId {
@@ -1870,7 +1861,7 @@ mod tests {
     fn auth_requirement(scopes: &[&str]) -> RuntimeCredentialAuthRequirement {
         RuntimeCredentialAuthRequirement {
             provider: VendorId::new("notion").unwrap(),
-            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+            setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth {
                 scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
             },
             requester_extension: ExtensionId::new("notion").unwrap(),
@@ -1926,7 +1917,7 @@ mod tests {
         // record produced the same gate id; the write-once gate-record store
         // then reported `GateRecordAlreadyExists`, kept the stale record, and
         // the runner reloaded and rendered the wrong authentication flow.
-        use ironclaw_host_api::RuntimeCredentialAccountSetup as Setup;
+        use ironclaw_host_api::capability::RuntimeCredentialAccountSetup as Setup;
         let requirement_with = |setup: Setup| RuntimeCredentialAuthRequirement {
             provider: VendorId::new("notion").unwrap(),
             setup,
@@ -2349,7 +2340,7 @@ mod tests {
             "shell execution failed: cannot read /workspace/{}\nsecond line",
             "segment/".repeat(600)
         );
-        assert!(raw.len() > ironclaw_host_api::MODEL_DIAGNOSTIC_MAX_BYTES);
+        assert!(raw.len() > ironclaw_host_api::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES);
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor),
             safe_summary: Some(raw.clone()),
@@ -2363,14 +2354,14 @@ mod tests {
             Some("the tool executor failed"),
             "message must stay the fixed category sentence"
         );
-        let Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { text }) =
+        let Some(ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic { text }) =
             failure.detail.as_ref()
         else {
             panic!("rejected public summary must ride the diagnostic detail");
         };
         assert_eq!(
             text,
-            &raw[..ironclaw_host_api::MODEL_DIAGNOSTIC_MAX_BYTES],
+            &raw[..ironclaw_host_api::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES],
             "the inline diagnostic uses the shared model-observation byte cap"
         );
         assert_eq!(
@@ -2390,11 +2381,12 @@ mod tests {
         };
 
         let failure = failure_from(error, cap());
-        let Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { text }) = failure.detail
+        let Some(ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic { text }) =
+            failure.detail
         else {
             panic!("expected a bounded diagnostic");
         };
-        assert!(text.len() <= ironclaw_host_api::MODEL_DIAGNOSTIC_MAX_BYTES);
+        assert!(text.len() <= ironclaw_host_api::result_meta::MODEL_DIAGNOSTIC_MAX_BYTES);
         assert!(text.ends_with('é'));
     }
 
@@ -2406,9 +2398,12 @@ mod tests {
         );
         assert_eq!(
             failure.detail,
-            Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic {
-                text: ironclaw_host_api::ModelDiagnostic::unavailable().into_inner(),
-            })
+            Some(
+                ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic {
+                    text: ironclaw_host_api::result_meta::ModelDiagnostic::unavailable()
+                        .into_inner(),
+                }
+            )
         );
     }
 
@@ -2437,17 +2432,19 @@ mod tests {
 
     #[test]
     fn failure_from_preserves_dispatch_detail() {
-        let issue = ironclaw_host_api::DispatchInputIssue::new(
+        let issue = ironclaw_host_api::dispatch::DispatchInputIssue::new(
             "schedule.kind",
-            ironclaw_host_api::DispatchInputIssueCode::MissingRequired,
+            ironclaw_host_api::dispatch::DispatchInputIssueCode::MissingRequired,
         )
         .expected("cron or once");
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
             safe_summary: Some("trigger_create input failed validation".to_string()),
-            detail: Some(ironclaw_host_api::DispatchFailureDetail::InvalidInput {
-                issues: vec![issue.clone()],
-            }),
+            detail: Some(
+                ironclaw_host_api::dispatch::DispatchFailureDetail::InvalidInput {
+                    issues: vec![issue.clone()],
+                },
+            ),
         };
 
         let failure = failure_from(
@@ -2458,9 +2455,11 @@ mod tests {
         assert_eq!(failure.kind, FailureKind::InputEncode);
         assert_eq!(
             failure.detail,
-            Some(ironclaw_host_api::DispatchFailureDetail::InvalidInput {
-                issues: vec![issue]
-            })
+            Some(
+                ironclaw_host_api::dispatch::DispatchFailureDetail::InvalidInput {
+                    issues: vec![issue]
+                }
+            )
         );
     }
 
@@ -2574,7 +2573,7 @@ mod tests {
 
     fn build_descriptor_for_manifest(
         manifest_toml: &str,
-    ) -> ironclaw_host_api::CapabilityDescriptor {
+    ) -> ironclaw_host_api::capability::CapabilityDescriptor {
         let manifest = ExtensionManifest::parse(
             manifest_toml,
             ManifestSource::InstalledLocal,
@@ -2819,29 +2818,31 @@ required = true
     }
 
     #[test]
-    fn unavailable_from_run_state_uses_redacted_reasons() {
-        let error = RunStateError::InvalidPath("/private/users/secret/database.sqlite".to_string());
-        let host_error = unavailable_from_run_state(error);
+    fn unavailable_from_approval_store_uses_redacted_reasons() {
+        let error =
+            ApprovalStoreError::InvalidPath("/private/users/secret/database.sqlite".to_string());
+        let host_error = unavailable_from_approval_store(error);
         match host_error {
             HostRuntimeError::Unavailable { reason } => {
                 assert!(
                     !reason.contains("/private/"),
                     "sanitized reason must not leak filesystem paths, got {reason:?}"
                 );
-                assert_eq!(reason, "run-state storage path invalid");
+                assert_eq!(reason, "approval storage path invalid");
             }
             other => panic!("expected Unavailable, got {other:?}"),
         }
 
-        let error = RunStateError::Filesystem("connection refused at /tmp/runstate.db".to_string());
-        let host_error = unavailable_from_run_state(error);
+        let error =
+            ApprovalStoreError::Filesystem("connection refused at /tmp/approvals.db".to_string());
+        let host_error = unavailable_from_approval_store(error);
         match host_error {
             HostRuntimeError::Unavailable { reason } => {
                 assert!(
                     !reason.contains("/tmp"),
                     "sanitized reason must not leak filesystem paths, got {reason:?}"
                 );
-                assert_eq!(reason, "run-state filesystem unavailable");
+                assert_eq!(reason, "approval filesystem unavailable");
             }
             other => panic!("expected Unavailable, got {other:?}"),
         }

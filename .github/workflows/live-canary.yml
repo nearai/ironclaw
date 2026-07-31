@@ -2,12 +2,14 @@ name: Live Canary
 run-name: ${{ inputs.trigger_context || github.workflow }}
 
 on:
-  # Scheduled runs are intentionally limited to Reborn WebUI v2 live QA.
-  # Legacy canary lanes remain available through workflow_dispatch for
-  # manual diagnosis, but do not run on cron.
+  # Frequent scheduled runs cover Reborn WebUI v2 live QA. A weekly provider
+  # matrix supplies broader live drift evidence without putting credentialed
+  # providers on the three-hour cadence.
   schedule:
-    # Every 3 hours. Only reborn-webui-v2-live-qa has a matching guard.
+    # Every 3 hours. Only reborn-webui-v2-live-qa has this matching guard.
     - cron: "0 */3 * * *"
+    # Weekly. Only provider-matrix has this matching guard.
+    - cron: "30 5 * * 1"
   workflow_dispatch:
     inputs:
       lane:
@@ -620,7 +622,7 @@ jobs:
     if: >
       always() &&
       (
-        github.event_name == 'schedule' ||
+        (github.event_name == 'schedule' && github.event.schedule == '0 */3 * * *') ||
         (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa'))
       ) &&
       (inputs.target_ref == '' || needs.approve-reborn-webui-v2-pr-live-qa.result == 'success')
@@ -856,7 +858,7 @@ jobs:
       always() &&
       needs.prepare-reborn-webui-v2-live-qa.result == 'success' &&
       (
-        github.event_name == 'schedule' ||
+        (github.event_name == 'schedule' && github.event.schedule == '0 */3 * * *') ||
         (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa'))
       )
     runs-on: ubuntu-latest
@@ -898,19 +900,15 @@ jobs:
           - shard_id: qa-8-delivery
             shard_name: QA 8D
             cases: qa_8d_hn_keyword_slack_delivery
-          # Automation delivery probes, in the 3-hourly cron rotation (the
-          # delivery-routing fixes from #5898 are merged and live-verified
-          # green). Guards regressions in: wrong-channel routine delivery,
-          # duplicate DM delivery, raw Slack user ids leaking into digests,
-          # and per-trigger delivery-target routing.
+          # Automation delivery probes remain dispatchable as a full shard.
+          # The recurring lane selects only the manifest-declared
+          # representative drift case below.
           - shard_id: qa-9
             shard_name: QA 9
             cases: qa_9a_slack_connect,qa_9b_routine_dm_delivery_exactly_once,qa_9c_slack_digest_names_not_ids,qa_9d_routine_per_trigger_delivery_target
-          # Slack tool-correctness probes, in the 3-hourly cron rotation (the
-          # tool-surface fixes from #5898 are merged and live-verified green).
-          # Guards regressions in: self-attribution, status readback, thread
-          # replies, membership honesty, error honesty, mention encoding,
-          # last-sent recall, email hallucination, and raw-entity hygiene.
+          # Slack tool-correctness probes remain dispatchable as a full shard.
+          # The recurring lane selects only the manifest-declared
+          # representative drift case below.
           - shard_id: qa-10
             shard_name: QA 10
             cases: qa_10a_slack_self_attribution,qa_10b_slack_ooo_status,qa_10c_slack_thread_replies,qa_10d_slack_channel_membership,qa_10e_slack_error_honesty,qa_10f_slack_mention_encoding,qa_10g_slack_last_message_sent,qa_10g_slack_last_message_sent_global,qa_10h_slack_email_hallucination_guard,qa_10i_slack_raw_entity_hygiene
@@ -943,7 +941,10 @@ jobs:
         id: resolve_reborn_webui_v2_cases
         shell: bash
         env:
-          REQUESTED_CASES: ${{ github.event_name == 'schedule' && 'all' || inputs.cases || vars.REBORN_WEBUI_V2_LIVE_QA_CASES || 'all' }}
+          # Recurring runs retain only the representative drift suite declared
+          # in the promotion manifest. Explicit dispatches can still select any
+          # known case for attended diagnosis.
+          REQUESTED_CASES: ${{ github.event_name == 'schedule' && 'qa_3b_endpoint_status_live_chat,qa_9b_routine_dm_delivery_exactly_once,qa_10a_slack_self_attribution' || inputs.cases || vars.REBORN_WEBUI_V2_LIVE_QA_CASES || 'all' }}
           DISPATCH_ONLY_SHARD: ${{ matrix.dispatch_only || false }}
           SHARD_CASES: ${{ matrix.cases }}
           ALL_SHARD_CASES: >-
@@ -1351,7 +1352,8 @@ jobs:
   provider-matrix:
     name: Provider Matrix (${{ matrix.provider }})
     if: >
-      github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'provider-matrix')
+      (github.event_name == 'schedule' && github.event.schedule == '30 5 * * 1') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'provider-matrix'))
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:

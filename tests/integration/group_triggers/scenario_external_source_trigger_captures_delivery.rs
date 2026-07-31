@@ -10,7 +10,7 @@
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
-use ironclaw_turns::{GetRunStateRequest, TurnStateStore};
+use ironclaw_turns::GetRunStateRequest;
 use serde_json::json;
 
 const ONCE_AT: &str = "2999-01-01T00:00:00";
@@ -47,7 +47,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // The trigger-creation turn below never sends this value to the model.
     let setup_run_id = creator.submit_turn("hello from the source chat").await?;
     let setup_run = creator
-        .turn_state_store_for_test()
+        .agent_turn_runtime_for_test()
         .get_run_state(GetRunStateRequest {
             scope: creator.turn_scope.clone(),
             run_id: setup_run_id,
@@ -63,7 +63,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .submit_turn("send the latest BTC news back here later")
         .await?;
     let source_run = creator
-        .turn_state_store_for_test()
+        .agent_turn_runtime_for_test()
         .get_run_state(GetRunStateRequest {
             scope: creator.turn_scope.clone(),
             run_id,

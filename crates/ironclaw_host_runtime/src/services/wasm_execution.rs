@@ -16,7 +16,7 @@ use super::{
     ResourceUsage, RootFilesystem, RuntimeAdapterResult, RuntimeDispatchErrorKind,
     RuntimeLaneRequest, WasmError, WitToolHost, WitToolRuntime,
 };
-use ironclaw_host_api::ResourceReceipt;
+use ironclaw_host_api::resource::ResourceReceipt;
 
 /// RAII guard over an in-flight `ResourceGovernor` reservation.
 ///
@@ -411,6 +411,10 @@ fn wasm_guest_error_kind(error: &str) -> WasmGuestErrorKind {
 }
 
 #[cfg(test)]
+#[path = "tests/wasm_execution_fault_profiles.rs"]
+mod fault_profile_tests;
+
+#[cfg(test)]
 mod tests {
     use std::time::Duration;
 
@@ -432,7 +436,7 @@ mod tests {
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use ironclaw_host_api::{ReservationStatus, ResourceEstimate, ResourceReservation};
+    use ironclaw_host_api::resource::{ReservationStatus, ResourceEstimate, ResourceReservation};
     use ironclaw_resources::{
         AccountSnapshot, ReservationOutcome, ResourceAccount, ResourceError, ResourceLimits,
     };
