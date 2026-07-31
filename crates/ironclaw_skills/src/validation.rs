@@ -327,9 +327,41 @@ const MAX_DESCRIPTION_CHARS: usize = 250;
 /// a hard parse error: the caller decides whether a lint failure blocks a write. A learned
 /// skill that fails should not be written; a checked-in skill that fails should fail CI.
 pub fn lint_skill_routing_metadata(manifest: &SkillManifest) -> Vec<String> {
+    let mut problems = lint_skill_routing_metadata_blocking(manifest);
+    problems.extend(lint_skill_routing_metadata_advisory(manifest));
+    problems
+}
+
+/// The subset that may REFUSE a write, because it poisons routing for *other* skills.
+///
+/// A generic keyword is not merely low quality: `coding` declares `file` and `change`, and on the
+/// reviewed baseline corpus it was being selected for security audits, QA plans and commit
+/// staging. That cost is paid by every later request, not by the skill that declared it, so
+/// refusing to write it is proportionate.
+///
+/// Measured against the skills agents actually write: 26 authored skills from the self-creation
+/// runs, of which only 4 declare keywords or tags at all — so this can gate the write path
+/// without blocking self-creation, while still stopping a model that tries to declare `file`.
+pub fn lint_skill_routing_metadata_blocking(manifest: &SkillManifest) -> Vec<String> {
     let mut problems = Vec::new();
     let activation = &manifest.activation;
+    lint_activation_terms(activation, &mut problems);
+    problems
+}
 
+/// The subset that must only WARN, because it describes the skill's own quality.
+///
+/// An empty or over-long description hurts that skill's discoverability and nothing else.
+/// Refusing the write hurts it strictly more: the agent authored a working skill and ends up with
+/// no skill at all, which is the failure this epic exists to remove.
+///
+/// This is not hypothetical. **19 of 26 skills agents actually wrote fail these rules — 15 have no
+/// description whatsoever.** Gating the write path on them would have silently returned
+/// self-creation to a ~0pp effect, and the self-creation measurement could not have caught it,
+/// because it re-runs the *use* phase against previously-authored skills and never exercises the
+/// write path.
+pub fn lint_skill_routing_metadata_advisory(manifest: &SkillManifest) -> Vec<String> {
+    let mut problems = Vec::new();
     if manifest.description.trim().is_empty() {
         problems.push(
             "description must not be empty; it is all the model sees in the listing".to_string(),
@@ -341,7 +373,14 @@ pub fn lint_skill_routing_metadata(manifest: &SkillManifest) -> Vec<String> {
             manifest.description.chars().count()
         ));
     }
+    problems
+}
 
+/// Rules about declared activation TERMS, shared by the blocking pass.
+fn lint_activation_terms(
+    activation: &crate::types::ActivationCriteria,
+    problems: &mut Vec<String>,
+) {
     for keyword in &activation.keywords {
         let lowered = keyword.trim().to_lowercase();
         if lowered.is_empty() {
@@ -396,8 +435,6 @@ pub fn lint_skill_routing_metadata(manifest: &SkillManifest) -> Vec<String> {
             ));
         }
     }
-
-    problems
 }
 
 #[cfg(test)]

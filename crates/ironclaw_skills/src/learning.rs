@@ -122,9 +122,24 @@ pub fn parse_distillation(raw: &str) -> Result<DistillOutcome, DistillError> {
     // Epic #6941 criterion 7: the descriptor lint runs at learned-skill WRITE time, and a
     // skill that fails it is not written. Both authoring paths funnel through
     // `parse_skill_md`, so this is the single enforcement point.
-    let problems = crate::validation::lint_skill_routing_metadata(&parsed.manifest);
+    // Gate on the BLOCKING rules only. Those describe metadata that poisons routing for *other*
+    // skills (a generic keyword like `file` fires on unrelated requests), so refusing the write is
+    // proportionate.
+    //
+    // The advisory rules -- empty or over-long description -- must NOT block. Measured on the
+    // skills agents actually write: 19 of 26 fail them, 15 having no description at all. Gating on
+    // those would mean the agent authors a working skill and ends up with nothing, silently
+    // returning self-creation to a ~0pp effect. An absent description hurts only that skill's own
+    // discoverability; refusing the write hurts it strictly more.
+    let problems = crate::validation::lint_skill_routing_metadata_blocking(&parsed.manifest);
     if !problems.is_empty() {
         return Err(DistillError::UnusableRoutingMetadata(problems.join("; ")));
+    }
+    for advisory in crate::validation::lint_skill_routing_metadata_advisory(&parsed.manifest) {
+        tracing::warn!(
+            skill = %parsed.manifest.name,
+            "learned skill has weak routing metadata: {advisory}"
+        );
     }
     Ok(DistillOutcome::Skill(DistilledSkill {
         name: parsed.manifest.name,
@@ -187,9 +202,24 @@ pub fn parse_refinement(raw: &str) -> Result<RefineOutcome, DistillError> {
     // Epic #6941 criterion 7: the descriptor lint runs at learned-skill WRITE time, and a
     // skill that fails it is not written. Both authoring paths funnel through
     // `parse_skill_md`, so this is the single enforcement point.
-    let problems = crate::validation::lint_skill_routing_metadata(&parsed.manifest);
+    // Gate on the BLOCKING rules only. Those describe metadata that poisons routing for *other*
+    // skills (a generic keyword like `file` fires on unrelated requests), so refusing the write is
+    // proportionate.
+    //
+    // The advisory rules -- empty or over-long description -- must NOT block. Measured on the
+    // skills agents actually write: 19 of 26 fail them, 15 having no description at all. Gating on
+    // those would mean the agent authors a working skill and ends up with nothing, silently
+    // returning self-creation to a ~0pp effect. An absent description hurts only that skill's own
+    // discoverability; refusing the write hurts it strictly more.
+    let problems = crate::validation::lint_skill_routing_metadata_blocking(&parsed.manifest);
     if !problems.is_empty() {
         return Err(DistillError::UnusableRoutingMetadata(problems.join("; ")));
+    }
+    for advisory in crate::validation::lint_skill_routing_metadata_advisory(&parsed.manifest) {
+        tracing::warn!(
+            skill = %parsed.manifest.name,
+            "learned skill has weak routing metadata: {advisory}"
+        );
     }
     Ok(RefineOutcome::Refined(DistilledSkill {
         name: parsed.manifest.name,
