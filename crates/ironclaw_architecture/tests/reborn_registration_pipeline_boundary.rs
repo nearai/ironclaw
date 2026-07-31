@@ -58,8 +58,13 @@ const REGISTRATION_BOUNDARY_ALLOWLIST_BASELINE: usize = 0;
 
 #[test]
 fn registration_boundary_allowlist_ratchets_down_only() {
+    // Bound through a binding: the baseline is 0 today, and comparing a
+    // `usize` against the literal minimum folds to a constant that clippy
+    // rejects. The comparison stays written this way so the ratchet still
+    // reads correctly if the baseline is ever deliberately raised.
+    let baseline = REGISTRATION_BOUNDARY_ALLOWLIST_BASELINE;
     assert!(
-        ALLOWLIST.len() <= REGISTRATION_BOUNDARY_ALLOWLIST_BASELINE,
+        ALLOWLIST.len() <= baseline,
         "registration-boundary ALLOWLIST grew to {} entries (baseline {}): this list is \
          shrink-only. Registration owns endpoint validation, MCP-server auth, discovery, retry, \
          and any not-yet-discovered state; the shared lifecycle receives only a complete \

@@ -150,10 +150,36 @@ impl AuthRecipeResolver for InstalledManifestAuthRecipeResolver {
         requester_extension: Option<&ExtensionId>,
         vendor: &str,
     ) -> Option<ResolvedVendorAuthRecipe> {
-        let requester_extension = requester_extension?;
-        // silent-ok: get_manifest read for recipe resolution; AuthRecipeResolver is Option-valued, so a store failure must fail closed (no recipe) rather than resolve to none.
-        let record = self.store.get_manifest(requester_extension).await.ok()??;
-        recipe_for_manifest(record.resolved(), vendor)
+        // The scope ceiling is the UNION across every installed extension
+        // declaring this vendor, not just the requester's own manifest.
+        //
+        // This resolver is the path connect flows actually take: they run
+        // before activation completes, so the active snapshot is still empty
+        // and the snapshot resolver delegates here. Several extensions can
+        // share one credential account for a vendor, and that account holds a
+        // single scope set that each exchange replaces rather than merges — so
+        // a per-requester ceiling clamps the grant to the requester's own
+        // scopes and wipes every sibling's, leaving already-connected
+        // extensions reporting that setup is still needed.
+        //
+        // silent-ok: list_manifests read for recipe resolution; AuthRecipeResolver is Option-valued, so a store failure must fail closed (no recipe) rather than resolve to none.
+        let records = self.store.list_manifests().await.ok()?;
+        let manifests: Vec<&ResolvedExtensionManifest> =
+            records.iter().map(|record| record.resolved()).collect();
+        match unified_vendor_recipes(manifests.into_iter()) {
+            Ok(recipes) => recipes.into_iter().find(|recipe| recipe.vendor == vendor),
+            Err(conflict) => {
+                // Activation-time conflict checks should have prevented this;
+                // fail closed for the conflicting vendor rather than picking
+                // an arbitrary declaration.
+                tracing::warn!(
+                    %conflict,
+                    "installed manifests carry conflicting vendor recipes"
+                );
+                let _ = requester_extension;
+                None
+            }
+        }
     }
 }
 

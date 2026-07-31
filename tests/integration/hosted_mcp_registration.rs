@@ -1208,10 +1208,9 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
         .await
         .expect("installed manifest readback")
         .expect("OAuth installation keeps its manifest");
-    assert_eq!(
-        manifest.initial_preparation(),
-        ironclaw_extensions::PreparationRequirement::Ready,
-        "a callback that publishes tools must durably finalize preparation: {manifest:#?}"
+    assert!(
+        manifest.resolved().has_model_visible_capabilities(),
+        "a callback that publishes tools must durably record them: {manifest:#?}"
     );
     let listed = services
         .lifecycle_service
@@ -1374,10 +1373,9 @@ async fn oauth_metadata_fetch_failures_leave_the_definition_unprepared() {
             .await
             .expect("installed manifest readback")
             .expect("fixture manifest remains durable after a metadata-fetch failure");
-        assert_eq!(
-            manifest.initial_preparation(),
-            ironclaw_extensions::PreparationRequirement::Required,
-            "a metadata-fetch failure must leave the definition unprepared: {manifest:#?}"
+        assert!(
+            !manifest.resolved().has_model_visible_capabilities(),
+            "a metadata-fetch failure must leave the definition publishing nothing: {manifest:#?}"
         );
     }
 
@@ -1519,9 +1517,8 @@ async fn oauth_callback_with_a_rejected_token_stays_setup_needed_and_publishes_n
         .await
         .expect("installed manifest readback")
         .expect("fixture manifest remains durable after rejected token");
-    assert_eq!(
-        manifest.initial_preparation(),
-        ironclaw_extensions::PreparationRequirement::Required,
+    assert!(
+        !manifest.resolved().has_model_visible_capabilities(),
         "the user can retry setup after an MCP-side credential rejection",
     );
     let listed = services
@@ -1646,10 +1643,11 @@ async fn oauth_empty_catalog_after_callback_retains_account_and_stays_installed(
         .await
         .expect("installed manifest readback")
         .expect("fixture manifest remains durable after OAuth completion");
-    assert_eq!(
-        installed_manifest.initial_preparation(),
-        ironclaw_extensions::PreparationRequirement::Required,
-        "empty catalog must remain durably marked for preparation retry: {installed_manifest:#?}"
+    assert!(
+        !installed_manifest
+            .resolved()
+            .has_model_visible_capabilities(),
+        "an empty catalog must leave the package publishing nothing: {installed_manifest:#?}"
     );
     let listed = services
         .lifecycle_service
