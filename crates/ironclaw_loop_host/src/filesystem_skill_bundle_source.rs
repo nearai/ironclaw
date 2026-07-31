@@ -21,7 +21,21 @@ use crate::{
 };
 
 const DEFAULT_MAX_BUNDLE_FILE_BYTES: usize = 256 * 1024;
-const DEFAULT_MAX_BUNDLES_PER_ROOT: usize = 100;
+/// Per-root cap on how many skill bundles are enumerated.
+///
+/// Raised from 100 to 512. 100 was too low to be a runaway guard and low enough to
+/// silently amputate a real catalog: measured on a 227-skill root, this returned the
+/// first 100 bundles and skipped 127, so the skills in the tail were invisible to the
+/// selector, to the listing, and to the model — the same failure as never installing
+/// them. It is the *lower* of the two limits that used to truncate a large catalog, so
+/// raising the listing budget alone accomplished nothing; both had to move.
+///
+/// This cap protects against an unbounded directory walk, not against a large catalog.
+/// 512 keeps that protection (a bundle is a directory read plus a manifest parse, and
+/// the result is cached per root) while leaving real catalogs whole. Past it the answer
+/// is `skill_search` (#4428) rather than a bigger number, and the truncation is still
+/// warned and disclosed rather than silent.
+const DEFAULT_MAX_BUNDLES_PER_ROOT: usize = 512;
 /// One scoped filesystem root that can contain portable skill bundle folders.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesystemSkillBundleRoot {
@@ -1294,6 +1308,42 @@ mod tests {
             descriptors.len(),
             1,
             "the bundles that fit under the cap stay discoverable"
+        );
+    }
+
+    /// A real-sized catalog must enumerate WHOLE, at the default cap.
+    ///
+    /// The test above proves truncation degrades gracefully; it does not prove the default
+    /// cap is high enough to avoid truncating anything real, and that is the failure that
+    /// actually happened. At the previous default of 100 a 227-skill root returned its first
+    /// 100 bundles and skipped 127, so the tail was invisible to the selector, to the listing
+    /// and to the model — identical in effect to never installing those skills.
+    ///
+    /// It also hid the fix one layer above: raising the listing budget changed nothing while
+    /// this cap still amputated the catalog before the listing ever saw it. Two limits, and
+    /// only the lower one decides.
+    #[tokio::test]
+    async fn a_two_hundred_and_twenty_seven_skill_root_enumerates_whole() {
+        let (root, source) = mounted_source();
+        for i in 0..227 {
+            let name = format!("probe-{i:03}");
+            write_root(
+                &root,
+                &format!("/tenants/tenant-a/users/user-a/skills/{name}/SKILL.md"),
+                skill_md(&name, "A probe skill."),
+            )
+            .await;
+        }
+
+        let descriptors = source
+            .list_skill_bundles(&run_context().await)
+            .await
+            .expect("a 227-skill root must enumerate");
+        assert_eq!(
+            descriptors.len(),
+            227,
+            "the default per-root cap must not truncate a real catalog; a skill the selector \
+             never sees is one the model can never activate"
         );
     }
 
