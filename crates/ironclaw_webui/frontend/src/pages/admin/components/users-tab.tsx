@@ -399,7 +399,7 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
                 role="alert"
                 data-testid="admin-users-load-more-error"
               >
-                {t("admin.users.loadMoreFailed")}
+                {adminUserActionErrorMessage(loadMoreError, t)}
               </p>
             )}
             <Button

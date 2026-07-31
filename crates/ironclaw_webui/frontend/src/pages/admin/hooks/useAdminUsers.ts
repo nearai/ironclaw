@@ -1,11 +1,6 @@
 // @ts-nocheck
 import React from "react";
-import {
-  useInfiniteQuery,
-  useQuery,
-  useMutation,
-  useQueryClient,
-} from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   fetchAdminUsers,
   fetchAdminUser,
@@ -23,31 +18,36 @@ export function useAdminUsers() {
   const queryClient = useQueryClient();
   const requestedMoreRef = React.useRef(false);
 
-  const query = useInfiniteQuery({
+  const query = useQuery({
     queryKey: ["admin", "users"],
-    queryFn: ({ pageParam, signal }) =>
-      fetchAdminUsers({ cursor: pageParam || undefined, signal }),
-    initialPageParam: null,
-    getNextPageParam: (lastPage) => lastPage?.nextCursor || undefined,
+    queryFn: ({ signal }) => fetchAdminUsers({ signal }),
     // Poll the initial bounded page, but stop once the administrator attempts
-    // to load additional pages, even if that request fails: TanStack refetches
-    // every retained infinite-query page, so a fixed interval would multiply
-    // traffic by the number of loaded pages. Also pause the timer during any
-    // active/paused fetch so it cannot cancel a slow fetchNextPage request.
-    // Mutations still invalidate the full query.
+    // to load more. Additional pages are fetched directly below, so polling
+    // can never multiply traffic by the number of retained pages.
     refetchInterval: (currentQuery) => {
-      const pageCount = currentQuery.state.data?.pages?.length || 0;
       return currentQuery.state.fetchStatus === "idle" &&
-        pageCount <= 1 &&
         !requestedMoreRef.current
         ? 10_000
         : false;
     },
   });
 
+  const [additionalPages, setAdditionalPages] = React.useState([]);
+  const [isLoadingMore, setIsLoadingMore] = React.useState(false);
+  const [loadMoreError, setLoadMoreError] = React.useState(null);
+  const initialPageUpdatedAtRef = React.useRef(query.dataUpdatedAt);
+  React.useEffect(() => {
+    if (initialPageUpdatedAtRef.current === query.dataUpdatedAt) return;
+    initialPageUpdatedAtRef.current = query.dataUpdatedAt;
+    setAdditionalPages([]);
+    setLoadMoreError(null);
+    requestedMoreRef.current = false;
+  }, [query.dataUpdatedAt]);
+
+  const pages = [query.data, ...additionalPages].filter(Boolean);
   const users = React.useMemo(() => {
     const seen = new Set();
-    return (query.data?.pages || []).flatMap((page) =>
+    return pages.flatMap((page) =>
       (page?.users || []).filter((user) => {
         const id = user?.id || user?.user_id;
         if (!id || seen.has(id)) return false;
@@ -55,21 +55,34 @@ export function useAdminUsers() {
         return true;
       }),
     );
-  }, [query.data]);
+  }, [query.data, additionalPages]);
+  const nextCursor = pages.at(-1)?.nextCursor || null;
   const loadMoreInFlightRef = React.useRef(null);
   const loadMore = React.useCallback(() => {
-    if (!query.hasNextPage) return Promise.resolve();
+    if (!nextCursor) return Promise.resolve();
     requestedMoreRef.current = true;
     if (loadMoreInFlightRef.current) return loadMoreInFlightRef.current;
 
-    const request = query.fetchNextPage().finally(() => {
-      if (loadMoreInFlightRef.current === request) {
-        loadMoreInFlightRef.current = null;
-      }
-    });
+    setIsLoadingMore(true);
+    setLoadMoreError(null);
+    const request = fetchAdminUsers({ cursor: nextCursor })
+      .then((page) => {
+        setAdditionalPages((current) => [...current, page]);
+        return page;
+      })
+      .catch((error) => {
+        setLoadMoreError(error);
+        return null;
+      })
+      .finally(() => {
+        setIsLoadingMore(false);
+        if (loadMoreInFlightRef.current === request) {
+          loadMoreInFlightRef.current = null;
+        }
+      });
     loadMoreInFlightRef.current = request;
     return request;
-  }, [query.fetchNextPage, query.hasNextPage]);
+  }, [nextCursor]);
   // Detect the forbidden state from the structured `ApiError` (see
   // `lib/api.ts`), not the humanized message: a non-admin caller gets HTTP 403
   // whose body kind is humanized to "Participant denied", so a string match on
@@ -132,9 +145,9 @@ export function useAdminUsers() {
     users,
     query,
     isForbidden,
-    hasMore: Boolean(query.hasNextPage),
-    isLoadingMore: query.isFetchingNextPage,
-    loadMoreError: query.isFetchNextPageError ? query.error : null,
+    hasMore: Boolean(nextCursor),
+    isLoadingMore,
+    loadMoreError,
     loadMore,
     createUser: createMut.mutateAsync,
     isCreating: createMut.isPending,

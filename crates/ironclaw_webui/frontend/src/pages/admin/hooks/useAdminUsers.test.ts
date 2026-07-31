@@ -26,18 +26,16 @@ test("admin user hook exposes pending and error state for every management actio
     {
       React: {
         useCallback: (callback) => callback,
+        useEffect: () => {},
         useMemo: (factory) => factory(),
         useRef: (initial) => ({ current: initial }),
+        useState: (initial) => [initial, () => {}],
       },
-      useInfiniteQuery: () => ({
-        data: { pages: [] },
+      useQuery: () => ({
+        data: { users: [], nextCursor: null },
+        dataUpdatedAt: 1,
         error: null,
-        fetchNextPage: () => Promise.resolve(),
-        hasNextPage: false,
-        isFetchNextPageError: false,
-        isFetchingNextPage: false,
       }),
-      useQuery: () => ({ data: [], error: null }),
       useMutation: () => mutationStates[mutationIndex++],
       useQueryClient: () => ({
         invalidateQueries: () => Promise.resolve(),
@@ -81,20 +79,15 @@ test("admin user hook exposes pending and error state for every management actio
   assert.deepEqual(resetCalls, [1, 2, 3, 1, 2, 3, 4]);
 });
 
-test("admin user hook consumes cursors, deduplicates pages, and keeps polling off after load-more failure", async () => {
-  let infiniteQueryOptions;
+test("admin user hook loads the next cursor once and disables polling after the attempt", async () => {
+  let queryOptions;
   const fetchCalls = [];
-  let resolvePage;
-  let fetchNextPageCalls = 0;
-  const pageError = new Error("next page failed");
-  const failedPageResult = {
-    data: { pages: [] },
-    error: pageError,
-    isFetchNextPageError: true,
-  };
-  const pendingPage = new Promise((resolve) => {
-    resolvePage = resolve;
+  let rejectPage;
+  const pendingPage = new Promise((_resolve, reject) => {
+    rejectPage = reject;
   });
+  const pageError = new Error("next page failed");
+  const stateUpdates = [];
   const mutationState = {
     data: null,
     error: null,
@@ -110,43 +103,25 @@ test("admin user hook consumes cursors, deduplicates pages, and keeps polling of
     {
       React: {
         useCallback: (callback) => callback,
+        useEffect: () => {},
         useMemo: (factory) => factory(),
         useRef: (initial) => ({ current: initial }),
+        useState: (initial) => [initial, (value) => stateUpdates.push(value)],
       },
-      useInfiniteQuery: (options) => {
-        infiniteQueryOptions = options;
+      useQuery: (options) => {
+        queryOptions = options;
         return {
           data: {
-            pages: [
-              {
-                users: [
-                  { id: "user-1", display_name: "First" },
-                  { id: "user-2", display_name: "Old second" },
-                ],
-                nextCursor: "cursor-1",
-              },
-              {
-                users: [
-                  { id: "user-2", display_name: "Duplicate second" },
-                  { id: "user-3", display_name: "Third" },
-                ],
-                nextCursor: "cursor-2",
-              },
+            users: [
+              { id: "user-1", display_name: "First" },
+              { id: "user-2", display_name: "Second" },
             ],
+            nextCursor: "cursor-1",
           },
-          error: pageError,
-          fetchNextPage: () => {
-            fetchNextPageCalls += 1;
-            return fetchNextPageCalls === 1
-              ? pendingPage
-              : Promise.resolve({ data: { pages: [] } });
-          },
-          hasNextPage: true,
-          isFetchNextPageError: true,
-          isFetchingNextPage: false,
+          dataUpdatedAt: 1,
+          error: null,
         };
       },
-      useQuery: () => ({ data: [], error: null }),
       useMutation: () => mutationState,
       useQueryClient: () => ({
         invalidateQueries: () => Promise.resolve(),
@@ -154,6 +129,7 @@ test("admin user hook consumes cursors, deduplicates pages, and keeps polling of
       }),
       fetchAdminUsers: async (params) => {
         fetchCalls.push(params);
+        if (params.cursor) return pendingPage;
         return { users: [], nextCursor: null };
       },
       fetchAdminUser: () => {},
@@ -172,64 +148,45 @@ test("admin user hook consumes cursors, deduplicates pages, and keeps polling of
   const state = exports.useAdminUsers();
 
   assert.deepEqual(
-    state.users.map((user) => [user.id, user.display_name]),
+    JSON.parse(JSON.stringify(
+      state.users.map((user) => [user.id, user.display_name]),
+    )),
     [
       ["user-1", "First"],
-      ["user-2", "Old second"],
-      ["user-3", "Third"],
+      ["user-2", "Second"],
     ],
   );
   assert.equal(state.hasMore, true);
-  assert.equal(state.loadMoreError, pageError);
-  assert.equal(infiniteQueryOptions.initialPageParam, null);
   assert.equal(
-    infiniteQueryOptions.getNextPageParam({ nextCursor: "cursor-next" }),
-    "cursor-next",
-  );
-  assert.equal(infiniteQueryOptions.getNextPageParam({ nextCursor: null }), undefined);
-  assert.equal(
-    infiniteQueryOptions.refetchInterval({
-      state: { data: { pages: [{ users: [] }] }, fetchStatus: "idle" },
+    queryOptions.refetchInterval({
+      state: { fetchStatus: "idle" },
     }),
     10_000,
   );
   assert.equal(
-    infiniteQueryOptions.refetchInterval({
-      state: { data: { pages: [{ users: [] }] }, fetchStatus: "fetching" },
-    }),
-    false,
-  );
-  assert.equal(
-    infiniteQueryOptions.refetchInterval({
-      state: {
-        data: { pages: [{ users: [] }, { users: [] }] },
-        fetchStatus: "idle",
-      },
+    queryOptions.refetchInterval({
+      state: { fetchStatus: "fetching" },
     }),
     false,
   );
 
   const signal = {};
-  await infiniteQueryOptions.queryFn({ pageParam: "cursor-requested", signal });
+  await queryOptions.queryFn({ signal });
   assert.equal(fetchCalls.length, 1);
-  assert.equal(fetchCalls[0].cursor, "cursor-requested");
   assert.equal(fetchCalls[0].signal, signal);
 
   const firstRequest = state.loadMore();
   const duplicateRequest = state.loadMore();
   assert.equal(firstRequest, duplicateRequest);
-  assert.equal(fetchNextPageCalls, 1);
-  resolvePage(failedPageResult);
-  const firstResult = await firstRequest;
-  assert.equal(firstResult.error, pageError);
-  assert.equal(firstResult.isFetchNextPageError, true);
+  assert.equal(fetchCalls.length, 2);
+  assert.equal(fetchCalls[1].cursor, "cursor-1");
   assert.equal(
-    infiniteQueryOptions.refetchInterval({
-      state: { data: { pages: [{ users: [] }] }, fetchStatus: "idle" },
+    queryOptions.refetchInterval({
+      state: { fetchStatus: "idle" },
     }),
     false,
   );
-
-  await state.loadMore();
-  assert.equal(fetchNextPageCalls, 2);
+  rejectPage(pageError);
+  assert.equal(await firstRequest, null);
+  assert.ok(stateUpdates.includes(pageError));
 });

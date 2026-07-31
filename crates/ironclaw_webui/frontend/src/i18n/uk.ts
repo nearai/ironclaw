@@ -1092,7 +1092,6 @@ registerPack("uk", {
   "admin.users.title": "Користувачі ({count} / {total})",
   "admin.users.searchPlaceholder": "Пошук…",
   "admin.users.noMatch": "Жоден користувач не відповідає поточним фільтрам.",
-  "admin.users.loadMoreFailed": "Не вдалося завантажити більше користувачів. Спробуйте ще раз.",
   "admin.users.filter.all": "Усі",
   "admin.users.filter.active": "Активні",
   "admin.users.filter.suspended": "Призупинені",

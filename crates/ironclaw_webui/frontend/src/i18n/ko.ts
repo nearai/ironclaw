@@ -1092,7 +1092,6 @@ registerPack("ko", {
   "admin.users.title": "사용자 ({count} / {total})",
   "admin.users.searchPlaceholder": "검색…",
   "admin.users.noMatch": "현재 필터와 일치하는 사용자가 없습니다.",
-  "admin.users.loadMoreFailed": "사용자를 더 불러오지 못했습니다. 다시 시도하세요.",
   "admin.users.filter.all": "전체",
   "admin.users.filter.active": "활성",
   "admin.users.filter.suspended": "정지",
