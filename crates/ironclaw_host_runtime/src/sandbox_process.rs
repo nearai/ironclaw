@@ -39,6 +39,7 @@ mod mounts;
 mod network_allowlist;
 mod scope_key;
 pub(crate) mod shell_limits;
+mod tls_intercept;
 
 // `attribution`, `registry`, and `user_key` are the persistent per-user
 // sandbox container model's identity/registry primitives: container naming,

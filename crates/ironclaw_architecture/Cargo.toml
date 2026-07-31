@@ -18,3 +18,12 @@ ironclaw_host_api = { path = "../ironclaw_host_api" }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 syn = { version = "2", features = ["full"] }
 toml = "1.1"
+# Dev-only: reborn_tls_verification_escape_hatches.rs's exact-identifier
+# carve-out matching needs Rust's real XID_Continue identifier-continuation
+# rule (ASCII alphanumeric/underscore alone under-matches: a combining mark
+# like U+0301 is a valid identifier-continuation character to rustc but not
+# `char::is_alphanumeric()`, so a look-alike `from_system_roots<combining
+# mark>` would otherwise be misidentified as the real function and inherit
+# its escape-hatch carve-out). Already resolves in the workspace lockfile as
+# a transitive dep of proc-macro2/syn.
+unicode-ident = "1"

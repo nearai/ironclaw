@@ -303,6 +303,67 @@ fn consecutive_dots_are_rejected_as_an_empty_label() {
 }
 
 #[test]
+fn leading_hyphen_label_is_rejected() {
+    // Regression for the validator divergence this module used to have
+    // with `rustls_pki_types::ServerName::try_from`: every byte of a
+    // leading- or trailing-hyphen label is inside the old hand-rolled
+    // `[a-z0-9-.]` charset check, so that check accepted it — but
+    // `DnsName`/`ServerName` reject it as invalid RFC 1035 label syntax
+    // (a label may not start or end with a hyphen). `validate_dns_host`
+    // now delegates to `DnsName` so it agrees with `ServerName::try_from`
+    // on hosts like this one — see
+    // `tls_intercept::tests::invalid_sni_host_fails_before_the_origin_is_dialed`
+    // for the end-to-end proof this can no longer reach a leaf mint.
+    let ca = SandboxCertificateAuthority::generate().unwrap();
+
+    let leading = ca.issue_leaf_for_host("-leading-hyphen.example.com");
+    assert!(leading.is_err(), "a leading-hyphen label must be rejected");
+    assert_eq!(ca.cached_entry_count(), 0);
+
+    let trailing = ca.issue_leaf_for_host("trailing-hyphen-.example.com");
+    assert!(
+        trailing.is_err(),
+        "a trailing-hyphen label must be rejected"
+    );
+    assert_eq!(ca.cached_entry_count(), 0);
+}
+
+/// `validate_dns_host`'s `DnsName::try_from_str(host).map_err(|_| ...)`
+/// must not discard the parsed bound error: per this repo's error-handling
+/// rule (`.claude/rules/error-handling.md`, "A `map_err(|_| …)` … is not
+/// `silent-ok`-exemptible"), a sanitized `RuntimeProcessError` may hide
+/// details from the client, but the server-side chain must retain/log the
+/// source. This gates certificate minting, so a discarded parse failure is
+/// exactly the kind of path that needs to stay debuggable.
+#[test]
+#[tracing_test::traced_test]
+fn dns_parse_failure_is_logged_before_being_sanitized() {
+    let ca = SandboxCertificateAuthority::generate().unwrap();
+
+    // A leading-hyphen label: `rcgen` itself accepts it, so this must fail
+    // via `validate_dns_host`'s `DnsName::try_from_str` delegation — the
+    // exact path whose error `map_err(|_| ...)` currently discards.
+    let expected_parse_error = DnsName::try_from_str("-leading-hyphen.example.com")
+        .expect_err("fixture must be an invalid DNS name")
+        .to_string();
+    let error = ca.issue_leaf_for_host("-leading-hyphen.example.com");
+
+    assert!(error.is_err(), "a leading-hyphen label must be rejected");
+    // Asserting the interpolated `DnsName::try_from_str` cause itself, not
+    // just the static `"... DnsName parse: ..."` log prefix: the static
+    // prefix already contains the literal substring "DnsName", so a looser
+    // `logs_contain("DnsName")` would keep passing even if `{error}` were
+    // dropped from the log's format string entirely, silently letting the
+    // interpolated cause go unasserted again.
+    assert!(
+        logs_contain(&expected_parse_error),
+        "the original DnsName parse error ({expected_parse_error:?}) must be \
+         logged (debug!) before validate_dns_host returns its sanitized \
+         ExecutionFailed message, so the cause is not silently discarded"
+    );
+}
+
+#[test]
 fn oversized_dns_label_is_rejected() {
     let ca = SandboxCertificateAuthority::generate().unwrap();
     // A single 64-byte label exceeds `MAX_DNS_LABEL_LEN` (63) while the

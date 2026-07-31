@@ -28,6 +28,7 @@ use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose,
 };
+use rustls_pki_types::DnsName;
 use time::{Duration as CertValidityDuration, OffsetDateTime};
 
 use crate::RuntimeProcessError;
@@ -243,8 +244,14 @@ impl SandboxCertificateAuthority {
         // variants of the same host multiply cache entries — on a
         // bounded, oldest-first-eviction cache, that lets a peer choosing
         // SNI case variants evict unrelated live entries. Every downstream
-        // use (cache key, SAN, CN) shares this one canonical form.
-        let host = host.trim().to_ascii_lowercase();
+        // use (cache key, SAN, CN) shares this one canonical form. This is
+        // the same [`normalize_host`] callers upstream of this CA (e.g.
+        // `tls_intercept::terminate_and_forward_with_timeout`) apply before
+        // they ever call here — see that function's doc for why a *second*
+        // independent normalization here still matters even once callers
+        // normalize first: this method must stay safe to call with a raw,
+        // unnormalized host on its own.
+        let host = normalize_host(host);
         if host.is_empty() {
             return Err(RuntimeProcessError::ExecutionFailed(
                 "sandbox CA: host must not be empty".to_string(),
@@ -415,6 +422,25 @@ impl SandboxCertificateAuthority {
     }
 }
 
+/// The one definition of "the host" for the sandbox TLS-interception seam:
+/// trimmed and lowercased. DNS names are case-insensitive, and an
+/// intercepted CONNECT's host/SNI can carry incidental whitespace, so every
+/// consumer that decides identity from a host string — leaf-cert
+/// mint/cache key ([`SandboxCertificateAuthority::issue_leaf_for_host`]),
+/// the bound-hosts allowlist check (`tls_intercept::TlsInterceptConfig::
+/// is_bound`), and the SNI value threaded to the origin dial
+/// (`tls_intercept::terminate_and_forward_with_timeout`) — must canonicalize
+/// through this exact function. Two independently-normalizing call sites is
+/// precisely how the leaf-mint/SNI-dial asymmetry this function replaces
+/// came to exist: `issue_leaf_for_host` trimmed and lowercased, the SNI
+/// conversion did neither, so a padded host could mint a leaf and pass the
+/// client handshake, then fail `ServerName::try_from` — after the origin
+/// was one step from being dialed. One chokepoint removes the class, not
+/// just this instance of it.
+pub(crate) fn normalize_host(host: &str) -> String {
+    host.trim().to_ascii_lowercase()
+}
+
 fn ca_error(error: rcgen::Error) -> RuntimeProcessError {
     RuntimeProcessError::ExecutionFailed(format!("sandbox CA: {error}"))
 }
@@ -427,20 +453,30 @@ fn ca_range_error(field: &str) -> RuntimeProcessError {
 
 /// Bound on total DNS name length (RFC 1035 §3.1): 253 visible characters
 /// (255 octets on the wire, minus the length-prefix and root-label bytes).
+/// Kept as an explicit pre-check only so an oversized host is rejected
+/// before the `DnsName` parse below runs — `DnsName::try_from_str` enforces
+/// the identical bound (its own `MAX_NAME_LENGTH`) as part of the delegated
+/// validation, so this can never reject something that check would accept.
 const MAX_DNS_HOST_LEN: usize = 253;
 
-/// Bound on one DNS label's length (RFC 1035 §3.1).
-const MAX_DNS_LABEL_LEN: usize = 63;
-
 /// Rejects hosts `rcgen` itself would accept as a DNS SAN but that are not
-/// plausible DNS names: oversized input, wildcards, and anything outside
-/// `[a-z0-9-.]` (which excludes control characters and other non-ASCII or
-/// non-hostname bytes). `host` is expected to already be trimmed and
-/// lowercased by the caller. This is deliberately a plausibility filter, not
-/// full RFC 1035 label-syntax enforcement (e.g. leading/trailing hyphens
-/// within a label) — the goal is bounding what a network-controlled CONNECT
-/// host can force this CA to mint a certificate for, not general-purpose DNS
-/// validation.
+/// syntactically valid DNS names. Delegates the actual syntax check to
+/// `rustls_pki_types::DnsName` — the same type `ServerName::try_from`
+/// (`tls_intercept.rs`'s SNI-host check, which runs before this CA's leaf
+/// is used to dial the origin) constructs internally — rather than
+/// hand-rolling a second copy of RFC 1035 label syntax. Two independently
+/// maintained DNS-name validators drift (this crate already collapsed one
+/// such duplicate, the trusted-variant list on PR #6747), and here that
+/// drift is dangerous specifically because this function's `Ok` gates a
+/// real (if short-lived, if bounded) certificate mint: a host this
+/// function accepted that `ServerName::try_from` then rejected would burn
+/// a mint on a host that can never complete interception. Delegating means
+/// a host this function accepts is *by construction* one `ServerName::
+/// try_from` also accepts — including case and padding, since both this
+/// function's caller and `terminate_and_forward_with_timeout` canonicalize
+/// through the same [`normalize_host`] before either the mint or the SNI
+/// conversion runs. `host` is expected to already be trimmed and lowercased
+/// by the caller.
 fn validate_dns_host(host: &str) -> Result<(), RuntimeProcessError> {
     if host.len() > MAX_DNS_HOST_LEN {
         return Err(RuntimeProcessError::ExecutionFailed(format!(
@@ -452,19 +488,18 @@ fn validate_dns_host(host: &str) -> Result<(), RuntimeProcessError> {
             "sandbox CA: wildcard hosts are not permitted".to_string(),
         ));
     }
-    let is_valid_char = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.';
-    if !host.bytes().all(is_valid_char) {
-        return Err(RuntimeProcessError::ExecutionFailed(
-            "sandbox CA: host contains characters outside the DNS hostname charset".to_string(),
-        ));
-    }
-    for label in host.split('.') {
-        if label.is_empty() || label.len() > MAX_DNS_LABEL_LEN {
-            return Err(RuntimeProcessError::ExecutionFailed(
-                "sandbox CA: host contains an empty or oversized DNS label".to_string(),
-            ));
-        }
-    }
+    DnsName::try_from_str(host).map_err(|error| {
+        // The public error is intentionally sanitized (no attacker-influenced
+        // host content echoed back), but the parse cause must not simply
+        // vanish — `RuntimeProcessError::ExecutionFailed` here gates
+        // certificate minting, so a discarded cause would make a real
+        // validator regression undebuggable. See
+        // `.claude/rules/error-handling.md`'s `map_err(|_| ...)` rule.
+        tracing::debug!("sandbox CA: host failed DnsName parse: {error}");
+        RuntimeProcessError::ExecutionFailed(
+            "sandbox CA: host is not a syntactically valid DNS name".to_string(),
+        )
+    })?;
     Ok(())
 }
 

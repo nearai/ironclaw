@@ -3502,6 +3502,7 @@ dependencies = [
  "syn 2.0.117",
  "tempfile",
  "toml 1.1.2+spec-1.1.0",
+ "unicode-ident",
 ]
 
 [[package]]
@@ -3998,6 +3999,9 @@ dependencies = [
  "libsql",
  "rcgen",
  "rust_decimal",
+ "rustls 0.23.41",
+ "rustls-native-certs 0.8.4",
+ "rustls-pki-types",
  "secrecy",
  "serde",
  "serde_json",
@@ -4008,6 +4012,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-postgres",
+ "tokio-rustls 0.26.4",
  "tokio-util",
  "tracing",
  "tracing-subscriber",

@@ -71,10 +71,29 @@ serde_json = "1"
 sha2 = "0.11"
 static_assertions = "1"
 thiserror = "2"
+# W6 phase 1 (design doc §4, `sandbox_process::tls_intercept`): the egress
+# proxy's TLS-termination seam for bound hosts. Version pinned to match the
+# `rustls` already in the workspace (`ironclaw_reborn_event_store`) rather
+# than introducing a second major version. Ships unwired — see
+# `tls_intercept`'s module doc for what still needs a caller.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+# PEM parsing for `tls_intercept`'s leaf cert/key and test root stores.
+# `rustls-pemfile` is unmaintained (RUSTSEC-2025-0134); `rustls-pki-types`
+# (already pulled in by `rustls`) absorbed the same `PemObject` decoding and
+# is the maintained upstream replacement the advisory itself points to.
+rustls-pki-types = "1"
+# `VerifiedOriginConnector::from_system_roots` (`tls_intercept`'s only
+# production origin-connector constructor) loads the platform's real trust
+# anchors. Already a direct dependency of `ironclaw_reborn_event_store` at
+# the same version (see its `make_rustls_connector`), and already present in
+# this crate's own dependency tree via `hyper-rustls`/`reqwest` at 0.8 — no
+# new crate or version enters the workspace by declaring it here directly.
+rustls-native-certs = "0.8"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 # rcgen's `CertificateParams::not_before`/`not_after` are `time::OffsetDateTime`
 # — needed directly to compute the CA's leaf-cert validity window.
 time = { version = "0.3", default-features = false }
-tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
 tokio-util = { version = "0.7" }
 tracing = "0.1"
 url = "2"
