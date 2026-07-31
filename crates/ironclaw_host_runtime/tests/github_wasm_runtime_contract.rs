@@ -1324,9 +1324,16 @@ async fn bundled_github_wasm_executes_search_get_and_comment_operations() {
         Arc::clone(&search_http),
     );
     assert_eq!(search.error, None);
+    let search_output: serde_json::Value = serde_json::from_str(
+        search
+            .output_json
+            .as_deref()
+            .expect("search should return compact JSON"),
+    )
+    .expect("compact search output should be valid JSON");
     assert_eq!(
-        search.output_json.as_deref(),
-        Some(r#"{"total_count":0,"incomplete_results":false,"items":[]}"#)
+        search_output,
+        json!({"total_count": 0, "incomplete_results": false, "items": []})
     );
     assert_single_wasm_request(
         &search_http,
@@ -1859,8 +1866,8 @@ async fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
 #[tokio::test]
 async fn bundled_github_wasm_leaves_success_json_for_host_output_decode() {
     let execution = execute_bundled_github_wasm(
-        "github.search_issues",
-        json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
+        "github.get_issue",
+        json!({"owner": "nearai", "repo": "ironclaw", "issue_number": 1}),
         Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
             status: 200,
             headers_json: "{}".to_string(),
@@ -1870,6 +1877,25 @@ async fn bundled_github_wasm_leaves_success_json_for_host_output_decode() {
 
     assert_eq!(execution.output_json.as_deref(), Some("not-json"));
     assert_eq!(execution.error, None);
+}
+
+#[tokio::test]
+async fn bundled_github_wasm_rejects_malformed_compacted_search_response() {
+    let execution = execute_bundled_github_wasm(
+        "github.search_issues",
+        json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
+        Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+            status: 200,
+            headers_json: "{}".to_string(),
+            body: b"not-json".to_vec(),
+        })),
+    );
+
+    assert_eq!(execution.output_json, None);
+    assert_eq!(
+        structured_wasm_error_code(&execution).as_deref(),
+        Some("github_api_invalid_response")
+    );
 }
 
 #[test]
