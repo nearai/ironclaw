@@ -4280,17 +4280,24 @@ fn skill_activation_selector_config(
 ) -> SkillActivationSelectorConfig {
     SkillActivationSelectorConfig {
         max_context_tokens: MAX_SKILL_CONTEXT_TOKENS,
-        // `ExplicitAndCriteria` (the upstream default) lets a learned skill
-        // auto-activate when a later request matches its keywords/patterns —
-        // not only when the user types `$name`/`/name`. This is what closes
-        // the learn→reuse loop: a skill distilled from one task is applied
-        // automatically on the next similar task. Explicit mentions still
-        // force-activate; criteria selection is additive and bounded by
-        // `max_active_skills` / `max_context_tokens`. Under the default
-        // `Listing` injection mode a criteria match ranks the skill in the
-        // one-line listing instead of injecting its body.
-        selection_mode:
-            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitAndCriteria,
+        // `selection_mode` is deliberately NOT set here: it inherits
+        // `SkillActivationSelectorConfig`'s default, which this PR makes
+        // `ExplicitOnly`.
+        //
+        // The model decides which skill applies. It sees every installed skill in
+        // the one-line listing and calls `skill_activate` for the one it wants;
+        // the host does not keyword-match on its behalf. A scoring function
+        // guessing from the user's wording is strictly worse at this than the
+        // model reading the same listing, and a wrong guess spends the skill
+        // budget on the wrong body.
+        //
+        // Pinning `ExplicitAndCriteria` here previously made that default
+        // unreachable on the Reborn path — the value in `activation.rs` was dead
+        // code as far as any real user was concerned, so changing it looked like a
+        // behaviour change and was not one. `reborn_skill_selection_is_model_decided`
+        // fails if it is re-pinned. Criteria selection is still available to
+        // callers that opt in via `set_selection_mode`, and explicit `$name` /
+        // `/name` mentions force-activate under either mode.
         regex_activation_enabled: regex_skill_activation_enabled,
         injection_mode,
         ..SkillActivationSelectorConfig::default()

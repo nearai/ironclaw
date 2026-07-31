@@ -43,8 +43,54 @@ const SKILL_LISTING_CANDIDATE_NAME: &str = "available-skills";
 /// loaded skill bodies.
 const SKILL_LISTING_ORDERING_KEY: &str = "~available-skills";
 const SKILL_LISTING_HEADER: &str = include_str!("../prompts/skill_listing_header.md");
-const MAX_LISTED_SKILLS: usize = 100;
+/// Total character budget for the rendered listing, excluding its header.
+///
+/// This replaces a flat `MAX_LISTED_SKILLS = 100` cap. The cap was the wrong shape:
+/// it dropped whole alphabetical tails, because the listing is source-then-name
+/// ordered. Measured on a 227-skill catalog, `pdf`, `pptx`, `xlsx` and
+/// `timeseries-detrending` all sorted past position 100, so those skills could not
+/// be discovered at all — and since a skill the model cannot see is a skill it
+/// cannot request, that is indistinguishable from not having installed it.
+///
+/// The budget is deliberately the *same* prompt cost the old cap already permitted
+/// (`100 * (250 + 64)`), so this is not a context-size increase. What changes is how
+/// the budget is spent: on **every** skill's name with a shorter description, rather
+/// than on a long description for the alphabetically-lucky first 100. Names are what
+/// make a skill reachable; descriptions only help rank it, and the model can always
+/// activate a skill to read its body.
+const LISTING_CHAR_BUDGET: usize = 100 * (250 + 64);
+/// Longest description rendered for a single entry, when the catalog is small enough
+/// to afford it. Preserves the previous rendering for ordinary catalogs.
 const MAX_LISTING_DESCRIPTION_CHARS: usize = 250;
+/// Shortest description the listing will shrink an entry to before it gives up and
+/// truncates. Below roughly this length a description stops disambiguating similar
+/// skills, so trading further characters for more entries is a bad trade.
+const MIN_LISTING_DESCRIPTION_CHARS: usize = 60;
+/// Per-entry overhead: `"\n- "`, the `": "` separator, and a name allowance.
+const LISTING_ENTRY_OVERHEAD_CHARS: usize = 48;
+
+/// How many description characters each entry may use, given how many there are.
+///
+/// Returns `None` when even [`MIN_LISTING_DESCRIPTION_CHARS`] per entry will not fit,
+/// which is the only case where the listing must still drop entries.
+fn listing_description_allowance(entry_count: usize) -> Option<usize> {
+    if entry_count == 0 {
+        return None;
+    }
+    let per_entry = LISTING_CHAR_BUDGET / entry_count;
+    let for_description = per_entry.saturating_sub(LISTING_ENTRY_OVERHEAD_CHARS);
+    if for_description < MIN_LISTING_DESCRIPTION_CHARS {
+        None
+    } else {
+        Some(for_description.min(MAX_LISTING_DESCRIPTION_CHARS))
+    }
+}
+
+/// How many entries fit at the minimum description length — the count used only on
+/// the give-up path, so that truncation is a last resort rather than a fixed cap.
+fn max_entries_at_min_description() -> usize {
+    LISTING_CHAR_BUDGET / (MIN_LISTING_DESCRIPTION_CHARS + LISTING_ENTRY_OVERHEAD_CHARS)
+}
 
 /// Typed request produced by first-party skill activation selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1194,37 +1240,39 @@ fn skill_listing_candidate(entries: &[SkillListingEntry]) -> Option<HostSkillCon
     if entries.is_empty() {
         return None;
     }
+    // Spend the character budget on listing EVERY skill, shrinking descriptions as the
+    // catalog grows, and only drop entries if even the minimum will not fit.
+    let (allowance, listed) = match listing_description_allowance(entries.len()) {
+        Some(allowance) => (allowance, entries.len()),
+        None => (MIN_LISTING_DESCRIPTION_CHARS, max_entries_at_min_description()),
+    };
     let mut listing = String::from(SKILL_LISTING_HEADER.trim_end());
     listing.push('\n');
-    for entry in entries.iter().take(MAX_LISTED_SKILLS) {
+    for entry in entries.iter().take(listed) {
         listing.push_str("\n- ");
         listing.push_str(&entry.name);
         listing.push_str(": ");
-        listing.push_str(&entry.description);
+        listing.push_str(&single_line_truncated(&entry.description, allowance));
     }
-    // Say so when the listing is truncated, and WARN. Silence here is a correctness bug, not a
-    // cosmetic one: the listing is source-then-name ordered, so past this cap whole alphabetical
-    // tails vanish with no signal to the model or the operator.
+    // If entries still had to be dropped, SAY so and WARN. Silence here is a correctness bug,
+    // not a cosmetic one: the listing is source-then-name ordered, so a dropped tail is a
+    // dropped alphabetical range, with no signal to the model or the operator.
     //
-    // Measured on a 227-skill catalog: `pdf`, `pptx`, `xlsx` and `timeseries-detrending` all
-    // sorted past position 100, so three of the first four benchmark tasks could not reach their
-    // own skill and the run was measuring nothing. The model had no way to know, and neither did
-    // I until I diffed the listing against each task's expected set.
-    //
-    // This does not make a large catalog usable -- that needs `skill_search` (#4428) -- but it
-    // converts a silent, invisible failure into a stated one.
-    let hidden = entries.len().saturating_sub(MAX_LISTED_SKILLS);
+    // This is now reachable only past ~380 skills rather than at 100, but the disclosure stays
+    // because the failure is severe when it does happen. Beyond that size the answer is
+    // `skill_search` (#4428), not a larger prompt.
+    let hidden = entries.len().saturating_sub(listed);
     if hidden > 0 {
         listing.push_str(&format!(
             "\n\n({hidden} further skill(s) are installed but not listed here, because the \
-             listing is capped at {MAX_LISTED_SKILLS}. Activating one by exact name still works \
-             if you already know it.)"
+             listing does not fit its character budget. Activating one by exact name still \
+             works if you already know it.)"
         ));
         tracing::warn!(
-            listed = MAX_LISTED_SKILLS,
+            listed,
             hidden,
             total = entries.len(),
-            "skill listing truncated; skills past the cap are invisible to the model"
+            "skill listing truncated; skills past the budget are invisible to the model"
         );
     }
     Some(
@@ -1949,7 +1997,12 @@ mod tests {
     ///
     /// With the scorer retired the listing IS the routing interface, so its size is now a
     /// correctness property rather than a cosmetic one. 200 skills is well past any real catalog
-    /// (the bundled one is 32) and past `MAX_LISTED_SKILLS`, so this also pins the truncation.
+    /// (the bundled one is 32) and past the old flat cap of 100.
+    ///
+    /// Two properties, and the second is the one that used to fail: the listing stays inside its
+    /// character budget, AND **every** skill appears in it. Under the old cap this test would have
+    /// passed on budget alone while silently hiding 100 of the 200 skills — a skill the model
+    /// cannot see is one it cannot activate, so that is a routing failure, not a display detail.
     #[tokio::test]
     async fn the_listing_stays_within_budget_at_two_hundred_skills() {
         let owned: Vec<(SkillSourceKind, String, String)> = (0..200)
@@ -1985,21 +2038,35 @@ mod tests {
             .load_skill_context_candidates(&context)
             .await
             .expect("selection succeeds");
-        let listing_chars: usize = selected
+        let listing_text: String = selected
             .iter()
             .filter_map(|candidate| candidate.discoverable_metadata())
-            .map(|(_, text)| text.chars().count())
-            .sum();
+            .map(|(_, text)| text.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let listing_chars = listing_text.chars().count();
 
-        // MAX_LISTED_SKILLS entries, each capped at MAX_LISTING_DESCRIPTION_CHARS plus the name
-        // and separators. Budget stated as characters because that is what the listing builder
-        // actually bounds; ~4 chars per token puts this near 8k tokens worst case.
-        const LISTING_CHAR_BUDGET: usize = MAX_LISTED_SKILLS * (MAX_LISTING_DESCRIPTION_CHARS + 64);
+        // Budget stated as characters because that is what the listing builder actually bounds;
+        // ~4 chars per token puts this near 8k tokens worst case. Unchanged by the switch from a
+        // count cap to a budget: this is the same ceiling the old cap already permitted.
         assert!(
-            listing_chars <= LISTING_CHAR_BUDGET,
+            listing_chars <= LISTING_CHAR_BUDGET + SKILL_LISTING_HEADER.chars().count(),
             "listing is {listing_chars} chars, over the {LISTING_CHAR_BUDGET}-char budget; with \
              the scorer retired the listing is the routing interface and its size is a \
              correctness property"
+        );
+        // Every skill is reachable. This is the assertion the old flat cap violated.
+        let missing: Vec<&str> = owned
+            .iter()
+            .map(|(_, name, _)| name.as_str())
+            .filter(|name| !listing_text.contains(*name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{} of 200 skills are absent from the listing (first few: {:?}); a skill the model \
+             cannot see is one it cannot activate",
+            missing.len(),
+            &missing[..missing.len().min(5)]
         );
         assert_no_skill_body_disclosed(&selected, "200-skill catalog, nothing activated");
     }
@@ -2086,14 +2153,18 @@ mod tests {
 
     /// A truncated listing must SAY it is truncated.
     ///
-    /// The cap is 100 and the listing is source-then-name ordered, so past it whole alphabetical
-    /// tails disappear. Measured on a 227-skill catalog, `pdf`, `pptx`, `xlsx` and
-    /// `timeseries-detrending` all sorted past position 100 -- three of the first four benchmark
-    /// tasks could not reach their own skill, and nothing anywhere said so. That is a silent
-    /// correctness failure, and this test is what stops it recurring.
+    /// The listing is source-then-name ordered, so a dropped tail is a dropped alphabetical
+    /// range. Measured on a 227-skill catalog under the old flat cap of 100, `pdf`, `pptx`,
+    /// `xlsx` and `timeseries-detrending` all sorted past position 100 -- three of the first
+    /// four benchmark tasks could not reach their own skill, and nothing anywhere said so.
+    ///
+    /// The budget makes that unreachable until roughly 380 skills, so this test has to build a
+    /// catalog past THAT to exercise the disclosure at all. Kept because the failure is severe
+    /// when it happens, and because "we raised the limit" is not the same as "it cannot happen".
     #[tokio::test]
     async fn a_truncated_listing_states_how_many_skills_are_hidden() {
-        let owned: Vec<(SkillSourceKind, String, String)> = (0..MAX_LISTED_SKILLS + 25)
+        let listed = max_entries_at_min_description();
+        let owned: Vec<(SkillSourceKind, String, String)> = (0..listed + 25)
             .map(|i| {
                 let name = format!("probe-{i:03}");
                 let md = skill_md(&name, "A probe skill.", &[&name], "PROBE_SENTINEL");
@@ -2777,8 +2848,8 @@ mod tests {
         assert!(entry.description.starts_with("line one line two "));
         assert!(!entry.description.contains('\n'));
 
-        // The composed listing is bounded: at most MAX_LISTED_SKILLS entries.
-        let entries: Vec<SkillListingEntry> = (0..MAX_LISTED_SKILLS + 5)
+        // The composed listing is bounded by its character budget, not a flat entry count.
+        let entries: Vec<SkillListingEntry> = (0..max_entries_at_min_description() + 5)
             .map(|index| SkillListingEntry {
                 name: format!("skill-{index:03}"),
                 description: "listed".to_string(),
@@ -2788,7 +2859,10 @@ mod tests {
         let (_, listing) = candidate
             .discoverable_metadata()
             .expect("listing is discoverable");
-        assert_eq!(listing.matches("\n- ").count(), MAX_LISTED_SKILLS);
+        assert_eq!(
+            listing.matches("\n- ").count(),
+            max_entries_at_min_description()
+        );
     }
 
     #[tokio::test]

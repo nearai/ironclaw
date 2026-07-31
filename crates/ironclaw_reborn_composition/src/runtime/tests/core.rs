@@ -315,6 +315,33 @@ fn standalone_selector_config_propagates_injection_mode() {
     }
 }
 
+/// Skill selection on the Reborn path must be the model's decision, not a host-side
+/// keyword guess.
+///
+/// This exists because changing the default in `activation.rs` was, on its own, a
+/// no-op here: `skill_activation_selector_config` used to pin
+/// `ExplicitAndCriteria` at the call site, so no real Reborn user could ever see
+/// `ExplicitOnly` however the default was written. The bug was invisible to every
+/// test in `ironclaw_first_party_extension_ports`, because those construct their own
+/// config — only a test at the composition layer, on the value this function
+/// actually returns, can catch it.
+///
+/// If a later change re-pins the mode here, this fails rather than silently
+/// reinstating host-side matching.
+#[test]
+fn reborn_skill_selection_is_model_decided() {
+    let cfg = super::skill_activation_selector_config(
+        true,
+        ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+    );
+    assert_eq!(
+        cfg.selection_mode,
+        ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitOnly,
+        "Reborn must let the model choose the skill from the listing; pinning \
+         ExplicitAndCriteria here makes the host keyword-match on the model's behalf"
+    );
+}
+
 #[test]
 fn skill_injection_mode_parses_listing_full_and_defaults() {
     use ironclaw_first_party_extension_ports::SkillInjectionMode;
