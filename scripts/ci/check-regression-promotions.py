@@ -167,36 +167,48 @@ def validate(
         elif fixture and not (repo_root / fixture).is_file():
             errors.append(f"{field}.deterministic_fixture does not exist")
 
-    replayable = selected - no_model - quarantined
-    accounted = drift_set | retired_set
-    missing = sorted(replayable - accounted)
-    unexpected = sorted(accounted - replayable)
-    if missing:
-        errors.append(
-            "replayable cases must be representative drift or retired: "
-            + ", ".join(missing)
-        )
-    if unexpected:
-        errors.append(
-            "live/retired cases must have active deterministic replay: "
-            + ", ".join(unexpected)
-        )
-
-    workflow = (repo_root / ".github/workflows/live-canary.yml").read_text(encoding="utf-8")
+    workflow = (repo_root / ".github/workflows/live-canary.yml").read_text(
+        encoding="utf-8"
+    )
     scheduled_match = re.search(
         r"REQUESTED_CASES:\s*\$\{\{\s*github\.event_name == 'schedule'\s*&&\s*'([^']+)'",
         workflow,
     )
+    scheduled: set[str] = set()
     if not scheduled_match:
-        errors.append("live-canary workflow has no mechanical scheduled drift selection")
+        errors.append("live-canary workflow has no mechanical scheduled case selection")
     else:
-        scheduled = {
-            case.strip() for case in scheduled_match.group(1).split(",") if case.strip()
-        }
-        if scheduled != drift_set:
-            errors.append(
-                "scheduled live cases must exactly match representative_drift_cases"
-            )
+        scheduled_selector = scheduled_match.group(1).strip()
+        if scheduled_selector.lower() == "all" or scheduled_selector == "*":
+            scheduled = set(selected)
+        else:
+            scheduled = {
+                case.strip()
+                for case in scheduled_selector.split(",")
+                if case.strip()
+            }
+
+    for case in sorted(scheduled - selected):
+        errors.append(f"scheduled case is not in the harvested inventory: {case}")
+    for case in sorted(drift_set - scheduled):
+        errors.append(f"representative drift case is not scheduled: {case}")
+    for case in sorted(retired_set & scheduled):
+        errors.append(f"retired case is still scheduled: {case}")
+
+    replayable = selected - no_model - quarantined
+    accounted = scheduled | retired_set
+    missing = sorted(replayable - accounted)
+    if missing:
+        errors.append(
+            "replayable cases must be scheduled or retired: "
+            + ", ".join(missing)
+        )
+    unscheduled_without_replay = sorted((no_model | quarantined) - scheduled)
+    if unscheduled_without_replay:
+        errors.append(
+            "cases without active deterministic replay must remain scheduled: "
+            + ", ".join(unscheduled_without_replay)
+        )
     return errors
 
 

@@ -28,6 +28,7 @@ class RegressionPromotionMetadataTest(unittest.TestCase):
         self,
         manifest: dict[str, object],
         today: dt.date = dt.date(2026, 7, 30),
+        scheduled_cases: str = "all",
     ) -> list[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -39,9 +40,13 @@ class RegressionPromotionMetadataTest(unittest.TestCase):
             )
             workflow_path = root / ".github/workflows/live-canary.yml"
             workflow_path.parent.mkdir(parents=True)
-            workflow_path.write_text(
-                workflow_source.read_text(encoding="utf-8"), encoding="utf-8"
+            workflow = workflow_source.read_text(encoding="utf-8")
+            workflow = workflow.replace(
+                "github.event_name == 'schedule' && 'all'",
+                f"github.event_name == 'schedule' && '{scheduled_cases}'",
+                1,
             )
+            workflow_path.write_text(workflow, encoding="utf-8")
             lifecycle = manifest.get("promotion_metadata", {}).get("live_retirement", {})
             for entry in lifecycle.get("retired_cases", []):
                 fixture = entry.get("deterministic_fixture")
@@ -83,13 +88,39 @@ class RegressionPromotionMetadataTest(unittest.TestCase):
         self.assertIn("missing retirement_evidence", errors)
         self.assertTrue(any("deterministic_test" in error for error in errors), errors)
 
-    def test_every_replayable_case_is_live_or_retired_with_evidence(self) -> None:
+    def test_every_replayable_case_is_scheduled_or_retired_with_evidence(self) -> None:
         broken = copy.deepcopy(self.manifest)
         broken["promotion_metadata"]["live_retirement"]["retired_cases"] = []
-        errors = self.validate(broken)
+        errors = self.validate(
+            broken,
+            scheduled_cases=(
+                "qa_3b_endpoint_status_live_chat,"
+                "qa_9b_routine_dm_delivery_exactly_once,"
+                "qa_10a_slack_self_attribution"
+            ),
+        )
         self.assertTrue(
             any(
-                "replayable cases must be representative drift or retired" in error
+                "replayable cases must be scheduled or retired" in error
+                for error in errors
+            ),
+            errors,
+        )
+
+    def test_cases_without_active_replay_must_remain_scheduled(self) -> None:
+        errors = self.validate(
+            self.manifest,
+            scheduled_cases=(
+                "qa_3b_endpoint_status_live_chat,"
+                "qa_9b_routine_dm_delivery_exactly_once,"
+                "qa_10a_slack_self_attribution"
+            ),
+        )
+
+        self.assertTrue(
+            any(
+                "cases without active deterministic replay must remain scheduled"
+                in error
                 for error in errors
             ),
             errors,
