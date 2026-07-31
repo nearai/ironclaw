@@ -4277,6 +4277,7 @@ fn optional_nonzero_u32_env(
 fn skill_activation_selector_config(
     regex_skill_activation_enabled: bool,
     injection_mode: SkillInjectionMode,
+    activation_strategy: ironclaw_skills::activation_strategy::ActivationStrategy,
 ) -> SkillActivationSelectorConfig {
     SkillActivationSelectorConfig {
         max_context_tokens: MAX_SKILL_CONTEXT_TOKENS,
@@ -4300,6 +4301,7 @@ fn skill_activation_selector_config(
         // `/name` mentions force-activate under either mode.
         regex_activation_enabled: regex_skill_activation_enabled,
         injection_mode,
+        activation_strategy,
         ..SkillActivationSelectorConfig::default()
     }
 }
@@ -4311,7 +4313,7 @@ fn skill_activation_selector_config(
 fn skill_injection_mode_env() -> Result<SkillInjectionMode, RebornRuntimeError> {
     match std::env::var(SKILL_INJECTION_MODE_ENV_KEY) {
         Ok(value) => skill_injection_mode_from(&value),
-        Err(std::env::VarError::NotPresent) => Ok(SkillInjectionMode::Listing),
+        Err(std::env::VarError::NotPresent) => Ok(DEFAULT_SKILL_INJECTION_MODE),
         Err(error) => Err(RebornRuntimeError::InvalidArgument {
             reason: format!("could not read {SKILL_INJECTION_MODE_ENV_KEY}: {error}"),
         }),
@@ -4319,6 +4321,101 @@ fn skill_injection_mode_env() -> Result<SkillInjectionMode, RebornRuntimeError> 
 }
 
 const SKILL_INJECTION_MODE_ENV_KEY: &str = "IRONCLAW_REBORN_SKILL_INJECTION";
+
+/// Binding for the `skill.activation.v1` profile.
+const SKILL_ACTIVATION_ENV_KEY: &str = "IRONCLAW_REBORN_SKILL_ACTIVATION";
+
+/// Default activation strategy for Reborn: **behavior-preserving**.
+///
+/// Deliberately `CriteriaOnly`, matching the memory-provider discipline where the
+/// bundled native provider stays the default and a new provider is opt-in. Three
+/// existing local-dev tests encode today's selection behavior (setup-marker
+/// suppression, the webui listing candidate, `skill_activate` context loading);
+/// flipping this default changes them, so the strategy ships opt-in and the
+/// default remains byte-identical.
+///
+/// Opt in with `IRONCLAW_REBORN_SKILL_ACTIVATION=name_and_description`.
+///
+/// Why anyone would: the selector scores only
+/// `activation.keywords`/`tags`/`patterns` and keeps a skill `if score > 0`, but
+/// **0 of 30** skills an agent authored for itself on the SkillsBench subset
+/// (nearai/benchmarks#287) declared any of those. Under `CriteriaOnly` every
+/// agent-authored skill is permanently unselectable — the agent can create a
+/// skill and never reuse it. `name_and_description` restores the Claude-Code
+/// contract where name + description suffice.
+/// Default stays `CriteriaOnly` — behavior-preserving.
+///
+/// `name_and_description` is the opt-in
+/// (`IRONCLAW_REBORN_SKILL_ACTIVATION=name_and_description`): it lets a skill match on its
+/// name and description, not only on `activation.keywords`/`tags`/`patterns`. Measured on
+/// nearai/benchmarks#287, **0 of 30 agent-authored skills carried an `activation` block**, so
+/// under criteria scoring they never auto-activate.
+///
+/// A floor-score strategy (`always_available`, "every skill is a candidate") was tried and
+/// REMOVED. It bought nothing: listing membership is decided by VISIBILITY, not selection
+/// (`extension_ports/activation.rs`), so the model was already shown every visible skill; the
+/// floor only reordered that listing, and it demoted chain-loaded companions. The real gap is
+/// not that the model cannot see a skill -- it is that it rarely acts on the listing
+/// (`builtin.skill_activate` called in 3 of 30 measured runs, body read in 0 of 30).
+const DEFAULT_SKILL_ACTIVATION: ironclaw_skills::activation_strategy::ActivationStrategy =
+    ironclaw_skills::activation_strategy::ActivationStrategy::CriteriaOnly;
+
+/// Resolve the activation binding from the env, failing closed on an unknown id.
+fn skill_activation_env()
+-> Result<ironclaw_skills::activation_strategy::ActivationStrategy, RebornRuntimeError> {
+    match std::env::var(SKILL_ACTIVATION_ENV_KEY) {
+        Ok(value) => ironclaw_skills::activation_strategy::ActivationStrategy::parse(&value)
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!("{SKILL_ACTIVATION_ENV_KEY}: {error}"),
+            }),
+        Err(std::env::VarError::NotPresent) => Ok(DEFAULT_SKILL_ACTIVATION),
+        Err(error) => Err(RebornRuntimeError::InvalidArgument {
+            reason: format!("could not read {SKILL_ACTIVATION_ENV_KEY}: {error}"),
+        }),
+    }
+}
+
+/// Default skill-injection mode for Reborn.
+///
+/// `Full` (the library default in
+/// [`SkillActivationSelectorConfig::default`]) injects keyword-scored skill
+/// bodies into model context. `Listing` instead shows a one-line
+/// `- name: description` menu and loads a body only on an explicit `$name`
+/// mention or a `builtin.skill_activate` call.
+///
+/// Reborn previously defaulted to `Listing` to save context. Benchmarking shows
+/// that trade is badly priced: the model reads the menu and then does not open
+/// the skill. Over 30 human-curated-skill runs of the SkillsBench/SkillLearnBench
+/// subset in nearai/benchmarks#287 (`deepseek-v4-flash`):
+///
+/// * `builtin.skill_list`      — called in 30/30 runs
+/// * `builtin.skill_activate`  — called in  3/30 runs
+/// * a skill body actually read —          0/30 runs
+///
+/// So installed skills were inert. Scores over those 31 tasks, same skills and
+/// same model, differing only in this constant:
+///
+/// | condition                | score |
+/// |--------------------------|-------|
+/// | no skills                | 78.5% |
+/// | curated skills, `Listing`| 79.8% |
+/// | curated skills, `Full`   | 85.6% |
+///
+/// `Listing` bought +1.3pp over having no skills at all; `Full` buys +7.1pp. For
+/// reference, harnesses that inject skill bodies unconditionally (Hermes, Claude
+/// Code) score 91.5% on the same tasks with the same skills.
+///
+/// **This default is deliberately left at `Listing`** even though the measurement
+/// above argues for `Full`: three existing local-dev tests HANG under `Full`
+/// (`local_dev_skill_activate_tool_loads_selected_skill_context`,
+/// `local_dev_webui_bundle_records_selectable_filesystem_skill_context`,
+/// `local_dev_runtime_wires_filesystem_skills_by_default_to_model_calls`) because
+/// they drive a mock that expects the one-line listing candidate. Flipping the
+/// product default is a maintainer call that needs those expectations updated
+/// first, so this ships as an opt-in switch with the evidence attached.
+///
+/// Opt in with `IRONCLAW_REBORN_SKILL_INJECTION=full`.
+const DEFAULT_SKILL_INJECTION_MODE: SkillInjectionMode = SkillInjectionMode::Listing;
 
 fn skill_injection_mode_from(value: &str) -> Result<SkillInjectionMode, RebornRuntimeError> {
     match value.trim().to_ascii_lowercase().as_str() {
@@ -4359,6 +4456,7 @@ fn filesystem_skill_context_source(
     let selector_config = skill_activation_selector_config(
         regex_skill_activation_enabled,
         skill_injection_mode_env()?,
+        skill_activation_env()?,
     );
     let selectable_skills = extension.selectable_skill_runtime_with_setup_markers(
         selector_config,

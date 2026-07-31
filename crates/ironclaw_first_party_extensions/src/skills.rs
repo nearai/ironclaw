@@ -361,7 +361,14 @@ fn parse_install_files(
             .and_then(Value::as_str)
             .ok_or_else(input_error)?
             .to_string();
-        let contents = if let Some(encoded) = file.get("bytes_base64") {
+        // `text` first: a bundle file an AGENT authors is a script, a reference doc or a
+        // schema fragment -- all UTF-8. Requiring base64 (or a JSON array of byte
+        // integers) for those made the capability effectively unusable by a model: it
+        // burns ~33% more tokens, and an encoding slip fails the whole install with
+        // InputEncode. Binary payloads keep using `bytes_base64`/`bytes`.
+        let contents = if let Some(text) = file.get("text") {
+            text.as_str().ok_or_else(input_error)?.as_bytes().to_vec()
+        } else if let Some(encoded) = file.get("bytes_base64") {
             let encoded = encoded.as_str().ok_or_else(input_error)?;
             BASE64_STANDARD.decode(encoded).map_err(|_| input_error())?
         } else {
@@ -442,5 +449,70 @@ mod tests {
         let error = dispatch(&request).await.unwrap_err();
 
         assert_eq!(error.kind(), RuntimeDispatchErrorKind::InputEncode);
+    }
+}
+
+#[cfg(test)]
+mod install_files_encoding_tests {
+    use super::parse_install_files;
+    use serde_json::json;
+
+    /// The encoding an agent actually produces. Before `text` existed, a self-authored
+    /// bundle had to be base64'd, and measured on the 31-task SkillsBench subset
+    /// (nearai/benchmarks#287) **0 of 27** agent-authored skills shipped any resource
+    /// file at all -- the schema did not advertise `files` and the encoding was hostile.
+    #[test]
+    fn text_files_are_accepted_as_utf8() {
+        let input = json!({
+            "content": "# skill",
+            "files": [
+                { "path": "scripts/analyze.py", "text": "import sys\nprint(sys.argv)\n" },
+                { "path": "references/units.md", "text": "mg/dL -> mmol/L: x 0.0555\n" }
+            ]
+        });
+        let parsed = parse_install_files(&input).expect("text files parse");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].path, "scripts/analyze.py");
+        assert_eq!(
+            String::from_utf8(parsed[0].contents.clone()).unwrap(),
+            "import sys\nprint(sys.argv)\n"
+        );
+        assert!(
+            String::from_utf8(parsed[1].contents.clone())
+                .unwrap()
+                .contains("0.0555")
+        );
+    }
+
+    /// Binary payloads keep working; `text` is additive, not a replacement.
+    #[test]
+    fn base64_still_accepted_and_text_takes_precedence() {
+        let b64 =
+            json!({ "content": "# s", "files": [{ "path": "a.bin", "bytes_base64": "aGVsbG8=" }] });
+        let parsed = parse_install_files(&b64).expect("base64 parses");
+        assert_eq!(parsed[0].contents, b"hello");
+
+        // both present -> `text` wins, since that is the documented preference
+        let both = json!({ "content": "# s",
+            "files": [{ "path": "a.txt", "text": "plain", "bytes_base64": "aGVsbG8=" }] });
+        let parsed = parse_install_files(&both).expect("parses");
+        assert_eq!(parsed[0].contents, b"plain");
+    }
+
+    /// Absent `files` stays a no-op, so prose-only installs are unchanged.
+    #[test]
+    fn no_files_key_is_empty_not_an_error() {
+        assert!(
+            parse_install_files(&json!({ "content": "# s" }))
+                .expect("ok")
+                .is_empty()
+        );
+    }
+
+    /// A file entry with no usable encoding must fail rather than install an empty file.
+    #[test]
+    fn entry_without_any_content_is_rejected() {
+        assert!(parse_install_files(&json!({ "files": [{ "path": "x.py" }] })).is_err());
+        assert!(parse_install_files(&json!({ "files": [{ "text": "no path" }] })).is_err());
     }
 }

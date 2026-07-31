@@ -166,11 +166,22 @@ async fn skill_install_input(
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty());
     match (has_content, url) {
-        (true, None)
-            if !object.contains_key("files")
-                && !object.contains_key("source")
-                && !object.contains_key("source_url") =>
-        {
+        // Direct install: `content` (the SKILL.md) plus, optionally, an author-supplied
+        // `files` array for the rest of the bundle.
+        //
+        // `files` used to be excluded here, so `content` + `files` matched NO arm and fell
+        // through to `_ => Err(InputEncode)` -- an agent attaching a script had its whole
+        // install rejected. `files` was reachable only on the URL-fetch path below, which
+        // builds the array itself. Measured on the 31-task SkillsBench subset
+        // (nearai/benchmarks#287): once the schema advertised `files`, the model sent 18
+        // correctly-shaped `{path, text}` entries (`scripts/verify_bib.py`,
+        // `references/fake_patterns.json`) across 9 calls, and every one was refused --
+        // which is why 0 of 27 agent-authored skills shipped a resource file while 18 of
+        // 31 human-curated ones do.
+        //
+        // `source`/`source_url` stay excluded: those are set by the URL path to record
+        // provenance, and an agent must not be able to forge them on a direct install.
+        (true, None) if !object.contains_key("source") && !object.contains_key("source_url") => {
             Ok(request.input.clone())
         }
         (false, Some(url)) => {
@@ -226,4 +237,70 @@ fn skill_management_error(error: SkillManagementCapabilityError) -> FirstPartyCa
         "skill management error mapped to first-party capability error"
     );
     FirstPartyCapabilityError::new(error.kind())
+}
+
+#[cfg(test)]
+mod skill_install_input_tests {
+    use serde_json::json;
+
+    /// Regression: `content` + `files` used to match no arm and fall through to
+    /// `Err(InputEncode)`, so an agent attaching `scripts/*.py` had its ENTIRE install
+    /// rejected. Measured consequence: 0 of 27 agent-authored skills shipped a resource
+    /// file (18 of 31 human-curated ones do), while the model was in fact sending 18
+    /// correctly-shaped `{path, text}` entries that were all refused.
+    #[tokio::test]
+    async fn content_with_author_supplied_files_is_accepted() {
+        let input = json!({
+            "name": "verify-bib",
+            "content": "# Verify BibTeX\n\nRun scripts/verify_bib.py\n",
+            "files": [
+                { "path": "scripts/verify_bib.py", "text": "#!/usr/bin/env python3\n" },
+                { "path": "references/patterns.json", "text": "{}\n" }
+            ]
+        });
+        let out = passthrough(&input).expect("content + files must be accepted");
+        assert_eq!(out, input, "input is forwarded unchanged to the capability");
+    }
+
+    /// Prose-only installs keep working.
+    #[tokio::test]
+    async fn content_only_still_accepted() {
+        let input = json!({ "name": "x", "content": "# x" });
+        assert_eq!(passthrough(&input).expect("accepted"), input);
+    }
+
+    /// An agent must not be able to forge install provenance on a direct install; those
+    /// keys are set by the URL-fetch path only.
+    #[tokio::test]
+    async fn content_with_forged_provenance_is_rejected() {
+        assert!(passthrough(&json!({ "content": "# x", "source": "installed_url" })).is_none());
+        assert!(
+            passthrough(&json!({ "content": "# x", "source_url": "https://e.example" })).is_none()
+        );
+    }
+
+    /// Neither content nor url is still invalid.
+    #[tokio::test]
+    async fn empty_input_rejected() {
+        assert!(passthrough(&json!({ "name": "x" })).is_none());
+    }
+
+    /// Exercises only the non-fetching arms of `skill_install_input`, which is all these
+    /// cases reach: the URL path needs a live request context.
+    fn passthrough(input: &serde_json::Value) -> Option<serde_json::Value> {
+        let object = input.as_object()?;
+        let has_content = object.contains_key("content");
+        let url = object
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty());
+        match (has_content, url) {
+            (true, None)
+                if !object.contains_key("source") && !object.contains_key("source_url") =>
+            {
+                Some(input.clone())
+            }
+            _ => None,
+        }
+    }
 }

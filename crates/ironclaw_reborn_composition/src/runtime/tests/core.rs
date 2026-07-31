@@ -260,18 +260,29 @@ fn standalone_selector_config_propagates_regex_activation_disabled() {
     let cfg = super::skill_activation_selector_config(
         false,
         ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        super::DEFAULT_SKILL_ACTIVATION,
     );
     assert!(
         !cfg.regex_activation_enabled,
         "regex_skill_activation_enabled=false must propagate into SkillActivationSelectorConfig"
     );
-    // Standalone uses criteria selection so a learned skill auto-activates on
-    // a keyword/pattern match (the learn→reuse loop), not only on an
-    // explicit `$name` mention. A revert to `ExplicitOnly` would silently
-    // break auto-reuse, so lock it here.
+    // Selection is the MODEL's decision, so this must be `ExplicitOnly`.
+    //
+    // This assertion previously locked `ExplicitAndCriteria`, on the reasoning that
+    // criteria selection is what closes the learn→reuse loop -- a learned skill
+    // auto-activating on a keyword match rather than only on an explicit `$name`.
+    // That reasoning does not survive contact with the corpus: **0 of 30
+    // agent-authored skills declare an `activation:` block**, so the scorer could
+    // never select a learned skill and the loop it was protecting did not exist.
+    // What actually closes the loop is the skill appearing in the listing, which is
+    // why this PR makes the listing complete.
+    //
+    // Kept as an assertion rather than deleted, with the polarity flipped: a revert
+    // to `ExplicitAndCriteria` reinstates host-side keyword matching on the model's
+    // behalf, which is the #5417 class.
     assert!(matches!(
         cfg.selection_mode,
-        ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitAndCriteria
+        ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitOnly
     ));
 }
 
@@ -280,6 +291,7 @@ fn standalone_selector_config_propagates_regex_activation_enabled() {
     let cfg = super::skill_activation_selector_config(
         true,
         ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        super::DEFAULT_SKILL_ACTIVATION,
     );
     assert!(
         cfg.regex_activation_enabled,
@@ -292,6 +304,7 @@ fn standalone_selector_config_uses_large_skill_context_budget() {
     let cfg = super::skill_activation_selector_config(
         true,
         ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        super::DEFAULT_SKILL_ACTIVATION,
     );
     assert_eq!(
         cfg.max_context_tokens, 6000,
@@ -302,15 +315,17 @@ fn standalone_selector_config_uses_large_skill_context_budget() {
 /// Wiring guard for the `IRONCLAW_REBORN_SKILL_INJECTION` env switch: the
 /// parsed injection mode must reach
 /// [`SkillActivationSelectorConfig::injection_mode`] unchanged (not get
-/// clobbered by the `..default()` spread), and the parser must default to
-/// `listing` while still accepting the `full` legacy escape hatch.
+/// clobbered by the `..default()` spread). The parser still maps an explicit
+/// empty value to `listing`; the ENV-ABSENT default is `full` (see
+/// `DEFAULT_SKILL_INJECTION_MODE`).
 #[test]
 fn standalone_selector_config_propagates_injection_mode() {
     for mode in [
         ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
         ironclaw_first_party_extension_ports::SkillInjectionMode::Full,
     ] {
-        let cfg = super::skill_activation_selector_config(true, mode);
+        let cfg =
+            super::skill_activation_selector_config(true, mode, super::DEFAULT_SKILL_ACTIVATION);
         assert_eq!(cfg.injection_mode, mode);
     }
 }
@@ -333,12 +348,39 @@ fn reborn_skill_selection_is_model_decided() {
     let cfg = super::skill_activation_selector_config(
         true,
         ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        super::DEFAULT_SKILL_ACTIVATION,
     );
     assert_eq!(
         cfg.selection_mode,
         ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitOnly,
         "Reborn must let the model choose the skill from the listing; pinning \
          ExplicitAndCriteria here makes the host keyword-match on the model's behalf"
+    );
+}
+
+/// Guards the injection default.
+///
+/// Currently `Listing`. The measurement argues for `Full` (79.8% -> 85.6% on the
+/// 31-task SkillsBench subset, nearai/benchmarks#287, because the model reads the
+/// one-line listing and then opens a skill in 0 of 30 runs), but three local-dev
+/// tests HANG under `Full` — they drive a mock that expects the listing candidate —
+/// so the flip is a maintainer call and `Full` ships as an opt-in switch.
+///
+/// If you flip `DEFAULT_SKILL_INJECTION_MODE`, update those three tests too:
+/// `local_dev_skill_activate_tool_loads_selected_skill_context`,
+/// `local_dev_webui_bundle_records_selectable_filesystem_skill_context`,
+/// `local_dev_runtime_wires_filesystem_skills_by_default_to_model_calls`.
+#[test]
+fn skill_injection_mode_default_is_documented_and_guarded() {
+    assert_eq!(
+        super::DEFAULT_SKILL_INJECTION_MODE,
+        ironclaw_first_party_extension_ports::SkillInjectionMode::Listing,
+        "flipping this default changes three local-dev expectations; see the doc comment"
+    );
+    // and the opt-in path must still resolve
+    assert_eq!(
+        super::skill_injection_mode_from("full").expect("full parses"),
+        ironclaw_first_party_extension_ports::SkillInjectionMode::Full
     );
 }
 

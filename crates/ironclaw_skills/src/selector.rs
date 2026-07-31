@@ -11,6 +11,7 @@
 //! - Regex pattern match: 20 points (capped at 40 total)
 #![allow(dead_code)] // Scaffolding; some items kept for future use.
 
+use crate::activation_strategy::{ActivationStrategy, fallback_score};
 use crate::types::LoadedSkill;
 
 /// Default maximum context tokens allocated to skills.
@@ -57,12 +58,18 @@ pub struct SelectionOutcome<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SkillSelectionOptions {
     pub regex_activation_enabled: bool,
+    /// Which activation strategy is bound to `skill.activation.v1`.
+    ///
+    /// Defaults to [`ActivationStrategy::CriteriaOnly`], the historical rule, so
+    /// callers that do not opt in behave exactly as before.
+    pub activation_strategy: ActivationStrategy,
 }
 
 impl Default for SkillSelectionOptions {
     fn default() -> Self {
         Self {
             regex_activation_enabled: true,
+            activation_strategy: ActivationStrategy::CriteriaOnly,
         }
     }
 }
@@ -362,6 +369,21 @@ fn score_skill(
         score += regex_score.min(MAX_REGEX_SCORE);
     }
 
+    // Name/description fallback (`skill.activation.v1` = name_and_description).
+    //
+    // Applied ONLY when the criteria pass scored nothing, so a curated skill's
+    // explicit keywords always decide ordering and this can never reorder two
+    // skills that both declare activation metadata.
+    //
+    // This is what makes agent-authored skills reusable: measured on the 31-task
+    // SkillsBench subset, 0/30 skills an agent wrote for itself had an
+    // `activation` block, so under CriteriaOnly every one scored 0 and was
+    // permanently unselectable — the agent could create a skill but never reuse
+    // it. Claude Code has no such requirement; this ports that contract.
+    if score == 0 && options.activation_strategy.allows_name_fallback() {
+        score += fallback_score(&skill.manifest, message_lower);
+    }
+
     score
 }
 
@@ -600,6 +622,7 @@ mod tests {
             &HashSet::new(),
             super::SkillSelectionOptions {
                 regex_activation_enabled: false,
+                ..Default::default()
             },
         );
 
@@ -623,6 +646,7 @@ mod tests {
             &HashSet::new(),
             super::SkillSelectionOptions {
                 regex_activation_enabled: false,
+                ..Default::default()
             },
         );
 
@@ -790,6 +814,119 @@ mod tests {
         let skills = vec![skill, skill2];
         let result = prefilter_no_markers("test", &skills, 5, 1);
         assert_eq!(result.len(), 1);
+    }
+
+    /// End-to-end proof that the `skill.activation.v1` binding closes the
+    /// self-improvement gap.
+    ///
+    /// An agent-authored skill has no `activation` block (measured: 0 of 30 on the
+    /// 31-task SkillsBench subset). Under the default `CriteriaOnly` strategy it
+    /// scores 0 and `select_skills` drops it, so the agent can create a skill and
+    /// then never reuse it. Under `NameAndDescription` the same skill is selected.
+    #[test]
+    fn agent_authored_skill_unreachable_by_default_but_selected_under_name_strategy() {
+        // no keywords, no tags, no patterns -- exactly what agents write
+        let skill = make_skill("hp-filter-detrending", &[], &[], &[]);
+        let skills = vec![skill];
+        let msg = "detrend the series with an hp filter and report the correlation";
+
+        let criteria_only = super::prefilter_skills_with_options(
+            msg,
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+            &HashSet::new(),
+            super::SkillSelectionOptions {
+                activation_strategy: crate::activation_strategy::ActivationStrategy::CriteriaOnly,
+                ..Default::default()
+            },
+        );
+        assert!(
+            criteria_only.selected.is_empty(),
+            "regression guard: criteria-only must stay byte-identical to today's behavior"
+        );
+
+        let with_fallback = super::prefilter_skills_with_options(
+            msg,
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+            &HashSet::new(),
+            super::SkillSelectionOptions {
+                activation_strategy:
+                    crate::activation_strategy::ActivationStrategy::NameAndDescription,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            with_fallback.selected.len(),
+            1,
+            "an agent-authored skill must be selectable from its name alone"
+        );
+        assert_eq!(
+            with_fallback.selected[0].manifest.name,
+            "hp-filter-detrending"
+        );
+    }
+
+    /// The fallback must not let an irrelevant skill in -- that is the failure mode
+    /// that makes injecting an unrelated bank harmful (it took xlsx_recover_data
+    /// 1.000 -> 0.271 when a whole catalog was injected).
+    #[test]
+    fn name_strategy_does_not_select_an_irrelevant_skill() {
+        let skills = vec![make_skill("hp-filter-detrending", &[], &[], &[])];
+        let out = super::prefilter_skills_with_options(
+            "fill in the pdf court form checkboxes",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+            &HashSet::new(),
+            super::SkillSelectionOptions {
+                activation_strategy:
+                    crate::activation_strategy::ActivationStrategy::NameAndDescription,
+                ..Default::default()
+            },
+        );
+        assert!(
+            out.selected.is_empty(),
+            "must not over-select on an unrelated request"
+        );
+    }
+
+    /// A skill whose wording misses the prompt is NOT reachable by criteria under either
+    /// strategy -- `name_and_description` widens the match but still requires a lexical hit.
+    ///
+    /// Recorded because a floor-score strategy (`always_available`) was tried here and
+    /// removed: the listing already advertises every VISIBLE skill regardless of score
+    /// (membership is decided by visibility in `activation.rs`, not by selection), so a floor
+    /// bought no reach -- it only reordered the listing, and it demoted chain-loaded
+    /// companions. If floor-based ranking is wanted later it needs to feed the listing order
+    /// deliberately, with its own test.
+    #[test]
+    fn a_wording_mismatch_is_not_reachable_by_criteria_under_either_strategy() {
+        let skills = vec![make_skill("hp-filter-detrending", &[], &[], &[])];
+        let msg = "separate the cyclical component from the underlying growth path";
+        for strategy in [
+            crate::activation_strategy::ActivationStrategy::CriteriaOnly,
+            crate::activation_strategy::ActivationStrategy::NameAndDescription,
+        ] {
+            let out = super::prefilter_skills_with_options(
+                msg,
+                &skills,
+                3,
+                MAX_SKILL_CONTEXT_TOKENS,
+                &HashSet::new(),
+                super::SkillSelectionOptions {
+                    activation_strategy: strategy,
+                    ..Default::default()
+                },
+            );
+            assert!(
+                out.selected.is_empty(),
+                "{strategy:?} requires a lexical hit; the model reaches this skill via the \
+                 listing plus builtin.skill_activate, not via scoring"
+            );
+        }
     }
 
     fn make_skill_with_excludes(

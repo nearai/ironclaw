@@ -611,6 +611,14 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
     assert_schema_has_property(&surface, "builtin.skill_install", "content");
     assert_schema_has_property(&surface, "builtin.skill_install", "url");
     assert_schema_has_property(&surface, "builtin.skill_install", "name");
+    // The runtime has always accepted a `files` array (`parse_install_files` in
+    // ironclaw_first_party_extensions::skills) but the schema never advertised it AND set
+    // `additionalProperties: false`, so a model attempting a multi-file install was
+    // rejected. Measured consequence on the 31-task SkillsBench subset
+    // (nearai/benchmarks#287): 0 of 27 agent-authored skills shipped a single resource
+    // file, against 18 of 31 human-curated ones -- agents could only ever author the
+    // prose half of a skill.
+    assert_schema_has_property(&surface, "builtin.skill_install", "files");
 
     let apply_patch_schema = &surface
         .capabilities

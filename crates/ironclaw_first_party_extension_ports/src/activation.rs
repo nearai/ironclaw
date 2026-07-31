@@ -144,6 +144,14 @@ pub struct SkillActivationSelectorConfig {
     pub max_context_tokens: usize,
     pub selection_mode: SkillActivationSelectionMode,
     pub regex_activation_enabled: bool,
+    /// Strategy bound to the `skill.activation.v1` profile.
+    ///
+    /// Defaults to `CriteriaOnly` (historical behavior). `NameAndDescription`
+    /// makes a skill selectable from its name/description when it declares no
+    /// activation metadata -- which is every skill an agent writes for itself
+    /// (measured 0/30 with an `activation` block), and therefore the difference
+    /// between an agent being able to reuse its own skills or not.
+    pub activation_strategy: ironclaw_skills::activation_strategy::ActivationStrategy,
     pub injection_mode: SkillInjectionMode,
 }
 
@@ -173,6 +181,8 @@ impl Default for SkillActivationSelectorConfig {
             // Nothing inherits it silently any more.
             selection_mode: SkillActivationSelectionMode::ExplicitOnly,
             regex_activation_enabled: true,
+            activation_strategy:
+                ironclaw_skills::activation_strategy::ActivationStrategy::CriteriaOnly,
             // Library default stays the legacy full-body contract; the Reborn
             // composition seam opts into `Listing` (see
             // `ironclaw_reborn_composition::runtime::skill_activation_selector_config`
@@ -200,6 +210,15 @@ impl SkillActivationSelectorConfig {
 
     pub fn set_regex_activation_enabled(mut self, regex_activation_enabled: bool) -> Self {
         self.regex_activation_enabled = regex_activation_enabled;
+        self
+    }
+
+    /// Bind a skill-activation strategy (profile `skill.activation.v1`).
+    pub fn set_activation_strategy(
+        mut self,
+        activation_strategy: ironclaw_skills::activation_strategy::ActivationStrategy,
+    ) -> Self {
+        self.activation_strategy = activation_strategy;
         self
     }
 
@@ -1451,6 +1470,7 @@ fn select_skill_activations(
             satisfied_setup_markers,
             SkillSelectionOptions {
                 regex_activation_enabled: config.regex_activation_enabled,
+                activation_strategy: config.activation_strategy,
             },
         );
         feedback.extend(outcome.notes);
