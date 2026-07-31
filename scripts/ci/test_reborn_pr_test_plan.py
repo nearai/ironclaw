@@ -233,6 +233,10 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertIn("needs.changes.outputs.root_partitions", workflow)
         self.assertIn("needs.changes.outputs.integration_lanes", workflow)
         self.assertIn(
+            '"${feature_args[@]}" --ignore-rust-version --all-targets',
+            workflow,
+        )
+        self.assertIn(
             "max-parallel: ${{ github.event_name == 'pull_request' && 3 || 14 }}",
             workflow,
         )
