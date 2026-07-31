@@ -25,7 +25,19 @@ use ironclaw_turns::{AcceptedMessageRef, TurnRunId, TurnScope};
 use thiserror::Error;
 
 /// Maximum number of first-party skills selected for one turn by default.
-pub const DEFAULT_MAX_ACTIVE_SKILLS: usize = 4;
+/// How many skills may be active at once.
+///
+/// Raised from 4 to 8. Four was low enough to make correct routing IMPOSSIBLE on real tasks:
+/// on the SkillsBench routing set, 3 of 31 tasks expect five skills and 4 more expect four, so
+/// a perfectly-routing agent could not satisfy them and recall was capped below 100% by the
+/// constant rather than by anything the model did. Measuring against a ceiling you imposed
+/// yourself tells you nothing.
+///
+/// The real guard on skill context is `max_context_tokens`, which bounds how much body text
+/// can load regardless of how many skills are named -- a large skill still consumes the budget
+/// and pushes the effective count back down. This constant only stops a model from naming an
+/// unbounded list.
+pub const DEFAULT_MAX_ACTIVE_SKILLS: usize = 8;
 
 /// Maximum estimated skill prompt tokens selected for one turn by default.
 pub const DEFAULT_MAX_SKILL_CONTEXT_TOKENS: usize = 4000;

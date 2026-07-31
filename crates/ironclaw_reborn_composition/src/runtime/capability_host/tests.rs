@@ -2441,19 +2441,30 @@ mod tests {
         assert!(
             descriptor
                 .safe_description
-                .contains("Call this before answering when a listed skill could help"),
+                .contains("When the task at hand is one a listed skill covers, call this FIRST"),
             "skill_activate description must tell the model when to use the capability"
+        );
+        // The clause that actually moved the metric. With only a statement of what the tool
+        // does, the model solved tasks with `shell` and never activated: measured 0% correct
+        // activation over a 227-skill catalog, with refusals at 0% -- it was not blocked, it
+        // had no reason to ask. Telling it that a skill SUPERSEDES its own plan took that to
+        // 50%, matching claude-code's precision exactly.
+        assert!(
+            descriptor
+                .safe_description
+                .contains("instead of your own default approach"),
+            "skill_activate description must say a skill replaces the model's default approach"
         );
         assert!(
             descriptor
                 .safe_description
-                .contains("Ambiguous names fail without loading a skill"),
+                .contains("An ambiguous name fails without loading anything"),
             "skill_activate description must not imply every visible bare name is actionable"
         );
         assert!(
             descriptor
                 .safe_description
-                .contains("at most four active skills total per run"),
+                .contains("at most eight active skills total per run"),
             "skill_activate description must advertise the selector's activation limit"
         );
         assert!(
@@ -2471,7 +2482,7 @@ mod tests {
                 .and_then(|names| names.get("description"))
                 .and_then(serde_json::Value::as_str),
             Some(
-                "Exact skill names copied from the available-skills list; at most four total per run"
+                "Exact skill names copied from the available-skills list; at most eight total per run"
             )
         );
         assert_eq!(
@@ -2481,7 +2492,11 @@ mod tests {
                 .and_then(|properties| properties.get("names"))
                 .and_then(|names| names.get("maxItems"))
                 .and_then(serde_json::Value::as_u64),
-            Some(4)
+            // Tracks DEFAULT_MAX_ACTIVE_SKILLS, raised 4 -> 8. Four made correct routing
+            // impossible on real tasks: 3 of 31 SkillsBench routing tasks expect five skills
+            // and 4 more expect four, so recall was capped by this constant rather than by
+            // anything the model did.
+            Some(8)
         );
         let tool_definition = port
             .tool_definitions()
