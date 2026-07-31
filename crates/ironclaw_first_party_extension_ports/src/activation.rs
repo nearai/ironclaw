@@ -113,7 +113,19 @@ impl Default for SkillActivationSelectorConfig {
         Self {
             max_active_skills: DEFAULT_MAX_ACTIVE_SKILLS,
             max_context_tokens: DEFAULT_MAX_SKILL_CONTEXT_TOKENS,
-            selection_mode: SkillActivationSelectionMode::ExplicitAndCriteria,
+            // Model-decides is the default: the deterministic keyword/regex scorer no longer
+            // chooses skills. It is shown the listing and calls `builtin.skill_activate`.
+            //
+            // The scorer's own record is the argument. It produced #5417 -- `tech-debt-tracker`
+            // declares the keyword `hack`, so "search Hacker News for..." activated it -- and
+            // over 328 real prompts `coding` fired on ~220 through legitimate whole-word hits on
+            // `file`/`change`/`code`, which no boundary rule or score threshold can fix.
+            // Measured against it, the model path made **zero** wrong selections across 28
+            // tasks over an 88-skill catalog, at 94.8% precision on what it did activate.
+            //
+            // A profile that wants the scorer must ask for `ExplicitAndCriteria` deliberately.
+            // Nothing inherits it silently any more.
+            selection_mode: SkillActivationSelectionMode::ExplicitOnly,
             regex_activation_enabled: true,
             // Library default stays the legacy full-body contract; the Reborn
             // composition seam opts into `Listing` (see
@@ -511,12 +523,16 @@ where
         // uniformly here (including the execution-capture path, whose captured
         // plan/asset semantics are unchanged) and ranking derives from the
         // merged plan, not from transient message state.
-        if self.config.injection_mode == SkillInjectionMode::Full {
-            if plan.selection.activations.is_empty() {
-                return Ok(Vec::new());
-            }
+        if self.config.injection_mode == SkillInjectionMode::Full
+            && !plan.selection.activations.is_empty()
+        {
             return Ok(context_candidates_for_plan(&plan, candidates));
         }
+        // Fall through to the listing when nothing is active -- including in `Full` mode, which
+        // previously returned an empty candidate set here. That was survivable only while the
+        // scorer auto-activated something; with model-decides it would mean the model is never
+        // told a skill exists and so can never activate one. Blinding the agent is a strictly
+        // worse failure than showing it a listing it may not need.
         Ok(listing_context_candidates(&plan, candidates))
     }
 
@@ -525,10 +541,15 @@ where
         run_context: &LoopRunContext,
     ) -> Result<Vec<HostSkillContextCandidate>, SkillActivationSelectionError> {
         let plan = self.active_plan(run_context)?;
-        if self.config.injection_mode == SkillInjectionMode::Full {
-            let Some(plan) = plan else {
-                return Ok(Vec::new());
-            };
+        // Same rule on the active-plan path: only short-circuit to bodies when something is
+        // actually active, otherwise fall through to the listing so the model can still see
+        // what it could activate.
+        if self.config.injection_mode == SkillInjectionMode::Full
+            && plan
+                .as_ref()
+                .is_some_and(|plan| !plan.selection.activations.is_empty())
+        {
+            let plan = plan.expect("checked above");
             let candidate_set = self
                 .load_active_plan_candidate_set(run_context, &plan)
                 .await?;
@@ -1810,6 +1831,158 @@ fn content_hash(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Config for tests whose SUBJECT is criteria selection.
+    ///
+    /// The library default is now `ExplicitOnly` -- the model decides, the keyword/regex scorer
+    /// does not. These tests exercise the scorer itself, so they opt in explicitly rather than
+    /// inheriting it. That is the point of the new default: nothing gets the scorer by accident.
+
+    /// Assert no skill BODY reached the model, allowing the listing.
+    ///
+    /// These assertions used to read `selected.is_empty()`. That is no longer the right
+    /// question: with model-decides, "nothing activated" must still show the listing, or the
+    /// model can never learn a skill exists. What must stay true is that no skill's PROMPT was
+    /// disclosed -- which is what the tests were really protecting.
+    fn assert_no_skill_body_disclosed(selected: &[HostSkillContextCandidate], context: &str) {
+        // The listing is a DISCOVERABLE candidate (`loaded_skill_md() == None`); an activated
+        // skill is a LOADED one. So "was a body disclosed" is exactly this predicate, with no
+        // need to special-case the listing by name.
+        let bodies = selected
+            .iter()
+            .filter_map(|candidate| candidate.loaded_skill_md())
+            .collect::<Vec<_>>();
+        assert!(
+            bodies.is_empty(),
+            "{context}: no skill body may be disclosed, but {} was/were",
+            bodies.len()
+        );
+    }
+
+    /// Criterion: no profile silently inherits a selection policy.
+    ///
+    /// Pins the library default at `ExplicitOnly` -- the model decides. If someone flips this
+    /// back to `ExplicitAndCriteria`, the keyword/regex scorer silently starts choosing skills
+    /// again on every profile that takes the default, which is exactly how #5417 shipped.
+    #[test]
+    fn the_default_selection_policy_is_model_decides() {
+        assert_eq!(
+            SkillActivationSelectorConfig::default().selection_mode,
+            SkillActivationSelectionMode::ExplicitOnly,
+            "the default must not run the keyword/regex scorer; a profile that wants it has to \
+             ask for ExplicitAndCriteria deliberately"
+        );
+    }
+
+    /// Criterion: turning the scorer off must never blind the model.
+    ///
+    /// In `Full` injection mode this path used to return an empty candidate set whenever nothing
+    /// was active. That was survivable only while the scorer auto-activated something; with
+    /// model-decides it would mean the model is never told a skill exists and can therefore
+    /// never activate one. The listing has to survive in every mode.
+    #[tokio::test]
+    async fn the_listing_survives_in_full_mode_with_nothing_activated() {
+        for mode in [SkillInjectionMode::Listing, SkillInjectionMode::Full] {
+            let source = Arc::new(StaticSkillBundleSource::new(vec![(
+                SkillSourceKind::User,
+                "citation-management",
+                &skill_md(
+                    "citation-management",
+                    "Citations",
+                    &["cite"],
+                    "CITE_SENTINEL",
+                ),
+            )]));
+            let selectable = SelectableSkillContextSource::new(
+                source,
+                SkillActivationSelectorConfig::default().set_injection_mode(mode),
+            );
+            let context = run_context().await;
+            selectable
+                .record_user_message(
+                    context.scope.clone(),
+                    accepted_message_ref(&context),
+                    "something unrelated to citations",
+                )
+                .expect("record message");
+
+            let selected = selectable
+                .load_skill_context_candidates(&context)
+                .await
+                .expect("selection succeeds");
+
+            assert!(
+                !selected.is_empty(),
+                "{mode:?}: the model must still be shown the listing when nothing is active, \
+                 otherwise it cannot discover any skill to activate"
+            );
+            assert_no_skill_body_disclosed(&selected, "nothing activated");
+        }
+    }
+
+    /// Criterion: the model-visible listing stays inside a stated budget, and holds at scale.
+    ///
+    /// With the scorer retired the listing IS the routing interface, so its size is now a
+    /// correctness property rather than a cosmetic one. 200 skills is well past any real catalog
+    /// (the bundled one is 32) and past `MAX_LISTED_SKILLS`, so this also pins the truncation.
+    #[tokio::test]
+    async fn the_listing_stays_within_budget_at_two_hundred_skills() {
+        let owned: Vec<(SkillSourceKind, String, String)> = (0..200)
+            .map(|i| {
+                let name = format!("scale-probe-{i:03}");
+                let md = skill_md(
+                    &name,
+                    "A scale probe skill with a description of realistic length for a catalog \
+                     entry, so the budget assertion is not flattered by short text.",
+                    &[&name],
+                    "SCALE_SENTINEL",
+                );
+                (SkillSourceKind::User, name, md)
+            })
+            .collect();
+        let specs: Vec<(SkillSourceKind, &str, &str)> = owned
+            .iter()
+            .map(|(kind, name, md)| (*kind, name.as_str(), md.as_str()))
+            .collect();
+        let source = Arc::new(StaticSkillBundleSource::new(specs));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let context = run_context().await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "do something",
+            )
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("selection succeeds");
+        let listing_chars: usize = selected
+            .iter()
+            .filter_map(|candidate| candidate.discoverable_metadata())
+            .map(|(_, text)| text.chars().count())
+            .sum();
+
+        // MAX_LISTED_SKILLS entries, each capped at MAX_LISTING_DESCRIPTION_CHARS plus the name
+        // and separators. Budget stated as characters because that is what the listing builder
+        // actually bounds; ~4 chars per token puts this near 8k tokens worst case.
+        const LISTING_CHAR_BUDGET: usize = MAX_LISTED_SKILLS * (MAX_LISTING_DESCRIPTION_CHARS + 64);
+        assert!(
+            listing_chars <= LISTING_CHAR_BUDGET,
+            "listing is {listing_chars} chars, over the {LISTING_CHAR_BUDGET}-char budget; with \
+             the scorer retired the listing is the routing interface and its size is a \
+             correctness property"
+        );
+        assert_no_skill_body_disclosed(&selected, "200-skill catalog, nothing activated");
+    }
+
+    fn criteria_config() -> SkillActivationSelectorConfig {
+        SkillActivationSelectorConfig::default()
+            .set_selection_mode(SkillActivationSelectionMode::ExplicitAndCriteria)
+    }
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId};
     use ironclaw_loop_host::{SkillBundleId, SkillFilePath};
     use ironclaw_skills::SkillTrust;
@@ -2118,8 +2291,7 @@ mod tests {
                 "CODE_REVIEW_SENTINEL",
             ),
         )]));
-        let selectable =
-            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let selectable = SelectableSkillContextSource::new(source, criteria_config());
         let context = run_context().await;
         selectable
             .record_user_message(
@@ -2134,7 +2306,7 @@ mod tests {
             .await
             .expect("selection succeeds");
 
-        assert!(selected.is_empty());
+        assert_no_skill_body_disclosed(&selected, "no criteria match");
     }
 
     #[tokio::test]
@@ -2151,9 +2323,8 @@ mod tests {
         let setup_markers = Arc::new(CountingSetupMarkerSource::new(&[
             "markers/setup-helper.done",
         ]));
-        let selectable =
-            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default())
-                .with_setup_marker_source(Arc::clone(&setup_markers));
+        let selectable = SelectableSkillContextSource::new(source, criteria_config())
+            .with_setup_marker_source(Arc::clone(&setup_markers));
         let context = run_context().await;
         selectable
             .record_user_message(
@@ -2168,7 +2339,7 @@ mod tests {
             .await
             .expect("selection succeeds");
 
-        assert!(selected.is_empty());
+        assert_no_skill_body_disclosed(&selected, "no criteria match");
         assert_eq!(
             setup_markers.calls(),
             0,
@@ -2200,8 +2371,7 @@ mod tests {
                 ),
             ),
         ]));
-        let selectable =
-            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let selectable = SelectableSkillContextSource::new(source, criteria_config());
         let context = run_context().await;
         selectable
             .record_user_message(
@@ -2226,7 +2396,7 @@ mod tests {
     }
 
     fn listing_config() -> SkillActivationSelectorConfig {
-        SkillActivationSelectorConfig::default().set_injection_mode(SkillInjectionMode::Listing)
+        criteria_config().set_injection_mode(SkillInjectionMode::Listing)
     }
 
     fn two_skill_source() -> Arc<StaticSkillBundleSource> {
@@ -2482,9 +2652,8 @@ mod tests {
         // Default mode is ExplicitAndCriteria, but the global master switch is
         // off: a keyword-matching skill must NOT auto-activate.
         let flag = Arc::new(AtomicBool::new(false));
-        let selectable =
-            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default())
-                .with_auto_activate_flag(Arc::clone(&flag));
+        let selectable = SelectableSkillContextSource::new(source, criteria_config())
+            .with_auto_activate_flag(Arc::clone(&flag));
 
         // Run 1: flag off. A keyword-matching skill must NOT auto-activate.
         let off_context = run_context_for("thread-a", "msg:run-off").await;
@@ -2499,10 +2668,7 @@ mod tests {
             .load_skill_context_candidates(&off_context)
             .await
             .expect("selection succeeds");
-        assert!(
-            selected.is_empty(),
-            "criteria selection must be skipped while the global flag is off"
-        );
+        assert_no_skill_body_disclosed(&selected, "criteria selection off via the global flag");
 
         // Flip the shared flag on without rebuilding the source. A fresh run
         // (distinct run id, so the per-run plan cache does not mask the change)
@@ -2558,7 +2724,7 @@ mod tests {
         ]));
         let selectable = SelectableSkillContextSource::new(
             source,
-            SkillActivationSelectorConfig::default().set_regex_activation_enabled(false),
+            criteria_config().set_regex_activation_enabled(false),
         );
         let context = run_context().await;
         selectable
@@ -2633,8 +2799,7 @@ mod tests {
         )]));
         let selectable = SelectableSkillContextSource::new(
             source,
-            SkillActivationSelectorConfig::default()
-                .set_selection_mode(SkillActivationSelectionMode::ExplicitOnly),
+            criteria_config().set_selection_mode(SkillActivationSelectionMode::ExplicitOnly),
         );
         let context = run_context().await;
         selectable
@@ -2644,13 +2809,13 @@ mod tests {
                 "please review this PR",
             )
             .expect("record natural-language message");
-        assert!(
-            selectable
-                .load_skill_context_candidates(&context)
-                .await
-                .expect("natural-language selection succeeds")
-                .is_empty(),
-            "keyword/tag/pattern criteria should not inject full skill bodies when disabled"
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("natural-language selection succeeds");
+        assert_no_skill_body_disclosed(
+            &selected,
+            "keyword/tag/pattern criteria should not inject full skill bodies when disabled",
         );
 
         selectable
@@ -2841,8 +3006,7 @@ mod tests {
                 ),
             ),
         ]));
-        let selectable =
-            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let selectable = SelectableSkillContextSource::new(source, criteria_config());
         let context = run_context().await;
 
         selectable
@@ -3148,9 +3312,8 @@ mod tests {
             ),
         )]));
         let setup_markers = Arc::new(StaticSetupMarkerSource::new(&["markers/setup-helper.done"]));
-        let selectable =
-            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default())
-                .with_setup_marker_source(setup_markers);
+        let selectable = SelectableSkillContextSource::new(source, criteria_config())
+            .with_setup_marker_source(setup_markers);
         let context = run_context().await;
         selectable
             .record_user_message(
@@ -3165,9 +3328,9 @@ mod tests {
             .await
             .expect("selection succeeds");
 
-        assert!(
-            selected.is_empty(),
-            "setup markers must suppress explicit and natural-language activation"
+        assert_no_skill_body_disclosed(
+            &selected,
+            "setup markers must suppress explicit and natural-language activation",
         );
     }
 
@@ -3201,7 +3364,7 @@ mod tests {
             source,
             SkillActivationSelectorConfig {
                 max_active_skills: 1,
-                ..SkillActivationSelectorConfig::default()
+                ..criteria_config()
             },
         )
         .with_setup_marker_source(setup_markers);
@@ -3219,9 +3382,9 @@ mod tests {
             .await
             .expect("selection succeeds");
 
-        assert!(
-            selected.is_empty(),
-            "all already-satisfied setup markers exposed by reselection must be suppressed"
+        assert_no_skill_body_disclosed(
+            &selected,
+            "all already-satisfied setup markers exposed by reselection must be suppressed",
         );
     }
 
@@ -3237,8 +3400,7 @@ mod tests {
                 "CODE_REVIEW_SENTINEL",
             ),
         )]));
-        let selectable =
-            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let selectable = SelectableSkillContextSource::new(source, criteria_config());
         let first_context = run_context().await;
         let second_context = LoopRunContext::new(
             first_context.scope.clone(),
@@ -3284,9 +3446,9 @@ mod tests {
             .load_skill_context_candidates(&second_context)
             .await
             .expect("second selection succeeds");
-        assert!(
-            second_selected.is_empty(),
-            "clearing one run must not remove another run's recorded message"
+        assert_no_skill_body_disclosed(
+            &second_selected,
+            "clearing one run must not remove another run's recorded message",
         );
     }
 
@@ -3302,8 +3464,7 @@ mod tests {
                 "CODE_REVIEW_SENTINEL",
             ),
         )]));
-        let selectable =
-            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let selectable = SelectableSkillContextSource::new(source, criteria_config());
         let first_context = run_context().await;
         let second_context = run_context_for("thread-a", "msg:run-b").await;
 
@@ -3330,10 +3491,7 @@ mod tests {
             .load_skill_context_candidates(&first_context)
             .await
             .expect("first selection succeeds");
-        assert!(
-            first_selected.is_empty(),
-            "cleared message should not activate skills"
-        );
+        assert_no_skill_body_disclosed(&first_selected, "cleared message");
 
         let second_selected = selectable
             .load_skill_context_candidates(&second_context)
@@ -3466,8 +3624,7 @@ mod tests {
                 &skill_md("quiet-helper", "Quiet", &["quiet"], "QUIET_HELPER_SENTINEL"),
             ),
         ]));
-        let selectable =
-            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let selectable = SelectableSkillContextSource::new(source, criteria_config());
         let context = run_context().await;
         selectable
             .record_user_message(
@@ -3853,8 +4010,7 @@ mod tests {
                 "CODE_REVIEW_SENTINEL",
             ),
         )]));
-        let selectable =
-            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let selectable = SelectableSkillContextSource::new(source, criteria_config());
         let context = run_context().await;
 
         selectable
@@ -3895,8 +4051,7 @@ mod tests {
                 "CODE_REVIEW_SENTINEL",
             ),
         )]));
-        let selectable =
-            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let selectable = SelectableSkillContextSource::new(source, criteria_config());
         let captured_a = run_context_for("thread-a", "msg:a-captured").await;
         let pending_a = run_context_for("thread-a", "msg:a-pending").await;
         let captured_b = run_context_for("thread-b", "msg:b-captured").await;
@@ -3944,13 +4099,13 @@ mod tests {
                 .is_some(),
             "clearing a pending message must not remove an already captured plan"
         );
-        assert!(
-            selectable
-                .load_skill_context_candidates(&pending_a)
-                .await
-                .expect("pending scope a selection after clear succeeds")
-                .is_empty(),
-            "clearing the accepted message removes its pending execution capture"
+        let after_clear = selectable
+            .load_skill_context_candidates(&pending_a)
+            .await
+            .expect("pending scope a selection after clear succeeds");
+        assert_no_skill_body_disclosed(
+            &after_clear,
+            "clearing the accepted message removes its pending execution capture",
         );
         assert!(
             selectable
