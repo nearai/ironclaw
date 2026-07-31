@@ -6,7 +6,7 @@
 
 use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
-    aead::{Aead, AeadCore, OsRng, Payload},
+    aead::{Aead, Generate, Payload},
 };
 use hkdf::Hkdf;
 use secrecy::{ExposeSecret, SecretString};
@@ -102,7 +102,7 @@ impl SecretsCrypto {
         let derived_key = self.derive_key(&salt)?;
         let cipher = Aes256Gcm::new_from_slice(&derived_key)
             .map_err(|error| SecretError::EncryptionFailed(error.to_string()))?;
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let nonce = Nonce::<Aes256Gcm>::generate();
         let ciphertext = cipher
             .encrypt(
                 &nonce,
