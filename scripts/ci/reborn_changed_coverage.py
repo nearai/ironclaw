@@ -3,7 +3,10 @@
 
 The denominator is mechanical:
 
-* added lines come from ``git diff --unified=0 BASE...HEAD``;
+* added lines come from
+  ``git diff --unified=0 --diff-algorithm=histogram BASE...HEAD`` — the
+  algorithm is deliberate, not a default: myers re-anchors deletion-shaped
+  diffs and reports unchanged surviving text as added;
 * testable lines are the intersection with LLVM's ``DA`` records;
 * changed branch arms are LLVM ``BRDA`` records located on those added lines.
 
@@ -423,6 +426,13 @@ def git_diff(repo_root: pathlib.Path, base: str, head: str) -> str:
         "git",
         "diff",
         "--unified=0",
+        # Myers (git's default) anchors greedily: deleting a large block near the
+        # top of a file makes it re-emit the unchanged tail as additions rather
+        # than context, manufacturing "changed" lines this gate would then demand
+        # coverage for. Histogram matches the surviving text and reports only what
+        # actually changed. Deletion- and move-shaped diffs are the common case in
+        # the restructure workstreams, so this is load-bearing, not cosmetic.
+        "--diff-algorithm=histogram",
         "--diff-filter=AMR",
         f"{base}...{head}",
         "--",
