@@ -215,6 +215,22 @@ pub struct SkillActivationSelection {
     pub activations: Vec<SkillActivationRequest>,
     pub rewritten_message: String,
     pub feedback: Vec<String>,
+    /// Bundles the criteria scorer judged relevant, for LISTING ORDER ONLY — never
+    /// activated on this basis.
+    ///
+    /// Under `ExplicitOnly` the scorer no longer decides anything, which is the point.
+    /// But it turned out the scorer was also the only thing making a long listing
+    /// legible: with it off, the listing collapses to source-then-name alphabetical
+    /// order and the relevant skill sits among dozens of equally-weighted lines.
+    /// Measured on the 31-task routing benchmark at 88 candidates, that halved the
+    /// model's own behaviour — `skill_activate` never called on 57% of tasks vs 25%,
+    /// and the correct skill requested on 35.7% vs 75.0%. The model was not being
+    /// refused; it stopped asking.
+    ///
+    /// So the scorer keeps its useful job and loses its harmful one: it RANKS what the
+    /// model is shown, and the model alone decides what to activate. Ordering a menu is
+    /// not choosing from it.
+    pub ranking_only: Vec<SkillBundleId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -657,6 +673,7 @@ where
                     activations: Vec::new(),
                     rewritten_message: message.to_string(),
                     feedback: Vec::new(),
+                    ranking_only: Vec::new(),
                 }),
                 Vec::new(),
             ));
@@ -1290,12 +1307,20 @@ fn skill_listing_candidate(entries: &[SkillListingEntry]) -> Option<HostSkillCon
 /// order — the keyword-scoring pipeline's output, reused as the listing
 /// ranking under [`SkillInjectionMode::Listing`].
 fn criteria_ranked_bundle_ids(plan: &SkillActivationPlan) -> Vec<SkillBundleId> {
-    plan.selection
+    let activated: Vec<SkillBundleId> = plan
+        .selection
         .activations
         .iter()
         .filter(|activation| activation.mode == SkillActivationMode::ActivationCriteria)
         .filter_map(|activation| activation.bundle_id.clone())
-        .collect()
+        .collect();
+    if !activated.is_empty() {
+        return activated;
+    }
+    // `ExplicitOnly`: nothing was criteria-activated by design, but the scorer still
+    // ran for ranking. Without this the listing is alphabetical and the model stops
+    // engaging with it entirely (see `SkillActivationSelection::ranking_only`).
+    plan.selection.ranking_only.clone()
 }
 
 /// Order listing entries: criteria-ranked bundles first (in ranking order),
@@ -1440,6 +1465,34 @@ fn select_skill_activations(
     // The global master switch (`auto_activate_learned`) gates criteria
     // selection on top of the configured mode: when it is off, only explicit
     // mentions activate, regardless of `selection_mode`.
+    // Ranking-only pass: under `ExplicitOnly` the scorer still runs, but its output is
+    // used solely to order the listing. Nothing here appends to `activations`.
+    let mut ranking_only = Vec::new();
+    if auto_activate_learned
+        && config.selection_mode == SkillActivationSelectionMode::ExplicitOnly
+    {
+        let outcome = prefilter_skills_with_options(
+            &rewritten_message,
+            &criteria_skills,
+            // Rank every criteria match, not just what would have fit the activation
+            // budget: a skill ranked 5th is still worth showing near the top, and no
+            // context is spent on a listing line.
+            criteria_skills.len(),
+            remaining_tokens,
+            satisfied_setup_markers,
+            SkillSelectionOptions {
+                regex_activation_enabled: config.regex_activation_enabled,
+            },
+        );
+        // Deliberately NOT extending `feedback`: those notes explain activation
+        // decisions, and nothing was activated here.
+        for skill in outcome.selected {
+            if let Ok(candidate) = candidate_for_loaded_skill(skill, &active_candidates) {
+                ranking_only.push(candidate.descriptor.id().clone());
+            }
+        }
+    }
+
     if auto_activate_learned
         && config.selection_mode == SkillActivationSelectionMode::ExplicitAndCriteria
     {
@@ -1477,6 +1530,7 @@ fn select_skill_activations(
         activations,
         rewritten_message,
         feedback,
+        ranking_only,
     })
 }
 
@@ -1608,6 +1662,9 @@ fn select_named_skill_activations(
         activations,
         rewritten_message: String::new(),
         feedback,
+        // Model-selected activations arrive by name from `skill_activate`; ranking is a
+        // message-path concern and does not apply here.
+        ranking_only: Vec::new(),
     })
 }
 
@@ -2979,6 +3036,77 @@ mod tests {
         assert!(!combined.contains("REGEX_REVIEW_SENTINEL"));
     }
 
+    /// Under `ExplicitOnly` the scorer must RANK the listing and activate nothing.
+    ///
+    /// Both halves matter and they pull in opposite directions, which is why this is one
+    /// test rather than two. Retiring the scorer from deciding is the point of the change.
+    /// But retiring it from ordering as well is what broke the benchmark: with an
+    /// alphabetical listing of dozens of equally-weighted lines, the model stopped calling
+    /// `skill_activate` at all on 57% of tasks (vs 25%), and the correct-skill request rate
+    /// halved to 35.7% from 75.0%. It was not being refused. It stopped asking.
+    ///
+    /// So: the matching skill leads the listing, AND no body is injected and nothing is
+    /// reported as activated. Ordering a menu is not choosing from it.
+    #[tokio::test]
+    async fn explicit_only_ranks_the_listing_without_activating_anything() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![
+            (
+                SkillSourceKind::User,
+                "aaa-unrelated",
+                &skill_md("aaa-unrelated", "Unrelated", &[], "UNRELATED_SENTINEL"),
+            ),
+            (
+                SkillSourceKind::User,
+                "zzz-detrending",
+                &skill_md(
+                    "zzz-detrending",
+                    "Detrend a timeseries",
+                    &["detrending"],
+                    "DETREND_SENTINEL",
+                ),
+            ),
+        ]));
+        let selectable = SelectableSkillContextSource::new(
+            source,
+            SkillActivationSelectorConfig::default()
+                .set_selection_mode(SkillActivationSelectionMode::ExplicitOnly),
+        );
+        let context = run_context().await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "please help with detrending this series",
+            )
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("selection succeeds");
+
+        // Nothing activated: no body reaches the model on a criteria match alone.
+        assert_no_skill_body_disclosed(&selected, "ExplicitOnly with a keyword match");
+
+        let listing = selected
+            .iter()
+            .filter_map(|candidate| candidate.discoverable_metadata())
+            .map(|(_, text)| text.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let matched = listing
+            .find("zzz-detrending")
+            .expect("the matching skill must be listed");
+        let unrelated = listing
+            .find("aaa-unrelated")
+            .expect("the other skill must be listed too");
+        assert!(
+            matched < unrelated,
+            "the criteria-matched skill must LEAD the listing even though it was not \
+             activated; alphabetical order buries it and the model stops engaging.\n{listing}"
+        );
+    }
+
     #[tokio::test]
     async fn selector_keeps_explicit_activation_when_regex_activation_is_disabled() {
         let source = Arc::new(StaticSkillBundleSource::new(vec![(
@@ -3424,6 +3552,7 @@ mod tests {
                         }],
                         rewritten_message: String::new(),
                         feedback: Vec::new(),
+                        ranking_only: Vec::new(),
                     },
                     Vec::new(),
                 ),
