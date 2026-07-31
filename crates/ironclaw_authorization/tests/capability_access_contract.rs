@@ -8,8 +8,8 @@ use ironclaw_host_api::{
     },
     decision::{Decision, DenyReason, Obligation},
     ids::{
-        CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ProjectId,
-        SecretHandle, TenantId, UserId,
+        AgentId, CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId, InvocationId,
+        MissionId, ProjectId, SecretHandle, TenantId, ThreadId, UserId,
     },
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
