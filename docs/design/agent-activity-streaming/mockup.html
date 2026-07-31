@@ -1,4 +1,6 @@
 <!DOCTYPE html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>IronClaw · Agent Activity & Streaming — Design Mockup</title>
 <style>
 /* ============================================================
@@ -623,7 +625,7 @@ h1,h2,h3,p{margin:0}
     {v:'Reading Slack…',busy:true},
     {v:'Waiting for your approval…',busy:false,wait:true},
     {v:'Composing the digest…',busy:true},
-    {v:'Done · 12s',busy:false,done:true}
+    {busy:false,done:true}
   ];
   // plan state per step: [p1,p2,p3,p4]
   var PLAN=[
@@ -648,7 +650,7 @@ h1,h2,h3,p{margin:0}
   function tickEl(){elP.textContent=fmt(Date.now()-runStart);}
 
   function markMk(pi,state){
-    var mk=pi.querySelector('.mk');var n=pi.getAttribute('data-n')||mk.getAttribute('data-n');
+    var mk=pi.querySelector('.mk');
     if(state==='done'){mk.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5 9-11"/></svg>';}
     else if(state==='active'){mk.innerHTML='<svg class="rspin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><path d="M21 12a9 9 0 1 1-6.2-8.5"/></svg>';}
     else{mk.textContent=mk.getAttribute('data-i');}
@@ -705,7 +707,8 @@ h1,h2,h3,p{margin:0}
         if(elTimer){clearInterval(elTimer);elTimer=null;} elP.style.display='none';
       } else {
         verbP.textContent=st.v;
-        if(st.busy){if(!elTimer){runStart=Date.now();elTimer=setInterval(tickEl,250);}tickEl();elP.style.display='';}
+        if(!runStart){runStart=Date.now();}
+        if(st.busy){if(!elTimer){elTimer=setInterval(tickEl,250);}tickEl();elP.style.display='';}
         else{if(elTimer){clearInterval(elTimer);elTimer=null;}elP.style.display='none';}
       }
     }
@@ -731,7 +734,7 @@ h1,h2,h3,p{margin:0}
   }
   function play(){if(step>=MAX){reset();}playing=true;setPlay(true);advance();}
   function stop(){playing=false;setPlay(false);if(timer){clearTimeout(timer);timer=null;}}
-  function reset(){stop();step=-1;procOpen=false;wasDone=false;
+  function reset(){stop();step=-1;procOpen=false;wasDone=false;runStart=0;
     // reset interactive states
     document.getElementById('connState').className='chip-state off';document.getElementById('connState').textContent='not connected';
     document.getElementById('connBtn').textContent='Connect';document.getElementById('connBtn').disabled=false;

@@ -3,8 +3,7 @@
 **Status:** design approved; implementation in progress (this is the foundation PR).
 **Interactive mockup:** [`mockup.html`](./agent-activity-streaming/mockup.html) — open in a
 browser to see the full behavior (press **Play**; toggle **Compare / Proposed · focus**,
-**Flags**, and the theme). Also published for review at
-`claude.ai/code/artifact/92974a1f-d2b7-46d9-8927-bc882adcc495`.
+**Flags**, and the theme).
 
 > File/symbol references are a point-in-time trace of `webui_v2`. Verify against live code
 > before relying on them — prefer the codebase knowledge graph / `openwiki/`.
@@ -77,9 +76,9 @@ Each of the above follows `.claude/rules/gateway-events.md` (durable event → p
 
 ## Rollout
 
-- **This PR (foundation):** the design reference above + the `NearProcessIndicator` component
+- **This activity cohort (foundation):** the design reference above + the `NearProcessIndicator` component
   (the branded live indicator), wired into `TypingIndicator` and retained as a static
-  “Worked for Ns” line after completion. Presentation-only, no backend change.
+  “Worked for Ns” line after completion. This cohort is presentation-only, with no backend change.
 - **Next:** activity-trail consolidation (top toggle + bottom status), composer mode selector,
   card-family unification + artifact card, floating rail.
 - **Then:** the five new SSE payloads, one focused PR each, each with tests through the caller.

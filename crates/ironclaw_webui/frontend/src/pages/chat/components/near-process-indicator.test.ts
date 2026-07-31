@@ -1,8 +1,9 @@
 // @ts-nocheck
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+import { componentSourceForTest } from "../../../lib/vm-component-harness";
+import "../../../test/vm-tsx-setup";
 
 const CLIP_ID = "near-clip-test";
 
@@ -11,24 +12,15 @@ const CLIP_ID = "near-clip-test";
 // `React.useId()` returns a deterministic clipPath id. The vm-tsx-setup shim
 // transpiles the JSX into inspectable `{ type, props, children }` nodes.
 function loadNearProcessIndicator() {
-  const source = readFileSync(
-    new URL("./near-process-indicator.tsx", import.meta.url),
-    "utf8",
-  );
-  const body = source
-    .split("\n")
-    .filter((line) => !line.startsWith("import "))
-    .join("\n")
-    .replace(
-      "export function NearProcessIndicator",
-      "function NearProcessIndicator",
-    );
   const context = {
     React: { useId: () => CLIP_ID },
     globalThis: {},
   };
   vm.runInNewContext(
-    `${body}\nglobalThis.__testExports = { NearProcessIndicator };`,
+    componentSourceForTest(
+      new URL("./near-process-indicator.tsx", import.meta.url),
+      "NearProcessIndicator",
+    ),
     context,
   );
   return context.globalThis.__testExports.NearProcessIndicator;
@@ -78,8 +70,8 @@ test("NearProcessIndicator working state chases the NEAR spine with elapsed time
   const comet = findNode(rendered, byClass("near-comet"));
   assert.notEqual(comet, null, "comet should render while working");
   assert.ok(comet.props.d.startsWith("M2.6 22.2"), "comet rides the N spine");
-  const clipGroup = findNode(rendered, (node) => node.props?.["clip-path"]);
-  assert.equal(clipGroup.props["clip-path"], `url(#${CLIP_ID})`);
+  const clipGroup = findNode(rendered, (node) => node.props?.clipPath);
+  assert.equal(clipGroup.props.clipPath, `url(#${CLIP_ID})`);
 
   // State-scoped CSS makes the working label strong; elapsed is shown beside it.
   const label = findNode(rendered, byClass("near-process-label"));

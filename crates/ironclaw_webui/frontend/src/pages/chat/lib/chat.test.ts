@@ -1,29 +1,19 @@
 // @ts-nocheck
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
 
 import { channelConnectionDisplayName } from "../../../lib/channel-connection-events";
+import { componentSourceForTest } from "../../../lib/vm-component-harness";
+import "../../../test/vm-tsx-setup";
 import { channelConnectionFromGate } from "./gates";
 import { messageBelongsToActiveRun } from "./message-types";
 
 function chatSourceForTest() {
-  const source = readFileSync(new URL("../chat.tsx", import.meta.url), "utf8");
-  const lines = [];
-  let skippingImport = false;
-  for (const line of source.split("\n")) {
-    if (!skippingImport && line.startsWith("import ")) {
-      skippingImport = !line.trimEnd().endsWith(";");
-      continue;
-    }
-    if (skippingImport) {
-      skippingImport = !line.trimEnd().endsWith(";");
-      continue;
-    }
-    lines.push(line.replace("export function Chat", "function Chat"));
-  }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { Chat };`;
+  return componentSourceForTest(
+    new URL("../chat.tsx", import.meta.url),
+    "Chat",
+  );
 }
 
 function findComponent(node, component) {

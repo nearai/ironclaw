@@ -1,12 +1,13 @@
 import { NearProcessIndicator } from "./near-process-indicator";
 
+type TypingIndicatorProps =
+  | { state?: "working"; durationSeconds?: never }
+  | { state: "done"; durationSeconds: number };
+
 export function TypingIndicator({
   state = "working",
   durationSeconds,
-}: {
-  state?: "working" | "done";
-  durationSeconds?: number;
-} = {}) {
+}: TypingIndicatorProps = {}) {
   return (
     <div className="flex flex-col items-start">
       <div className="flex min-w-0 flex-col gap-2 v2-chat-readable-width">

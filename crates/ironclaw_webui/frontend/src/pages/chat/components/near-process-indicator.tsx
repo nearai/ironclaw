@@ -46,7 +46,7 @@ export function NearProcessIndicator({
         )}
         <path className="near-base" d={NEAR_GLYPH} />
         {working && (
-          <g clip-path={`url(#${clipId})`}>
+          <g clipPath={`url(#${clipId})`}>
             <path className="near-comet" d={NEAR_SPINE} />
           </g>
         )}
