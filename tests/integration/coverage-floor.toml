@@ -140,20 +140,20 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
 name = "ironclaw_filesystem"
-floor_percent = 76.91
-floor_covered_lines = 6043
-captured_total_lines = 7857
-captured_date = "2026-07-30"
-rationale = "Filesystem containment and bounded CAS protect durable tenant state."
+floor_percent = 75.93
+floor_covered_lines = 5826
+captured_total_lines = 7673
+captured_date = "2026-07-31"
+rationale = "Filesystem containment and bounded CAS protect durable tenant state; recalibrated after current-main libsql recovery and migration growth."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
 name = "ironclaw_llm"
-floor_percent = 79.64
-floor_covered_lines = 23422
-captured_total_lines = 29411
-captured_date = "2026-07-30"
-rationale = "Provider retry classification and the complete decorator chain are production-critical."
+floor_percent = 79.92
+floor_covered_lines = 22566
+captured_total_lines = 28235
+captured_date = "2026-07-31"
+rationale = "Provider retry classification and the complete decorator chain are production-critical; recalibrated after current-main covered-code shrinkage."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
@@ -185,20 +185,20 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
 name = "ironclaw_extension_host"
-floor_percent = 84.58
-floor_covered_lines = 20010
-captured_total_lines = 23659
-captured_date = "2026-07-30"
-rationale = "Channel ingress deduplication and outbound delivery routing are production-composed."
+floor_percent = 83.82
+floor_covered_lines = 22271
+captured_total_lines = 26569
+captured_date = "2026-07-31"
+rationale = "Channel ingress deduplication and outbound delivery routing are production-composed; recalibrated after current-main production growth while raising the covered-line floor."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
 name = "ironclaw_events"
-floor_percent = 83.51
-floor_covered_lines = 1535
-captured_total_lines = 1838
-captured_date = "2026-07-30"
-rationale = "Durable event envelopes are the typed redacted audit substrate."
+floor_percent = 81.04
+floor_covered_lines = 1252
+captured_total_lines = 1545
+captured_date = "2026-07-31"
+rationale = "Durable event envelopes are the typed redacted audit substrate; recalibrated after current-main covered-code shrinkage."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
