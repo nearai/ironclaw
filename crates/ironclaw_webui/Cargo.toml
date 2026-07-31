@@ -47,7 +47,7 @@ lru = "0.18"
 # Static compression is intentionally unconditional: it is part of the embedded
 # WebUI delivery contract, and optional build variants would leave cache and
 # transport behavior untested.
-tower-http = { version = "0.6", features = [
+tower-http = { version = "0.7", features = [
     "cors",
     "set-header",
     "limit",

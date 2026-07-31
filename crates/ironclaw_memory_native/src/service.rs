@@ -8,27 +8,22 @@
 use std::{cmp::Ordering, collections::BTreeMap, sync::Arc};
 
 use crate::{
-    ChunkingMemoryDocumentIndexer, DocumentMetadata, FilesystemMemoryDocumentRepository,
-    MemoryBackend, MemoryBackendCapabilities, MemoryBackendWriteOptions, MemoryContext,
-    MemoryDocumentPath, MemoryDocumentScope, MemorySearchRequest, MemorySearchResult,
-    MemoryWriteOutcome, PromptSafetyAllowanceId, PromptWriteSafetyEventSink,
-    RepositoryMemoryBackend, content_bytes_sha256,
+    ChunkingMemoryDocumentIndexer, FilesystemMemoryDocumentRepository, MemoryBackend,
+    MemoryBackendCapabilities, MemoryBackendWriteOptions, MemorySearchRequest, MemorySearchResult,
+    MemoryWriteOutcome, RepositoryMemoryBackend,
 };
 use async_trait::async_trait;
 use chrono::Utc;
 use chrono_tz::Tz;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::ids::ThreadId;
-use serde_json::{Map, Value, json};
-
-// The host-facing operation shapes + the `MemoryService` trait moved to
-// `ironclaw_memory`; re-exported so `crate::service::*` and the crate's
-// public API stay unchanged while `NativeMemoryService` (below) keeps the native
-// adapter behavior here.
-pub use ironclaw_memory::{
-    MemoryContextProfileId, MemoryInteractionMessage, MemoryInteractionRole, MemoryInvocation,
-    MemoryProfileSetStatus, MemoryService, MemoryServiceContextRequest,
-    MemoryServiceContextSnippet, MemoryServiceError, MemoryServiceErrorKind,
+use ironclaw_memory::{
+    DocumentMetadata, MemoryContext, MemoryDocumentPath, MemoryDocumentScope,
+    PromptSafetyAllowanceId, PromptWriteSafetyEventSink, content_bytes_sha256,
+};
+use ironclaw_memory::{
+    MemoryInteractionMessage, MemoryInvocation, MemoryProfileSetStatus, MemoryService,
+    MemoryServiceContextRequest, MemoryServiceContextSnippet, MemoryServiceError,
     MemoryServiceProfileReadResponse, MemoryServiceProfileSetRequest,
     MemoryServiceProfileSetResponse, MemoryServiceReadRequest, MemoryServiceReadResponse,
     MemoryServiceRecordRequest, MemoryServiceRecordResponse, MemoryServiceSearchRequest,
@@ -36,6 +31,13 @@ pub use ironclaw_memory::{
     MemoryServiceTreeResponse, MemoryServiceWriteRequest, MemoryServiceWriteResponse,
     MemoryWriteStatus, memory_context_disabled,
 };
+use serde_json::{Map, Value, json};
+
+// The host-facing operation shapes and the `MemoryService` trait are owned by
+// `ironclaw_memory`; consumers import them from there. The imports above are
+// private to this module — #6943 deleted the re-export shim that used to
+// republish them under `ironclaw_memory_native::` — and this module exports
+// only `NativeMemoryService`, the native adapter implemented below.
 
 const MEMORY_PATH: &str = "MEMORY.md";
 const HEARTBEAT_PATH: &str = "HEARTBEAT.md";

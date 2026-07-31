@@ -4,17 +4,21 @@
 
 - No crate-local CLAUDE.md exists yet; use this map plus `Cargo.toml` and source files.
 - Read `src/lib.rs` first, then:
-  - `adapter.rs` — ProductAdapter implementation.
+  - `channel.rs` — the `SlackChannelAdapter` (`ChannelAdapter`) implementation.
   - `payload.rs` — Slack Events API payload parsing/DTO handling.
-  - `render.rs` — Slack outbound rendering.
+  - `mrkdwn.rs` — Slack outbound mrkdwn rendering and message chunking.
+  - `delivery.rs`, `attachment_transfer.rs`, `preference_targets.rs` — delivery DTOs, attachment transfer, reply-target codec.
+  - Re-derive this list with `ls crates/ironclaw_slack_extension/src/`.
 - Read upstream contracts before changing adapter behavior:
   - `crates/ironclaw_product/AGENTS.md`
 
 ## What This Crate Owns
 
-- Slack v2 ProductAdapter tracer-bullet implementation for Reborn issue #3857.
+- The Slack `ChannelAdapter` implementation for Reborn (issue #3857). The
+  contract is `ironclaw_host_api::product_adapter::ChannelAdapter` — there is
+  no `ProductAdapter` trait in this codebase.
 - Slack Events API payload parsing and outbound `chat.postMessage` rendering.
-- Adapter-specific mapping between Slack shapes and shared ProductAdapter DTOs.
+- Adapter-specific mapping between Slack shapes and the shared channel DTOs.
 
 ## Do Not Move In Here
 

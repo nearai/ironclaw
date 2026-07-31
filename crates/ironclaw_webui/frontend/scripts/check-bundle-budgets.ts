@@ -26,9 +26,11 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // React.lazy (see gateway-layout.tsx / message-bubble.tsx), and their
 // presentation-only field-value helpers moved out of the eager
 // chat-commands.ts into command-result.tsx. What's left (~0.45 KB over the
-// previous 210.0 KB budget) is the composer menu's own necessary weight, so
-// the budget moves up instead.
-const CHAT_GZIP_BUDGET = 211_000;
+// previous 210.0 KB budget) is the composer menu's own necessary weight. React
+// Router 8 and its required React 19.2 upgrade then moved the measured initial
+// route from 211 KB to 213.8 KB gzip, so retain about 1.2 KB of explicit
+// headroom for that supported dependency upgrade.
+const CHAT_GZIP_BUDGET = 215_000;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {

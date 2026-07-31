@@ -13,7 +13,7 @@
 
 - Reborn-owned durable event/audit store backends and their selection service, currently:
 - Backend selection/composition: `RebornEventStoreConfig`, `RebornProfile`, `RebornEventStores`, `RebornEventStoreError`.
-- Concrete durable-log backends implementing the `ironclaw_events` `DurableEventLog`/`DurableAuditLog` traits: filesystem (`FilesystemDurableEventLog`, `FilesystemDurableAuditLog`), JSONL (`JsonlDurableEventLog`, `JsonlDurableAuditLog`), and the feature-gated libSQL/Postgres backends (behind the `libsql` / `postgres` features).
+- Concrete durable-log backends implementing the `ironclaw_events` `DurableEventLog`/`DurableAuditLog` traits: filesystem (`FilesystemDurableEventLog`, `FilesystemDurableAuditLog`), JSONL (`JsonlDurableEventLog`, `JsonlDurableAuditLog`), The crate declares **no cargo features** and has no per-backend `LibSql*`/`Postgres*` log impls — those were removed; libSQL/Postgres dispatch happens one layer down, at `RootFilesystem` (see `src/lib.rs`).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here
