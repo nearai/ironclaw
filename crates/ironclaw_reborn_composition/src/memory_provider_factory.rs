@@ -21,9 +21,9 @@
 
 use std::sync::Arc;
 
+use ironclaw_extension_contracts::memory::{MemoryDescriptor, MemoryLifecycleHook};
 use ironclaw_extensions::ExtensionPackage;
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::memory::{MemoryDescriptor, MemoryLifecycleHook};
 use ironclaw_host_runtime::memory_binding::{MemoryBindingPolicy, MemoryProviderBinding};
 use ironclaw_host_runtime::memory_context::ProductionMemoryPromptContextService;
 use ironclaw_host_runtime::memory_native_extension as memory_extension;
@@ -617,7 +617,7 @@ mod tests {
         let full = memory_lifecycle_consumers(
             Some(inert_provider()),
             &MemoryDescriptor {
-                lifecycle: ironclaw_host_api::memory::MemoryLifecycleHook::ALL.to_vec(),
+                lifecycle: ironclaw_extension_contracts::memory::MemoryLifecycleHook::ALL.to_vec(),
             },
         );
         assert!(full.memory_context_service.is_some());

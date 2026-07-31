@@ -15,12 +15,9 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_extension_contracts::channel::{ChannelIngressDescriptor, ChannelIngressMethod};
 use ironclaw_extensions::ResolvedExtensionManifest;
-use ironclaw_host_api::{
-    channel::{ChannelIngressDescriptor, ChannelIngressMethod},
-    ids::SecretHandle,
-    tool_adapter::RestrictedEgress,
-};
+use ironclaw_host_api::{ids::SecretHandle, tool_adapter::RestrictedEgress};
 use ironclaw_product::{
     ChannelAdapter, ChannelError, InboundBatchFragment, InboundOutcome, NormalizedInboundMessage,
     VerifiedInbound,

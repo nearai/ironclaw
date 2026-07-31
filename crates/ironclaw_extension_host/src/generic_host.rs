@@ -27,12 +27,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::extension::ExtensionHostAssemblyConfig;
 use ironclaw_extensions::{
     ExtensionInstallationError, ExtensionInstallationStorePort, ExtensionManifest,
     ExtensionPackage, ResolvedExtensionManifest,
 };
 use ironclaw_host_api::{
-    extension::ExtensionHostAssemblyConfig,
     path::VirtualPath,
     tool_adapter::{
         RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
@@ -151,7 +151,7 @@ fn boot_installation_record(
     InstallationRecord {
         extension_id: extension_id.as_str().to_string(),
         installation_id: installation_id.to_string(),
-        state: crate::InstallationState::Installed,
+        state: ironclaw_extension_contracts::state::InstallationState::Installed,
         resolved: Arc::new(resolved.clone()),
         config,
         last_error: None,
@@ -513,7 +513,7 @@ impl EgressFactory for DenyAllEgressFactory {
         &self,
         _extension_id: &str,
         _installation_id: &str,
-        _declared: &[ironclaw_host_api::channel::ChannelEgressDescriptor],
+        _declared: &[ironclaw_extension_contracts::channel::ChannelEgressDescriptor],
     ) -> Arc<dyn RestrictedEgress> {
         Arc::new(DenyAllRestrictedEgress)
     }
@@ -536,13 +536,13 @@ mod tests {
     use std::collections::BTreeSet;
 
     use ironclaw_authorization::GrantAuthorizer;
+    use ironclaw_extension_contracts::extension::ExtensionHostAssemblyConfig;
     use ironclaw_extensions::{
         ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
         ExtensionManifestRecord, ExtensionManifestRef, ExtensionRegistry, MANIFEST_SCHEMA_VERSION,
         ManifestSource,
     };
     use ironclaw_filesystem::DiskFilesystem;
-    use ironclaw_host_api::extension::ExtensionHostAssemblyConfig;
     use ironclaw_host_api::ids::{CapabilityId, ExtensionId};
     use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
     use ironclaw_processes::ProcessServices;
@@ -739,7 +739,7 @@ input_schema_ref = "schemas/echo.input.json"
             records.push(InstallationRecord {
                 extension_id: extension_id.as_str().to_string(),
                 installation_id: installation.installation_id().as_str().to_string(),
-                state: crate::InstallationState::Installed,
+                state: ironclaw_extension_contracts::state::InstallationState::Installed,
                 resolved: Arc::new(manifest_record.resolved().clone()),
                 config: Vec::new(),
                 last_error: None,

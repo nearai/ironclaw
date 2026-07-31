@@ -1,4 +1,7 @@
 // arch-exempt: large_file, bundled extension catalog and manifest projection, plan #5905
+use ironclaw_extension_contracts::{
+    channel::ChannelConnectionStrategy, surface::CapabilitySurfaceKind,
+};
 use ironclaw_extensions::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionAdminConfigurationDescriptor,
     ExtensionManifestRecord, ExtensionPackage, ExtensionRuntime, HostApiContractRegistry,
@@ -6,11 +9,9 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    channel::ChannelConnectionStrategy,
     host_port::HostPortCatalog,
     ids::{CapabilityId, ExtensionId, VendorId},
     path::VirtualPath,
-    surface::CapabilitySurfaceKind,
 };
 use ironclaw_product::{
     ChannelConnectionRequirement, LifecycleChannelDirections,
@@ -115,7 +116,7 @@ pub struct AvailableExtensionPackage {
     /// The channel surface's declared `[channel.presentation]` (markdown +
     /// message cap), cached at construction like `channel_directions`. Fed into
     /// prompt construction via the lifecycle summary (OUT-11).
-    pub channel_presentation: Option<ironclaw_host_api::channel::ChannelPresentation>,
+    pub channel_presentation: Option<ironclaw_extension_contracts::channel::ChannelPresentation>,
     pub assets: Vec<AvailableExtensionAsset>,
     /// Bespoke onboarding copy carried down from a migrated inventory bundle
     /// (`ironclaw_first_party_extensions::packages`). `None` for packages whose
@@ -945,7 +946,7 @@ fn channel_directions_from_manifest_record(
 /// `channel_directions` and fed into prompt construction (OUT-11).
 fn channel_presentation_from_manifest_record(
     record: &ExtensionManifestRecord,
-) -> Option<ironclaw_host_api::channel::ChannelPresentation> {
+) -> Option<ironclaw_extension_contracts::channel::ChannelPresentation> {
     record
         .resolved()
         .channel

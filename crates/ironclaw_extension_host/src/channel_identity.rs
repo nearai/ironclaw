@@ -4,12 +4,11 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_extensions::ExtensionInstallationStorePort;
-use ironclaw_host_api::{
-    channel_identity::{ChannelConnectionScope, ChannelConnectionScopeSource},
-    ids::ExtensionId,
-    product_adapter::AdapterInstallationId,
+use ironclaw_extension_contracts::channel_identity::{
+    ChannelConnectionScope, ChannelConnectionScopeSource,
 };
+use ironclaw_extensions::ExtensionInstallationStorePort;
+use ironclaw_host_api::{ids::ExtensionId, product_adapter::AdapterInstallationId};
 
 use crate::ChannelConfigService;
 

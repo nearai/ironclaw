@@ -10,6 +10,7 @@ use ironclaw_auth::{
     runtime_credential_account_selection_request,
 };
 use ironclaw_authorization::CapabilityLeaseStore;
+use ironclaw_extension_contracts::extension::ExtensionHostAssemblyConfig;
 use ironclaw_extensions::{
     ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry,
     SharedExtensionRegistry,
@@ -22,7 +23,6 @@ use ironclaw_host_api::{
     capability::CapabilityDescriptor,
     decision::{Decision, Obligations},
     dispatch::CredentialStageError,
-    extension::ExtensionHostAssemblyConfig,
     ids::{CapabilityId, VendorId},
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},

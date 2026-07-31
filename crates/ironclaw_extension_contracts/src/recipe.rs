@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{error::HostApiError, ids::SecretHandle};
+use ironclaw_host_api::{error::HostApiError, ids::SecretHandle};
 
 /// OAuth authorize-request parameters the host constructs itself. A recipe's
 /// `extra_authorize_params` may never name them (directly or via the
@@ -550,7 +550,7 @@ pub enum ProbeMethod {
 pub struct ProbeInjection {
     pub handle: SecretHandle,
     #[serde(flatten)]
-    pub target: crate::http::RuntimeCredentialTarget,
+    pub target: ironclaw_host_api::http::RuntimeCredentialTarget,
 }
 
 /// Semantic recipe validation failures (path context is added by the

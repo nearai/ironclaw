@@ -24,6 +24,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use ironclaw_conversations::RebornFilesystemConversationServices;
+use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec;
+use ironclaw_extension_contracts::recipe::IngressVerificationRecipe;
+use ironclaw_extension_contracts::recipe::RecipeSecretField;
 use ironclaw_extension_host::active::{ActiveExtension, ActiveSnapshot};
 use ironclaw_extension_host::ingress::{
     IngressConfigurationPort, IngressPortError, IngressSecretsPort, VerificationCandidate,
@@ -31,12 +34,10 @@ use ironclaw_extension_host::ingress::{
 use ironclaw_extension_host::{DeploymentChannelBinding, DeploymentChannelRegistry, SnapshotWatch};
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::product_surface::ChannelInboundProductSurface;
-use ironclaw_host_api::recipe::IngressVerificationRecipe;
 use ironclaw_host_api::{
     ids::{AgentId, ExtensionId, ProjectId, SecretHandle, TenantId, ThreadId, UserId},
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
-    recipe::RecipeSecretField,
     resource::ResourceScope,
 };
 use ironclaw_outbound::{CommunicationPreferenceRepository, DeliveredGateRouteStore};
@@ -48,7 +49,7 @@ use ironclaw_product::{
     ApprovalInteractionService, ApprovalPromptContextSource, AuthInteractionService,
     BlockedAuthFlowCanceller, BlockedAuthPromptSource, ChannelConnectionNoticePolicy,
     ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
-    DeliveryCoordinator, IdempotencyLedger, InboundAttachmentLander, PreferenceTargetCodec,
+    DeliveryCoordinator, IdempotencyLedger, InboundAttachmentLander,
     ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
     ProductSurfaceFailure, RebornFilesystemIdempotencyLedger, ResolvedProductActorUser,
@@ -1305,7 +1306,7 @@ mod e2e_tests;
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::recipe::{
+    use ironclaw_extension_contracts::recipe::{
         HmacSha256VerificationRecipe, SharedSecretHeaderRecipe, SignatureEncoding,
         SignedPayloadSegment,
     };

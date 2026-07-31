@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
+use ironclaw_extension_contracts::state::LifecyclePublicState;
 use ironclaw_host_api::{
     action::NetworkMethod,
     ids::{ActivityId, AgentId, ProjectId, ResultRef, TenantId, ThreadId, UserId},
@@ -27,7 +28,6 @@ use ironclaw_host_api::{
     resolution::{Outcome, OutcomeRefs, Resolution, ResultPreviewMeta, ToolVerdict},
     result_meta::{ResultProgress, TerminateHint},
     safe_summary::SafeSummary,
-    state::LifecyclePublicState,
 };
 use ironclaw_host_ingress::{ProtectedRouteMount, PublicRouteMount};
 use ironclaw_product::{

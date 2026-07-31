@@ -10,6 +10,7 @@
 //! production removal is the service path (`remove_record` + auth cleanup) and
 //! is covered through the composition services.
 
+use ironclaw_extension_contracts::state::InstallationState;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -20,7 +21,7 @@ use ironclaw_extension_host::test_support::{
 };
 use ironclaw_extension_host::{
     ExtensionBindings, ExtensionHost, ExtensionHostDeps, InstallationRecord,
-    InstallationRecordStore, InstallationState, LifecycleError, RehydratedInstallationRecordStore,
+    InstallationRecordStore, LifecycleError, RehydratedInstallationRecordStore,
 };
 use ironclaw_host_api::{
     ids::ProductKind, invocation::InvocationOrigin, tool_adapter::ToolAdapter,

@@ -9,11 +9,9 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::memory::{MemoryDescriptor, MemoryLifecycleHook};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_host_api::turn::{TurnActor, TurnScope};
-use ironclaw_host_api::{
-    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
-    memory::{MemoryDescriptor, MemoryLifecycleHook},
-};
 use ironclaw_loop_contracts::{
     ContextProfileId, MemoryPromptContextRequest, MemoryPromptContextService,
     memory_snippet_display_ref,

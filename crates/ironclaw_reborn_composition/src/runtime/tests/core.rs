@@ -512,8 +512,8 @@ fn production_scheduler_wake_guard_passes_standalone_with_absent_wiring() {
         .expect("standalone is exempt from the scheduler wake wiring requirement");
 }
 
+use ironclaw_extension_contracts::state::{InstallationState, LifecyclePublicState};
 use ironclaw_host_api::ids::ProjectId;
-use ironclaw_host_api::state::{InstallationState, LifecyclePublicState};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, IdempotencyKey, LoopResultRef, ReplyTargetBindingRef,
     SanitizedCancelReason, SourceBindingRef, TurnActor, TurnId, TurnRunId, TurnScope, TurnStatus,

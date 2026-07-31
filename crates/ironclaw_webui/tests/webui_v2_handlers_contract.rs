@@ -27,6 +27,7 @@ use axum::http::{HeaderName, Method, Request, StatusCode, header};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use http_body_util::BodyExt;
+use ironclaw_extension_contracts::state::LifecyclePublicState;
 use ironclaw_host_api::{
     ids::{
         ActivityId, AgentId, CapabilityId, ExtensionId, GateRef, InvocationId, ProjectId,
@@ -43,7 +44,6 @@ use ironclaw_host_api::{
     result_meta::{ResultProgress, TerminateHint},
     runtime::RuntimeKind,
     safe_summary::SafeSummary,
-    state::LifecyclePublicState,
 };
 use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,

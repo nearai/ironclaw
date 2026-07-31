@@ -310,6 +310,13 @@ fn reborn_crate_dependency_boundaries_hold() {
         "ironclaw_host_api",
         "ironclaw_common",
         "ironclaw_prompt_envelope",
+        // Added by WS1.3, forced by the code and sanctioned by §8.2's contracts
+        // row ("others: host_api/common ± extension_contracts"): the loop's
+        // `LoopRuntimeContext` carries `Option<ChannelPresentation>` and
+        // `render_presentation_hint` reads it, so when the channel
+        // manifest-surface descriptors left `host_api` this edge moved with
+        // them. §6.1.4's dependency list predates the extension tier existing.
+        "ironclaw_extension_contracts",
     ];
     assert_no_normal_workspace_deps(
         &dependencies,
@@ -317,6 +324,27 @@ fn reborn_crate_dependency_boundaries_hold() {
         workspace_ironclaw_crates(&dependencies)
             .into_iter()
             .filter(|name| !loop_contracts_allowed.contains(name))
+            .collect::<Vec<_>>(),
+    );
+
+    // PROPOSAL §11.2.3 contracts purity — `ironclaw_extension_contracts`.
+    //
+    // The extension tier's contract crate defines the host↔extension membrane:
+    // what an installable extension declares (manifest surfaces, auth recipes,
+    // memory surface), what state its installation and auth account are in, and
+    // the one vendor-implemented codec port. Its whole reason to exist is that
+    // channel packages, lanes, `extension_host`, product, and the manager can
+    // share that vocabulary without any of them importing a registry or an
+    // owner (§6.1.2), so it may name only `ironclaw_host_api` — never the
+    // registry crate whose DTOs it must not absorb, and never product.
+    // An allowlist, not a blocklist, for the same reason as the loop tier's.
+    let extension_contracts_allowed = ["ironclaw_extension_contracts", "ironclaw_host_api"];
+    assert_no_normal_workspace_deps(
+        &dependencies,
+        "ironclaw_extension_contracts",
+        workspace_ironclaw_crates(&dependencies)
+            .into_iter()
+            .filter(|name| !extension_contracts_allowed.contains(name))
             .collect::<Vec<_>>(),
     );
 
@@ -356,6 +384,7 @@ fn reborn_contracts_crates_hold_no_framework_dependencies() {
     ];
     const CONTRACTS_CRATES: &[&str] = &[
         "ironclaw_common",
+        "ironclaw_extension_contracts",
         "ironclaw_host_api",
         "ironclaw_loop_contracts",
         "ironclaw_prompt_envelope",
@@ -622,6 +651,7 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
         "crates/ironclaw_capabilities/src",
         "crates/ironclaw_first_party_extension_ports/src",
         "crates/ironclaw_first_party_extensions/src",
+        "crates/ironclaw_extension_contracts/src",
         "crates/ironclaw_host_api/src",
         "crates/ironclaw_host_runtime/src",
         "crates/ironclaw_product/src",
@@ -3022,6 +3052,91 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_scripts",
                 "ironclaw_secrets",
                 "ironclaw_skills",
+                "ironclaw_threads",
+                "ironclaw_trust",
+                "ironclaw_tui",
+                "ironclaw_turns",
+                "ironclaw_wasm",
+            ],
+        },
+        BoundaryRule {
+            // The extension-tier contract stays a leaf of the contracts family.
+            // The allowlist in `reborn_crate_dependency_boundaries_hold` is the
+            // authority; this rule names the edges whose appearance would be
+            // most damaging, so the failure message says which invariant broke:
+            // `ironclaw_extensions` (the registry crate whose installation
+            // stores and manifest parsing §6.1.2 forbids here),
+            // `ironclaw_extension_host` (lifecycle execution and ingress
+            // routing), and `ironclaw_product` (the product workflow this crate
+            // exists to keep the channel packages away from).
+            crate_name: "ironclaw_extension_contracts",
+            forbidden: vec![
+                "ironclaw_auth",
+                "ironclaw_capabilities",
+                "ironclaw_extension_host",
+                "ironclaw_extensions",
+                "ironclaw_first_party_extensions",
+                "ironclaw_host_runtime",
+                "ironclaw_loop_host",
+                "ironclaw_mcp",
+                "ironclaw_product",
+                "ironclaw_reborn_composition",
+                "ironclaw_scripts",
+                "ironclaw_slack_extension",
+                "ironclaw_telegram_extension",
+                "ironclaw_turns",
+                "ironclaw_wasm",
+                "ironclaw_webui",
+            ],
+        },
+        BoundaryRule {
+            // Concrete Telegram channel extension. It had no rule at all until
+            // WS1.3, which is how its `ironclaw_product` edge survived: the
+            // crate reached product for `PreferenceTargetCodec` /
+            // `PreferenceTargetEncodeRequest` / `ExternalConversationRef` while
+            // its Slack sibling — same shape, same surfaces — already forbade
+            // product here. The codec port moved to
+            // `ironclaw_extension_contracts` (its implementors are exactly the
+            // channel packages), the edge is gone from both `[dependencies]`
+            // and `[dev-dependencies]`, and this rule keeps it gone.
+            // `ironclaw_telegram_v2_adapter` is the crate's own protocol half
+            // and stays allowed; `ironclaw_host_api` /
+            // `ironclaw_extension_contracts` are the sanctioned contract deps.
+            crate_name: "ironclaw_telegram_extension",
+            forbidden: vec![
+                "ironclaw_legacy",
+                "ironclaw_authorization",
+                "ironclaw_approvals",
+                "ironclaw_auth",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_engine",
+                "ironclaw_event_projections",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_llm",
+                "ironclaw_loop_host",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_product",
+                "ironclaw_runner",
+                "ironclaw",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_slack_extension",
                 "ironclaw_threads",
                 "ironclaw_trust",
                 "ironclaw_tui",

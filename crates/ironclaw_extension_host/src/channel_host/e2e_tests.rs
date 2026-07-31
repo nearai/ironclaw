@@ -774,8 +774,8 @@ async fn slack_test_extension_host_with_manifest_commands(
     };
     use ironclaw_extension_host::{
         BindContext, BindError, ExtensionBindings, ExtensionEntrypoint, ExtensionHost,
-        ExtensionHostDeps, ExtensionLoader, InstallationRecord, InstallationState, LoadContext,
-        LoadedExtension, RehydratedInstallationRecordStore,
+        ExtensionHostDeps, ExtensionLoader, InstallationRecord, LoadContext, LoadedExtension,
+        RehydratedInstallationRecordStore,
     };
 
     struct SlackTestEntrypoint;
@@ -4377,10 +4377,11 @@ use crate::channel_outbound_targets::{
     GenericChannelOutboundTargetProvider, register_generic_channel_outbound_targets,
 };
 use crate::channel_triggered_delivery::GenericTriggeredRunDeliveryHook;
+use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec as _;
+use ironclaw_extension_contracts::state::InstallationState;
 use ironclaw_extension_host::{FilesystemChannelDmTargetStore, dm_target_payload};
 use ironclaw_outbound::OutboundDeliveryTargetProvider;
 use ironclaw_outbound::{OutboundDeliveryTargetScope, TriggeredRunDeliveryStore};
-use ironclaw_product::PreferenceTargetCodec as _;
 
 /// The retired Slack setup surface's installation id — DIFFERENT from the
 /// durable extension installation id (`INSTALLATION`) the active snapshot

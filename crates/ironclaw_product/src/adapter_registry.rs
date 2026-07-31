@@ -11,6 +11,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use ironclaw_extension_contracts::surface::CapabilitySurfaceKind;
 use ironclaw_extensions::{
     ExtensionInstallationError, ExtensionManifestRecord, ExtensionManifestV2,
     HostApiContractRegistry, HostApiId, HostApiManifestContext, HostApiManifestContract,
@@ -25,7 +26,6 @@ use ironclaw_host_api::{
     host_port::HostPortCatalog,
     ids::ExtensionId,
     ingress::{IngressAuthPolicy, IngressRouteDescriptor, IngressRouteId},
-    surface::CapabilitySurfaceKind,
 };
 use serde::Deserialize;
 use thiserror::Error;

@@ -25,6 +25,10 @@ use ironclaw_auth::{
     AuthAccountLastError, AuthAccountState, CredentialAccountId, CredentialAccountProjection,
     CredentialAccountStatus,
 };
+use ironclaw_extension_contracts::{
+    state::{InstallationState, LifecyclePublicState},
+    surface::CapabilitySurfaceKind,
+};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
     SanitizedFailure, SourceBindingRef, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope,
@@ -37,8 +41,6 @@ use ironclaw_host_api::{
         ProductSurfaceErrorKind, ProductSurfaceInvokeRequest, ProductSurfaceStreamRequest,
         ProductSurfaceValidationCode,
     },
-    state::{InstallationState, LifecyclePublicState},
-    surface::CapabilitySurfaceKind,
 };
 use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
@@ -16326,7 +16328,7 @@ async fn execute_status_on_foreign_thread_is_indistinguishable_from_unknown() {
 // `extension_list` exercises the list-family shaping: a `Count` field plus
 // one readable row per installed extension (id, name, version, and its
 // public `LifecyclePublicState`, never the raw internal `InstallationState`
-// checkpoint — see `ironclaw_host_api::state`'s "must never expose those
+// checkpoint — see `ironclaw_extension_contracts::state`'s "must never expose those
 // checkpoints" contract).
 #[tokio::test]
 async fn admin_execute_lifecycle_command_executes_and_renders_installed_extensions() {

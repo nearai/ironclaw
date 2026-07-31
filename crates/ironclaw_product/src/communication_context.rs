@@ -5,10 +5,9 @@ use crate::{
     LifecycleProductService, LifecycleProductSurfaceContext, OutboundPreferencesProductService,
     RebornOutboundDeliveryTargetStatus,
 };
+use ironclaw_extension_contracts::{state::InstallationState, surface::CapabilitySurfaceKind};
+use ironclaw_host_api::product_surface::ProductSurfaceCaller;
 use ironclaw_host_api::turn::{TurnActor, TurnScope};
-use ironclaw_host_api::{
-    product_surface::ProductSurfaceCaller, state::InstallationState, surface::CapabilitySurfaceKind,
-};
 use ironclaw_loop_contracts::{
     CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
     ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
@@ -236,6 +235,7 @@ mod tests {
         RebornOutboundPreferencesResponse, RebornSetOutboundPreferencesRequest,
     };
     use async_trait::async_trait;
+    use ironclaw_extension_contracts::{state::InstallationState, surface::CapabilitySurfaceKind};
     use ironclaw_host_api::turn::{TurnActor, TurnScope};
     use ironclaw_host_api::{
         ids::{AgentId, ProjectId, TenantId, UserId},
@@ -243,8 +243,6 @@ mod tests {
             ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
             ProductSurfaceErrorKind,
         },
-        state::InstallationState,
-        surface::CapabilitySurfaceKind,
     };
     use ironclaw_loop_contracts::{
         CommunicationContextProvider, ConnectedChannelsState, DeliveryTargetState,
@@ -683,7 +681,7 @@ mod tests {
         // The telegram summary also carries a declared presentation (OUT-11).
         let mut telegram = channel_extension("telegram");
         telegram.summary.channel_presentation =
-            Some(ironclaw_host_api::channel::ChannelPresentation {
+            Some(ironclaw_extension_contracts::channel::ChannelPresentation {
                 supports_markdown: true,
                 supports_threads: false,
                 max_message_chars: Some(4096),
@@ -717,7 +715,7 @@ mod tests {
         // onto the connected-channel summary that prompt construction renders.
         assert_eq!(
             channels[0].presentation,
-            Some(ironclaw_host_api::channel::ChannelPresentation {
+            Some(ironclaw_extension_contracts::channel::ChannelPresentation {
                 supports_markdown: true,
                 supports_threads: false,
                 max_message_chars: Some(4096),

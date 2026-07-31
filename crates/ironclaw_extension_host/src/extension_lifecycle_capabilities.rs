@@ -2,6 +2,7 @@
 use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::state::InstallationState;
 use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
 };
@@ -16,7 +17,6 @@ use ironclaw_host_api::{
     http::RuntimeHttpEgress,
     ids::CapabilityId,
     resource::{ResourceEstimate, ResourceProfile, ResourceUsage},
-    state::InstallationState,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -696,7 +696,7 @@ mod tests {
         ExtensionLifecycleTestServices, build_lifecycle_test_services,
         invoke_json_with_standalone_approval, invoke_with_standalone_approval,
     };
-    use ironclaw_host_api::state::InstallationState;
+    use ironclaw_extension_contracts::state::InstallationState;
     use ironclaw_product::{
         ChannelConnectionRequirement, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
         LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,

@@ -7,10 +7,12 @@
 //! vocabulary (including the `slack_v2` adapter segment) is a wire format:
 //! changing it requires a data migration.
 
+use ironclaw_extension_contracts::preference_target::{
+    PreferenceTargetCodec, PreferenceTargetEncodeRequest,
+};
 use ironclaw_host_api::ids::{AgentId, ProjectId};
 use ironclaw_host_api::product_adapter::{
-    AdapterInstallationId, ExternalActorRef, ExternalConversationRef, PreferenceTargetCodec,
-    PreferenceTargetEncodeRequest,
+    AdapterInstallationId, ExternalActorRef, ExternalConversationRef,
 };
 use ironclaw_host_api::turn::ReplyTargetBindingRef;
 

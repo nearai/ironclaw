@@ -11,14 +11,15 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
+use ironclaw_host_api::{
     capability::CapabilityDescriptor,
-    channel::ChannelDescriptor,
     error::HostApiError,
     ids::{CapabilityId, ExtensionId},
     product_adapter::ChannelAdapter,
     tool_adapter::ToolAdapter,
 };
+
+use crate::channel::ChannelDescriptor;
 
 /// One loaded extension instance.
 ///
@@ -106,7 +107,7 @@ pub struct ExtensionContract {
 impl ExtensionContract {
     pub fn capability(
         &self,
-        capability_id: &crate::ids::CapabilityId,
+        capability_id: &ironclaw_host_api::ids::CapabilityId,
     ) -> Option<&CapabilityDescriptor> {
         self.capabilities
             .iter()

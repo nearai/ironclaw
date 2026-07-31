@@ -52,6 +52,7 @@ clap_complete = "4.5.0"
 crossterm = "0.29"
 dotenvy = "0.15"
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_operator = { path = "../ironclaw_operator", version = "0.1.0" }
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }

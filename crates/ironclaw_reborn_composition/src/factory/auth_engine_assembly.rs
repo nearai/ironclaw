@@ -180,7 +180,9 @@ fn register_vendor_client_config(
         );
         return;
     };
-    let ironclaw_host_api::recipe::VendorAuthRecipe::Oauth2Code(recipe) = &resolved.recipe else {
+    let ironclaw_extension_contracts::recipe::VendorAuthRecipe::Oauth2Code(recipe) =
+        &resolved.recipe
+    else {
         tracing::warn!(
             vendor = config.vendor,
             "configured OAuth vendor's recipe is not oauth2_code; client material not wired"

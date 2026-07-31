@@ -7,12 +7,13 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
+use ironclaw_host_api::{
     action::NetworkScheme,
     error::HostApiError,
     ids::{SecretHandle, VendorId},
-    recipe::{IngressVerificationRecipe, RecipeValidationError},
 };
+
+use crate::recipe::{IngressVerificationRecipe, RecipeValidationError};
 
 const MAX_CHANNEL_COMMANDS: usize = 32;
 const MAX_CHANNEL_COMMAND_NAME_BYTES: usize = 64;
@@ -183,21 +184,24 @@ impl ChannelDescriptor {
                     });
                 }
                 let well_formed = match injection {
-                    crate::http::RuntimeCredentialTarget::Header { name, .. } => {
-                        crate::http::valid_http_field_name(name)
+                    ironclaw_host_api::http::RuntimeCredentialTarget::Header { name, .. } => {
+                        ironclaw_host_api::http::valid_http_field_name(name)
                     }
-                    crate::http::RuntimeCredentialTarget::QueryParam { name } => {
+                    ironclaw_host_api::http::RuntimeCredentialTarget::QueryParam { name } => {
                         !name.trim().is_empty() && !name.contains(char::is_whitespace)
                     }
-                    crate::http::RuntimeCredentialTarget::PathPlaceholder { placeholder } => {
+                    ironclaw_host_api::http::RuntimeCredentialTarget::PathPlaceholder {
+                        placeholder,
+                    } => {
                         !placeholder.is_empty()
                             && placeholder
                                 .chars()
                                 .all(|c| c.is_ascii_alphanumeric() || c == '_')
                     }
-                    crate::http::RuntimeCredentialTarget::BodyJsonPointer { pointer, .. } => {
-                        pointer.starts_with('/')
-                    }
+                    ironclaw_host_api::http::RuntimeCredentialTarget::BodyJsonPointer {
+                        pointer,
+                        ..
+                    } => pointer.starts_with('/'),
                 };
                 if !well_formed {
                     return Err(ChannelDescriptorError::InvalidEgressInjection {
@@ -397,7 +401,7 @@ pub struct ChannelEgressDescriptor {
     #[serde(default = "default_https")]
     pub scheme: NetworkScheme,
     pub host: String,
-    pub methods: Vec<crate::action::NetworkMethod>,
+    pub methods: Vec<ironclaw_host_api::action::NetworkMethod>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_handle: Option<SecretHandle>,
     /// How the host injects the declared credential into vendor requests.
@@ -406,7 +410,7 @@ pub struct ChannelEgressDescriptor {
     /// path (the adapter writes `{placeholder}` into the path; the host
     /// substitutes the secret — bytes never reach the adapter).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub injection: Option<crate::http::RuntimeCredentialTarget>,
+    pub injection: Option<ironclaw_host_api::http::RuntimeCredentialTarget>,
     /// Body credentials the host may inject for this target: each entry binds
     /// a secret handle to the RFC 6901 JSON pointer where its resolved value
     /// is inserted in the request's JSON body (e.g. a vendor
@@ -443,7 +447,7 @@ pub const MAX_CHANNEL_EGRESS_TRANSFER_BYTES: u64 = 10 * 1024 * 1024;
 
 fn valid_egress_path_constraint(
     path: &str,
-    injection: Option<&crate::http::RuntimeCredentialTarget>,
+    injection: Option<&ironclaw_host_api::http::RuntimeCredentialTarget>,
 ) -> bool {
     if path.is_empty()
         || path.len() > 2_048
@@ -461,7 +465,7 @@ fn valid_egress_path_constraint(
         return false;
     }
     match injection {
-        Some(crate::http::RuntimeCredentialTarget::PathPlaceholder { placeholder }) => {
+        Some(ironclaw_host_api::http::RuntimeCredentialTarget::PathPlaceholder { placeholder }) => {
             let marker = format!("{{{placeholder}}}");
             let without_marker = path.replace(&marker, "");
             !without_marker.contains(['{', '}'])
@@ -802,7 +806,7 @@ max_message_chars = 40000
         channel.validate().unwrap();
         assert!(matches!(
             channel.egress[0].injection,
-            Some(crate::http::RuntimeCredentialTarget::PathPlaceholder { .. })
+            Some(ironclaw_host_api::http::RuntimeCredentialTarget::PathPlaceholder { .. })
         ));
 
         // Header injection stays expressible explicitly too.

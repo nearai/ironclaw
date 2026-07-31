@@ -9,6 +9,7 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, SecretCleanupAction, SecretCleanupReport,
     SecretCleanupRequest,
 };
+use ironclaw_extension_contracts::{state::InstallationState, surface::CapabilitySurfaceKind};
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionError, ExtensionInstallation, ExtensionInstallationError,
     ExtensionInstallationId, ExtensionLifecycleService, ExtensionManifestRecord, ExtensionPackage,
@@ -22,8 +23,6 @@ use ironclaw_host_api::{
     path::VirtualPath,
     product_surface::{ProductSurfaceCaller, ProductSurfaceError},
     resource::ResourceScope,
-    state::InstallationState,
-    surface::CapabilitySurfaceKind,
 };
 use ironclaw_product::{
     ChannelConnectionService, ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
@@ -361,7 +360,7 @@ impl ExtensionLifecycleManager {
         let record = crate::InstallationRecord {
             extension_id: extension_id.as_str().to_string(),
             installation_id: installation_id.as_str().to_string(),
-            state: crate::InstallationState::Installed,
+            state: ironclaw_extension_contracts::state::InstallationState::Installed,
             resolved: Arc::new(effective),
             config,
             last_error: None,
@@ -450,7 +449,7 @@ impl ExtensionLifecycleManager {
         host.install(crate::InstallationRecord {
             extension_id: package.id.as_str().to_string(),
             installation_id: format!("{}-test-install", package.id.as_str()),
-            state: crate::InstallationState::Installed,
+            state: ironclaw_extension_contracts::state::InstallationState::Installed,
             resolved: Arc::new(effective),
             config,
             last_error: None,

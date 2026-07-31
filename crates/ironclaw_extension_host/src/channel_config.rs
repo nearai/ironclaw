@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::recipe::RecipeSecretField;
 use ironclaw_extensions::{
     ExtensionInstallationStorePort, ExtensionManifestRecord, ResolvedExtensionManifest,
 };
@@ -27,7 +28,6 @@ use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     ids::{ExtensionId, SecretHandle},
     product_surface::{ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind},
-    recipe::RecipeSecretField,
     resource::ResourceScope,
 };
 use ironclaw_secrets::{SecretMaterial, SecretStorePort};

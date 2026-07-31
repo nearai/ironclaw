@@ -7,6 +7,7 @@
 //! 2xx. Checklist: ING-1/2/5/6/7/8-unit/9/11-storage; the recipe byte
 //! semantics themselves are pinned by the verifier unit tests (ING-3/4).
 
+use ironclaw_extension_contracts::state::InstallationState;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -28,9 +29,8 @@ use ironclaw_extension_host::ingress::{
 use ironclaw_extension_host::test_support::resolve_manifest_toml;
 use ironclaw_extension_host::{
     ExtensionBindings, ExtensionEntrypoint, ExtensionHost, ExtensionHostDeps, ExtensionLoader,
-    FilesystemInboundBatchStore, InstallationRecord, InstallationRecordStore, InstallationState,
-    LifecycleError, LoadContext, LoadedExtension, RehydratedInstallationRecordStore,
-    SnapshotConflict,
+    FilesystemInboundBatchStore, InstallationRecord, InstallationRecordStore, LifecycleError,
+    LoadContext, LoadedExtension, RehydratedInstallationRecordStore, SnapshotConflict,
 };
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::ids::{SecretHandle, TenantId, UserId};

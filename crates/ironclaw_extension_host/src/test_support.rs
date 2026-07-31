@@ -442,7 +442,7 @@ impl EgressFactory for FakeEgressFactory {
         &self,
         _extension_id: &str,
         _installation_id: &str,
-        _declared: &[ironclaw_host_api::channel::ChannelEgressDescriptor],
+        _declared: &[ironclaw_extension_contracts::channel::ChannelEgressDescriptor],
     ) -> Arc<dyn RestrictedEgress> {
         Arc::new(DenyAllEgress)
     }

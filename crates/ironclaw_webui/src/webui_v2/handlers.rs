@@ -104,6 +104,7 @@ use secrecy::ExposeSecret;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use ironclaw_extension_contracts::state::LifecyclePublicState;
 use ironclaw_host_api::turn::IdempotencyKey;
 use ironclaw_host_api::{
     ids::{ActivityId, SecretHandle, ThreadId, UserId},
@@ -113,7 +114,6 @@ use ironclaw_host_api::{
     },
     resolution::{Blocked, Resolution},
     result_meta::FailureKind,
-    state::LifecyclePublicState,
 };
 use uuid::Uuid;
 

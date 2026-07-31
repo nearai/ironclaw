@@ -14,8 +14,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ironclaw_auth::{AuthRecipeResolver, ResolvedVendorAuthRecipe};
+use ironclaw_extension_contracts::recipe::VendorAuthRecipe;
 use ironclaw_extensions::ResolvedExtensionManifest;
-use ironclaw_host_api::recipe::VendorAuthRecipe;
 
 use crate::SnapshotWatch;
 

@@ -13,6 +13,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_extension_contracts::preference_target::{
+    PreferenceTargetCodec, PreferenceTargetEncodeRequest,
+};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
     SourceBindingRef, TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
@@ -40,8 +43,8 @@ use ironclaw_product::{
 use ironclaw_product::{
     BlockedAuthPromptRequest, BlockedAuthPromptSource, ChannelConnectionNoticePolicy,
     ChannelDeliveryResolver, DeliveryCoordinator, DeliveryReplyContextSource, DeliveryRetryPolicy,
-    PreferenceTargetCodec, ResolvedChannelDelivery, RunDeliveryObserver, RunDeliveryServices,
-    RunDeliverySettings, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
+    ResolvedChannelDelivery, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
+    TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
 };
 use ironclaw_product::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsStat,
@@ -476,14 +479,14 @@ impl PreferenceTargetCodec for StaticCodec {
 
     fn encode_shared_conversation_target(
         &self,
-        _request: ironclaw_product::PreferenceTargetEncodeRequest<'_>,
+        _request: PreferenceTargetEncodeRequest<'_>,
     ) -> Option<ReplyTargetBindingRef> {
         None
     }
 
     fn encode_personal_direct_message_target(
         &self,
-        _request: ironclaw_product::PreferenceTargetEncodeRequest<'_>,
+        _request: PreferenceTargetEncodeRequest<'_>,
         _external_actor_id: &str,
     ) -> Option<ReplyTargetBindingRef> {
         None

@@ -4,11 +4,10 @@
 //! implemented exactly once here.
 
 use chrono::Utc;
-use ironclaw_host_api::{
-    Timestamp,
-    ids::SecretHandle,
-    recipe::{MissingScopeBehavior, OAuth2CodeRecipe, PkceMode, TokenExchangeAuth},
+use ironclaw_extension_contracts::recipe::{
+    MissingScopeBehavior, OAuth2CodeRecipe, PkceMode, TokenExchangeAuth,
 };
+use ironclaw_host_api::{Timestamp, ids::SecretHandle};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 

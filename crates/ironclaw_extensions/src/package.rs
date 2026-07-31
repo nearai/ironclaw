@@ -223,8 +223,10 @@ fn capability_descriptors_from_manifest(
     // enforcement is the v3 parser (`[memory]` requires a first_party runtime,
     // which requires a host-bundled source); this check keeps the namespace
     // closed to every non-host-bundled package as defense in depth.
-    let reserved_memory_prefix =
-        format!("{}.", ironclaw_host_api::memory::MEMORY_TOOL_ID_NAMESPACE);
+    let reserved_memory_prefix = format!(
+        "{}.",
+        ironclaw_extension_contracts::memory::MEMORY_TOOL_ID_NAMESPACE
+    );
     let mut seen_capabilities = HashSet::new();
     manifest
         .capabilities

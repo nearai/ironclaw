@@ -16,9 +16,10 @@
 
 use std::{sync::Arc, time::Duration};
 
-use ironclaw_host_api::{
-    channel_identity::{ChannelIdentityPostBind, ChannelIdentityPostBindFactory},
-    ids::UserId,
+use ironclaw_host_api::ids::UserId;
+
+use ironclaw_extension_contracts::channel_identity::{
+    ChannelIdentityPostBind, ChannelIdentityPostBindFactory,
 };
 use ironclaw_product::ChannelDeliveryResolver;
 use ironclaw_product::TargetQuery;

@@ -22,13 +22,13 @@ use ironclaw_auth::{
     OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, PrepareOAuthFlowRequest,
     ProviderCallbackOutcome, ProviderScope, ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
 };
+use ironclaw_extension_contracts::recipe::{RecipeClientCredentials, VendorAuthRecipe};
 use ironclaw_host_api::{
     http::{
         RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
         RuntimeHttpEgressResponse,
     },
     ids::{InvocationId, SecretHandle, UserId},
-    recipe::{RecipeClientCredentials, VendorAuthRecipe},
     resource::ResourceScope,
 };
 use ironclaw_secrets::{SecretStore, SecretStorePort};

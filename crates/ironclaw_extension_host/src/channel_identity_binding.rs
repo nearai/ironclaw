@@ -31,14 +31,14 @@ use ironclaw_auth::{
     OAuthProviderIdentityBindingRollback, OAuthProviderIdentityCheck,
     OAuthProviderIdentityCheckFuture, ProviderIdentityHookFactory,
 };
+use ironclaw_extension_contracts::channel_identity::{
+    ChannelConnectionScopeSource, ChannelIdentityOverride, ChannelIdentityPostBind,
+    ChannelIdentityPostBindFactory,
+};
 use ironclaw_extension_host::{
     ChannelConfigService, channel_config_connection_scope_source, discover_channel_extensions,
 };
 use ironclaw_host_api::{
-    channel_identity::{
-        ChannelConnectionScopeSource, ChannelIdentityOverride, ChannelIdentityPostBind,
-        ChannelIdentityPostBindFactory,
-    },
     ids::{ExtensionId, TenantId, UserId},
     user_identity::{
         RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
@@ -396,6 +396,7 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
+    use ironclaw_extension_contracts::channel_identity::ChannelConnectionScope;
     use ironclaw_extension_host::handle_declares_claim;
     use ironclaw_extensions::{
         ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
@@ -403,8 +404,7 @@ mod tests {
         ManifestSource,
     };
     use ironclaw_host_api::{
-        channel_identity::ChannelConnectionScope, ids::InvocationId,
-        product_adapter::AdapterInstallationId, resource::ResourceScope,
+        ids::InvocationId, product_adapter::AdapterInstallationId, resource::ResourceScope,
     };
 
     use super::*;

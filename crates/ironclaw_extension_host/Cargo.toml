@@ -36,6 +36,7 @@ ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_host_ingress = { path = "../ironclaw_host_ingress" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions", optional = true }
