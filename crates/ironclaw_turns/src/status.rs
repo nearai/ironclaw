@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use ironclaw_host_api::{RuntimeCredentialAuthRequirement, SanitizedFailure};
+use ironclaw_host_api::{decision::RuntimeCredentialAuthRequirement, turn::SanitizedFailure};
 
 use crate::{
     AcceptedMessageRef, CapabilityActivityId, GateRef, ProductTurnContext, ReplyTargetBindingRef,
@@ -490,7 +490,7 @@ impl TurnError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::ModelInvalidOutputDetailReason;
+    use ironclaw_host_api::turn::ModelInvalidOutputDetailReason;
 
     #[test]
     fn blocked_external_tool_status_is_non_terminal_and_keeps_lock() {

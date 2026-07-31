@@ -261,6 +261,66 @@ test("locale packs include client-generated chat failure copy", () => {
   }
 });
 
+test("locale packs include composer command menu and command failure copy", () => {
+  const requiredKeys = [
+    "chat.commandMenu",
+    "chat.commandFailed",
+    "chat.commandMenuHintRun",
+    "chat.commandMenuHintComplete",
+  ];
+
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    for (const key of requiredKeys) {
+      assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
+      assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
+    }
+  }
+});
+
+test("commandMenuHintRun is an imperative verb, not a bare noun or transliteration", () => {
+  // Regression: several locales translated the paired "Run"/"Complete"
+  // composer hints inconsistently — an action-noun (or, for de, an ASCII
+  // transliteration dropping the umlaut entirely) for Run alongside a proper
+  // imperative/infinitive verb for Complete. Every locale below already uses
+  // an imperative verb for every other action label in the same file (see
+  // e.g. common.cancel/common.save); commandMenuHintRun must match that
+  // convention instead of standing out as the one noun-shaped label.
+  // ar/en/ja/ko/zh-CN are deliberately absent: their existing values already
+  // follow their language's own idiomatic convention for action labels
+  // (Arabic masdar, CJK action-noun compounds, English base-form) and are
+  // correct as-is.
+  const expected = {
+    de: "Ausführen",
+    es: "Ejecutar",
+    fr: "Exécuter",
+    "pt-BR": "Executar",
+    uk: "Запустити",
+    hi: "रन करें",
+  };
+
+  for (const [locale, value] of Object.entries(expected)) {
+    const pack = loadLocalePack(locale);
+    assert.equal(pack["chat.commandMenuHintRun"], value, `${locale} chat.commandMenuHintRun`);
+  }
+});
+
+test("locale packs include the command-result presentation's list heading", () => {
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    assert.equal(
+      typeof pack["chat.commandListTitle"],
+      "string",
+      `${locale} missing chat.commandListTitle`,
+    );
+    assert.notEqual(
+      pack["chat.commandListTitle"].trim(),
+      "",
+      `${locale} chat.commandListTitle should not be empty`,
+    );
+  }
+});
+
 test("locale packs include lazy-route loading and recovery copy", () => {
   const requiredKeys = [
     "app.loadingPage",
@@ -272,6 +332,16 @@ test("locale packs include lazy-route loading and recovery copy", () => {
   for (const locale of LOCALES) {
     const pack = loadLocalePack(locale);
     for (const key of requiredKeys) {
+      assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
+      assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
+    }
+  }
+});
+
+test("locale packs include logs pagination copy", () => {
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    for (const key of ["logs.loadOlder", "logs.retentionLimitReached"]) {
       assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
       assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
     }

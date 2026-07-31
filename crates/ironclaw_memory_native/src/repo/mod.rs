@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, FilesystemOperation};
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 
 use crate::metadata::MemoryWriteOptions;
 use crate::path::{

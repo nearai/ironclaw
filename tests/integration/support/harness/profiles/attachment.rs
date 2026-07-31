@@ -1,6 +1,6 @@
 //! Attachment domain tools profile (`attachment_tools`).
 
-use ironclaw_host_api::{EffectKind, MountView};
+use ironclaw_host_api::{capability::EffectKind, mount::MountView};
 
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
 use super::super::{HarnessResult, HostRuntimeCapabilityHarness};

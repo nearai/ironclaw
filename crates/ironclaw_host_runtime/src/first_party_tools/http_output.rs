@@ -1,5 +1,5 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use ironclaw_host_api::RuntimeHttpEgressResponse;
+use ironclaw_host_api::http::RuntimeHttpEgressResponse;
 use serde_json::{Map, Value, json};
 
 use super::model_visible_output::{
@@ -328,7 +328,7 @@ fn mark_inline_body_truncated(output: &mut Map<String, Value>, returned_body_byt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::RuntimeHttpEgressResponse;
+    use ironclaw_host_api::http::RuntimeHttpEgressResponse;
 
     fn response_with_status(status: u16) -> RuntimeHttpEgressResponse {
         RuntimeHttpEgressResponse {

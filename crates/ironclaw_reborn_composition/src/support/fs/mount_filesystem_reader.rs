@@ -19,15 +19,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_attachments::DEFAULT_MAX_ATTACHMENT_BYTES;
 use ironclaw_filesystem::{DirEntry, FilesystemError, RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{ResourceScope, ScopedPath};
+use ironclaw_host_api::{path::ScopedPath, resource::ResourceScope};
 use ironclaw_product::{
     FilesystemBrowseReader, FsMount, ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat,
+    file_name_of, guard_readable_file, map_filesystem_error, map_kind, mime_for_path,
 };
 
 use crate::runtime_mounts::{BROWSE_MEMORY_ALIAS, WORKSPACE_ALIAS};
-use crate::support::fs::project_filesystem_reader::{
-    file_name_of, guard_readable_file, map_filesystem_error, map_kind, mime_for_path,
-};
 
 /// Browses the agent's internal filesystem across mounts on behalf of an
 /// already-authorized caller, over a read-only scoped filesystem.
@@ -166,10 +164,10 @@ impl<F: RootFilesystem> FilesystemBrowseReader for MountScopedFilesystemReader<F
         let mime_type = mime_for_path(&scoped_str);
         let filename = file_name_of(&scoped_str);
         Ok(ProjectFsFile {
-            size_bytes: bytes.len() as u64,
             path: Self::relativize(alias, &scoped_str),
             filename,
             mime_type,
+            size_bytes: bytes.len() as u64,
             bytes,
         })
     }
@@ -248,8 +246,10 @@ mod tests {
 
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        AgentId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-        ScopedPath, TenantId, UserId, VirtualPath,
+        ids::{AgentId, InvocationId, TenantId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, ScopedPath, VirtualPath},
+        resource::ResourceScope,
     };
 
     fn browse_fs() -> Arc<ScopedFilesystem<InMemoryBackend>> {
@@ -418,7 +418,7 @@ mod tests {
     #[test]
     fn empty_mount_root_lists_as_empty_not_404() {
         use ironclaw_filesystem::FilesystemOperation;
-        use ironclaw_host_api::VirtualPath;
+        use ironclaw_host_api::path::VirtualPath;
 
         let not_found = || FilesystemError::NotFound {
             path: VirtualPath::new("/memory").unwrap(),

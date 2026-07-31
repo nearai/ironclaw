@@ -6,9 +6,26 @@ use std::sync::Arc;
 
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_host_api::FailureKind;
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
-use ironclaw_host_api::*;
+use ironclaw_host_api::result_meta::FailureKind;
+use ironclaw_host_api::{
+    action::NetworkPolicy,
+    capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
+    dispatch::CapabilityDispatchResult,
+    host_port::HostPortCatalog,
+    ids::{
+        CapabilityGrantId, CapabilityId, ExtensionId, PackageId, ResourceReservationId, RunId,
+        UserId,
+    },
+    mount::MountView,
+    path::VirtualPath,
+    resource::{
+        ReservationStatus, ResourceEstimate, ResourceReceipt, ResourceScope, ResourceUsage,
+    },
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
+    trust::PackageSource,
+};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime, RuntimeCapabilityOutcome,
 };

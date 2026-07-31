@@ -110,7 +110,7 @@ Prefer generic/extensible architectures over hardcoding specific integrations. A
 **Reborn (`crates/`): the unified extension model.** The top-level product
 object is always an *extension*; a channel is one capability surface an
 extension's manifest declares (`tool` / `channel` / `auth` —
-`ironclaw_host_api::CapabilitySurfaceKind`), and runtime (`wasm` / `mcp` /
+`ironclaw_host_api::surface::CapabilitySurfaceKind`), and runtime (`wasm` / `mcp` /
 `first_party`) is implementation only, never taxonomy. `ExtensionId` is the
 product identity (`slack`, `github`, `gmail`); `ProviderId` is the credential
 authority namespace and may be shared across extensions (`google` backs

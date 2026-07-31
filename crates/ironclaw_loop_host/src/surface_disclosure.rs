@@ -2,7 +2,11 @@
 
 use std::sync::Arc;
 
-use ironclaw_host_api::{CapabilityId, MountView, Resolution, ResolutionBatch};
+use ironclaw_host_api::{
+    ids::CapabilityId,
+    mount::MountView,
+    resolution::{Resolution, ResolutionBatch},
+};
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
     READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
@@ -216,7 +220,10 @@ fn append_path_schema_note(schema: &mut serde_json::Value, note: &str) {
 mod tests {
     use std::path::Path;
 
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
 
     use super::*;
 

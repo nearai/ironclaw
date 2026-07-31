@@ -1,4 +1,4 @@
-use ironclaw_host_api::ApprovalRequestId;
+use ironclaw_host_api::ids::ApprovalRequestId;
 use ironclaw_turns::{GateRef, ReplyTargetBindingRef, SourceBindingRef};
 
 use super::{ApprovalInteractionRejectionKind, approval_rejected};

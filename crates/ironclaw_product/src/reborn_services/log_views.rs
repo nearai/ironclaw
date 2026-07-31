@@ -6,7 +6,9 @@ use super::{
     RebornServices, RebornViewDescriptor, RebornViewProvider, bounded_log_query,
     bounded_operator_logs_query, parse_thread_id_field, validate_log_query_modes,
 };
-use ironclaw_host_api::{ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode};
+use ironclaw_host_api::product_surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode,
+};
 
 pub const LOGS_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "logs",

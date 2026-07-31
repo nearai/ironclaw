@@ -5,9 +5,11 @@ use std::{
 
 use ironclaw_approvals::LeaseApproval;
 use ironclaw_host_api::{
-    Action, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-    ExtensionId, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern, PackageId,
-    Principal,
+    action::{Action, NetworkPolicy, NetworkTargetPattern},
+    capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
+    ids::{CapabilityGrantId, CapabilityId, ExtensionId, PackageId},
+    mount::MountView,
+    scope::Principal,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -31,7 +33,7 @@ pub(crate) enum BuiltinCapabilityPolicyError {
     #[error("standalone capability policy has duplicate effect {effect:?} for {target}")]
     DuplicateEffect { target: String, effect: EffectKind },
     #[error("standalone capability policy provider id is invalid as an extension id: {0}")]
-    InvalidProviderExtensionId(#[source] ironclaw_host_api::HostApiError),
+    InvalidProviderExtensionId(#[source] ironclaw_host_api::error::HostApiError),
     #[error("standalone capability policy provider manifest path is empty")]
     EmptyProviderManifestPath,
     #[error("standalone capability policy provider manifest path must be absolute")]

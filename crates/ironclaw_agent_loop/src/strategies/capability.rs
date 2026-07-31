@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use serde::{Deserialize, Serialize};
 
 use crate::state::LoopExecutionState;
@@ -59,7 +59,7 @@ impl CapabilityStrategy for DefaultCapabilityStrategy {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{CapabilityId, TenantId, ThreadId};
+    use ironclaw_host_api::ids::{CapabilityId, TenantId, ThreadId};
     use ironclaw_turns::{
         AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
         run_profile::{

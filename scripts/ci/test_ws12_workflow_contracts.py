@@ -70,6 +70,36 @@ class WorkflowContractSabotageTests(unittest.TestCase):
         self.assertIn("python3 scripts/ci/test_ws12_suite_shards.py", workflow)
         self.assertIn("python3 scripts/ci/test_ws12_workflow_contracts.py", workflow)
 
+    def test_code_style_fast_checks_share_one_runner_without_losing_gates(self) -> None:
+        workflow = (ROOT / ".github/workflows/code_style.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("  fast-checks:", workflow)
+        for marker in (
+            "cargo fmt --all -- --check",
+            "EmbarkStudios/cargo-deny-action@",
+            "git ls-files -ci --exclude-standard",
+            "scripts/ci/check-include-str-paths.sh",
+            "scripts/ci/check-hermetic-env.sh",
+            "scripts/check_no_panics.py --reborn-baseline",
+            "scripts/ci/check-composition-budget.sh",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, workflow)
+
+        for retired_job in (
+            "  clippy-matrix:",
+            "  format:",
+            "  deny-check:",
+            "  tracked-ignored-files:",
+            "  static-checks:",
+            "  no-panics:",
+            "  composition-budget:",
+        ):
+            with self.subTest(retired_job=retired_job):
+                self.assertNotIn(retired_job, workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

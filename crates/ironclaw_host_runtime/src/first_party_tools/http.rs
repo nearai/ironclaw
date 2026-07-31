@@ -1,12 +1,18 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
-    EffectKind, MountAlias, MountGrant, MountPermissions, MountView, NetworkMethod, NetworkPolicy,
-    PermissionMode, RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED, ResourceCeiling,
-    ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
-    RuntimeHttpEgressError, RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest,
-    RuntimeHttpSaveTarget, RuntimeKind, SandboxQuota, ScopedPath, VirtualPath,
-    valid_http_field_name,
+    action::{NetworkMethod, NetworkPolicy},
+    capability::{EffectKind, PermissionMode},
+    dispatch::RuntimeDispatchErrorKind,
+    http::{
+        RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED, RuntimeHttpEgressError,
+        RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest, RuntimeHttpSaveTarget,
+        valid_http_field_name,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, ScopedPath, VirtualPath},
+    resource::{ResourceCeiling, ResourceEstimate, ResourceProfile, ResourceUsage, SandboxQuota},
+    runtime::RuntimeKind,
 };
 use serde_json::Value;
 
@@ -570,11 +576,16 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
-        CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-        RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED, ResourceEstimate, ResourceScope,
-        RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeHttpEgressError,
-        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeHttpSavedBody, TenantId,
-        UserId, VirtualPath,
+        dispatch::RuntimeDispatchErrorKind,
+        http::{
+            RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED, RuntimeHttpEgress,
+            RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+            RuntimeHttpSavedBody,
+        },
+        ids::{CapabilityId, InvocationId, TenantId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+        resource::{ResourceEstimate, ResourceScope},
     };
     use serde_json::json;
 

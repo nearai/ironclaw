@@ -203,10 +203,53 @@ frontier rather than switching everything on:
    delta, not the corpus — the same shape as the coverage ratchet.
 4. Never a PR-blocking mutation score. See `equivalent-mutant` above.
 
+## The blocking named-function gate
+
+The scheduled frontier above remains the right tool for broad discovery and
+triage. A narrower rule blocks pull requests that touch an already-designated
+critical invariant:
+
+```bash
+python3 scripts/ci/critical_mutation_gate.py \
+  --manifest tests/integration/critical-mutation-functions.toml \
+  --base <base-sha> --head <head-sha>
+```
+
+The manifest is an explicit allowlist of named functions, one for each
+workstream-11 domain: authorization, approvals, credential scope, tenant
+isolation, persistence/CAS, retry classification, trigger scheduling,
+idempotency, delivery deduplication/routing, and redaction. Changing a listed
+source file or one of its explicit `watch_paths` runs cargo-mutants only for
+its listed functions. Watch paths name the guarding test targets and package
+configuration so weakening an assertion cannot bypass replay. Changing the
+manifest or the gate runs the complete allowlist.
+
+An entry may carry exact `test_args` when the package-wide cargo test command
+would run unrelated long-lived suites. Those arguments are reviewed as part of
+the invariant and the self-test proves the gate forwards them. Keep the
+narrowed command large enough to catch every generated mutant; a miss still
+blocks. Function matching is identifier-exact: a renamed function cannot be
+silently replaced by a similarly named sibling.
+
+This is deliberately not a workspace score:
+
+- every generated mutant for a selected named function must be caught or fail
+  to compile;
+- one survivor or timeout blocks the change;
+- zero discovered mutants and an empty or misplaced result directory fail;
+- unviable mutants do not weaken the verdict because they cannot change
+  behavior;
+- the gate strips `CARGO_TARGET_DIR` before both discovery and execution.
+
+Add a function only after its unmodified tests pass and a behavior-changing
+sabotage fails. Broad or expensive candidate discovery stays scheduled; the
+small named set is the reviewed blocking contract.
+
 ## Self-tests
 
 ```bash
 ./scripts/test-mutation-audit.sh
+./scripts/ci/test-critical-mutation-gate.sh
 ```
 
 Fast and hermetic — no cargo. Pins the failure modes that produced confidently
@@ -223,3 +266,8 @@ correct and the caller wired it to the wrong path — the gap
 `.claude/rules/testing.md` calls *test through the caller*. Section G runs
 `mutation-audit.sh` end to end behind a stub `cargo` that reproduces the
 directory layout, so the wiring itself is asserted.
+
+The critical-gate self-test separately sabotages a survivor, timeout, empty
+discovery, zero-result run, wrong result directory, malformed manifest, and
+stale source path. That suite is required in the blocking job before cargo is
+installed, so broken gate wiring fails quickly and loudly.

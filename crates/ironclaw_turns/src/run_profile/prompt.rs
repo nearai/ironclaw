@@ -434,7 +434,7 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::TimeZone;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
 
     use super::*;
     use crate::{

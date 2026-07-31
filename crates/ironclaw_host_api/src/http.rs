@@ -11,8 +11,13 @@ use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
-    CapabilityId, HostApiError, MountGrant, NetworkMethod, NetworkPolicy, ResourceScope,
-    RuntimeKind, ScopedPath, SecretHandle,
+    action::{NetworkMethod, NetworkPolicy},
+    error::HostApiError,
+    ids::{CapabilityId, SecretHandle},
+    mount::MountGrant,
+    path::ScopedPath,
+    resource::ResourceScope,
+    runtime::RuntimeKind,
 };
 
 /// Runtime HTTP request accepted by the host-owned egress service.
@@ -147,6 +152,11 @@ pub enum RuntimeCredentialTarget {
     /// request closed.
     BodyJsonPointer {
         pointer: String,
+        /// Host-derived cap checked after every credential has been injected
+        /// and the JSON body has been re-serialized. Callers that do not own a
+        /// narrower request-body contract leave this unset.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        post_injection_body_limit_bytes: Option<u64>,
     },
 }
 
@@ -197,7 +207,7 @@ impl RuntimeCredentialTarget {
             Self::PathPlaceholder { placeholder } => {
                 validate_runtime_credential_path_placeholder(placeholder)?;
             }
-            Self::BodyJsonPointer { pointer } => {
+            Self::BodyJsonPointer { pointer, .. } => {
                 validate_runtime_credential_body_pointer(pointer)?;
             }
         }
@@ -540,7 +550,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{InvocationId, UserId};
+    use crate::ids::{InvocationId, UserId};
 
     #[test]
     fn runtime_http_egress_request_scrubs_url_and_header_values() {

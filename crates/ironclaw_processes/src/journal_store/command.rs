@@ -1,4 +1,4 @@
-use ironclaw_host_api::ProcessId;
+use ironclaw_host_api::ids::ProcessId;
 use serde::{Deserialize, Serialize};
 
 use super::{

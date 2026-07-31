@@ -2,7 +2,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_extensions::{InstallationOwner, SharedExtensionRegistry};
-use ironclaw_host_api::{EffectKind, ExtensionId, RuntimeKind, UserId};
+use ironclaw_host_api::{
+    capability::EffectKind,
+    ids::{ExtensionId, UserId},
+    runtime::RuntimeKind,
+};
 use ironclaw_product::{RebornOperatorToolCatalog, RebornOperatorToolInfo};
 
 use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;

@@ -19,7 +19,7 @@
 #[cfg(feature = "test-support")]
 pub fn staged_capability_io_for_test(
     thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
-    fallback_user_id: ironclaw_host_api::UserId,
+    fallback_user_id: ironclaw_host_api::ids::UserId,
 ) -> (
     std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
     std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
@@ -30,7 +30,7 @@ pub fn staged_capability_io_for_test(
 #[cfg(feature = "test-support")]
 pub fn staged_capability_io_with_observer_for_test(
     thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
-    fallback_user_id: ironclaw_host_api::UserId,
+    fallback_user_id: ironclaw_host_api::ids::UserId,
     observer: Option<std::sync::Arc<dyn crate::RebornTrajectoryObserver>>,
 ) -> (
     std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,

@@ -20,9 +20,16 @@ use ironclaw_authorization::{
 };
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_host_api::{
-    Action, ApprovalRequest, ApprovalRequestId, CapabilityId, CorrelationId, EffectKind,
-    ExtensionId, GrantConstraints, InvocationFingerprint, InvocationId, MountView, NetworkPolicy,
-    Principal, ResourceEstimate, ResourceScope, TenantId, ThreadId, UserId,
+    action::{Action, NetworkPolicy},
+    approval::{ApprovalRequest, InvocationFingerprint},
+    capability::{EffectKind, GrantConstraints},
+    ids::{
+        ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, InvocationId, TenantId,
+        ThreadId, UserId,
+    },
+    mount::MountView,
+    resource::{ResourceEstimate, ResourceScope},
+    scope::Principal,
 };
 use ironclaw_product::{
     ApprovalBlockedTurnRun, ApprovalGateRecord, ApprovalInteractionDecision,
@@ -654,7 +661,7 @@ fn no_project_scope(user: &str, agent: Option<&str>, thread: &str) -> ResourceSc
     ResourceScope {
         tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
         user_id: UserId::new(user).expect("user"),
-        agent_id: agent.map(|id| ironclaw_host_api::AgentId::new(id).expect("agent")),
+        agent_id: agent.map(|id| ironclaw_host_api::ids::AgentId::new(id).expect("agent")),
         project_id: None,
         mission_id: None,
         thread_id: Some(ThreadId::new(thread).expect("thread")),
@@ -679,7 +686,10 @@ fn scoped_fs(
     tenant: &str,
     user: &str,
 ) -> Arc<ironclaw_filesystem::ScopedFilesystem<ironclaw_filesystem::InMemoryBackend>> {
-    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_host_api::{
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
     let backend = Arc::new(ironclaw_filesystem::InMemoryBackend::new());
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/approvals").expect("alias"),
@@ -1277,7 +1287,8 @@ async fn always_allow_grants_same_user_in_other_agent() {
 #[tokio::test]
 async fn always_allow_does_not_grant_other_extension_grantee() {
     for (store, idempotency) in caller_level_store_pair("ext-iso") {
-        let extension_x = ironclaw_host_api::ExtensionId::new("extension-x").expect("extension");
+        let extension_x =
+            ironclaw_host_api::ids::ExtensionId::new("extension-x").expect("extension");
         let request =
             approval_request_by("send the email", Principal::Extension(extension_x.clone()));
         let capability = dispatch_capability(&request);
@@ -1286,7 +1297,8 @@ async fn always_allow_does_not_grant_other_extension_grantee() {
 
         // Same scope, same capability, but a different extension grantee.
         let lookup_scope = no_project_scope("user-alpha", Some("agent-a"), "thread-2");
-        let extension_y = ironclaw_host_api::ExtensionId::new("extension-y").expect("extension");
+        let extension_y =
+            ironclaw_host_api::ids::ExtensionId::new("extension-y").expect("extension");
         let key = PersistentApprovalPolicyKey::new(
             &settings_scope(&lookup_scope),
             PersistentApprovalAction::Dispatch,
@@ -1547,7 +1559,7 @@ async fn always_allow_resolution_failure_preserves_existing_policy() {
             capability_id: CapabilityId::new("demo.echo").expect("capability"),
             grantee: Principal::User(UserId::new("user-alpha").expect("user")),
             approved_by: Principal::User(UserId::new("user-alpha").expect("user")),
-            constraints: ironclaw_host_api::GrantConstraints {
+            constraints: ironclaw_host_api::capability::GrantConstraints {
                 allowed_effects: vec![EffectKind::DispatchCapability],
                 mounts: MountView::default(),
                 network: NetworkPolicy::default(),

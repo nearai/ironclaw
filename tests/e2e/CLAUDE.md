@@ -131,6 +131,11 @@ the Reborn WebChat v2 or OpenAI-compatible API surface. The manifest may use
 pytest node IDs to include only the Reborn binary/API checks from a broader
 scenario file.
 
+That lane builds the shipping binary under branch-aware LLVM instrumentation,
+fails if the run emits zero profile files, and uploads
+`reborn-shipping-binary-e2e-coverage`. A passing Pytest result without binary
+coverage is therefore not a passing coverage lane.
+
 Do not add legacy `ironclaw` gateway tests to that manifest, even if they run
 with `ENGINE_V2=true`. Those are compatibility/runtime E2E tests. Direct
 Emulate provider-contract tests are also excluded from the Reborn coverage gate
@@ -276,11 +281,22 @@ provider world.
 `JourneyCase` is the small composition layer above those operation contracts.
 It declares the trace (when recorded), provider worlds, ingress, execution
 lane, delivery target, observable assertions, and exact executable evidence.
-The harvested provider runner consumes these declarations directly; provider
-setup, normalization, and readback remain in provider-owned helpers rather
-than moving into a generic DSL. The journey coverage gate derives channel
+The harvested provider runner consumes these declarations directly. Its small
+`ProviderJourneyReplayFacts` sidecar owns the few deterministic fixture choices
+that differ by journey; runners must not branch on case names. Recorded JSON is
+loaded as immutable input and compiled into an execution copy by
+`provider_journey_trace.py`. Provider setup and readback live in the
+`provider_journey_{google,github,slack}.py` helpers and the reusable
+`provider_journey_world.py` builder rather than moving into a generic DSL.
+`test_journey_coverage.py` blocks case-name branches and verifies compilation
+does not mutate the recording. The journey coverage gate derives channel
 ingress and delivery requirements from shipped manifests and adds the built-in
 WebUI and scheduled-trigger surfaces.
+
+Recorded-model parsing, request matching, exact result binding, and the
+`/__mock/llm_trace` routes live in `mock_llm_trace.py`; `mock_llm.py` owns the
+generic canned/scripted server and composes that trace module. Keep new replay
+semantics with the trace owner instead of growing the server file again.
 `ProviderFaultProfile` places a transparent proxy between that Reborn process
 and Emulate. Reusable profiles cover HTTP 400/401/403/404/409/429/5xx,
 timeout, connection reset, malformed/truncated/missing-field responses, and a
@@ -324,8 +340,8 @@ inventory now says so mechanically.** Coverage is counted per
   `slack__send_message` proves tool *choice*; it proves nothing about whether
   the provider committed the effect. Writes need a `ProviderOperationCase`
   with provider readback, an `integration_evidence` entry, or a
-  `journey_evidence` entry naming the exact test *and* the assertion helper
-  that performs the readback.
+  `journey_evidence` entry naming the exact test, provider-owned assertion
+  source, and assertion helper that performs the readback.
 - A read capability needs both a seeded `success` case and an `empty`-result
   case, so the runtime is proven to distinguish "no results" from "the call
   failed". Status and transport failures stay with the reusable fault

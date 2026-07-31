@@ -28,12 +28,22 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
-    ActivityId, AgentId, Blocked, CapabilityId, ExtensionId, GateRef, GateWaypoint, InvocationId,
-    LifecyclePublicState, Outcome, OutcomeRefs, ProductSurface, ProductSurfaceCaller,
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    ProductSurfaceEventSubscription, ProductSurfaceStreamResponse, ProductSurfaceValidationCode,
-    ProjectId, Resolution, ResultPreviewMeta, ResultProgress, ResultRef, RuntimeKind, SafeSummary,
-    TenantId, TerminateHint, ThreadId, ToolVerdict, UserId,
+    ids::{
+        ActivityId, AgentId, CapabilityId, ExtensionId, GateRef, InvocationId, ProjectId,
+        ResultRef, TenantId, ThreadId, UserId,
+    },
+    product_surface::{
+        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+        ProductSurfaceErrorKind, ProductSurfaceEventSubscription, ProductSurfaceStreamResponse,
+        ProductSurfaceValidationCode,
+    },
+    resolution::{
+        Blocked, GateWaypoint, Outcome, OutcomeRefs, Resolution, ResultPreviewMeta, ToolVerdict,
+    },
+    result_meta::{ResultProgress, TerminateHint},
+    runtime::RuntimeKind,
+    safe_summary::SafeSummary,
+    state::LifecyclePublicState,
 };
 use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
@@ -92,12 +102,13 @@ use ironclaw_product::{
     RebornResumeGateResponse, RebornRetryRunResponse, RebornRunArtifact, RebornRunArtifactRequest,
     RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
-    RebornTraceHoldAuthorizeResponse, RebornViewPage, RebornViewQuery, RunArtifactLogs,
-    RunArtifactRedaction, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
-    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW,
+    RebornSubmitTurnResponse, RebornThreadArtifact, RebornThreadArtifactRequest,
+    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
+    RebornTraceHoldAuthorizeProductRequest, RebornTraceHoldAuthorizeResponse, RebornViewPage,
+    RebornViewQuery, RunArtifactLogs, RunArtifactRedaction,
+    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+    SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW,
+    SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW, THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW,
     THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
     TRACE_CREDITS_VIEW, rejecting_product_surface_error,
 };
@@ -277,6 +288,15 @@ fn caller_for_user(user_id: &str) -> ProductSurfaceCaller {
 
 fn router_with(services: Arc<dyn ProductSurface>) -> Router {
     router_with_caller(services, WebUiV2Capabilities::default(), caller())
+}
+
+fn artifact_router_with(services: Arc<dyn ProductSurface>) -> Router {
+    webui_v2_router(
+        WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_regression_artifact_export_enabled(true),
+    )
+    .layer(axum::Extension(caller()))
+    .layer(axum::Extension(WebUiV2Capabilities::default()))
 }
 
 fn router_with_caller(
@@ -626,7 +646,7 @@ impl StubServices {
         }
         Ok(RebornCreateThreadResponse {
             thread: SessionThreadRecord {
-                thread_id: ironclaw_host_api::ThreadId::new("thread:fake").expect("thread id"),
+                thread_id: ironclaw_host_api::ids::ThreadId::new("thread:fake").expect("thread id"),
                 scope: ironclaw_threads::ThreadScope {
                     tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
                     agent_id: AgentId::new("agent-alpha").expect("agent"),
@@ -660,7 +680,7 @@ impl StubServices {
             return Ok(next);
         }
         Ok(RebornSubmitTurnResponse::Submitted {
-            thread_id: ironclaw_host_api::ThreadId::new(
+            thread_id: ironclaw_host_api::ids::ThreadId::new(
                 request.thread_id.clone().unwrap_or_default(),
             )
             .expect("thread id"),
@@ -685,7 +705,7 @@ impl StubServices {
             .push(request.clone());
         Ok(RebornTimelineResponse {
             thread: SessionThreadRecord {
-                thread_id: ironclaw_host_api::ThreadId::new(request.thread_id.clone())
+                thread_id: ironclaw_host_api::ids::ThreadId::new(request.thread_id.clone())
                     .expect("thread id"),
                 scope: ironclaw_threads::ThreadScope {
                     tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
@@ -1275,6 +1295,32 @@ impl StubServices {
                 .expect("project members payload"),
                 next_cursor: None,
             }),
+            id if id == THREAD_ARTIFACT_VIEW.id => {
+                let request: RebornThreadArtifactRequest =
+                    serde_json::from_value(query.params).expect("thread artifact params");
+                let artifact = RebornThreadArtifact {
+                    schema: THREAD_ARTIFACT_SCHEMA.to_string(),
+                    generated_at: Utc::now(),
+                    thread_id: request.thread_id,
+                    messages: Vec::new(),
+                    logs: RunArtifactLogs {
+                        source: "test".to_string(),
+                        available: true,
+                        complete: false,
+                        truncated: false,
+                        unavailable_reason: None,
+                        entries: Vec::new(),
+                    },
+                    redaction: RunArtifactRedaction {
+                        pipeline: "deterministic-trace-redactor-v1".to_string(),
+                        applied: false,
+                    },
+                };
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(artifact).expect("thread artifact payload"),
+                    next_cursor: None,
+                })
+            }
             _ => Err(rejecting_product_surface_error()),
         }
     }
@@ -1695,8 +1741,9 @@ impl ProductSurface for StubServices {
     async fn invoke(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
+    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse, ProductSurfaceError>
+    {
         if let Some(call_id) = ProductSurfaceCallId::parse(request.operation_id.as_str()) {
             let output = self
                 .record_product_surface_call(
@@ -1705,7 +1752,7 @@ impl ProductSurface for StubServices {
                 )
                 .await?
                 .into_value()?;
-            return Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output });
+            return Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output });
         }
 
         let output = StubServices::invoke(
@@ -1717,14 +1764,15 @@ impl ProductSurface for StubServices {
         )
         .await?;
         let output = serde_json::to_value(output).map_err(ProductSurfaceError::internal_from)?;
-        Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
+        Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
     }
 
     async fn query(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+    {
         let page = StubServices::query(
             self,
             caller,
@@ -1735,17 +1783,20 @@ impl ProductSurface for StubServices {
             },
         )
         .await?;
-        Ok(ironclaw_host_api::ProductSurfaceQueryPage {
-            items: vec![page.payload],
-            next_cursor: page.next_cursor,
-        })
+        Ok(
+            ironclaw_host_api::product_surface::ProductSurfaceQueryPage {
+                items: vec![page.payload],
+                next_cursor: page.next_cursor,
+            },
+        )
     }
 
     async fn stream_events(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::ProductSurfaceStreamRequest,
-    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+        request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
+    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceStreamResponse, ProductSurfaceError>
+    {
         let thread_id = request.stream_id.ok_or_else(|| {
             ProductSurfaceError::validation("stream_id", ProductSurfaceValidationCode::MissingField)
         })?;
@@ -1805,11 +1856,13 @@ impl ProductSurface for StubServices {
         } else {
             None
         };
-        Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
-            events,
-            next_cursor: None,
-            subscription,
-        })
+        Ok(
+            ironclaw_host_api::product_surface::ProductSurfaceStreamResponse {
+                events,
+                next_cursor: None,
+                subscription,
+            },
+        )
     }
 }
 
@@ -2270,7 +2323,7 @@ async fn get_timeline_threads_path_into_request() {
 #[tokio::test]
 async fn get_run_artifact_threads_path_and_run_path_into_request() {
     let services = Arc::new(StubServices::default());
-    let router = router_with(services.clone());
+    let router = artifact_router_with(services.clone());
     let run_id = "3d54a1f0-0a7f-4b9c-a350-4258f2fa3e18";
 
     let response = router
@@ -2299,6 +2352,65 @@ async fn get_run_artifact_threads_path_and_run_path_into_request() {
         serde_json::from_value(queries[0].params.clone()).expect("artifact params");
     assert_eq!(request.thread_id, "thread-x");
     assert_eq!(request.run_id, run_id);
+}
+
+#[tokio::test]
+async fn get_thread_artifact_threads_path_into_request() {
+    let services = Arc::new(StubServices::default());
+    let router = artifact_router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/artifact")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let payload: Value = serde_json::from_slice(&body).expect("artifact json");
+    assert_eq!(payload["schema"], THREAD_ARTIFACT_SCHEMA);
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id, THREAD_ARTIFACT_VIEW.id);
+    let request: RebornThreadArtifactRequest =
+        serde_json::from_value(queries[0].params.clone()).expect("artifact params");
+    assert_eq!(request.thread_id, "thread-x");
+}
+
+#[tokio::test]
+async fn regression_artifact_routes_are_unmounted_by_default() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    for path in [
+        "/api/webchat/v2/threads/thread-x/runs/run-x/artifact",
+        "/api/webchat/v2/threads/thread-x/artifact",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "path={path}");
+    }
+
+    assert!(
+        services.view_queries.lock().expect("lock").is_empty(),
+        "a disabled artifact route must not invoke the product surface"
+    );
 }
 
 // The attachment-bytes route carries three path segments and returns raw
@@ -3693,14 +3805,14 @@ async fn get_session_returns_caller_identity_and_capabilities() {
         !accept.iter().any(|t| t.contains('*')),
         "accept must not advertise wildcards: {accept:?}"
     );
-    assert_eq!(body["attachments"]["max_count"], expected.max_count);
+    assert_eq!(body["attachments"]["max_count"], expected.budgets.max_count);
     assert_eq!(
         body["attachments"]["max_file_bytes"],
-        expected.max_file_bytes
+        expected.budgets.max_file_bytes
     );
     assert_eq!(
         body["attachments"]["max_total_bytes"],
-        expected.max_total_bytes
+        expected.budgets.max_total_bytes
     );
 }
 
@@ -3760,6 +3872,37 @@ async fn get_session_reports_reborn_projects_feature_from_state_flag() {
         assert_eq!(
             body["features"]["reborn_projects"], enabled,
             "features.reborn_projects must mirror the state flag (enabled={enabled})"
+        );
+    }
+}
+
+#[tokio::test]
+async fn get_session_reports_regression_artifact_export_feature_from_state_flag() {
+    for enabled in [false, true] {
+        let services = Arc::new(StubServices::default());
+        let router = webui_v2_router(
+            WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+                .with_regression_artifact_export_enabled(enabled),
+        )
+        .layer(axum::Extension(caller()))
+        .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/webchat/v2/session")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(
+            body["features"]["regression_artifact_export"], enabled,
+            "session feature must mirror the artifact export gate"
         );
     }
 }

@@ -47,7 +47,7 @@ use ironclaw_hooks::predicate::{
 use ironclaw_hooks::registrar::HookRegistrar;
 use ironclaw_hooks::registry::HookRegistry;
 use ironclaw_hooks::sink::{PrivilegedBeforePromptHook, PrivilegedMutatorSink};
-use ironclaw_host_api::{ExtensionId, TenantId};
+use ironclaw_host_api::ids::{ExtensionId, TenantId};
 
 // ─────────────────────────────────────────────────────────────────────────
 // Hook 1 — polymarket daily cap

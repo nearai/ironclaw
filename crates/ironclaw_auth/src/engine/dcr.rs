@@ -10,7 +10,7 @@
 //! 3. register a client with the static vendor callback as its redirect URI,
 //! 4. persist the registered client and reuse it for every later flow.
 
-use ironclaw_host_api::{OAuth2CodeRecipe, ResourceScope, SecretHandle};
+use ironclaw_host_api::{ids::SecretHandle, recipe::OAuth2CodeRecipe, resource::ResourceScope};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 

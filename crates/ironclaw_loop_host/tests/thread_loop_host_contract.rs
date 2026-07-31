@@ -7,8 +7,15 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    AgentId, CapabilityId, DenyReason, DispatchInputIssueCode, MissionId, ProjectId,
-    ProviderToolName, Resolution, ResolutionBatch, ResourceScope, TenantId, ThreadId, UserId,
+    decision::DenyReason,
+    dispatch::DispatchInputIssueCode,
+    ids::{
+        AgentId, CapabilityId, MissionId, ProjectId, ProviderToolName, RunId, TenantId, ThreadId,
+        UserId,
+    },
+    path::ScopedPath,
+    resolution::{Resolution, ResolutionBatch},
+    resource::ResourceScope,
 };
 use ironclaw_loop_host::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
@@ -23,14 +30,18 @@ use ironclaw_loop_host::{
     ThreadBackedLoopTranscriptPort, ThreadContextWindowCache, build_skill_run_snapshot,
     identity_message_ref,
 };
+use ironclaw_outbound::{
+    OutboundError, OutboundStateStore, ReplyAttachmentHandle, ReplyAttachmentIntent,
+    ReplyAttachmentIntentPort,
+};
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
-    AppendToolResultReferenceRequest, AttachmentKind, AttachmentRef, ContextMessage,
-    ContextMessages, ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    InMemorySessionThreadService, LoadContextMessagesRequest, MessageContent, MessageKind,
-    MessageStatus, ProviderToolCallReferenceEnvelope, RedactMessageRequest,
+    AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest, AttachmentKind,
+    AttachmentRef, ContextMessage, ContextMessages, ContextWindow, CreateSummaryArtifactRequest,
+    EnsureThreadRequest, InMemorySessionThreadService, LoadContextMessagesRequest, MessageContent,
+    MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
     SessionThreadService, SummaryArtifact, SummaryModelContextPolicy, ThreadHistory,
     ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
@@ -2374,6 +2385,496 @@ async fn transcript_port_finalizes_assistant_reply_into_durable_thread_history()
 }
 
 #[tokio::test]
+async fn finalized_assistant_attachment_refs_are_sealed_in_registration_order() {
+    let fixture = ThreadFixture::new().await;
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/report.csv",
+        "report.csv",
+        "text/csv",
+        19,
+    )
+    .await;
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/chart.gif",
+        "chart.gif",
+        "image/gif",
+        23,
+    )
+    .await;
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/voice.wav",
+        "voice.wav",
+        "audio/wav",
+        11,
+    )
+    .await;
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/clip.mp4",
+        "clip.mp4",
+        "video/mp4",
+        13,
+    )
+    .await;
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/scene.glb",
+        "scene.glb",
+        "model/gltf-binary",
+        17,
+    )
+    .await;
+    let intent_port: Arc<dyn ReplyAttachmentIntentPort> = store.clone();
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    )
+    .with_reply_attachment_intent_port(intent_port);
+
+    adapter
+        .finalize_assistant_message(FinalizeAssistantMessage {
+            reply: AssistantReply {
+                content: "Created [the report](/workspace/report.csv); unrelated [link](/workspace/missing.txt).".to_string(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let assistant = finalized_assistant_message(&fixture).await;
+    assert_eq!(
+        assistant.content.as_deref(),
+        Some(
+            "Created [the report](/workspace/report.csv); unrelated [link](/workspace/missing.txt)."
+        )
+    );
+    assert_eq!(assistant.attachments.len(), 5);
+    let run_id = reply_attachment_run_id(&fixture);
+    assert_eq!(
+        assistant
+            .attachments
+            .iter()
+            .map(|attachment| attachment.id.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            ReplyAttachmentHandle::for_run_path(
+                &run_id,
+                &ScopedPath::new("/workspace/report.csv").unwrap(),
+            )
+            .to_string(),
+            ReplyAttachmentHandle::for_run_path(
+                &run_id,
+                &ScopedPath::new("/workspace/chart.gif").unwrap(),
+            )
+            .to_string(),
+            ReplyAttachmentHandle::for_run_path(
+                &run_id,
+                &ScopedPath::new("/workspace/voice.wav").unwrap(),
+            )
+            .to_string(),
+            ReplyAttachmentHandle::for_run_path(
+                &run_id,
+                &ScopedPath::new("/workspace/clip.mp4").unwrap(),
+            )
+            .to_string(),
+            ReplyAttachmentHandle::for_run_path(
+                &run_id,
+                &ScopedPath::new("/workspace/scene.glb").unwrap(),
+            )
+            .to_string(),
+        ]
+    );
+    assert_eq!(
+        assistant
+            .attachments
+            .iter()
+            .map(|attachment| attachment.storage_key.as_deref())
+            .collect::<Vec<_>>(),
+        vec![
+            Some("/workspace/report.csv"),
+            Some("/workspace/chart.gif"),
+            Some("/workspace/voice.wav"),
+            Some("/workspace/clip.mp4"),
+            Some("/workspace/scene.glb"),
+        ]
+    );
+    assert_eq!(
+        assistant.attachments[0].filename.as_deref(),
+        Some("report.csv")
+    );
+    assert_eq!(assistant.attachments[0].mime_type, "text/csv");
+    assert_eq!(assistant.attachments[0].size_bytes, Some(19));
+    assert_eq!(assistant.attachments[0].kind, AttachmentKind::Document);
+    assert_eq!(assistant.attachments[1].kind, AttachmentKind::Image);
+    assert_eq!(assistant.attachments[2].kind, AttachmentKind::Audio);
+    assert_eq!(assistant.attachments[3].kind, AttachmentKind::Video);
+    assert_eq!(assistant.attachments[4].kind, AttachmentKind::Other);
+    let error = store
+        .register(
+            &reply_attachment_scope(&fixture),
+            &reply_attachment_run_id(&fixture),
+            reply_attachment("/workspace/late.txt", "late.txt", "text/plain", 4),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, OutboundError::ReplyAttachmentIntentsSealed));
+}
+
+#[tokio::test]
+async fn finalized_assistant_deprojects_host_context_for_the_same_typed_attachment() {
+    let fixture = ThreadFixture::new().await;
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/attachments/photo.jpg",
+        "photo.jpg",
+        "image/jpeg",
+        3714,
+    )
+    .await;
+    let intent_port: Arc<dyn ReplyAttachmentIntentPort> = store;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    )
+    .with_reply_attachment_intent_port(intent_port);
+    let copied_context = "Reattached the image.\n\n<attachments>\n\
+<attachment index=\"1\" type=\"document\" filename=\"photo.jpg\" mime=\"image/jpeg\" project_path=\"/workspace/attachments/photo.jpg\" size=\"3KB\">\n\
+Saved to project file: /workspace/attachments/photo.jpg\n\
+[Document attached — text extraction unavailable]\n\
+</attachment>\n\
+</attachments>";
+
+    adapter
+        .finalize_assistant_message(FinalizeAssistantMessage {
+            reply: AssistantReply {
+                content: copied_context.to_string(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let assistant = finalized_assistant_message(&fixture).await;
+    assert_eq!(assistant.content.as_deref(), Some("Reattached the image."));
+    assert_eq!(assistant.attachments.len(), 1);
+    assert_eq!(assistant.attachments[0].kind, AttachmentKind::Image);
+    assert_eq!(
+        assistant.attachments[0].storage_key.as_deref(),
+        Some("/workspace/attachments/photo.jpg")
+    );
+}
+
+#[tokio::test]
+async fn finalized_assistant_attachment_port_with_no_intents_stays_text_only() {
+    let fixture = ThreadFixture::new().await;
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let intent_port: Arc<dyn ReplyAttachmentIntentPort> = store;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    )
+    .with_reply_attachment_intent_port(intent_port);
+
+    adapter
+        .finalize_assistant_message(FinalizeAssistantMessage {
+            reply: AssistantReply {
+                content: "plain reply".to_string(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let assistant = finalized_assistant_message(&fixture).await;
+    assert_eq!(assistant.content.as_deref(), Some("plain reply"));
+    assert!(assistant.attachments.is_empty());
+}
+
+#[tokio::test]
+async fn finalized_assistant_attachment_seal_failure_prevents_transcript_write() {
+    let fixture = ThreadFixture::new().await;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    )
+    .with_reply_attachment_intent_port(Arc::new(FailingSealReplyAttachmentIntentPort));
+
+    let error = adapter
+        .finalize_assistant_message(FinalizeAssistantMessage {
+            reply: AssistantReply {
+                content: "must not persist".to_string(),
+            },
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::TranscriptWriteFailed);
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        history
+            .messages
+            .iter()
+            .all(|message| message.kind != MessageKind::Assistant)
+    );
+}
+
+#[tokio::test]
+async fn finalized_assistant_attachment_duplicate_retry_preserves_complete_content() {
+    let fixture = ThreadFixture::new().await;
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/result.json",
+        "result.json",
+        "application/json",
+        7,
+    )
+    .await;
+    let intent_port: Arc<dyn ReplyAttachmentIntentPort> = store;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    )
+    .with_reply_attachment_intent_port(intent_port);
+    let request = FinalizeAssistantMessage {
+        reply: AssistantReply {
+            content: "retry reply".to_string(),
+        },
+    };
+
+    let first = adapter
+        .finalize_assistant_message(request.clone())
+        .await
+        .unwrap();
+    let second = adapter.finalize_assistant_message(request).await.unwrap();
+
+    assert_eq!(first, second);
+    let assistant = finalized_assistant_message(&fixture).await;
+    assert_eq!(assistant.attachments.len(), 1);
+    assert_eq!(
+        assistant.attachments[0].storage_key.as_deref(),
+        Some("/workspace/result.json")
+    );
+}
+
+#[tokio::test]
+async fn finalized_assistant_attachment_retry_rejects_mismatched_refs() {
+    let fixture = ThreadFixture::new().await;
+    let plain_adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+    let request = FinalizeAssistantMessage {
+        reply: AssistantReply {
+            content: "same text".to_string(),
+        },
+    };
+    plain_adapter
+        .finalize_assistant_message(request.clone())
+        .await
+        .unwrap();
+
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    register_reply_attachment(
+        store.as_ref(),
+        &fixture,
+        "/workspace/different.txt",
+        "different.txt",
+        "text/plain",
+        9,
+    )
+    .await;
+    let intent_port: Arc<dyn ReplyAttachmentIntentPort> = store;
+    let attachment_adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    )
+    .with_reply_attachment_intent_port(intent_port);
+
+    let error = attachment_adapter
+        .finalize_assistant_message(request)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::TranscriptWriteFailed);
+    assert!(
+        finalized_assistant_message(&fixture)
+            .await
+            .attachments
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn transcript_port_retries_transient_finalized_assistant_backend_failure() {
+    let fixture = ThreadFixture::new().await;
+    let service = Arc::new(ScriptedTranscriptWriteThreadService::new(
+        Arc::clone(&fixture.thread_service),
+        TranscriptWriteOperation::FinalizedAssistant,
+        TranscriptWriteFailure::Backend,
+        1,
+    ));
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+
+    adapter
+        .finalize_assistant_message(FinalizeAssistantMessage {
+            reply: AssistantReply {
+                content: "persist after transient failure".to_string(),
+            },
+        })
+        .await
+        .expect("the exact finalized assistant write is retried");
+
+    assert_eq!(service.attempts(), 2);
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope,
+            thread_id: fixture.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .filter(|message| message.kind == MessageKind::Assistant)
+            .count(),
+        1,
+        "retry must converge on one durable assistant message"
+    );
+}
+
+#[tokio::test]
+async fn transcript_port_retries_transient_tool_result_backend_failure() {
+    let fixture = ThreadFixture::new().await;
+    let service = Arc::new(ScriptedTranscriptWriteThreadService::new(
+        Arc::clone(&fixture.thread_service),
+        TranscriptWriteOperation::ToolResultReference,
+        TranscriptWriteFailure::Backend,
+        1,
+    ));
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+
+    adapter
+        .append_capability_result_ref(AppendCapabilityResultRef {
+            result_ref: LoopResultRef::new("result:transient-tool-write").unwrap(),
+            safe_summary: "tool completed once".to_string(),
+            provider_call: None,
+            model_observation: None,
+        })
+        .await
+        .expect("the exact tool-result reference write is retried");
+
+    assert_eq!(service.attempts(), 2);
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope,
+            thread_id: fixture.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .filter(|message| message.kind == MessageKind::ToolResultReference)
+            .count(),
+        1,
+        "retry must not duplicate the tool-result reference"
+    );
+}
+
+#[tokio::test]
+async fn transcript_port_does_not_retry_non_backend_write_failure() {
+    let fixture = ThreadFixture::new().await;
+    let service = Arc::new(ScriptedTranscriptWriteThreadService::new(
+        Arc::clone(&fixture.thread_service),
+        TranscriptWriteOperation::FinalizedAssistant,
+        TranscriptWriteFailure::Serialization,
+        1,
+    ));
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&service),
+        fixture.thread_scope,
+        fixture.run_context,
+    );
+
+    let error = adapter
+        .finalize_assistant_message(FinalizeAssistantMessage {
+            reply: AssistantReply {
+                content: "invalid write".to_string(),
+            },
+        })
+        .await
+        .expect_err("serialization failures are terminal without retry");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::TranscriptWriteFailed);
+    assert_eq!(service.attempts(), 1);
+}
+
+#[tokio::test]
+async fn transcript_port_stops_after_bounded_backend_write_attempts() {
+    let fixture = ThreadFixture::new().await;
+    let service = Arc::new(ScriptedTranscriptWriteThreadService::new(
+        Arc::clone(&fixture.thread_service),
+        TranscriptWriteOperation::ToolResultReference,
+        TranscriptWriteFailure::Backend,
+        usize::MAX,
+    ));
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&service),
+        fixture.thread_scope,
+        fixture.run_context,
+    );
+
+    let error = adapter
+        .append_capability_result_ref(AppendCapabilityResultRef {
+            result_ref: LoopResultRef::new("result:permanent-tool-write").unwrap(),
+            safe_summary: "tool completed once".to_string(),
+            provider_call: None,
+            model_observation: None,
+        })
+        .await
+        .expect_err("persistent backend failure remains terminal");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::TranscriptWriteFailed);
+    assert_eq!(service.attempts(), 3);
+}
+
+#[tokio::test]
 async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
     let fixture = ThreadFixture::new().await;
     let adapter = ThreadBackedLoopTranscriptPort::new(
@@ -4511,6 +5012,85 @@ impl ThreadFixture {
     }
 }
 
+fn reply_attachment_scope(fixture: &ThreadFixture) -> ResourceScope {
+    let mut scope = fixture.thread_scope.to_resource_scope();
+    scope.thread_id = Some(fixture.thread_id.clone());
+    scope
+}
+
+fn reply_attachment_run_id(fixture: &ThreadFixture) -> RunId {
+    RunId::from_uuid(fixture.run_context.run_id.as_uuid())
+}
+
+fn reply_attachment(
+    path: &str,
+    filename: &str,
+    mime_type: &str,
+    size_bytes: u64,
+) -> ReplyAttachmentIntent {
+    ReplyAttachmentIntent {
+        path: ScopedPath::new(path).expect("reply attachment path"),
+        filename: filename.to_string(),
+        mime_type: mime_type.to_string(),
+        size_bytes,
+    }
+}
+
+async fn register_reply_attachment(
+    store: &OutboundStateStore<ironclaw_filesystem::InMemoryBackend>,
+    fixture: &ThreadFixture,
+    path: &str,
+    filename: &str,
+    mime_type: &str,
+    size_bytes: u64,
+) {
+    store
+        .register(
+            &reply_attachment_scope(fixture),
+            &reply_attachment_run_id(fixture),
+            reply_attachment(path, filename, mime_type, size_bytes),
+        )
+        .await
+        .expect("reply attachment registration");
+}
+
+async fn finalized_assistant_message(fixture: &ThreadFixture) -> ThreadMessageRecord {
+    fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .expect("thread history")
+        .messages
+        .into_iter()
+        .find(|message| message.kind == MessageKind::Assistant)
+        .expect("finalized assistant message")
+}
+
+struct FailingSealReplyAttachmentIntentPort;
+
+#[async_trait]
+impl ReplyAttachmentIntentPort for FailingSealReplyAttachmentIntentPort {
+    async fn register(
+        &self,
+        _scope: &ResourceScope,
+        _run_id: &RunId,
+        _intent: ReplyAttachmentIntent,
+    ) -> Result<(), OutboundError> {
+        Ok(())
+    }
+
+    async fn seal(
+        &self,
+        _scope: &ResourceScope,
+        _run_id: &RunId,
+    ) -> Result<Vec<ReplyAttachmentIntent>, OutboundError> {
+        Err(OutboundError::Backend)
+    }
+}
+
 struct GatedThreadFixture {
     thread_service: Arc<GatedFinalizeThreadService>,
     thread_scope: ThreadScope,
@@ -4532,6 +5112,208 @@ impl GatedThreadFixture {
             thread_id: base.thread_id,
             run_context: base.run_context,
         }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TranscriptWriteOperation {
+    FinalizedAssistant,
+    ToolResultReference,
+}
+
+#[derive(Clone, Copy)]
+enum TranscriptWriteFailure {
+    Backend,
+    Serialization,
+}
+
+struct ScriptedTranscriptWriteThreadService {
+    inner: Arc<InMemorySessionThreadService>,
+    operation: TranscriptWriteOperation,
+    failure: TranscriptWriteFailure,
+    failures_remaining: AtomicUsize,
+    attempts: AtomicUsize,
+}
+
+impl ScriptedTranscriptWriteThreadService {
+    fn new(
+        inner: Arc<InMemorySessionThreadService>,
+        operation: TranscriptWriteOperation,
+        failure: TranscriptWriteFailure,
+        failures: usize,
+    ) -> Self {
+        Self {
+            inner,
+            operation,
+            failure,
+            failures_remaining: AtomicUsize::new(failures),
+            attempts: AtomicUsize::new(0),
+        }
+    }
+
+    fn attempts(&self) -> usize {
+        self.attempts.load(Ordering::SeqCst)
+    }
+
+    fn scripted_failure(&self, operation: TranscriptWriteOperation) -> Option<SessionThreadError> {
+        if self.operation != operation {
+            return None;
+        }
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        if self
+            .failures_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_err()
+        {
+            return None;
+        }
+        Some(match self.failure {
+            TranscriptWriteFailure::Backend => {
+                SessionThreadError::Backend("transient transcript backend failure".to_string())
+            }
+            TranscriptWriteFailure::Serialization => {
+                SessionThreadError::Serialization("invalid transcript request".to_string())
+            }
+        })
+    }
+}
+
+#[async_trait]
+impl SessionThreadService for ScriptedTranscriptWriteThreadService {
+    async fn ensure_thread(
+        &self,
+        _request: EnsureThreadRequest,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        panic!("scripted transcript service does not create threads")
+    }
+
+    async fn accept_inbound_message(
+        &self,
+        _request: AcceptInboundMessageRequest,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        panic!("scripted transcript service does not accept inbound messages")
+    }
+
+    async fn replay_accepted_inbound_message(
+        &self,
+        _request: ReplayAcceptedInboundMessageRequest,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+        panic!("scripted transcript service does not replay inbound messages")
+    }
+
+    async fn mark_message_submitted(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+        _turn_id: String,
+        _turn_run_id: String,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not mark submitted")
+    }
+
+    async fn mark_message_rejected_busy(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not reject messages")
+    }
+
+    async fn append_assistant_draft(
+        &self,
+        _request: AppendAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not append assistant drafts")
+    }
+
+    async fn append_finalized_assistant_message(
+        &self,
+        request: AppendFinalizedAssistantMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        if let Some(error) = self.scripted_failure(TranscriptWriteOperation::FinalizedAssistant) {
+            return Err(error);
+        }
+        self.inner.append_finalized_assistant_message(request).await
+    }
+
+    async fn append_tool_result_reference(
+        &self,
+        request: AppendToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        if let Some(error) = self.scripted_failure(TranscriptWriteOperation::ToolResultReference) {
+            return Err(error);
+        }
+        self.inner.append_tool_result_reference(request).await
+    }
+
+    async fn append_capability_display_preview(
+        &self,
+        _request: AppendCapabilityDisplayPreviewRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not append capability display previews")
+    }
+
+    async fn update_tool_result_reference(
+        &self,
+        _request: UpdateToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not update tool result references")
+    }
+
+    async fn update_assistant_draft(
+        &self,
+        _request: UpdateAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not update assistant drafts")
+    }
+
+    async fn finalize_assistant_message(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+        _content: MessageContent,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not finalize draft messages")
+    }
+
+    async fn redact_message(
+        &self,
+        _request: RedactMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("scripted transcript service does not redact messages")
+    }
+
+    async fn load_context_window(
+        &self,
+        _request: ironclaw_threads::LoadContextWindowRequest,
+    ) -> Result<ContextWindow, SessionThreadError> {
+        panic!("scripted transcript service does not load context windows")
+    }
+
+    async fn load_context_messages(
+        &self,
+        _request: LoadContextMessagesRequest,
+    ) -> Result<ContextMessages, SessionThreadError> {
+        panic!("scripted transcript service does not load context messages")
+    }
+
+    async fn list_thread_history(
+        &self,
+        request: ThreadHistoryRequest,
+    ) -> Result<ThreadHistory, SessionThreadError> {
+        self.inner.list_thread_history(request).await
+    }
+
+    async fn create_summary_artifact(
+        &self,
+        _request: CreateSummaryArtifactRequest,
+    ) -> Result<SummaryArtifact, SessionThreadError> {
+        panic!("scripted transcript service does not create summaries")
     }
 }
 

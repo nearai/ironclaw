@@ -1,6 +1,46 @@
 use std::path::PathBuf;
 
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    action::{
+        Action, ExtensionLifecycleOperation, NetworkMethod, NetworkPolicy, NetworkScheme,
+        NetworkTarget, NetworkTargetPattern, SecretUseMode,
+    },
+    approval::InvocationFingerprint,
+    audit::{ActionSummary, AuditEnvelope, AuditStage},
+    capability::{CapabilitySet, EffectKind, RuntimeCredentialAccountSetup},
+    capability_profile::CapabilityProfileSchemaRef,
+    decision::{
+        Decision, DenyReason, Obligation, ObligationKind, Obligations,
+        RuntimeCredentialAuthRequirement,
+    },
+    dispatch::{
+        DispatchError, DispatchFailureKind, DispatchInputIssueCode, RuntimeDispatchErrorKind,
+    },
+    error::HostApiError,
+    host_port::{
+        HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortGrant,
+        HostPortId, HostPortView,
+    },
+    http::{
+        RuntimeCredentialInjection, RuntimeCredentialTarget, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse, RuntimeHttpSaveTarget, RuntimeHttpSavedBody,
+    },
+    ids::{
+        AgentId, CapabilityId, CorrelationId, ExtensionId, InvocationId, PackageId, ProjectId,
+        ResourceReservationId, SecretHandle, SystemServiceId, TenantId, UserId, VendorId,
+    },
+    ingress::{IngressPolicy, IngressRouteDescriptor},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{HostPath, MountAlias, ScopedPath, VirtualPath},
+    product_surface::{ProductSurfaceEventSubscription, ProductSurfaceStreamResponse},
+    resource::{
+        LOCAL_DEFAULT_AGENT_ID, LOCAL_DEFAULT_PROJECT_ID, LOCAL_DEFAULT_TENANT_ID, ResourceCeiling,
+        ResourceEstimate, ResourceScope,
+    },
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
+    trust::{PackageIdentity, PackageSource, RequestedTrustClass},
+};
 use rust_decimal_macros::dec;
 use serde_json::json;
 
@@ -145,6 +185,36 @@ fn runtime_credential_target_serializes_path_placeholder() {
     assert_eq!(
         serde_json::from_value::<RuntimeCredentialTarget>(wire).unwrap(),
         target
+    );
+}
+
+#[test]
+fn runtime_body_credential_limit_defaults_compatibly_and_round_trips_when_derived() {
+    let legacy_wire = json!({
+        "type": "body_json_pointer",
+        "pointer": "/secret_token"
+    });
+    let legacy = serde_json::from_value::<RuntimeCredentialTarget>(legacy_wire.clone()).unwrap();
+    assert_eq!(
+        legacy,
+        RuntimeCredentialTarget::BodyJsonPointer {
+            pointer: "/secret_token".to_string(),
+            post_injection_body_limit_bytes: None,
+        }
+    );
+    assert_eq!(serde_json::to_value(legacy).unwrap(), legacy_wire);
+
+    let bounded = RuntimeCredentialTarget::BodyJsonPointer {
+        pointer: "/secret_token".to_string(),
+        post_injection_body_limit_bytes: Some(256),
+    };
+    assert_eq!(
+        serde_json::to_value(&bounded).unwrap(),
+        json!({
+            "type": "body_json_pointer",
+            "pointer": "/secret_token",
+            "post_injection_body_limit_bytes": 256
+        })
     );
 }
 

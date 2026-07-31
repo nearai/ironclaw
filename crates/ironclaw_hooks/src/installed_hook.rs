@@ -94,7 +94,7 @@ mod tests {
     };
     use crate::predicate_state::PredicateEventId;
     use crate::sink::{GateSinkState, RecordingGateSink};
-    use ironclaw_host_api::TenantId;
+    use ironclaw_host_api::ids::TenantId;
 
     fn hook_id() -> HookId {
         HookId::derive(

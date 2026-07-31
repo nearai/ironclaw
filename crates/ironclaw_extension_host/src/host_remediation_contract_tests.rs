@@ -29,9 +29,10 @@
 //! the compiler and needs a manual audit
 //! (`rg -n dispatch_with_host_remediation crates`).
 
-use ironclaw_host_api::RuntimeDispatchErrorKind;
+use ironclaw_host_api::dispatch::RuntimeDispatchErrorKind;
 use ironclaw_host_api::{
-    DispatchFailureDetail, HostRemediation, ModelDiagnostic, Resolution, SafeSummary,
+    dispatch::DispatchFailureDetail, host_remediation::HostRemediation, resolution::Resolution,
+    result_meta::ModelDiagnostic, safe_summary::SafeSummary,
 };
 use ironclaw_host_runtime::FirstPartyCapabilityError;
 use ironclaw_reborn_config::HostRemediationText;
@@ -52,7 +53,7 @@ fn placeholder() -> String {
 /// reaches the verdict.
 fn text_through_host_api_hop(detail: CapabilityFailureDetail) -> Option<String> {
     match resolution::failed(
-        ironclaw_host_api::FailureKind::Backend,
+        ironclaw_host_api::result_meta::FailureKind::Backend,
         "tool failed".to_string(),
         detail,
     ) {
@@ -75,7 +76,7 @@ fn persists_to_thread_history(text: &str, trust: ObservationTrust) -> Result<(),
         status: ToolObservationStatus::Error,
         summary: "the tool call failed".to_string(),
         detail: ToolObservationDetail::GenericFailure {
-            failure_kind: ironclaw_host_api::FailureKind::Backend,
+            failure_kind: ironclaw_host_api::result_meta::FailureKind::Backend,
             detail: Some(text.to_string()),
         },
         artifacts: Vec::new(),

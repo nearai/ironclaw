@@ -2,8 +2,9 @@ use std::collections::BTreeSet;
 
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage};
 use ironclaw_host_api::{
-    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement,
-    RuntimeCredentialRequirementSource, VendorId,
+    capability::{RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource},
+    decision::RuntimeCredentialAuthRequirement,
+    ids::VendorId,
 };
 use ironclaw_product::LifecycleExtensionCredentialSetup;
 
@@ -66,7 +67,7 @@ pub fn lifecycle_credential_setup(
 }
 
 pub fn product_auth_credential_source(
-    credential: &ironclaw_host_api::RuntimeCredentialRequirement,
+    credential: &ironclaw_host_api::capability::RuntimeCredentialRequirement,
 ) -> Option<(VendorId, LifecycleExtensionCredentialSetup)> {
     let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } =
         &credential.source

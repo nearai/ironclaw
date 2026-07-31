@@ -68,7 +68,7 @@ mod tests {
 
     #[tokio::test]
     async fn default_input_drain_strategy_returns_true_for_both_hooks() {
-        use ironclaw_host_api::{TenantId, ThreadId};
+        use ironclaw_host_api::ids::{TenantId, ThreadId};
         use ironclaw_turns::{
             AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnId, TurnRunId,
             TurnScope,

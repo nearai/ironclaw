@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use ironclaw_extensions::ExtensionPackage;
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{MemoryDescriptor, MemoryLifecycleHook};
+use ironclaw_host_api::memory::{MemoryDescriptor, MemoryLifecycleHook};
 use ironclaw_host_runtime::memory_binding::{MemoryBindingPolicy, MemoryProviderBinding};
 use ironclaw_host_runtime::memory_context::ProductionMemoryPromptContextService;
 use ironclaw_host_runtime::memory_native_extension as memory_extension;
@@ -352,7 +352,7 @@ impl FirstPartyCapabilityHandler for Mem0MemoryToolHandler {
         ironclaw_host_runtime::FirstPartyCapabilityResult,
         ironclaw_host_runtime::FirstPartyCapabilityError,
     > {
-        use ironclaw_host_api::RuntimeDispatchErrorKind;
+        use ironclaw_host_api::dispatch::RuntimeDispatchErrorKind;
         use ironclaw_host_runtime::{
             FirstPartyCapabilityError, finish_memory_tool_result, map_memory_service_error,
             memory_invocation_for_request,
@@ -497,7 +497,7 @@ pub fn memory_lifecycle_consumers(
 mod tests {
     use super::*;
     use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::ExtensionId;
+    use ironclaw_host_api::ids::ExtensionId;
 
     #[cfg(feature = "memory-mem0")]
     fn mem0_binding() -> MemoryProviderBinding {
@@ -617,7 +617,7 @@ mod tests {
         let full = memory_lifecycle_consumers(
             Some(inert_provider()),
             &MemoryDescriptor {
-                lifecycle: ironclaw_host_api::MemoryLifecycleHook::ALL.to_vec(),
+                lifecycle: ironclaw_host_api::memory::MemoryLifecycleHook::ALL.to_vec(),
             },
         );
         assert!(full.memory_context_service.is_some());

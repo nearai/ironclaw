@@ -29,8 +29,11 @@ use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-    RuntimeHttpEgressRequest, UserId, VirtualPath,
+    http::RuntimeHttpEgressRequest,
+    ids::{CapabilityId, InvocationId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_llm::Role;
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
@@ -150,12 +153,10 @@ pub struct RebornIntegrationHarnessBuilder {
     model_mode: ThreadModelMode,
     /// C-TRACECAP seam: install an in-memory `TurnEventSink` when `true`.
     turn_event_sink: bool,
-    /// Force `ToolDisclosureMode::Bridged` into the underlying group's ONE
-    /// planned runtime, bypassing `REBORN_TOOL_DISCLOSURE`/`from_env()`
+    /// Tool disclosure mode for the underlying group's ONE planned runtime.
+    /// General harnesses pin `Off`; focused tests opt into `Bridged` explicitly
     /// (test-only knob; see `RebornIntegrationGroupBuilder::tool_disclosure`).
-    /// `None` (default) resolves via `ToolDisclosureMode::from_env()`, matching
-    /// today's behavior byte-for-byte.
-    tool_disclosure: Option<ToolDisclosureMode>,
+    tool_disclosure: ToolDisclosureMode,
     /// #5647 RED-pin seam: pass-through to
     /// `RebornIntegrationGroupBuilder::with_narrowed_capability_allow_set_for_bridged_test`. `None` (default) preserves today's forced-`All` behavior.
     narrowed_bridged_allow_set: Option<Vec<CapabilityId>>,
@@ -188,6 +189,11 @@ pub struct RebornIntegrationHarnessBuilder {
     lease_recovery_interval: Option<Duration>,
     /// Test-only canonical-loop iteration limit override.
     planned_default_iteration_limit: Option<std::num::NonZeroU32>,
+    /// Test-only runtime seam that rejects final assistant transcript writes.
+    fail_append_finalized_assistant_message: bool,
+    fail_append_tool_result_reference: bool,
+    /// Additive raw-provider call recording for terminal side-effect assertions.
+    record_model_calls: bool,
 }
 
 impl RebornIntegrationHarnessBuilder {
@@ -327,6 +333,18 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Return a typed provider decode/response error `failures` times through
+    /// the real vendor-provider seam.
+    pub fn provider_response_error_model_times(
+        mut self,
+        failure: RecoverableModelFailure,
+        failures: usize,
+    ) -> Self {
+        self.model_mode =
+            ThreadModelMode::Recoverable(RecoverableModelFailureScript::new(failure, failures));
+        self
+    }
+
     /// Report output truncation `failures` times, then resume scripted
     /// playback through the real provider gateway and recovery path.
     pub fn output_truncated_model_times(mut self, failures: usize) -> Self {
@@ -334,6 +352,14 @@ impl RebornIntegrationHarnessBuilder {
             RecoverableModelFailure::OutputTruncated,
             failures,
         ));
+        self
+    }
+
+    /// Record provider calls while otherwise delegating normal scripted
+    /// playback. Used by terminal-path tests that need to prove no second model
+    /// call happens after a non-model persistence boundary fails.
+    pub fn record_model_calls_for_test(mut self) -> Self {
+        self.record_model_calls = true;
         self
     }
 
@@ -371,6 +397,19 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Reject the runtime's final assistant transcript write while retaining
+    /// the real scheduler, loop host, turn store, and thread read path.
+    pub fn fail_append_finalized_assistant_message_for_test(mut self) -> Self {
+        self.fail_append_finalized_assistant_message = true;
+        self
+    }
+
+    /// Reject tool-result transcript persistence after a capability completes.
+    pub fn fail_append_tool_result_reference_for_test(mut self) -> Self {
+        self.fail_append_tool_result_reference = true;
+        self
+    }
+
     /// Every capability dispatch returns a caller-shaped port error
     /// (`InvalidInvocation`). #6284: such errors surface model-visibly and the
     /// run continues; only genuine host faults still end it.
@@ -398,9 +437,8 @@ impl RebornIntegrationHarnessBuilder {
     /// (enabler (b), `REBORN_TOOL_DISCLOSURE=Bridged`), so the bridged decorator
     /// (`ToolDisclosureCapabilityDecorator`) replaces the flat per-capability
     /// tool list with the bridge meta tools in the `tools` argument shipped
-    /// to the model. Only `tool_search` is ever ADVERTISED to the model;
-    /// `tool_describe`/`tool_call` are retained internally for describe-first
-    /// routing and never appear on the model-visible tool surface (see
+    /// to the model. Deferred surfaces advertise the complete
+    /// `tool_search`/`tool_describe`/`tool_call` protocol (see
     /// `tool_disclosure.rs`'s `bridged_mode_defers_wide_catalog_to_bridge_meta_tools`).
     /// Deferral is ALSO threshold-gated (`select_active_set`,
     /// `DisclosureCaps::default().max_tools = 32`): backends under the cap
@@ -411,7 +449,7 @@ impl RebornIntegrationHarnessBuilder {
     /// the `#[tokio::test]` concurrent-test race a raw env var would hit (see
     /// `ToolDisclosureMode::from_env`, `apply_hermetic_env`).
     pub fn with_tool_disclosure_bridged(mut self) -> Self {
-        self.tool_disclosure = Some(ToolDisclosureMode::Bridged);
+        self.tool_disclosure = ToolDisclosureMode::Bridged;
         self
     }
 
@@ -422,7 +460,7 @@ impl RebornIntegrationHarnessBuilder {
     /// `RebornIntegrationGroupBuilder::with_tool_disclosure_off` for why the
     /// env-resolution path alone is not control-safe.
     pub fn with_tool_disclosure_off(mut self) -> Self {
-        self.tool_disclosure = Some(ToolDisclosureMode::Off);
+        self.tool_disclosure = ToolDisclosureMode::Off;
         self
     }
 
@@ -657,13 +695,12 @@ impl RebornIntegrationHarnessBuilder {
             group_builder = group_builder.with_turn_event_sink();
         }
         match self.tool_disclosure {
-            Some(ToolDisclosureMode::Bridged) => {
+            ToolDisclosureMode::Bridged => {
                 group_builder = group_builder.with_tool_disclosure_bridged();
             }
-            Some(ToolDisclosureMode::Off) => {
+            ToolDisclosureMode::Off => {
                 group_builder = group_builder.with_tool_disclosure_off();
             }
-            None => {}
         }
         if let Some(ids) = self.narrowed_bridged_allow_set {
             group_builder = group_builder.with_narrowed_capability_allow_set_for_bridged_test(ids);
@@ -689,6 +726,12 @@ impl RebornIntegrationHarnessBuilder {
         if let Some(limit) = self.planned_default_iteration_limit {
             group_builder = group_builder.with_iteration_limit_for_test(limit);
         }
+        if self.fail_append_finalized_assistant_message {
+            group_builder = group_builder.fail_append_finalized_assistant_message_for_test();
+        }
+        if self.fail_append_tool_result_reference {
+            group_builder = group_builder.fail_append_tool_result_reference_for_test();
+        }
         let group: RebornIntegrationGroup = group_builder
             .build_with_capability(group_capability)
             .await?;
@@ -696,6 +739,7 @@ impl RebornIntegrationHarnessBuilder {
             .thread(self.conversation_id)
             .script(self.replies)
             .model_mode(self.model_mode)
+            .record_model_calls_for_test(self.record_model_calls)
             .build()
             .await
     }
@@ -798,7 +842,9 @@ impl RebornIntegrationHarness {
             shell_mode: ShellMode::default(),
             model_mode: ThreadModelMode::Normal,
             turn_event_sink: false,
-            tool_disclosure: None,
+            // General integration tests stay hermetic across production default
+            // changes. Disclosure-specific tests opt into Bridged explicitly.
+            tool_disclosure: ToolDisclosureMode::Off,
             narrowed_bridged_allow_set: None,
             budget_accounting: false,
             communication_context_provider: None,
@@ -808,6 +854,9 @@ impl RebornIntegrationHarness {
             runner_lease_ttl: None,
             lease_recovery_interval: None,
             planned_default_iteration_limit: None,
+            fail_append_finalized_assistant_message: false,
+            fail_append_tool_result_reference: false,
+            record_model_calls: false,
         }
     }
 
@@ -834,9 +883,9 @@ impl RebornIntegrationHarness {
 
     /// Number of loop milestones recorded for this harness right now (i.e.
     /// `[baseline_milestone_count..]` so far). Capture at the START of a turn
-    /// on a multi-turn harness and pass to `assert_compaction_failed_since` so
-    /// a prior turn's milestone can't satisfy the assertion — the
-    /// milestone analogue of `history_len`.
+    /// on a multi-turn harness and pass to a named compaction `*_since`
+    /// assertion so a prior turn's milestone can't satisfy it — the milestone
+    /// analogue of `history_len`.
     pub async fn milestone_len(&self) -> HarnessResult<usize> {
         Ok(self.loop_milestones().len())
     }
@@ -890,7 +939,7 @@ impl RebornIntegrationHarness {
             );
         }
         let (event_id, envelope) = self.build_user_envelope(text)?;
-        let attachment = ironclaw_attachments::InboundAttachment {
+        let attachment = ironclaw_host_api::attachment::InboundAttachment {
             id: format!("{event_id}-att-0"),
             mime_type: mime_type.to_string(),
             filename: Some(filename.to_string()),
@@ -927,14 +976,14 @@ impl RebornIntegrationHarness {
         let inbound = attachments
             .into_iter()
             .enumerate()
-            .map(
-                |(index, (filename, mime_type, bytes))| ironclaw_attachments::InboundAttachment {
+            .map(|(index, (filename, mime_type, bytes))| {
+                ironclaw_host_api::attachment::InboundAttachment {
                     id: format!("{event_id}-att-{index}"),
                     mime_type: mime_type.to_string(),
                     filename: Some(filename.to_string()),
                     bytes,
-                },
-            )
+                }
+            })
             .collect();
         let ack = self
             .workflow
@@ -2370,9 +2419,8 @@ pub(crate) fn apply_hermetic_env() {
             std::env::remove_var("RESPONSE_CACHE_ENABLED");
             std::env::remove_var("NEARAI_SESSION_TOKEN");
             // No integration test should inherit the ambient tool-disclosure
-            // knob: `ToolDisclosureMode::from_env()` resolution is opt-in per
-            // test via `.with_tool_disclosure_bridged()`/`.with_tool_disclosure_off()`,
-            // never ambient (see `tool_disclosure.rs`'s negative control).
+            // knob. Builders pin Off and disclosure tests opt into Bridged;
+            // scrubbing is defense in depth for the retained env fallback.
             std::env::remove_var(ironclaw_runner::runtime::REBORN_TOOL_DISCLOSURE_ENV);
         }
     });

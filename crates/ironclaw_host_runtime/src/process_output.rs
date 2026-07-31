@@ -5,7 +5,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use ironclaw_host_api::ResourceScope;
+use ironclaw_host_api::resource::ResourceScope;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
@@ -594,7 +594,10 @@ fn floor_char_boundary(s: &str, pos: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
+    use ironclaw_host_api::{
+        ids::{InvocationId, UserId},
+        resource::ResourceScope,
+    };
 
     fn test_scope() -> ResourceScope {
         ResourceScope::local_default(UserId::new("test-user").unwrap(), InvocationId::new())
@@ -602,7 +605,7 @@ mod tests {
     }
 
     fn test_scope_with(tenant: &str, user: &str, project: Option<&str>) -> ResourceScope {
-        use ironclaw_host_api::{AgentId, ProjectId, TenantId};
+        use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId};
         ResourceScope {
             tenant_id: TenantId::new(tenant).unwrap(),
             user_id: UserId::new(user).unwrap(),

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 
 import { groupMessages } from "./message-groups";
+import { messagesFromTimeline } from "./history-messages";
 
 test("groupMessages: live and final replies share a stable render key", () => {
   const live = groupMessages([
@@ -36,6 +37,40 @@ test("groupMessages: live and final replies share a stable render key", () => {
   assert.equal(live[0].id, "assistant-reply-run-1");
   assert.equal(finalized[0].id, live[0].id);
   assert.equal(refreshed[0].id, live[0].id);
+});
+
+test("groupMessages: finalized runs keep a durable completion indicator", () => {
+  const messages = messagesFromTimeline([
+    {
+      message_id: "user-1",
+      kind: "user",
+      status: "submitted",
+      content: "Check the catalog",
+      created_at: "2026-07-31T09:00:00Z",
+      updated_at: "2026-07-31T09:00:00Z",
+      turn_run_id: "run-1",
+    },
+    {
+      message_id: "assistant-1",
+      kind: "assistant",
+      status: "finalized",
+      content: "Done.",
+      created_at: "2026-07-31T09:00:03Z",
+      updated_at: "2026-07-31T09:00:12Z",
+      turn_run_id: "run-1",
+    },
+  ]);
+  const grouped = groupMessages(messages);
+
+  assert.deepEqual(
+    grouped.map((item) => item.type),
+    ["message", "message", "run-completion"],
+  );
+  assert.deepEqual(grouped[2], {
+    type: "run-completion",
+    id: "run-completion-run-1",
+    durationSeconds: 12,
+  });
 });
 
 test("groupMessages: consecutive tool_activity messages collapse into one run", () => {

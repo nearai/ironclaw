@@ -19,7 +19,9 @@ use ironclaw_extensions::{
     CapabilitySurfaceDeclV2, ExtensionManifestRecord, ExtensionRuntimeV2, MANIFEST_SCHEMA_VERSION,
     MANIFEST_SCHEMA_VERSION_V3, ManifestSource,
 };
-use ironclaw_host_api::{RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource};
+use ironclaw_host_api::capability::{
+    RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource,
+};
 use ironclaw_host_runtime::{default_host_api_contract_registry, default_host_port_catalog};
 
 fn parse(toml: &str) -> ExtensionManifestRecord {
@@ -128,13 +130,13 @@ fn assert_static_projection_parity(dir: &str) {
             .collect::<Vec<_>>()
     };
     assert!(
-        !kinds(&v2).contains(&ironclaw_host_api::CapabilitySurfaceKind::Channel),
+        !kinds(&v2).contains(&ironclaw_host_api::surface::CapabilitySurfaceKind::Channel),
         "{dir}: v2 fixtures cannot attest channel surfaces post-DEL-5"
     );
     let non_channel_kinds = |record: &ExtensionManifestRecord| {
         kinds(record)
             .into_iter()
-            .filter(|kind| *kind != ironclaw_host_api::CapabilitySurfaceKind::Channel)
+            .filter(|kind| *kind != ironclaw_host_api::surface::CapabilitySurfaceKind::Channel)
             .collect::<Vec<_>>()
     };
     assert_eq!(
@@ -154,11 +156,13 @@ fn assert_static_projection_parity(dir: &str) {
         // vocabulary), while v2 declared it inconsistently (24 of github's
         // 48 tools). It gates nothing downstream; MAN-3's parity list is
         // surfaces / capability ids / scopes / credentials.
-        let observable = |effects: &[ironclaw_host_api::EffectKind]| {
+        let observable = |effects: &[ironclaw_host_api::capability::EffectKind]| {
             effects
                 .iter()
                 .copied()
-                .filter(|effect| *effect != ironclaw_host_api::EffectKind::DispatchCapability)
+                .filter(|effect| {
+                    *effect != ironclaw_host_api::capability::EffectKind::DispatchCapability
+                })
                 .collect::<Vec<_>>()
         };
         assert_eq!(
@@ -168,7 +172,7 @@ fn assert_static_projection_parity(dir: &str) {
         );
         assert!(
             b.effects
-                .contains(&ironclaw_host_api::EffectKind::DispatchCapability),
+                .contains(&ironclaw_host_api::capability::EffectKind::DispatchCapability),
             "{dir}/{id}: v3 normalization always includes the dispatch effect"
         );
         assert_eq!(
@@ -360,7 +364,7 @@ fn assert_hosted_mcp_projection(dir: &str, expected_namespace: &str) {
         for effect in &capability.effects {
             assert!(
                 mcp.effects.contains(effect)
-                    || *effect == ironclaw_host_api::EffectKind::DispatchCapability,
+                    || *effect == ironclaw_host_api::capability::EffectKind::DispatchCapability,
                 "{dir}: ceiling must cover static effect {effect:?}"
             );
         }
@@ -418,11 +422,130 @@ fn slack_v3_still_declares_the_channel_surface() {
     assert_eq!(
         kinds
             .iter()
-            .filter(|kind| **kind == ironclaw_host_api::CapabilitySurfaceKind::Channel)
+            .filter(|kind| **kind == ironclaw_host_api::surface::CapabilitySurfaceKind::Channel)
             .count(),
         1,
         "live slack manifest must declare exactly one channel surface; got {kinds:?}"
     );
+}
+
+#[test]
+fn slack_v3_declares_only_bounded_file_transfer_egress() {
+    use ironclaw_host_api::action::NetworkMethod;
+
+    let v3 = parse(&live_asset("slack"));
+    let channel = v3
+        .resolved()
+        .channel
+        .as_ref()
+        .expect("slack manifest must declare its channel");
+    assert_eq!(channel.egress.len(), 4);
+
+    let api_post = channel
+        .egress
+        .iter()
+        .find(|target| target.host == "slack.com" && target.methods == [NetworkMethod::Post])
+        .expect("Slack API POST target");
+    assert_eq!(
+        api_post.paths,
+        [
+            "/api/chat.postMessage",
+            "/api/chat.delete",
+            "/api/conversations.open",
+            "/api/files.completeUploadExternal",
+        ]
+    );
+    assert_eq!(api_post.request_body_limit_bytes, Some(256 * 1024));
+    assert_eq!(api_post.response_body_limit_bytes, Some(256 * 1024));
+    assert!(
+        api_post
+            .paths
+            .iter()
+            .all(|path| path != "/api/files.upload")
+    );
+
+    let api_get = channel
+        .egress
+        .iter()
+        .find(|target| target.host == "slack.com" && target.methods == [NetworkMethod::Get])
+        .expect("Slack API GET target");
+    assert_eq!(
+        api_get.paths,
+        ["/api/files.info", "/api/files.getUploadURLExternal",]
+    );
+    assert_eq!(api_get.request_body_limit_bytes, Some(0));
+    assert_eq!(api_get.response_body_limit_bytes, Some(256 * 1024));
+
+    let private_download = channel
+        .egress
+        .iter()
+        .find(|target| target.host == "files.slack.com" && target.methods == [NetworkMethod::Get])
+        .expect("Slack private download target");
+    assert_eq!(private_download.path_prefixes, ["/files-pri/"]);
+    assert_eq!(private_download.request_body_limit_bytes, Some(0));
+    assert_eq!(
+        private_download.response_body_limit_bytes,
+        Some(5 * 1024 * 1024)
+    );
+
+    let external_upload = channel
+        .egress
+        .iter()
+        .find(|target| target.host == "files.slack.com" && target.methods == [NetworkMethod::Post])
+        .expect("Slack external upload target");
+    assert_eq!(external_upload.path_prefixes, ["/upload/"]);
+    assert_eq!(external_upload.response_body_limit_bytes, Some(256 * 1024));
+    assert_eq!(
+        external_upload.request_body_limit_bytes,
+        Some(5 * 1024 * 1024)
+    );
+}
+
+#[test]
+fn telegram_v3_declares_only_the_bot_api_and_bounded_file_transfer_paths() {
+    let v3 = parse(&live_asset("telegram"));
+    let channel = v3
+        .resolved()
+        .channel
+        .as_ref()
+        .expect("telegram manifest must declare its channel");
+    assert_eq!(channel.egress.len(), 2);
+
+    let post = channel
+        .egress
+        .iter()
+        .find(|target| target.methods == [ironclaw_host_api::action::NetworkMethod::Post])
+        .expect("bounded Bot API POST target");
+    assert_eq!(post.host, "api.telegram.org");
+    assert_eq!(
+        post.paths,
+        [
+            "/bot{telegram_bot_token}/setWebhook",
+            "/bot{telegram_bot_token}/deleteWebhook",
+            "/bot{telegram_bot_token}/sendMessage",
+            "/bot{telegram_bot_token}/deleteMessage",
+            "/bot{telegram_bot_token}/getFile",
+            "/bot{telegram_bot_token}/sendDocument",
+        ]
+    );
+    assert_eq!(
+        post.request_body_limit_bytes,
+        Some(5 * 1024 * 1024 + 64 * 1024)
+    );
+    // This target also serves sendMessage/deleteMessage, whose responses echo
+    // the full Message object (including `reply_to_message` when the adapter
+    // threads a reply). A file-sized response cap here failed sends that had
+    // already reached the user, so it keeps the host default.
+    assert_eq!(post.response_body_limit_bytes, Some(256 * 1024));
+
+    let download = channel
+        .egress
+        .iter()
+        .find(|target| target.methods == [ironclaw_host_api::action::NetworkMethod::Get])
+        .expect("bounded Telegram file GET target");
+    assert_eq!(download.path_prefixes, ["/file/bot{telegram_bot_token}/"]);
+    assert_eq!(download.request_body_limit_bytes, Some(0));
+    assert_eq!(download.response_body_limit_bytes, Some(5 * 1024 * 1024));
 }
 
 #[test]

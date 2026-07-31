@@ -14,9 +14,14 @@ use ironclaw_approvals::{
 };
 use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStorePort as _};
 use ironclaw_host_api::{
-    CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
-    ExtensionId, FailureKind, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern,
-    Principal, ResourceEstimate, ResourceScope, RunId, RuntimeKind, ThreadId, TrustClass, UserId,
+    action::{NetworkPolicy, NetworkTargetPattern},
+    capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
+    ids::{CapabilityGrantId, CapabilityId, ExtensionId, RunId, ThreadId, UserId},
+    mount::MountView,
+    resource::{ResourceEstimate, ResourceScope},
+    result_meta::FailureKind,
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, ECHO_CAPABILITY_ID,
@@ -515,7 +520,7 @@ async fn standalone_legacy_persistent_echo_grant_does_not_override_global_off() 
                 expires_at: None,
                 max_invocations: None,
             },
-            source_approval_request_id: Some(ironclaw_host_api::ApprovalRequestId::new()),
+            source_approval_request_id: Some(ironclaw_host_api::ids::ApprovalRequestId::new()),
         })
         .await
         .expect("legacy persistent approval policy");

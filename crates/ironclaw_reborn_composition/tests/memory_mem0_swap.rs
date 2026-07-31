@@ -24,8 +24,10 @@
 use std::sync::Arc;
 
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-    TenantId, UserId, VirtualPath,
+    ids::{CapabilityId, InvocationId, TenantId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, register_memory_tool_handler,
@@ -157,7 +159,7 @@ async fn config_binding_swaps_the_memory_provider_to_mem0_through_the_factory() 
         .as_ref()
         .expect("binding mem0 must register mem0's package");
     assert_eq!(package.manifest.id.as_str(), MEM0_MEMORY_EXTENSION_ID);
-    use ironclaw_host_api::MemoryLifecycleHook;
+    use ironclaw_host_api::memory::MemoryLifecycleHook;
     assert!(
         resolved
             .lifecycle

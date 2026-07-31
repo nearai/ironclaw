@@ -10,9 +10,16 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Action, AgentId, ApprovalRequest, AuditEventId, CapabilityId, CorrelationId, DenyReason,
-    EffectKind, ExecutionContext, ExtensionId, InvocationId, MissionId, NetworkMethod, Principal,
-    ProcessId, ProjectId, SecretUseMode, TenantId, ThreadId, Timestamp, UserId,
+    Timestamp,
+    action::{Action, NetworkMethod, SecretUseMode},
+    approval::ApprovalRequest,
+    capability::EffectKind,
+    decision::DenyReason,
+    ids::{
+        AgentId, AuditEventId, CapabilityId, CorrelationId, ExtensionId, InvocationId, MissionId,
+        ProcessId, ProjectId, TenantId, ThreadId, UserId,
+    },
+    scope::{ExecutionContext, Principal},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,7 +39,7 @@ pub struct AuditEnvelope {
     pub invocation_id: InvocationId,
     pub process_id: Option<ProcessId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approval_request_id: Option<crate::ApprovalRequestId>,
+    pub approval_request_id: Option<crate::ids::ApprovalRequestId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension_id: Option<ExtensionId>,
 
@@ -74,7 +81,7 @@ impl AuditEnvelope {
     }
 
     pub fn approval_resolved(
-        scope: &crate::ResourceScope,
+        scope: &crate::resource::ResourceScope,
         request: &ApprovalRequest,
         resolved_by: Principal,
         decision: ApprovalDecisionKind,

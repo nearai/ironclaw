@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    AgentId, MemoryDescriptor, MemoryLifecycleHook, ProjectId, TenantId, ThreadId, UserId,
+    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+    memory::{MemoryDescriptor, MemoryLifecycleHook},
 };
 use ironclaw_memory::{
     MemoryInvocation, MemoryService, MemoryServiceContextRequest, MemoryServiceContextSnippet,

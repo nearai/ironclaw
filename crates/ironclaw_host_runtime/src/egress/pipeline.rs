@@ -1,6 +1,9 @@
 use ironclaw_host_api::{
-    NetworkPolicy, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-    RuntimeHttpSaveTarget,
+    action::NetworkPolicy,
+    http::{
+        RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+        RuntimeHttpSaveTarget,
+    },
 };
 use ironclaw_network::{NetworkHttpEgress, NetworkHttpRequest};
 use ironclaw_secrets::SecretStorePort;

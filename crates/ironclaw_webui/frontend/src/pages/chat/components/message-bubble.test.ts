@@ -38,6 +38,18 @@ vi.mock("./tool-activity", async () => {
   };
 });
 
+vi.mock("./command-result", async () => {
+  const { createElement } = await import("react");
+  return {
+    CommandResult: ({ response, commands }) =>
+      createElement("div", {
+        "data-testid": "command-result-mock",
+        "data-command": response?.command,
+        "data-commands-count": Array.isArray(commands) ? commands.length : -1,
+      }),
+  };
+});
+
 vi.mock("../../../design-system/icons", async () => {
   const { createElement } = await import("react");
   return {
@@ -48,14 +60,6 @@ vi.mock("../../../design-system/icons", async () => {
 
 vi.mock("../../../lib/toast", () => ({ toast: () => {} }));
 vi.mock("../../../lib/i18n", () => ({ useT: () => (key) => key }));
-
-vi.mock("./project-file-chips", async () => {
-  const { createElement } = await import("react");
-  return {
-    ProjectFileChips: () =>
-      createElement("div", { "data-testid": "project-file-chips" }),
-  };
-});
 
 vi.mock("./attachment-chip", async () => {
   const { createElement } = await import("react");
@@ -104,6 +108,41 @@ test("assistant bubbles expose final reply state for live QA", () => {
     messageBubbleSource,
     /data-final-reply=\{finalReplyState\}/,
     "live QA should be able to distinguish streaming text from the final answer",
+  );
+});
+
+test("assistant bubbles render only durable attachment references, not workspace paths in prose", async () => {
+  const { MessageBubble } = await import("./message-bubble");
+  const render = (attachments?: Array<Record<string, unknown>>) =>
+    renderToStaticMarkup(
+      React.createElement(MessageBubble, {
+        message: {
+          id: "assistant-attachment",
+          role: CHAT_MESSAGE_ROLES.ASSISTANT,
+          content: "I saved it to /workspace/report.pdf.",
+          attachments,
+        },
+        threadId: "thread-1",
+      }),
+    );
+
+  assert.doesNotMatch(
+    render(),
+    /data-testid="attachment-chip"/,
+    "a path mentioned in prose must not become an attachment",
+  );
+  assert.match(
+    render([
+      {
+        id: "attachment-1",
+        filename: "report.pdf",
+        mime_type: "application/pdf",
+        fetch_url:
+          "/api/webchat/v2/threads/thread-1/messages/message-1/attachments/attachment-1",
+      },
+    ]),
+    /data-testid="attachment-chip"/,
+    "a durable attachment reference must render an attachment chip",
   );
 });
 
@@ -193,6 +232,78 @@ test("untagged reasoning in an activity run renders Markdown", async () => {
   assert.match(markup, /data-streaming="false"/);
 });
 
+test("a SYSTEM message carrying a structured command result renders CommandResult, not the legacy markdown notice", async () => {
+  const { MessageBubble } = await import("./message-bubble");
+  const commands = [
+    { name: "status", title: "Status", description: "d", usage: "/status" },
+  ];
+  // CommandResult is a React.lazy import behind a local Suspense boundary
+  // (see message-bubble.tsx), so a synchronous renderToStaticMarkup would
+  // only ever observe the fallback. Render into a real container instead and
+  // await act() so the (mocked) dynamic import resolves before asserting —
+  // the same pattern renderExpandedActivity() below uses.
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        React.createElement(MessageBubble, {
+          message: {
+            id: "system-command-1",
+            role: CHAT_MESSAGE_ROLES.SYSTEM,
+            content: "**Status**\nState: idle",
+            commandResult: {
+              command: "status",
+              result: { title: "Status", fields: [], lines: [] },
+            },
+            timestamp: "2026-07-30T00:00:00.000Z",
+          },
+          commands,
+        }),
+      );
+    });
+    const html = container.innerHTML;
+
+    assert.match(html, /data-testid="command-result-mock"/);
+    assert.match(html, /data-command="status"/, "CommandResult should receive the raw structured response");
+    assert.match(
+      html,
+      /data-commands-count="1"/,
+      "CommandResult should receive the server command inventory threaded down from chat.tsx",
+    );
+    assert.doesNotMatch(
+      html,
+      /data-testid="markdown"/,
+      "a structured command result must not also render through the legacy markdown notice path",
+    );
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+  }
+});
+
+test("a plain SYSTEM notice without a structured command result keeps rendering through the legacy markdown bubble", async () => {
+  const { MessageBubble } = await import("./message-bubble");
+  const html = renderToStaticMarkup(
+    React.createElement(MessageBubble, {
+      message: {
+        id: "system-busy-1",
+        role: CHAT_MESSAGE_ROLES.SYSTEM,
+        content: "The assistant is still working on the previous message.",
+        timestamp: "2026-07-30T00:00:00.000Z",
+      },
+    }),
+  );
+
+  assert.match(
+    html,
+    /data-testid="markdown"/,
+    "a plain system notice (e.g. the busy/rejected notice from send()) must keep its existing rendering",
+  );
+  assert.doesNotMatch(html, /data-testid="command-result-mock"/);
+});
+
 test("incoming reasoning and tool failures do not expand an activity run", async () => {
   const { ActivityRun } = await import("./activity-run");
   const container = document.createElement("div");
@@ -263,9 +374,9 @@ async function renderExpandedActivity(activity, activeRunId: string | null = nul
   }
 }
 
-test("only final assistant replies expose the run artifact download", async () => {
+test("artifact downloads require the deployment gate and a final assistant reply", async () => {
   const { MessageBubble } = await import("./message-bubble");
-  const render = (isFinalReply: boolean) =>
+  const render = (isFinalReply: boolean, enabled = false) =>
     renderToStaticMarkup(
       React.createElement(MessageBubble, {
         message: {
@@ -277,13 +388,20 @@ test("only final assistant replies expose the run artifact download", async () =
           isFinalReply,
         },
         threadId: "thread-1",
+        regressionArtifactExportEnabled: enabled,
       }),
     );
 
-  assert.match(render(true), /data-testid="download-run-artifact"/);
-  assert.doesNotMatch(render(false), /data-testid="download-run-artifact"/);
+  assert.doesNotMatch(render(true), /data-testid="download-run-artifact"/);
+  assert.doesNotMatch(render(true), /data-testid="download-thread-artifact"/);
+  assert.match(render(true, true), /data-testid="download-run-artifact"/);
+  assert.match(render(true, true), /data-testid="download-thread-artifact"/);
+  assert.doesNotMatch(render(false, true), /data-testid="download-run-artifact"/);
+  assert.doesNotMatch(render(false, true), /data-testid="download-thread-artifact"/);
   assert.match(messageBubbleSource, /fetchRunArtifact\(\{/);
+  assert.match(messageBubbleSource, /fetchThreadArtifact\(\{/);
   assert.match(messageBubbleSource, /ironclaw-run-\$\{filenameRunId\}\.json/);
+  assert.match(messageBubbleSource, /ironclaw-thread-\$\{filenameThreadId\}\.json/);
 });
 
 test("markdown body and code blocks inherit readable message sizing", () => {
@@ -430,7 +548,7 @@ test("error bubbles expose structural provider failure metadata", async () => {
   assert.match(html, /data-failure-status="failed"/);
 });
 
-test("message timestamp and actions share a hover-only meta row", () => {
+test("message timestamp and actions share an always-visible meta row", () => {
   assert.match(
     messageBubbleSource,
     /const showActions =[\s\S]*CHAT_MESSAGE_ROLES\.USER[\s\S]*CHAT_MESSAGE_ROLES\.ASSISTANT/,
@@ -443,8 +561,13 @@ test("message timestamp and actions share a hover-only meta row", () => {
   );
   assert.match(
     messageBubbleSource,
-    /mt-1 flex min-h-7 w-max v2-chat-readable-width flex-nowrap items-center gap-3 px-1 text-iron-400 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100/,
-    "timestamp and controls should stay hidden until message hover or focus without being constrained to the bubble width",
+    /mt-1 flex min-h-7 w-max v2-chat-readable-width flex-nowrap items-center gap-3 px-1 text-iron-400/,
+    "timestamp and controls should remain visible without being constrained to the bubble width",
+  );
+  assert.doesNotMatch(
+    messageBubbleSource,
+    /text-iron-400[^"\n]*(?:opacity-0|group-hover:opacity-100|focus-within:opacity-100)/,
+    "message actions should not depend on hover or keyboard focus for visibility",
   );
   assert.match(
     messageBubbleSource,
@@ -459,7 +582,7 @@ test("message timestamp and actions share a hover-only meta row", () => {
   assert.doesNotMatch(
     actionRow,
     />\s*\$\{copied \? "Copied" : "Copy"\}\s*<|>Retry</,
-    "hover controls should use fixed-size icons instead of text that competes with the timestamp",
+    "message controls should use fixed-size icons instead of text that competes with the timestamp",
   );
 });
 

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ironclaw_auth::{CredentialAccountRecordSource, CredentialAccountService};
-use ironclaw_host_api::{EffectKind, HostApiError};
+use ironclaw_host_api::{capability::EffectKind, error::HostApiError};
 use ironclaw_host_runtime::{FirstPartyCapabilityRegistry, ProductAuthProviderRuntimePorts};
 
 /// Byte content of one asset shipped inside a first-party package.

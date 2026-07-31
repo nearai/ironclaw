@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use ironclaw_common::AttachmentRef;
-use ironclaw_host_api::{AgentId, MissionId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::ids::{AgentId, MissionId, ProjectId, TenantId, ThreadId, UserId};
 use serde::{Deserialize, Serialize};
 
 use crate::capability_display_preview::CapabilityDisplayPreviewEnvelope;
@@ -23,23 +23,23 @@ pub struct ThreadScope {
 }
 
 impl ThreadScope {
-    /// Convert into a [`ironclaw_host_api::ResourceScope`] suitable for the
+    /// Convert into a [`ironclaw_host_api::resource::ResourceScope`] suitable for the
     /// per-tenant filesystem resolver. `user_id` falls back to a per-thread
     /// system-tenant slot when `owner_user_id` is absent (system-scoped
     /// thread infrastructure that has no owning user).
-    pub fn to_resource_scope(&self) -> ironclaw_host_api::ResourceScope {
-        ironclaw_host_api::ResourceScope {
+    pub fn to_resource_scope(&self) -> ironclaw_host_api::resource::ResourceScope {
+        ironclaw_host_api::resource::ResourceScope {
             tenant_id: self.tenant_id.clone(),
             user_id: self.owner_user_id.clone().unwrap_or_else(|| {
-                ironclaw_host_api::UserId::from_trusted(
-                    ironclaw_host_api::SYSTEM_RESERVED_ID.to_string(),
+                ironclaw_host_api::ids::UserId::from_trusted(
+                    ironclaw_host_api::resource::SYSTEM_RESERVED_ID.to_string(),
                 )
             }),
             agent_id: Some(self.agent_id.clone()),
             project_id: self.project_id.clone(),
             mission_id: self.mission_id.clone(),
             thread_id: None,
-            invocation_id: ironclaw_host_api::InvocationId::new(),
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         }
     }
 }
@@ -528,6 +528,14 @@ pub struct ThreadHistoryRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedThreadMessagesRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub max_messages: usize,
+    pub max_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadMessageRangeRequest {
     pub scope: ThreadScope,
     pub thread_id: ThreadId,
@@ -574,6 +582,18 @@ pub struct ThreadHistory {
     pub thread: SessionThreadRecord,
     pub messages: Vec<ThreadMessageRecord>,
     pub summary_artifacts: Vec<SummaryArtifact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundedThreadMessages {
+    Complete(Box<BoundedThreadMessageSnapshot>),
+    LimitExceeded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedThreadMessageSnapshot {
+    pub history: ThreadMessageRange,
+    pub context: ContextMessages,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -850,6 +870,14 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<AttachmentKind>(r#""document""#).unwrap(),
             AttachmentKind::Document
+        );
+        assert_eq!(
+            serde_json::to_string(&AttachmentKind::Video).unwrap(),
+            r#""video""#
+        );
+        assert_eq!(
+            serde_json::from_str::<AttachmentKind>(r#""other""#).unwrap(),
+            AttachmentKind::Other
         );
     }
 

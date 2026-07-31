@@ -7,7 +7,7 @@ use ironclaw_runner::failure_categories::{
     HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY, MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
     MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
     MODEL_STAGE_POLICY_DENIED_CATEGORY, MODEL_STAGE_REQUEST_INVALID_CATEGORY,
-    MODEL_STAGE_SCOPE_MISMATCH_CATEGORY,
+    MODEL_STAGE_SCOPE_MISMATCH_CATEGORY, TRANSCRIPT_WRITE_FAILED_CATEGORY,
 };
 use ironclaw_turns::LoopFailureKind;
 
@@ -214,6 +214,10 @@ fn failure_summary_covers_reborn_failure_category_constants() {
         (
             BUDGET_ACCOUNTING_FAILED_CATEGORY,
             "The run failed because resource accounting was temporarily unavailable. Retry the run, and contact support if it keeps happening.",
+        ),
+        (
+            TRANSCRIPT_WRITE_FAILED_CATEGORY,
+            "The run failed while saving transcript output. Retry the run, and contact support if saving still fails.",
         ),
         (
             CHECKPOINT_REJECTED_CATEGORY,
@@ -684,6 +688,20 @@ async fn product_event_stream_pins_model_credentials_summary_before_explainer() 
         "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL, then try again.",
         Some(Arc::new(FakeFailureExplainer {
             explanation: "SENTINEL explainer output should not be used".to_string(),
+        })),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn product_event_stream_pins_transcript_failure_before_explainer() {
+    assert_failed_run_status_summary_with_explainer(
+        "webui-events-pinned-transcript-write-thread",
+        TRANSCRIPT_WRITE_FAILED_CATEGORY,
+        "The run failed while saving transcript output. Retry the run, and contact support if saving still fails.",
+        Some(Arc::new(FakeFailureExplainer {
+            explanation: "SENTINEL model output must not cross the failed transcript boundary"
+                .to_string(),
         })),
     )
     .await;

@@ -38,6 +38,7 @@
 
 ## Agent Notes
 
+- Contracts are reached module-qualified: `ironclaw_host_api::scope::ExecutionContext`, `ironclaw_host_api::ids::ExtensionId`. There is no flat prelude and no per-module glob re-export in `lib.rs`; `Timestamp` is the sole crate-root item. When you add a type, put it in the module that owns its vocabulary family and let consumers name that module.
 - `HostPortGrant` is intentionally a thin scoped-view grant token over `HostPortId`. Do not add attenuation/scope/expiry fields to that wire shape; introduce a distinct scoped/attenuated grant type if that behavior lands later.
 - Keep edits inside this crate unless a contract explicitly requires a neighboring crate change.
 - Prefer caller-level tests when a helper gates dispatch, persistence, network, secrets, approvals, resources, events, or process side effects.

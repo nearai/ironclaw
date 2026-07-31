@@ -194,8 +194,12 @@ mod tests {
     use std::time::Duration;
 
     use ironclaw_host_api::{
-        CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, MountView, ResourceEstimate,
-        RuntimeKind, TrustClass, UserId,
+        capability::CapabilitySet,
+        ids::{CapabilityId, ExtensionId, UserId},
+        mount::MountView,
+        resource::ResourceEstimate,
+        runtime::{RuntimeKind, TrustClass},
+        scope::ExecutionContext,
     };
     use serde_json::Value;
 

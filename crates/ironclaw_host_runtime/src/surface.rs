@@ -5,9 +5,12 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityDescriptionTrust, CapabilityDescriptor, CapabilityGrant, Decision, EffectKind,
-    ResourceEstimate, RuntimeKind, canonical_json_v1, runtime_policy::EffectiveRuntimePolicy,
-    sha256_digest_token,
+    approval::{canonical_json_v1, sha256_digest_token},
+    capability::{CapabilityDescriptionTrust, CapabilityDescriptor, CapabilityGrant, EffectKind},
+    decision::Decision,
+    resource::ResourceEstimate,
+    runtime::RuntimeKind,
+    runtime_policy::EffectiveRuntimePolicy,
 };
 use ironclaw_trust::TrustDecision;
 use serde_json::{Value, json};
@@ -380,7 +383,7 @@ impl<'a> CapabilityCatalog<'a> {
 async fn resolve_package_input_schema_ref(
     filesystem: &dyn RootFilesystem,
     package: &ExtensionPackage,
-    capability_id: &ironclaw_host_api::CapabilityId,
+    capability_id: &ironclaw_host_api::ids::CapabilityId,
     reference: &str,
 ) -> Result<Value, HostRuntimeError> {
     let Some(declaration) = package
@@ -589,7 +592,7 @@ fn stable_json_string(value: &Value) -> Result<String, HostRuntimeError> {
         .map_err(|error| HostRuntimeError::invalid_request(error.to_string()))
 }
 
-fn host_api_error(error: ironclaw_host_api::HostApiError) -> HostRuntimeError {
+fn host_api_error(error: ironclaw_host_api::error::HostApiError) -> HostRuntimeError {
     HostRuntimeError::invalid_request(error.to_string())
 }
 
@@ -598,7 +601,9 @@ mod tests {
     use super::*;
     use ironclaw_authorization::GrantAuthorizer;
     use ironclaw_host_api::{
-        CapabilityId, ExtensionId, PermissionMode, TrustClass,
+        capability::PermissionMode,
+        ids::{CapabilityId, ExtensionId},
+        runtime::TrustClass,
         runtime_policy::{
             ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy,
             FilesystemBackendKind, NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,

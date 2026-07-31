@@ -1,6 +1,7 @@
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { Card } from "../../../design-system/card";
+import { Switch } from "../../../design-system/switch";
 
 function SavedIndicator({ visible }) {
   const t = useT();
@@ -12,33 +13,6 @@ function SavedIndicator({ visible }) {
     >
       {t("tools.saved")}
     </span>
-  );
-}
-
-function Toggle({ checked, onChange, label }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      onClick={() => onChange(!checked)}
-      className={[
-        "relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border",
-        checked
-          ? "border-signal/40 bg-signal/30"
-          : "border-white/15 bg-white/[0.06]",
-      ].join(" ")}
-    >
-      <span
-        className={[
-          "pointer-events-none inline-block h-5 w-5 rounded-full",
-          checked
-            ? "translate-x-5 bg-signal"
-            : "translate-x-0 bg-iron-300",
-        ].join(" ")}
-      />
-    </button>
   );
 }
 
@@ -82,10 +56,11 @@ export function SettingsField({ field, value, onSave, isSaved }) {
       <div className="flex shrink-0 items-center gap-3">
         {field.type === "boolean"
           ? (
-              <Toggle
+              <Switch
                 checked={value === true || value === "true"}
                 onChange={(v) => onSave(field.key, v ? "true" : "false")}
-                label={label}
+                aria-label={label}
+                size="sm"
               />
             )
           : field.type === "select"

@@ -55,53 +55,7 @@ echo "==> reborn coverage ratchet: preparing ${out_dir}"
 mkdir -p "${out_dir}/packages" "${out_dir}/buckets" "${out_dir}/lanes"
 find "${out_dir}/packages" "${out_dir}/buckets" "${out_dir}/lanes" -type f -name '*.lcov' -delete
 
-allowlist_packages="$(
-    cargo metadata --no-deps --format-version 1 \
-        | jq -c '
-            [
-              .packages[]
-              | select(
-                  (
-                    (.name == "ironclaw")
-                    or (.name == "ironclaw_runner")
-                    or (.name | startswith("ironclaw_reborn"))
-                    or (.name | startswith("ironclaw_product"))
-                    or (.name == "ironclaw_architecture")
-                    or (.name == "ironclaw_slack_extension")
-                    or (.name == "ironclaw_telegram_extension")
-                    or (.name == "ironclaw_telegram_v2_adapter")
-                    or (.name | startswith("ironclaw_webui"))
-                  )
-                  and (.name != "ironclaw_reborn_integration_tests")
-                )
-              | .name
-            ]
-            | unique
-          '
-)"
-
-closure_packages="$(
-    comm -12 \
-        <(cargo tree -p ironclaw -e normal,build --prefix none \
-            | grep -oE 'ironclaw_[a-z0-9_]+' \
-            | sort -u) \
-        <(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[].name' \
-            | sort -u) \
-        | jq -R -s -c 'split("\n") | map(select(length > 0))'
-)"
-
-packages="$(
-    jq -n -c \
-        --argjson allowlist "${allowlist_packages}" \
-        --argjson closure "${closure_packages}" \
-        '$allowlist + $closure | unique'
-)"
-
-if [ -z "${packages}" ] || [ "${packages}" = "[]" ]; then
-    echo "No Reborn workspace crates discovered" >&2
-    exit 1
-fi
+packages="$("${script_dir}/discover-reborn-package-crates.sh")"
 
 buckets="$("${script_dir}/reborn-crate-test-buckets.sh" "${packages}")"
 

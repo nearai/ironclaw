@@ -1,9 +1,9 @@
 //! Seal enforcement for `Authorized` (arch-simplification §5.3.2; seal-placement
 //! decision 2026-07-18: `host_api` type + witness token).
 //!
-//! `ironclaw_host_api::Authorized` can be minted only via an `AuthorizationGrant`,
+//! `ironclaw_host_api::authorized::Authorized` can be minted only via an `AuthorizationGrant`,
 //! and the only way to obtain a grant is to implement
-//! `ironclaw_host_api::CapabilityAuthorizer`. Pure cross-crate type-sealing is not
+//! `ironclaw_host_api::authorized::CapabilityAuthorizer`. Pure cross-crate type-sealing is not
 //! expressible in Rust (host_api defines the type; the kernel is the sole
 //! legitimate minter), so this test supplies the other half of the seal: **only
 //! the kernel crate may implement `CapabilityAuthorizer`.**

@@ -10,9 +10,16 @@ use std::{collections::HashMap, fmt, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityDisplayOutputPreview, CapabilityId, DispatchFailureDetail, DispatchInputIssue,
-    HostRemediation, InvocationOrigin, MountView, ResourceEstimate, ResourceScope, ResourceUsage,
-    RunId, RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, SecretHandle, UserId,
+    decision::RuntimeCredentialAuthRequirement,
+    dispatch::{
+        CapabilityDisplayOutputPreview, DispatchFailureDetail, DispatchInputIssue,
+        RuntimeDispatchErrorKind,
+    },
+    host_remediation::HostRemediation,
+    ids::{CapabilityId, RunId, SecretHandle, UserId},
+    invocation::InvocationOrigin,
+    mount::MountView,
+    resource::{ResourceEstimate, ResourceScope, ResourceUsage},
 };
 use serde_json::Value;
 
@@ -83,7 +90,7 @@ impl FirstPartyCapabilityRequest {
         capability_id: CapabilityId,
         scope: ResourceScope,
         input: Value,
-        runtime_http_egress: Option<Arc<dyn ironclaw_host_api::RuntimeHttpEgress>>,
+        runtime_http_egress: Option<Arc<dyn ironclaw_host_api::http::RuntimeHttpEgress>>,
     ) -> Self {
         Self {
             capability_id,
@@ -91,7 +98,7 @@ impl FirstPartyCapabilityRequest {
             authenticated_actor_user_id: None,
             run_id: None,
             origin: Some(InvocationOrigin::Product(
-                ironclaw_host_api::ProductKind::new("test").expect("valid test product kind"), // safety: test-support-only static fixture.
+                ironclaw_host_api::ids::ProductKind::new("test").expect("valid test product kind"), // safety: test-support-only static fixture.
             )),
             estimate: ResourceEstimate::default(),
             mounts: None,
@@ -443,7 +450,7 @@ impl FirstPartyCapabilityRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{ResourceUsage, SecretHandle};
+    use ironclaw_host_api::{ids::SecretHandle, resource::ResourceUsage};
 
     struct TestHandler;
 
@@ -515,7 +522,7 @@ mod tests {
 
     #[test]
     fn first_party_capability_error_with_usage_on_dispatch_variant() {
-        use ironclaw_host_api::RuntimeDispatchErrorKind;
+        use ironclaw_host_api::dispatch::RuntimeDispatchErrorKind;
         let error = FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
             .with_usage(ResourceUsage::default().set_network_egress_bytes(10));
         assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::Backend));
@@ -525,7 +532,7 @@ mod tests {
 
     #[test]
     fn dispatch_with_diagnostic_carries_free_text_detail_and_optional_safe_summary() {
-        use ironclaw_host_api::RuntimeDispatchErrorKind;
+        use ironclaw_host_api::dispatch::RuntimeDispatchErrorKind;
         let error = FirstPartyCapabilityError::dispatch_with_diagnostic(
             RuntimeDispatchErrorKind::OperationFailed,
             None,
@@ -539,7 +546,7 @@ mod tests {
         let FirstPartyCapabilityError::Dispatch { detail, .. } = &error else {
             panic!("expected Dispatch variant");
         };
-        let ironclaw_host_api::DispatchFailureDetail::Diagnostic { text } =
+        let ironclaw_host_api::dispatch::DispatchFailureDetail::Diagnostic { text } =
             detail.as_deref().expect("diagnostic detail must be set")
         else {
             panic!("expected Diagnostic detail");

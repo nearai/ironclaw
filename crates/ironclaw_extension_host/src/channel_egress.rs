@@ -13,9 +13,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_extension_host::egress::{ApprovedChannelEgress, ChannelEgressTransport};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, InvocationId, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
-    ResourceScope, RestrictedEgressError, RestrictedEgressResponse, RuntimeHttpEgressReasonCode,
-    RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, TrustClass,
+    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    http::{RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest},
+    ids::{CapabilityId, ExtensionId, InvocationId, SecretHandle},
+    resource::ResourceScope,
+    runtime::{RuntimeKind, TrustClass},
+    tool_adapter::{RestrictedEgressError, RestrictedEgressResponse},
 };
 use ironclaw_host_runtime::{
     HostRuntimeCredentialMaterial, HostRuntimeHttpEgressPort, HostRuntimeHttpEgressRequest,
@@ -287,7 +290,10 @@ impl ChannelEgressTransport for HostRuntimeChannelEgressTransport {
             credentials.push(HostRuntimeCredentialMaterial {
                 handle: credential.handle.clone(),
                 material,
-                target: credential.target.clone(),
+                target: credential_target_with_body_limit(
+                    &credential.target,
+                    approved.request_body_limit,
+                ),
                 required: true,
             });
         }
@@ -331,8 +337,23 @@ impl ChannelEgressTransport for HostRuntimeChannelEgressTransport {
     }
 }
 
+fn credential_target_with_body_limit(
+    target: &ironclaw_host_api::http::RuntimeCredentialTarget,
+    request_body_limit: Option<u64>,
+) -> ironclaw_host_api::http::RuntimeCredentialTarget {
+    match target {
+        ironclaw_host_api::http::RuntimeCredentialTarget::BodyJsonPointer { pointer, .. } => {
+            ironclaw_host_api::http::RuntimeCredentialTarget::BodyJsonPointer {
+                pointer: pointer.clone(),
+                post_injection_body_limit_bytes: request_body_limit,
+            }
+        }
+        _ => target.clone(),
+    }
+}
+
 fn map_runtime_http_error(
-    error: ironclaw_host_api::RuntimeHttpEgressError,
+    error: ironclaw_host_api::http::RuntimeHttpEgressError,
 ) -> RestrictedEgressError {
     match error.reason_code() {
         RuntimeHttpEgressReasonCode::PolicyDenied | RuntimeHttpEgressReasonCode::RequestDenied => {
@@ -362,7 +383,11 @@ mod tests {
     use ironclaw_extension_host::egress::{ApprovedChannelCredential, ApprovedChannelEgress};
     use ironclaw_extensions::ExtensionRegistry;
     use ironclaw_filesystem::DiskFilesystem;
-    use ironclaw_host_api::{InvocationId, NetworkMethod, RuntimeCredentialTarget, UserId};
+    use ironclaw_host_api::{
+        action::NetworkMethod,
+        http::RuntimeCredentialTarget,
+        ids::{InvocationId, UserId},
+    };
     use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
     use ironclaw_network::{
         NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -490,6 +515,7 @@ mod tests {
             host: host.to_string(),
             credential,
             body_credentials: Vec::new(),
+            request_body_limit: None,
             response_body_limit: 64 * 1024,
             timeout_ms: 5_000,
         }
@@ -590,6 +616,7 @@ mod tests {
             handle,
             target: RuntimeCredentialTarget::BodyJsonPointer {
                 pointer: "/secret_token".to_string(),
+                post_injection_body_limit_bytes: None,
             },
         }];
         transport.execute(plan).await.expect("transport executes");
@@ -602,6 +629,40 @@ mod tests {
             "the resolved secret VALUE is inserted host-side; the adapter never saw it"
         );
         assert_eq!(body["url"], "https://hooks.example/updates");
+    }
+
+    #[tokio::test]
+    async fn body_json_pointer_credential_cannot_exceed_the_approved_request_body_limit() {
+        let scope = test_scope();
+        let handle = SecretHandle::new("vendor_webhook_secret").unwrap();
+        let credentials = seeded_credentials(&scope, &handle, "secret-expands-the-body").await;
+        let (port, requests) = host_egress_port(RecordingNetworkHttpEgress::ok());
+        let transport = HostRuntimeChannelEgressTransport::new(port, credentials, scope);
+
+        let mut plan = approved(
+            "https://vendor.example/api/setWebhook",
+            "vendor.example",
+            None,
+        );
+        plan.body = b"{}".to_vec();
+        plan.request_body_limit = Some(16);
+        plan.body_credentials = vec![ApprovedChannelCredential {
+            handle,
+            target: RuntimeCredentialTarget::BodyJsonPointer {
+                pointer: "/secret_token".to_string(),
+                post_injection_body_limit_bytes: None,
+            },
+        }];
+
+        let error = transport
+            .execute(plan)
+            .await
+            .expect_err("post-injection body above the manifest cap must fail closed");
+        assert!(matches!(error, RestrictedEgressError::PolicyDenied));
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "an oversized post-injection body must never reach network transport"
+        );
     }
 
     #[tokio::test]

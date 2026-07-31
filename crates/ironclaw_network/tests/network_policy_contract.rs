@@ -1,6 +1,7 @@
 use ironclaw_host_api::{
-    InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTarget, NetworkTargetPattern,
-    ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+    action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTarget, NetworkTargetPattern},
+    ids::{InvocationId, ProjectId, TenantId, ThreadId, UserId},
+    resource::ResourceScope,
 };
 use ironclaw_network::{
     NetworkRequest, StaticNetworkPolicyEnforcer, network_target_for_url, parse_host_pattern,

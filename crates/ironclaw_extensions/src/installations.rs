@@ -13,8 +13,12 @@ use ironclaw_filesystem::{
     ScopedFilesystem, VersionedEntry, cas_update,
 };
 use ironclaw_host_api::{
-    ExtensionId, HostPortCatalog, MountAlias, MountGrant, MountPermissions, MountView,
-    ResourceScope, ScopedPath, SecretHandle, UserId, VirtualPath, sha256_digest_token,
+    approval::sha256_digest_token,
+    host_port::HostPortCatalog,
+    ids::{ExtensionId, SecretHandle, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, ScopedPath, VirtualPath},
+    resource::ResourceScope,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -3518,7 +3522,7 @@ fn map_extension_state_cas_error(
 #[cfg(test)]
 mod tests {
     use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{ExtensionId, HostPortCatalog, VirtualPath};
+    use ironclaw_host_api::{host_port::HostPortCatalog, ids::ExtensionId, path::VirtualPath};
 
     use super::*;
     use crate::ManifestSource;
@@ -3726,7 +3730,7 @@ mod tests {
             serde_json::from_value(json).expect("legacy row without owner deserializes");
         assert_eq!(legacy.owner(), &InstallationOwner::Tenant);
 
-        let alice = ironclaw_host_api::UserId::new("alice").expect("user id");
+        let alice = ironclaw_host_api::ids::UserId::new("alice").expect("user id");
         let private = ExtensionInstallation::new(
             ExtensionInstallationId::new("fixture".to_string()).expect("installation id"),
             ExtensionId::new("fixture".to_string()).expect("extension id"),
@@ -3756,8 +3760,8 @@ mod tests {
     /// at construction (a row nobody could see, operate, or remove).
     #[test]
     fn slot_iteration_user_owner_rows_load_as_singleton_member_set() {
-        let alice = ironclaw_host_api::UserId::new("alice").expect("user id");
-        let bob = ironclaw_host_api::UserId::new("bob").expect("user id");
+        let alice = ironclaw_host_api::ids::UserId::new("alice").expect("user id");
+        let bob = ironclaw_host_api::ids::UserId::new("bob").expect("user id");
         let legacy: InstallationOwner =
             serde_json::from_str(r#"{"kind":"user","user_id":"alice"}"#)
                 .expect("slot-iteration owner row loads");
@@ -3777,8 +3781,8 @@ mod tests {
 
     #[test]
     fn caller_membership_join_and_leave_are_idempotent_domain_transitions() {
-        let alice = ironclaw_host_api::UserId::new("alice").expect("user id");
-        let bob = ironclaw_host_api::UserId::new("bob").expect("user id");
+        let alice = ironclaw_host_api::ids::UserId::new("alice").expect("user id");
+        let bob = ironclaw_host_api::ids::UserId::new("bob").expect("user id");
 
         assert_eq!(
             InstallationOwner::Tenant

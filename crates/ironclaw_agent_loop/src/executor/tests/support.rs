@@ -2,7 +2,10 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, ProviderToolName, RuntimeKind, TenantId, ThreadId};
+use ironclaw_host_api::{
+    ids::{CapabilityId, ProviderToolName, TenantId, ThreadId},
+    runtime::RuntimeKind,
+};
 use ironclaw_turns::{
     AgentLoopDriverDescriptor, LoopFailureKind, LoopMessageRef, RunProfileId, RunProfileVersion,
     TurnCheckpointId, TurnId, TurnRunId, TurnScope,
@@ -52,8 +55,8 @@ pub(super) struct MockHost {
     compaction: MockCompactionSupport,
     input_batches: Arc<Mutex<VecDeque<LoopInputBatch>>>,
     acked_input_tokens: Arc<Mutex<Vec<LoopInputAckToken>>>,
-    batch_outcomes: Arc<Mutex<VecDeque<ironclaw_host_api::ResolutionBatch>>>,
-    single_outcomes: Arc<Mutex<VecDeque<ironclaw_host_api::Resolution>>>,
+    batch_outcomes: Arc<Mutex<VecDeque<ironclaw_host_api::resolution::ResolutionBatch>>>,
+    single_outcomes: Arc<Mutex<VecDeque<ironclaw_host_api::resolution::Resolution>>>,
     checkpoints: Arc<Mutex<Vec<LoopCheckpointKind>>>,
     batch_invocations: Arc<Mutex<Vec<LoopRequestBatch>>>,
     single_invocations: Arc<Mutex<Vec<LoopRequest>>>,
@@ -170,13 +173,16 @@ impl MockHost {
 
     pub(super) fn with_batch_outcomes(
         self,
-        outcomes: Vec<ironclaw_host_api::ResolutionBatch>,
+        outcomes: Vec<ironclaw_host_api::resolution::ResolutionBatch>,
     ) -> Self {
         *self.batch_outcomes.lock().expect("lock") = outcomes.into();
         self
     }
 
-    pub(super) fn with_single_outcomes(self, outcomes: Vec<ironclaw_host_api::Resolution>) -> Self {
+    pub(super) fn with_single_outcomes(
+        self,
+        outcomes: Vec<ironclaw_host_api::resolution::Resolution>,
+    ) -> Self {
         *self.single_outcomes.lock().expect("lock") = outcomes.into();
         self
     }
@@ -559,7 +565,7 @@ impl RecoveryStrategy for RetryPolicyDeniedRecoveryStrategy {
         err: &CapabilityErrorSummary,
         _observation: Option<&ironclaw_turns::run_profile::ModelVisibleToolObservation>,
     ) -> RecoveryOutcome {
-        if err.kind == ironclaw_host_api::FailureKind::PolicyDenied {
+        if err.kind == ironclaw_host_api::result_meta::FailureKind::PolicyDenied {
             return RecoveryOutcome::Retry {
                 recovery: state.recovery_state.clone(),
                 scope: RetryScope::Call,
@@ -850,7 +856,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
     async fn invoke_capability(
         &self,
         request: LoopRequest,
-    ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
+    ) -> Result<ironclaw_host_api::resolution::Resolution, AgentLoopHostError> {
         self.single_invocations.lock().expect("lock").push(request);
         self.single_outcomes
             .lock()
@@ -864,7 +870,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
     async fn invoke_capability_batch(
         &self,
         request: LoopRequestBatch,
-    ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
+    ) -> Result<ironclaw_host_api::resolution::ResolutionBatch, AgentLoopHostError> {
         self.batch_invocations.lock().expect("lock").push(request);
         if let Some(kind) = *self.fail_batch_with.lock().expect("lock") {
             return Err(AgentLoopHostError::new(kind, "scripted batch failure"));

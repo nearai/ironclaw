@@ -21,7 +21,7 @@ use std::{
 
 use bollard::models::ContainerSummary;
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::ids::{TenantId, UserId};
 
 use crate::sandbox_process::user_key::RebornSandboxUserKey;
 
@@ -244,7 +244,7 @@ impl BackgroundJobRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{TenantId, UserId};
+    use ironclaw_host_api::ids::{TenantId, UserId};
 
     #[test]
     fn label_filter_targets_tenant_and_user_labels_only() {
@@ -314,14 +314,14 @@ mod tests {
     }
 
     fn test_key(tenant: &str, user: &str) -> RebornSandboxUserKey {
-        let scope = ironclaw_host_api::ResourceScope {
+        let scope = ironclaw_host_api::resource::ResourceScope {
             tenant_id: TenantId::new(tenant).unwrap(),
             user_id: UserId::new(user).unwrap(),
             agent_id: None,
             project_id: None,
             mission_id: None,
             thread_id: None,
-            invocation_id: ironclaw_host_api::InvocationId::new(),
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         };
         RebornSandboxUserKey::from_scope(&scope)
     }
@@ -453,14 +453,14 @@ mod tests {
         let registry = SandboxActivityRegistry::new();
         let tenant = TenantId::new("t").unwrap();
         let user = UserId::new("u").unwrap();
-        let scope = ironclaw_host_api::ResourceScope {
+        let scope = ironclaw_host_api::resource::ResourceScope {
             tenant_id: tenant,
             user_id: user,
             agent_id: None,
             project_id: None,
             mission_id: None,
             thread_id: None,
-            invocation_id: ironclaw_host_api::InvocationId::new(),
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         };
         let key = RebornSandboxUserKey::from_scope(&scope);
 
@@ -473,14 +473,14 @@ mod tests {
     #[test]
     fn activity_registry_forget_clears_the_entry() {
         let registry = SandboxActivityRegistry::new();
-        let scope = ironclaw_host_api::ResourceScope {
+        let scope = ironclaw_host_api::resource::ResourceScope {
             tenant_id: TenantId::new("t").unwrap(),
             user_id: UserId::new("u").unwrap(),
             agent_id: None,
             project_id: None,
             mission_id: None,
             thread_id: None,
-            invocation_id: ironclaw_host_api::InvocationId::new(),
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
         };
         let key = RebornSandboxUserKey::from_scope(&scope);
         registry.touch(&key);

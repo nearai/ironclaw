@@ -18,6 +18,13 @@ on `push` to main, the merge queue must run it in the same shape first
 instead). External/live checks (canaries, deploys, releases, benchmark
 thresholds) are exempt: they stay out of the queue by design.
 
+The canonical local composition of the deterministic Reborn gates is
+`scripts/ci/run-hermetic-deterministic-suite.sh all`. CI invokes the same
+checked-in stages through that runner so credentials, ambient behavior,
+mutable roots, clock/seed inputs, and non-loopback egress have one mechanical
+boundary. Setup and exclusions are documented in
+`docs/internal/hermetic-deterministic-suite.md`.
+
 The WASM WIT compatibility lane uses two risk scopes. Pull requests run it only
 for direct WIT, WASM host, extension, compatibility-test, or lane-workflow
 changes. Root `Cargo.toml` and `Cargo.lock` changes are broader workspace risk:
@@ -64,8 +71,16 @@ Rules for a roll-up job that is (or may become) required:
 2. Tolerate `skipped` only for jobs that are event- or scope-gated by design;
    anything that ran must have succeeded.
 3. Assert expected coverage where feasible — the Code Style roll-up fails if a
-   merge-queue/push run's clippy matrix is missing any of the three feature
-   lanes, so a "green but slim" regression cannot come back silently.
+   merge-queue/push run's clippy matrix is missing any required feature lane,
+   so a "green but slim" regression cannot come back silently.
+
+Code Style deliberately consolidates formatting, dependency policy, static
+guards, panic checks, and composition-budget checks into one
+`fast-checks` job. These checks complete in seconds to a few minutes and do not
+benefit from separate runners; keeping them together bounds a code-changing
+pull request to at most six active Code Style jobs while preserving every
+command. Clippy, WebUI checks, and CLI smoke remain separate because they are
+expensive or independently scope-gated.
 
 ## Reborn release and manual compile preflight
 

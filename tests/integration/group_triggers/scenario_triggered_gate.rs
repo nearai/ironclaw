@@ -16,7 +16,7 @@
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
-use ironclaw_host_api::TenantId;
+use ironclaw_host_api::ids::TenantId;
 use ironclaw_turns::{ResumeTurnPrecondition, TurnStatus};
 use serde_json::json;
 

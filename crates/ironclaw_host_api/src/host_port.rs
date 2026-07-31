@@ -10,8 +10,8 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    HostApiError,
     dotted_id::{PrefixRule, validate_dotted_id},
+    error::HostApiError,
 };
 
 /// Host-runtime mediated HTTP egress port for runtime lanes that delegate

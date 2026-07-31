@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 import pytest
 
+from hermetic_process import forward_hermetic_process_env
 from helpers import (
     AUTH_TOKEN,
     EMULATE_GITHUB_BEARER,
@@ -316,12 +317,13 @@ def test_tool_zips() -> dict[str, Path]:
 
 
 def _forward_coverage_env(env: dict[str, str]) -> None:
-    """Forward cargo-llvm-cov env vars into child processes when present."""
+    """Forward CI instrumentation and hermetic controls to child processes."""
     cov_env_prefixes = ("CARGO_LLVM_COV", "LLVM_")
     cov_env_extras = ("CARGO_ENCODED_RUSTFLAGS", "CARGO_INCREMENTAL")
     for key, val in os.environ.items():
         if key.startswith(cov_env_prefixes) or key in cov_env_extras:
             env[key] = val
+    forward_hermetic_process_env(env)
 
 
 def _build_gateway_env(

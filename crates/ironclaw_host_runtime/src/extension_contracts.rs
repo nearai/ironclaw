@@ -6,9 +6,13 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    HOST_EVENTS_AUDIT_PORT_ID, HOST_RUNTIME_HTTP_EGRESS_PORT_ID,
-    HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID, HostApiError, HostPortCatalog,
-    HostPortCatalogEntry, HostPortId, VirtualPath,
+    error::HostApiError,
+    host_port::{
+        HOST_EVENTS_AUDIT_PORT_ID, HOST_RUNTIME_HTTP_EGRESS_PORT_ID,
+        HOST_STORAGE_SQL_TRANSACTION_FIRST_PARTY_PORT_ID, HostPortCatalog, HostPortCatalogEntry,
+        HostPortId,
+    },
+    path::VirtualPath,
 };
 
 /// Build the host-runtime default set of Extension Manifest v2 host API contracts.

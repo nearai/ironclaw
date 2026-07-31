@@ -227,9 +227,8 @@ export function statProjectFile({ threadId, path } = {}) {
 }
 
 // Same-origin relative URL for a project file's bytes. Feeds the shared
-// `fetchAttachmentBlob` (which attaches the bearer) so project-file chips can
-// reuse the message-attachment preview modal: it carries the same byte-fetch
-// shape as `attachmentUrl(...)`.
+// `fetchAttachmentBlob` (which attaches the bearer) so the project workspace
+// browser can reuse the attachment preview modal.
 export function projectFileContentUrl({ threadId, path } = {}) {
   if (!threadId || !path) {
     throw new Error("projectFileContentUrl requires threadId and path");
@@ -407,6 +406,7 @@ export function queryLogs({
   source,
   tail,
   follow,
+  signal,
 } = {}) {
   const url = new URL(`${V2_BASE}/logs`, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
@@ -421,7 +421,7 @@ export function queryLogs({
   if (source) url.searchParams.set("source", source);
   if (tail) url.searchParams.set("tail", "true");
   if (follow) url.searchParams.set("follow", "true");
-  return apiFetch(url.pathname + url.search);
+  return apiFetch(url.pathname + url.search, { signal });
 }
 
 export function queryOperatorLogs({
@@ -437,6 +437,7 @@ export function queryOperatorLogs({
   source,
   tail,
   follow,
+  signal,
 } = {}) {
   const url = new URL(`${V2_BASE}/operator/logs`, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
@@ -451,7 +452,7 @@ export function queryOperatorLogs({
   if (source) url.searchParams.set("source", source);
   if (tail) url.searchParams.set("tail", "true");
   if (follow) url.searchParams.set("follow", "true");
-  return apiFetch(url.pathname + url.search);
+  return apiFetch(url.pathname + url.search, { signal });
 }
 
 // --- Messages ---
@@ -481,6 +482,22 @@ export function sendMessage({
   );
 }
 
+// --- Product commands ---
+
+export function listChatCommands() {
+  return apiFetch(`${V2_BASE}/commands`);
+}
+
+export function executeChatCommand({ threadId, text }) {
+  return apiFetch(
+    `${V2_BASE}/threads/${encodeURIComponent(threadId ?? "")}/commands`,
+    {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    },
+  );
+}
+
 // --- Timeline ---
 
 export function fetchTimeline({ threadId, limit, cursor } = {}) {
@@ -500,6 +517,13 @@ export function fetchRunArtifact({ threadId, runId } = {}) {
   return apiFetch(
     `${V2_BASE}/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/artifact`,
   );
+}
+
+export function fetchThreadArtifact({ threadId } = {}) {
+  if (!threadId) {
+    return Promise.reject(new Error("threadId is required"));
+  }
+  return apiFetch(`${V2_BASE}/threads/${encodeURIComponent(threadId)}/artifact`);
 }
 
 // --- Attachments ---

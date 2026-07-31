@@ -18,10 +18,18 @@ use ironclaw_filesystem::{
     Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    Action, ActionResultSummary, ActionSummary, AgentId, AuditEnvelope, AuditEventId, AuditStage,
-    CapabilityId, CapabilitySet, CorrelationId, DenyReason, ExtensionId, InvocationId, MountAlias,
-    MountGrant, MountPermissions, MountView, ProcessId, ProjectId, ResourceScope, RuntimeKind,
-    ScopedPath, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
+    action::Action,
+    audit::{ActionResultSummary, ActionSummary, AuditEnvelope, AuditStage},
+    capability::CapabilitySet,
+    decision::DenyReason,
+    ids::{
+        AgentId, AuditEventId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ProcessId,
+        ProjectId, TenantId, ThreadId, UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, ScopedPath, VirtualPath},
+    resource::ResourceScope,
+    runtime::{RuntimeKind, TrustClass},
 };
 use ironclaw_reborn_event_store::FilesystemDurableEventLog;
 
@@ -2101,8 +2109,8 @@ fn scope_for_thread_with_invocation(
     }
 }
 
-fn execution_context_for_scope(scope: ResourceScope) -> ironclaw_host_api::ExecutionContext {
-    let context = ironclaw_host_api::ExecutionContext {
+fn execution_context_for_scope(scope: ResourceScope) -> ironclaw_host_api::scope::ExecutionContext {
+    let context = ironclaw_host_api::scope::ExecutionContext {
         run_id: None,
         origin: None,
         invocation_id: scope.invocation_id,

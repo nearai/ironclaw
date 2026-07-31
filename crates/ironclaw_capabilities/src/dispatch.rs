@@ -15,13 +15,20 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_events::{EventSink, RuntimeEvent};
 use ironclaw_host_api::{
-    Actor, CapabilityId, ExtensionId, InvocationId, InvocationOrigin, ResourceReceipt,
-    ResourceReservation, ResourceScope, ResourceUsage, RuntimeKind, RuntimeLane,
+    authorized::Authorized,
+    dispatch::{
+        CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher,
+        CapabilityDisplayOutputPreview, DispatchError, DispatchFailureDetail,
+        RuntimeDispatchErrorKind,
+    },
+    runtime::DispatchErrorLane,
 };
 use ironclaw_host_api::{
-    Authorized, CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher,
-    CapabilityDisplayOutputPreview, DispatchError, DispatchErrorLane, DispatchFailureDetail,
-    RuntimeDispatchErrorKind,
+    ids::{CapabilityId, ExtensionId, InvocationId},
+    invocation::{Actor, InvocationOrigin},
+    lane::RuntimeLane,
+    resource::{ResourceReceipt, ResourceReservation, ResourceScope, ResourceUsage},
+    runtime::RuntimeKind,
 };
 use ironclaw_resources::ResourceGovernor;
 use serde_json::Value;

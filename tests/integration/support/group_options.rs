@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_loop_host::CapabilityAllowSet;
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_runner::runtime::ToolDisclosureMode;
@@ -54,7 +54,7 @@ impl RebornIntegrationGroupBuilder {
     pub fn with_bound_memory_provider(
         mut self,
         provider: std::sync::Arc<dyn ironclaw_memory::MemoryService>,
-        lifecycle: ironclaw_host_api::MemoryDescriptor,
+        lifecycle: ironclaw_host_api::memory::MemoryDescriptor,
     ) -> Self {
         self.bound_memory = Some((provider, lifecycle));
         self
@@ -88,10 +88,9 @@ impl RebornIntegrationGroupBuilder {
     /// Force `ToolDisclosureMode::Bridged` into the group's ONE planned
     /// runtime config (enabler (b)), regardless of `REBORN_TOOL_DISCLOSURE` —
     /// avoids the shared-process env-var race `apply_hermetic_env()` already
-    /// guards against (see `ToolDisclosureMode::from_env`). Defaults `None`
-    /// (resolves via `from_env()`, matching today's behavior).
+    /// guards against (see `ToolDisclosureMode::from_env`). Defaults to `Off`.
     pub fn with_tool_disclosure_bridged(mut self) -> Self {
-        self.tool_disclosure = Some(ToolDisclosureMode::Bridged);
+        self.tool_disclosure = ToolDisclosureMode::Bridged;
         self
     }
 
@@ -106,7 +105,7 @@ impl RebornIntegrationGroupBuilder {
     /// actually makes the control's assertion mode-specific rather than
     /// env-dependent.
     pub fn with_tool_disclosure_off(mut self) -> Self {
-        self.tool_disclosure = Some(ToolDisclosureMode::Off);
+        self.tool_disclosure = ToolDisclosureMode::Off;
         self
     }
 
@@ -198,6 +197,21 @@ impl RebornIntegrationGroupBuilder {
     /// whole-turn recovery scenario. Production defaults remain unchanged.
     pub fn with_iteration_limit_for_test(mut self, limit: std::num::NonZeroU32) -> Self {
         self.planned_default_iteration_limit = Some(limit);
+        self
+    }
+
+    /// Reject final assistant transcript writes at the runtime port while
+    /// leaving the real filesystem service in place for inbound messages and
+    /// read-back assertions.
+    pub fn fail_append_finalized_assistant_message_for_test(mut self) -> Self {
+        self.fail_append_finalized_assistant_message = true;
+        self
+    }
+
+    /// Reject tool-result transcript writes after the capability has completed,
+    /// while retaining the real capability path and thread read-back service.
+    pub fn fail_append_tool_result_reference_for_test(mut self) -> Self {
+        self.fail_append_tool_result_reference = true;
         self
     }
 

@@ -1,4 +1,4 @@
-use ironclaw_host_api::{ProcessId, ResourceScope};
+use ironclaw_host_api::{ids::ProcessId, resource::ResourceScope};
 
 use super::{ProcessJournalMaterializedState, ProcessJournalStoreError};
 use crate::{

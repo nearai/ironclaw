@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use chrono::Utc;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, InvocationId, NetworkMethod, ProjectId, ResourceScope, SecretHandle,
-    TenantId, UserId,
+    action::NetworkMethod,
+    ids::{CapabilityId, ExtensionId, InvocationId, ProjectId, SecretHandle, TenantId, UserId},
+    resource::ResourceScope,
 };
 
 use crate::{

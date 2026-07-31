@@ -3,8 +3,10 @@ use std::sync::Arc;
 use chrono::Utc;
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-    ProcessId, ProjectId, ResourceScope, TenantId, ThreadId, UserId, VirtualPath,
+    ids::{AgentId, CapabilityId, InvocationId, ProcessId, ProjectId, TenantId, ThreadId, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::ResourceScope,
 };
 use ironclaw_loop_host::{AwaitedChildSetRecord, SpawnSubagentMode, SubagentKindId};
 use ironclaw_processes::{

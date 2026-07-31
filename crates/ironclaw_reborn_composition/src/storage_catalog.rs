@@ -1,5 +1,5 @@
 use ironclaw_filesystem::{Capability, CompositeRootFilesystem, FilesystemError, TxnCapability};
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::path::VirtualPath;
 
 use crate::RebornBuildError;
 

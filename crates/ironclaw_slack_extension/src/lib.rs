@@ -15,6 +15,7 @@
 
 #![forbid(unsafe_code)]
 
+mod attachment_transfer;
 mod channel;
 mod delivery;
 mod mrkdwn;

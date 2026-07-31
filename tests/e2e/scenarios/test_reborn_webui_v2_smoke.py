@@ -2076,14 +2076,99 @@ async def test_reborn_v2_response_links_open_in_new_tab(reborn_v2_page):
 async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
     reborn_v2_page, reborn_v2_server
 ):
-    """The browser logs route passes URL scope to the API and renders scoped entries."""
+    """The browser logs route scopes, paginates, retries, and preserves older entries."""
     requested_queries: list[dict[str, list[str]]] = []
+    pagination_cursors: list[str] = []
     logs_requested = asyncio.Event()
+    polled_after_pagination = asyncio.Event()
+    pagination_attempts = 0
+    pagination_loaded = False
 
     async def handle_operator_logs(route) -> None:
+        nonlocal pagination_attempts, pagination_loaded
         parsed = urlparse(route.request.url)
-        requested_queries.append(parse_qs(parsed.query))
+        query = parse_qs(parsed.query)
+        requested_queries.append(query)
         logs_requested.set()
+        cursor = query.get("cursor", [None])[0]
+        if cursor == "older-page-1":
+            pagination_cursors.append(cursor)
+            pagination_attempts += 1
+            if pagination_attempts == 1:
+                await route.fulfill(
+                    status=503,
+                    content_type="application/json",
+                    body=json.dumps({"error": "older logs temporarily unavailable"}),
+                )
+                return
+            pagination_loaded = True
+            entries = [
+                {
+                    "id": "ui-log-1",
+                    "timestamp": "2026-06-12T10:11:12.123Z",
+                    "level": "info",
+                    "target": "ironclaw::ui::logs",
+                    "message": "scoped log from browser fixture",
+                    "thread_id": "thread-ui",
+                    "run_id": "run-ui",
+                    "tool_call_id": "tool-call-ui",
+                    "tool_name": "shell",
+                    "source": "slack",
+                },
+                {
+                    "id": "ui-log-older",
+                    "timestamp": "2026-06-12T10:10:12.123Z",
+                    "level": "debug",
+                    "target": "ironclaw::ui::logs",
+                    "message": "older paginated log from browser fixture",
+                    "thread_id": "thread-ui",
+                    "run_id": "run-ui",
+                },
+            ]
+            next_cursor = None
+        else:
+            if pagination_loaded:
+                polled_after_pagination.set()
+            entries = []
+            if pagination_loaded:
+                entries.append(
+                    {
+                        "id": "ui-log-poll",
+                        "timestamp": "2026-06-12T10:12:12.123Z",
+                        "level": "info",
+                        "target": "ironclaw::ui::logs",
+                        "message": "new log from polling refresh",
+                        "thread_id": "thread-ui",
+                        "run_id": "run-ui",
+                    }
+                )
+            entries.append(
+                {
+                    "id": "ui-log-1",
+                    "timestamp": "2026-06-12T10:11:12.123Z",
+                    "level": "info",
+                    "target": "ironclaw::ui::logs",
+                    "message": "scoped log from browser fixture",
+                    "thread_id": "thread-ui",
+                    "run_id": "run-ui",
+                    "tool_call_id": "tool-call-ui",
+                    "tool_name": "shell",
+                    "source": "slack",
+                }
+            )
+            if not pagination_loaded:
+                entries.append(
+                    {
+                        "id": "ui-log-boundary",
+                        "timestamp": "2026-06-12T10:10:42.123Z",
+                        "level": "info",
+                        "target": "ironclaw::ui::logs",
+                        "message": "latest-page boundary log",
+                        "thread_id": "thread-ui",
+                        "run_id": "run-ui",
+                    }
+                )
+            next_cursor = "older-page-1"
         await route.fulfill(
             status=200,
             content_type="application/json",
@@ -2092,21 +2177,8 @@ async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
                     "status": "available",
                     "logs": {
                         "source": "in_memory_tracing",
-                        "entries": [
-                            {
-                                "id": "ui-log-1",
-                                "timestamp": "2026-06-12T10:11:12.123Z",
-                                "level": "info",
-                                "target": "ironclaw::ui::logs",
-                                "message": "scoped log from browser fixture",
-                                "thread_id": "thread-ui",
-                                "run_id": "run-ui",
-                                "tool_call_id": "tool-call-ui",
-                                "tool_name": "shell",
-                                "source": "slack",
-                            }
-                        ],
-                        "next_cursor": None,
+                        "entries": entries,
+                        "next_cursor": next_cursor,
                         "tail_supported": True,
                         "follow_supported": False,
                     },
@@ -2154,6 +2226,32 @@ async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
     await expect(
         context.locator(SEL_V2["logs_context_chip"].format(key="source"))
     ).to_contain_text("slack")
+
+    load_older = reborn_v2_page.locator(SEL_V2["logs_load_older"])
+    await expect(load_older).to_be_visible()
+    await load_older.click()
+    await expect(
+        reborn_v2_page.locator(SEL_V2["logs_load_older_error"])
+    ).to_be_visible()
+    await expect(load_older).to_have_text("Retry")
+    assert pagination_attempts == 1
+    assert pagination_cursors == ["older-page-1"]
+
+    await load_older.click()
+    await expect(
+        reborn_v2_page.get_by_text("older paginated log from browser fixture")
+    ).to_be_visible()
+    assert pagination_attempts == 2
+    assert pagination_cursors == ["older-page-1", "older-page-1"]
+    await expect(reborn_v2_page.locator(SEL_V2["logs_pagination"])).to_have_count(0)
+
+    await asyncio.wait_for(polled_after_pagination.wait(), timeout=10)
+    await expect(reborn_v2_page.get_by_text("new log from polling refresh")).to_be_visible()
+    await expect(reborn_v2_page.get_by_text("latest-page boundary log")).to_be_visible()
+    await expect(
+        reborn_v2_page.get_by_text("older paginated log from browser fixture")
+    ).to_be_visible()
+    await expect(reborn_v2_page.locator(SEL_V2["logs_pagination"])).to_have_count(0)
 
     native_dialogs = capture_native_dialogs(reborn_v2_page)
     clear_button = reborn_v2_page.get_by_role("button", name="Clear", exact=True)

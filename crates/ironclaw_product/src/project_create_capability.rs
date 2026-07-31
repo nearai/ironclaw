@@ -4,7 +4,11 @@ use std::sync::Arc;
 
 use crate::{ProjectCaller, ProjectService, ProjectServiceError, RebornCreateProjectRequest};
 use async_trait::async_trait;
-use ironclaw_host_api::{FailureKind, InvocationId, Resolution, UserId};
+use ironclaw_host_api::{
+    ids::{InvocationId, UserId},
+    resolution::Resolution,
+    result_meta::FailureKind,
+};
 use ironclaw_loop_host::{
     CapabilityResultWrite, DurablePersistence, SyntheticCapability, SyntheticCapabilityDescriptor,
     SyntheticCapabilityHandler, SyntheticCapabilityInvocation,
@@ -253,7 +257,7 @@ mod tests {
     use super::*;
     fn assert_recoverable_failure(
         resolution: &Resolution,
-        expected_kind: ironclaw_host_api::FailureKind,
+        expected_kind: ironclaw_host_api::result_meta::FailureKind,
     ) {
         match resolution {
             Resolution::Done(outcome) => {
@@ -307,7 +311,10 @@ mod tests {
         })
         .expect("invalid input must be a model-visible failure, not terminal");
 
-        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::InputEncode);
+        assert_recoverable_failure(
+            &outcome,
+            ironclaw_host_api::result_meta::FailureKind::InputEncode,
+        );
     }
 
     #[test]
@@ -315,7 +322,10 @@ mod tests {
         let outcome = project_service_outcome(ProjectServiceError::Unavailable)
             .expect("transient unavailability must not kill the run");
 
-        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::Unavailable);
+        assert_recoverable_failure(
+            &outcome,
+            ironclaw_host_api::result_meta::FailureKind::Unavailable,
+        );
     }
 
     #[test]

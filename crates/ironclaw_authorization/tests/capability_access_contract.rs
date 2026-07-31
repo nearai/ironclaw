@@ -1,6 +1,22 @@
 use chrono::{Duration, Utc};
 use ironclaw_authorization::*;
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
+    capability::{
+        CapabilityDescriptor, CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints,
+        PermissionMode,
+    },
+    decision::{Decision, DenyReason, Obligation},
+    ids::{
+        AgentId, CapabilityGrantId, CapabilityId, CorrelationId, ExtensionId, InvocationId,
+        MissionId, ProjectId, SecretHandle, TenantId, ThreadId, UserId,
+    },
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
+    resource::{ResourceCeiling, ResourceEstimate, ResourceScope, SandboxQuota},
+    runtime::{RuntimeKind, TrustClass},
+    scope::{ExecutionContext, Principal},
+};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use serde_json::json;
 
@@ -46,6 +62,78 @@ async fn capability_access_allows_matching_extension_grant() {
             obligations: Default::default()
         }
     );
+}
+
+#[tokio::test]
+async fn capability_access_matches_every_typed_principal_and_rejects_nearby_identity() {
+    let descriptor = wasm_descriptor();
+    let mut context = execution_context(CapabilitySet::default());
+    context.agent_id = Some(AgentId::new("agent1").unwrap());
+    context.project_id = Some(ProjectId::new("project1").unwrap());
+    context.mission_id = Some(MissionId::new("mission1").unwrap());
+    context.thread_id = Some(ThreadId::new("thread1").unwrap());
+    context.resource_scope.agent_id = context.agent_id.clone();
+    context.resource_scope.project_id = context.project_id.clone();
+    context.resource_scope.mission_id = context.mission_id.clone();
+    context.resource_scope.thread_id = context.thread_id.clone();
+
+    let matching = [
+        Principal::Tenant(context.tenant_id.clone()),
+        Principal::User(context.user_id.clone()),
+        Principal::Agent(context.agent_id.clone().unwrap()),
+        Principal::Project(context.project_id.clone().unwrap()),
+        Principal::Mission(context.mission_id.clone().unwrap()),
+        Principal::Thread(context.thread_id.clone().unwrap()),
+        Principal::Extension(context.extension_id.clone()),
+    ];
+    let mismatching = [
+        Principal::Tenant(TenantId::new("tenant2").unwrap()),
+        Principal::User(UserId::new("user2").unwrap()),
+        Principal::Agent(AgentId::new("agent2").unwrap()),
+        Principal::Project(ProjectId::new("project2").unwrap()),
+        Principal::Mission(MissionId::new("mission2").unwrap()),
+        Principal::Thread(ThreadId::new("thread2").unwrap()),
+        Principal::Extension(ExtensionId::new("other").unwrap()),
+    ];
+    let authorizer = GrantAuthorizer::new();
+
+    for (matching_principal, mismatching_principal) in
+        matching.into_iter().zip(mismatching.into_iter())
+    {
+        context.grants = CapabilitySet {
+            grants: vec![grant_for(
+                descriptor.id.clone(),
+                matching_principal.clone(),
+                vec![EffectKind::DispatchCapability],
+            )],
+        };
+        assert_eq!(
+            authorizer
+                .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+                .await,
+            Decision::Allow {
+                obligations: Default::default()
+            },
+            "matching principal must authorize: {matching_principal:?}"
+        );
+
+        context.grants = CapabilitySet {
+            grants: vec![grant_for(
+                descriptor.id.clone(),
+                mismatching_principal.clone(),
+                vec![EffectKind::DispatchCapability],
+            )],
+        };
+        assert_eq!(
+            authorizer
+                .authorize_dispatch(&context, &descriptor, &ResourceEstimate::default())
+                .await,
+            Decision::Deny {
+                reason: DenyReason::MissingGrant
+            },
+            "different principal must fail closed: {mismatching_principal:?}"
+        );
+    }
 }
 
 #[tokio::test]
