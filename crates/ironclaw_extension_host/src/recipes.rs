@@ -100,30 +100,14 @@ pub fn unified_vendor_recipes<'a>(
     Ok(unified.into_values().map(|(_, recipe)| recipe).collect())
 }
 
-/// Resolve one recipe from exactly one manifest. A caller can never borrow a
-/// same-named vendor recipe from another installed extension.
-fn recipe_for_manifest(
-    manifest: &ResolvedExtensionManifest,
-    vendor: &str,
-) -> Option<ResolvedVendorAuthRecipe> {
-    let surface = manifest
-        .auth
-        .iter()
-        .find(|surface| surface.vendor.as_str() == vendor)?;
-    let recipe = surface.recipe.clone()?;
-    Some(ResolvedVendorAuthRecipe {
-        vendor: vendor.to_string(),
-        recipe,
-        token_exchange_resource: manifest.mcp.as_ref().map(|mcp| mcp.server.clone()),
-        protected_resource_metadata_url: surface.protected_resource_metadata_url.clone(),
-    })
-}
-
-/// Requester-bound resolver over the durable installation manifest source.
+/// Vendor-scoped resolver over the durable installation manifest source.
 ///
 /// This deliberately reads the existing installation store instead of a
 /// recipe sidecar or a vendor-global registry. Store failures and missing
 /// manifests fail closed because a recipe is authorization-sensitive input.
+/// Resolution is scoped to the vendor, not to the requesting extension: see
+/// `resolve` for why a per-requester ceiling breaks extensions that share a
+/// provider account.
 #[derive(Clone)]
 pub struct InstalledManifestAuthRecipeResolver {
     store: Arc<dyn ExtensionInstallationStorePort>,
@@ -166,7 +150,7 @@ impl AuthRecipeResolver for InstalledManifestAuthRecipeResolver {
         let records = self.store.list_manifests().await.ok()?;
         let manifests: Vec<&ResolvedExtensionManifest> =
             records.iter().map(|record| record.resolved()).collect();
-        match unified_vendor_recipes(manifests.into_iter()) {
+        match unified_vendor_recipes(manifests) {
             Ok(recipes) => recipes.into_iter().find(|recipe| recipe.vendor == vendor),
             Err(conflict) => {
                 // Activation-time conflict checks should have prevented this;
@@ -333,15 +317,22 @@ mod tests {
         assert_eq!(error.second_extension, "docs-ext");
     }
 
+    /// Resolution is vendor-scoped: unioning ceilings across installed
+    /// extensions must never hand a caller a recipe for a different vendor.
     #[test]
-    fn requester_manifest_recipe_lookup_does_not_cross_vendor() {
+    fn recipe_lookup_does_not_cross_vendor() {
         let manifest = manifest_with_recipe(
             "calendar-ext",
             "calendar-vendor",
             oauth_recipe(&["calendar:read"], "https://vendor.example/token"),
         );
+        let recipes = unified_vendor_recipes([&manifest]).expect("single manifest unions cleanly");
 
-        assert!(recipe_for_manifest(&manifest, "calendar-vendor").is_some());
-        assert!(recipe_for_manifest(&manifest, "other-vendor").is_none());
+        assert!(
+            recipes
+                .iter()
+                .any(|recipe| recipe.vendor == "calendar-vendor")
+        );
+        assert!(!recipes.iter().any(|recipe| recipe.vendor == "other-vendor"));
     }
 }
