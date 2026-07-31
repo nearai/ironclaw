@@ -28,6 +28,14 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
+path = "crates/ironclaw_extension_host/src/available_extension_import.rs"
+lines = [191, 192, 193, 194, 196, 197, 198, 199]
+owner = "@serrrfirat"
+reason = "Import tests execute both static registry constructors through successful and rejected manifests; their error closures require duplicate entries in the compile-time host-port or contract definitions, which cannot be injected while the same definitions remain valid for the test process."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
 path = "crates/ironclaw_host_api/src/credential_redaction.rs"
 branch_lines = [64, 111, 120]
 owner = "@serrrfirat"
@@ -71,7 +79,7 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_ironhub/src/link_service.rs"
-lines = [183, 206, 207, 234, 235, 263, 264, 379, 459, 485]
+lines = [177, 183, 206, 207, 234, 235, 263, 264, 379, 459, 485]
 branch_lines = [150, 155, 182, 208, 209, 213, 238, 265, 267, 272, 378, 400, 419, 434, 435, 458, 469, 482, 490]
 owner = "@serrrfirat"
 reason = "Durable replay tests execute corruption, identity mismatch, stale/equal/new manifests, CAS retry exhaustion, authentication failures, and every error mapping; the remaining records are multiline closers or synthetic async/short-circuit branches with no distinct behavior to drive."
@@ -80,9 +88,9 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_ironhub/src/link_service.rs"
-lines = [195, 196, 253, 254]
+lines = [130, 131, 132, 194, 195, 196, 253, 254, 255]
 owner = "@serrrfirat"
-reason = "PrivateManifestState and PublicManifestState contain only infallibly serializable primitives; serde_json::to_vec cannot reach these defensive error closures for any value of the fixed structs."
+reason = "ConsumedNonce, PrivateManifestState, and PublicManifestState contain only infallibly serializable primitives; serde_json::to_vec cannot reach these defensive error closures for any value of the fixed structs."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
@@ -156,7 +164,7 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_skills/src/management/install_bundle.rs"
-lines = [134, 135, 184]
+lines = [134, 135, 182, 184]
 branch_lines = [119, 180, 182, 197]
 owner = "@serrrfirat"
 reason = "Snapshot tests execute file/count/total caps, unsupported entries, complete restoration, write failure, cleanup success, and cleanup failure; remaining counters are match/async continuations or impossible parent/short-circuit bookkeeping for normalized bundle paths."

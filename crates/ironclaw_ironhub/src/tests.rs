@@ -18,12 +18,14 @@ use ironclaw_host_api::{
     resource::ResourceScope,
     runtime::RuntimeKind,
 };
-use ironclaw_product::{IronhubInstallDeliveryRequest, IronhubLinkError, IronhubLinkService};
+use ironclaw_product::{
+    IronhubInstallDeliveryRequest, IronhubLinkError, IronhubLinkService, IronhubRegisterRequest,
+};
 use ironclaw_skills::ManagedSkillSource;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use super::agent_link::{InstallDelivery, IronhubSharedKey};
+use super::agent_link::{InstallDelivery, IronhubSharedKey, RegisterChallenge};
 use super::catalog::{
     IronHubManifestSource, classify_gate_and_digest, sha256_hex, validate_manifest,
     validate_private_manifest, validate_private_manifest_origin, verify_signed_manifest_with_keys,
@@ -1208,6 +1210,28 @@ async fn deep_link_install_accepts_hub_digest_and_uses_authenticated_caller_scop
         sha256_hex(manifest.skills[0].skill_md.sha256.as_bytes())
     );
     let timestamp = u64::try_from(chrono::Utc::now().timestamp()).expect("positive timestamp");
+    let mut register_request = IronhubRegisterRequest {
+        uid: "signed-hub-user-not-the-caller".to_string(),
+        aid: "signed-hub-agent".to_string(),
+        ts: timestamp,
+        nonce: "caller-scope-register-nonce".to_string(),
+        sig: String::new(),
+    };
+    let register_challenge = RegisterChallenge {
+        uid: &register_request.uid,
+        aid: &register_request.aid,
+        ts: register_request.ts,
+        nonce: &register_request.nonce,
+    };
+    let mut register_mac =
+        Hmac::<sha2::Sha256>::new_from_slice(LINK_KEY.as_bytes()).expect("HMAC key");
+    register_mac.update(register_challenge.payload().as_bytes());
+    register_request.sig = hex::encode(register_mac.finalize().into_bytes());
+    service
+        .register(register_request)
+        .await
+        .expect("valid registration succeeds through the product service");
+
     let mut request = IronhubInstallDeliveryRequest {
         slug: "caller-skill".to_string(),
         version: "1.0.0".to_string(),
