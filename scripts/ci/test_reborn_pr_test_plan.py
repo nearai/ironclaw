@@ -256,6 +256,75 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertIn("Full Reborn plan is not exhaustive", workflow)
         self.assertIn("Full Reborn plan omitted a required lane", workflow)
 
+    def test_reborn_e2e_shards_preserve_all_runtime_and_webui_suites(self) -> None:
+        workflow = (ROOT / ".github/workflows/reborn-e2e.yml").read_text(
+            encoding="utf-8"
+        )
+        rust_gate = (ROOT / "scripts/reborn-e2e-rust.sh").read_text(
+            encoding="utf-8"
+        )
+
+        for group in (
+            "architecture-boundaries",
+            "architecture-runtime",
+            "runtimes",
+            "substrates",
+        ):
+            with self.subTest(group=group):
+                self.assertIn(f"          - {group}", workflow)
+
+        self.assertEqual(
+            rust_gate.count(
+                "gateway_maps_deterministic_provider_response_errors_to_invalid_output"
+            ),
+            1,
+        )
+        self.assertEqual(
+            rust_gate.count(
+                "deterministic_provider_response_errors_use_bounded_invalid_output_recovery"
+            ),
+            1,
+        )
+        self.assertEqual(
+            rust_gate.count(
+                "process_projection::runtime::tests::retry_rejects_checkpoint_rejection_without_creating_a_process"
+            ),
+            1,
+        )
+        self.assertNotIn("projection::tests::nested_dispatch_stream", rust_gate)
+
+        for suite in (
+            "tests/e2e/scenarios/test_reborn_webui_v2_smoke.py",
+            "tests/e2e/scenarios/test_reborn_webui_v2_sso.py",
+            "tests/e2e/scenarios/test_reborn_qa_trace_full_path.py",
+            "tests/e2e/scenarios/test_reborn_qa_trace_replay.py",
+            "tests/e2e/reborn_responses_e2e_tests.txt",
+        ):
+            with self.subTest(suite=suite):
+                self.assertIn(suite, workflow)
+
+        for process in (
+            "product_build_pid",
+            "emulate_build_pid",
+            "e2e_setup_pid",
+            "webui_pid",
+            "primary_pid",
+            "secondary_pid",
+            "tertiary_pid",
+            "quaternary_pid",
+            "responses_pid",
+            "package_pid",
+        ):
+            with self.subTest(process=process):
+                self.assertIn(f'wait "${{{process}}}" || status=1', workflow)
+
+        for shard in range(4):
+            with self.subTest(provider_operation_shard=shard):
+                self.assertIn(
+                    f"IRONCLAW_PROVIDER_OPERATION_SHARD={shard}/4",
+                    workflow,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
