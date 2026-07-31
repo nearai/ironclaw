@@ -2137,6 +2137,142 @@ async fn filesystem_thread_create_declares_indexes_once_per_mount() {
     );
 }
 
+/// The one-time transcript-index migration runs on a scope's first transcript
+/// read and rewrites message rows under CAS expectations. When that first read
+/// overlaps a live turn's message writes, the migration can lose the race; the
+/// resulting `VersionMismatch` used to escape to WebUI timeline reads as a
+/// retryable 503 (`TimelineUnavailable`, observed under the api-user-capacity
+/// stress workload). The migration must re-read and retry the page instead.
+#[tokio::test]
+async fn filesystem_transcript_migration_retries_a_lost_cas_race() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-migrate-race", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("migrate-race");
+    let thread_id = ThreadId::new("thread-migrate-race").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            turn_run_id: "run-migrate-race".into(),
+            content: MessageContent::text("assistant reply"),
+        })
+        .await
+        .unwrap();
+
+    // Reset the one-time marker so the next transcript read re-runs the
+    // migration with a message row present.
+    let marker = backend
+        .recorded_paths(FilesystemOperation::WriteFile)
+        .into_iter()
+        .find(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .expect("seeding wrote the transcript migration marker");
+    backend.delete(&marker).await.unwrap();
+
+    // Lose the CAS race exactly once: the first migration-transaction write to
+    // a message row fails the way a concurrent turn write makes it fail.
+    backend.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .path("/messages/")
+            .nth(1)
+            .version_mismatch(),
+    );
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+        })
+        .await
+        .expect("a single lost CAS race must be retried, not surfaced");
+    assert_eq!(history.messages.len(), 1);
+    let marker_writes = backend
+        .recorded_paths(FilesystemOperation::WriteFile)
+        .into_iter()
+        .filter(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .count();
+    assert_eq!(
+        marker_writes, 2,
+        "the retried migration completes and re-writes the one-time marker"
+    );
+}
+
+/// Retry exhaustion must stay bounded and fail loud with the real cause —
+/// a writer that conflicts forever must not pin the migration in a loop.
+#[tokio::test]
+async fn filesystem_transcript_migration_conflict_retries_are_bounded() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-migrate-bound", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("migrate-bound");
+    let thread_id = ThreadId::new("thread-migrate-bound").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            turn_run_id: "run-migrate-bound".into(),
+            content: MessageContent::text("assistant reply"),
+        })
+        .await
+        .unwrap();
+    let marker = backend
+        .recorded_paths(FilesystemOperation::WriteFile)
+        .into_iter()
+        .find(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .expect("seeding wrote the transcript migration marker");
+    backend.delete(&marker).await.unwrap();
+
+    let writes_before = backend.count(FilesystemOperation::WriteFile);
+    backend.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .path("/messages/")
+            .version_mismatch(),
+    );
+
+    let error = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+        })
+        .await
+        .expect_err("a permanently conflicting migration must fail, not loop");
+    assert!(
+        matches!(error, SessionThreadError::Backend(_)),
+        "retry exhaustion surfaces the underlying conflict: {error:?}"
+    );
+    let message_row_attempts = backend
+        .recorded_paths(FilesystemOperation::WriteFile)
+        .into_iter()
+        .skip(writes_before)
+        .filter(|path| path.as_str().contains("/messages/"))
+        .count();
+    // Initial attempt + TRANSCRIPT_PAGE_CONFLICT_RETRIES (5) retries.
+    assert_eq!(
+        message_row_attempts, 6,
+        "conflict retries are bounded, not unbounded"
+    );
+}
+
 #[tokio::test]
 async fn filesystem_list_threads_page_does_not_scan_scope_or_source_directory() {
     let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));

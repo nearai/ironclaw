@@ -20,6 +20,29 @@ use super::{
 };
 
 const THREAD_INDEX_KIND: &str = "thread_index";
+
+/// Bounded retries for a transcript-migration page that lost a CAS or
+/// writer-contention race against live turn writes.
+const TRANSCRIPT_PAGE_CONFLICT_RETRIES: u32 = 5;
+
+/// Outcome of one transactional transcript-migration page.
+enum TranscriptPageOutcome {
+    Committed,
+    /// The page lost a concurrency race and should be re-read and retried;
+    /// carries the underlying error so retry exhaustion can fail loud with
+    /// the real cause.
+    Conflict(ironclaw_filesystem::FilesystemError),
+}
+
+/// Whether a transcript-migration transaction error is a concurrency race
+/// (safe to retry with fresh reads) rather than a real backend failure.
+fn transcript_migration_conflict(error: &ironclaw_filesystem::FilesystemError) -> bool {
+    matches!(
+        error,
+        ironclaw_filesystem::FilesystemError::VersionMismatch { .. }
+            | ironclaw_filesystem::FilesystemError::BackendBusy { .. }
+    )
+}
 const THREAD_SCOPE_INDEX_KEY: &str = "scope_key";
 const THREAD_ACTIVITY_SORT_KEY: &str = "activity_sort";
 const THREAD_ID_INDEX_KEY: &str = "thread_id";
@@ -527,6 +550,7 @@ where
                 (summaries_root(scope, &thread_id)?, false),
             ] {
                 let mut offset = 0u64;
+                let mut conflict_attempts = 0u32;
                 loop {
                     let rows = self
                         .filesystem
@@ -541,66 +565,134 @@ where
                         break;
                     }
                     let received = rows.len();
-                    let mut txn = self
-                        .filesystem
-                        .begin(
-                            &scope.to_resource_scope(),
-                            &scoped_path(crate::filesystem_service::THREADS_PREFIX)?,
-                        )
-                        .await?;
-                    for listed_row in rows {
-                        // The listing runs before BEGIN IMMEDIATE owns the
-                        // writer lock. Re-read inside the transaction so a
-                        // current-code message update in that window cannot
-                        // make this one-time migration fail with a stale CAS.
-                        let Some(row) = txn.get(&listed_row.path).await? else {
-                            continue;
-                        };
-                        let expected_kind = if messages {
-                            crate::filesystem_service::THREAD_MESSAGE_KIND
-                        } else {
-                            crate::filesystem_service::THREAD_SUMMARY_KIND
-                        };
-                        if row.entry.kind.as_ref().map(RecordKind::as_str) != Some(expected_kind) {
-                            continue;
-                        }
-                        let entry = if messages {
-                            let record = deserialize::<ThreadMessageRecord>(&row.entry.body)?;
-                            for (lookup_path, lookup_entry, expectation) in
-                                crate::filesystem_service::message_lookup_index::MessageLookupIndexStore::<F>::entries_for_message(
-                                    scope,
-                                    &thread_id,
-                                    &record,
-                                )?
-                            {
-                                let virtual_path = self
-                                    .filesystem
-                                    .resolve(&scope.to_resource_scope(), &lookup_path)?;
-                                if matches!(expectation, CasExpectation::Absent)
-                                    && txn.get(&virtual_path).await?.is_some()
-                                {
-                                    continue;
-                                }
-                                txn.put(&virtual_path, lookup_entry, expectation).await?;
+                    match self
+                        .migrate_transcript_page(scope, &thread_id, messages, rows)
+                        .await?
+                    {
+                        TranscriptPageOutcome::Committed => {
+                            conflict_attempts = 0;
+                            migrated = migrated.saturating_add(received);
+                            if received < Page::MAX_LIMIT as usize {
+                                break;
                             }
-                            Self::message_entry(&record)?
-                        } else {
-                            let record = deserialize::<SummaryArtifact>(&row.entry.body)?;
-                            Self::summary_entry(&record)?
-                        };
-                        txn.put(&row.path, entry, CasExpectation::Version(row.version))
-                            .await?;
+                            offset = offset.saturating_add(received as u64);
+                        }
+                        TranscriptPageOutcome::Conflict(error) => {
+                            // A live writer (turn finalization, preview append)
+                            // landed between this page's in-transaction reads
+                            // and its commit. Re-reading the page picks up the
+                            // committed versions, so the retry converges; the
+                            // bound keeps a pathological writer from pinning
+                            // the migration forever.
+                            conflict_attempts += 1;
+                            if conflict_attempts > TRANSCRIPT_PAGE_CONFLICT_RETRIES {
+                                return Err(error.into());
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                10u64.saturating_mul(conflict_attempts.into()),
+                            ))
+                            .await;
+                        }
                     }
-                    txn.commit().await?;
-                    migrated = migrated.saturating_add(received);
-                    if received < Page::MAX_LIMIT as usize {
-                        break;
-                    }
-                    offset = offset.saturating_add(received as u64);
                 }
             }
         }
         Ok(migrated)
+    }
+
+    /// One transactional page of [`Self::migrate_transcript_indexes_for_scope`].
+    ///
+    /// Returns `Conflict` instead of an error when the transaction lost a CAS
+    /// or writer-contention race, so the caller can re-read and retry the page
+    /// bounded — an escaped `VersionMismatch` here surfaced to WebUI timeline
+    /// reads as a retryable 503 whenever the scope's first transcript read
+    /// overlapped a running turn.
+    async fn migrate_transcript_page(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        messages: bool,
+        rows: Vec<ironclaw_filesystem::VersionedEntry>,
+    ) -> Result<TranscriptPageOutcome, SessionThreadError> {
+        let mut txn = self
+            .filesystem
+            .begin(
+                &scope.to_resource_scope(),
+                &scoped_path(crate::filesystem_service::THREADS_PREFIX)?,
+            )
+            .await?;
+        for listed_row in rows {
+            // The listing runs before BEGIN IMMEDIATE owns the
+            // writer lock. Re-read inside the transaction so a
+            // current-code message update in that window cannot
+            // make this one-time migration fail with a stale CAS.
+            let row = match txn.get(&listed_row.path).await {
+                Ok(Some(row)) => row,
+                Ok(None) => continue,
+                Err(error) if transcript_migration_conflict(&error) => {
+                    txn.rollback().await;
+                    return Ok(TranscriptPageOutcome::Conflict(error));
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let expected_kind = if messages {
+                crate::filesystem_service::THREAD_MESSAGE_KIND
+            } else {
+                crate::filesystem_service::THREAD_SUMMARY_KIND
+            };
+            if row.entry.kind.as_ref().map(RecordKind::as_str) != Some(expected_kind) {
+                continue;
+            }
+            let entry = if messages {
+                let record = deserialize::<ThreadMessageRecord>(&row.entry.body)?;
+                for (lookup_path, lookup_entry, expectation) in
+                    crate::filesystem_service::message_lookup_index::MessageLookupIndexStore::<F>::entries_for_message(
+                        scope,
+                        thread_id,
+                        &record,
+                    )?
+                {
+                    let virtual_path = self
+                        .filesystem
+                        .resolve(&scope.to_resource_scope(), &lookup_path)?;
+                    if matches!(expectation, CasExpectation::Absent)
+                        && txn.get(&virtual_path).await?.is_some()
+                    {
+                        continue;
+                    }
+                    match txn.put(&virtual_path, lookup_entry, expectation).await {
+                        Ok(_) => {}
+                        Err(error) if transcript_migration_conflict(&error) => {
+                            txn.rollback().await;
+                            return Ok(TranscriptPageOutcome::Conflict(error));
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                Self::message_entry(&record)?
+            } else {
+                let record = deserialize::<SummaryArtifact>(&row.entry.body)?;
+                Self::summary_entry(&record)?
+            };
+            match txn
+                .put(&row.path, entry, CasExpectation::Version(row.version))
+                .await
+            {
+                Ok(_) => {}
+                Err(error) if transcript_migration_conflict(&error) => {
+                    txn.rollback().await;
+                    return Ok(TranscriptPageOutcome::Conflict(error));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        match txn.commit().await {
+            Ok(()) => Ok(TranscriptPageOutcome::Committed),
+            Err(error) if transcript_migration_conflict(&error) => {
+                Ok(TranscriptPageOutcome::Conflict(error))
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub(super) async fn ensure_transcript_indexes_migrated(
