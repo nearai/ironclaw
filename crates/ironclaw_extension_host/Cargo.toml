@@ -29,7 +29,7 @@ composition-substrate-tests = []
 
 [dependencies]
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 ed25519-dalek = "2.2.0"
 hmac = "0.13"

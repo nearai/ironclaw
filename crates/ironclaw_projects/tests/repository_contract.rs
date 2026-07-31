@@ -48,6 +48,14 @@ fn member(
     }
 }
 
+#[test]
+fn project_record_new_mints_a_nonempty_project_id() {
+    let record = ProjectRecord::new(tenant(), user("alice"), "Research", "AI research")
+        .expect("project record is valid");
+
+    assert!(!record.project_id.as_str().is_empty());
+}
+
 /// Runs the full contract against any repository implementation.
 async fn run_contract(repo: &dyn ProjectRepository) {
     let owner = user("alice");
