@@ -21,7 +21,7 @@
 
 ## Do Not Move In Here
 
-- Dispatcher, extensions, host runtime, MCP, WASM, scripts, network, engine, or gateway dependencies.
+- Extensions, host runtime, MCP, WASM, scripts, or network dependencies.
 - Product adapter transport/rendering logic, host runtime execution, capability dispatch, or storage backend details.
 - Raw secrets, raw host paths, backend error details, or unredacted user content in errors, events, snapshots, logs, or docs.
 

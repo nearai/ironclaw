@@ -3,10 +3,11 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_event_projections::{
-    AuditProjectionEntry, AuditProjectionRequest, AuditProjectionService, CapabilityActivityStatus,
-    EventProjectionService, MAX_PROJECTION_PAGE_LIMIT, ProjectionCursor, ProjectionError,
-    ProjectionReplay, ProjectionRequest, ProjectionScope, ReplayAuditProjectionService,
-    ReplayEventProjectionService, RunProjectionStatus, TimelineEntryKind,
+    AuditProjectionCursor, AuditProjectionEntry, AuditProjectionError, AuditProjectionRequest,
+    AuditProjectionService, CapabilityActivityStatus, EventProjectionService,
+    MAX_PROJECTION_PAGE_LIMIT, ProjectionCursor, ProjectionError, ProjectionReplay,
+    ProjectionRequest, ProjectionScope, ReplayAuditProjectionService, ReplayEventProjectionService,
+    RunProjectionStatus, TimelineEntryKind,
 };
 use ironclaw_events::{
     DurableAuditLog, DurableEventLog, EventCursor, EventError, EventLogEntry, EventReplay,
@@ -91,6 +92,127 @@ async fn replay_audit_projection_preserves_valid_capability_targets() {
         snapshot.entries[0].action_target.as_deref(),
         Some("1234567890123456789012345-cap.echo")
     );
+}
+
+/// Audit-side counterpart to
+/// `replay_projection_rejects_cursor_minted_under_a_different_scope` and
+/// `replay_projection_updates_return_rebase_signal_for_foreign_or_stale_cursor`.
+///
+/// `ReplayAuditProjectionService` enforces two cursor contracts of its own —
+/// `read_audit` rejects a cursor minted under a different scope, and
+/// `map_audit_projection_error` turns a durable `ReplayGap` into
+/// `AuditProjectionError::RebaseRequired`. Both were only ever asserted
+/// through the duplicate `EventStreamManager` deleted in #6943, whose own
+/// `audit_resume` re-implemented the scope check; when it went, these two live
+/// service behaviors lost their only coverage (CodeRabbit review on that PR).
+/// Restored here at the seam that actually owns them, so the audit half is
+/// pinned symmetrically with the runtime half.
+#[tokio::test]
+async fn replay_audit_projection_rejects_foreign_and_stale_cursors() {
+    let log = Arc::new(InMemoryDurableAuditLog::new());
+    let service = ReplayAuditProjectionService::new(Arc::clone(&log));
+    let ctx_a = execution_context_for_scope(scope_for_thread(ThreadId::new("thread-a").unwrap()));
+    let ctx_b = execution_context_for_scope(scope_for_thread(ThreadId::new("thread-b").unwrap()));
+    let action = Action::ReadFile {
+        path: ScopedPath::new("/workspace/notes.md").unwrap(),
+    };
+
+    let entry_a = log
+        .append(AuditEnvelope::denied(
+            &ctx_a,
+            AuditStage::Denied,
+            ActionSummary::from_action(&action),
+            DenyReason::PolicyDenied,
+        ))
+        .await
+        .unwrap();
+    let entry_b = log
+        .append(AuditEnvelope::denied(
+            &ctx_b,
+            AuditStage::Denied,
+            ActionSummary::from_action(&action),
+            DenyReason::PolicyDenied,
+        ))
+        .await
+        .unwrap();
+    assert!(entry_b.cursor > entry_a.cursor);
+
+    let scope_a = ProjectionScope::from_resource_scope(&ctx_a.resource_scope);
+    let scope_b = ProjectionScope::from_resource_scope(&ctx_b.resource_scope);
+
+    // (1) A cursor minted under thread B's scope must not be consumed as a
+    // resume cursor for thread A: the durable stream is partitioned by
+    // (tenant, user, agent), so the sibling cursor would silently skip
+    // records thread A had not yet seen.
+    let foreign_cursor = AuditProjectionCursor::for_scope(scope_b, entry_b.cursor);
+    let error = service
+        .snapshot(AuditProjectionRequest {
+            scope: scope_a.clone(),
+            after: Some(foreign_cursor.clone()),
+            limit: 16,
+        })
+        .await
+        .expect_err("cross-scope audit cursor must be rejected, not silently consumed");
+    match error {
+        AuditProjectionError::RebaseRequired {
+            requested,
+            earliest,
+        } => {
+            assert_eq!(*requested, foreign_cursor);
+            assert_eq!(earliest.scope, scope_a);
+        }
+        other => panic!("expected RebaseRequired for cross-scope audit cursor, got {other:?}"),
+    }
+
+    // The same foreign cursor must be rejected by `updates()` too — both
+    // entry points share `read_audit`, and a divergence there would let one
+    // surface a partial replay.
+    let updates_error = service
+        .updates(AuditProjectionRequest {
+            scope: scope_a.clone(),
+            after: Some(foreign_cursor),
+            limit: 16,
+        })
+        .await
+        .expect_err("updates() must enforce the same audit scope binding as snapshot()");
+    assert!(matches!(
+        updates_error,
+        AuditProjectionError::RebaseRequired { .. }
+    ));
+
+    // (2) A same-scope cursor beyond the stream head is a stale/foreign
+    // cursor the log reports as a replay gap; the projection must surface
+    // RebaseRequired rather than echoing it back as an empty page.
+    let stale_error = service
+        .updates(AuditProjectionRequest {
+            scope: scope_a.clone(),
+            after: Some(AuditProjectionCursor::for_scope(
+                scope_a.clone(),
+                EventCursor::new(99),
+            )),
+            limit: 16,
+        })
+        .await
+        .expect_err("a cursor beyond the audit head must surface a rebase, not an empty replay");
+    match stale_error {
+        AuditProjectionError::RebaseRequired { requested, .. } => {
+            assert_eq!(requested.audit, EventCursor::new(99));
+        }
+        other => panic!("expected RebaseRequired for stale audit cursor, got {other:?}"),
+    }
+
+    // Positive control: resuming from the legitimate origin still sees thread
+    // A's entry, proving the rejections above did not paper over a read
+    // failure.
+    let snapshot = service
+        .snapshot(AuditProjectionRequest {
+            scope: scope_a,
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    assert_eq!(snapshot.entries.len(), 1);
 }
 
 fn audit_projection_entry_for_stage(stage: AuditStage) -> AuditProjectionEntry {

@@ -794,9 +794,12 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
         );
     }
 
+    // WS8 re-point: the `ironclaw_dispatcher` shim this used to name was
+    // deleted, so guarding it would be vacuous. The invariant is unchanged and
+    // now names the crate that actually owns `RuntimeDispatcher`.
     assert!(
-        !scripts_manifest.contains("ironclaw_dispatcher"),
-        "ironclaw_scripts must not depend on ironclaw_dispatcher; script dispatcher adapters are host-runtime-private composition"
+        !scripts_manifest.contains("ironclaw_capabilities"),
+        "ironclaw_scripts must not depend on ironclaw_capabilities; script dispatcher adapters are host-runtime-private composition"
     );
 
     let forbidden_mcp_lane_surface = [
@@ -810,9 +813,10 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
             "ironclaw_mcp must not expose host-runtime dispatcher composition surface `{pattern}`; compose MCP dispatch adapters inside ironclaw_host_runtime"
         );
     }
+    // WS8 re-point, same reasoning as the scripts lane above.
     assert!(
-        !mcp_manifest.contains("ironclaw_dispatcher"),
-        "ironclaw_mcp must not depend on ironclaw_dispatcher; MCP dispatcher adapters are host-runtime-private composition"
+        !mcp_manifest.contains("ironclaw_capabilities"),
+        "ironclaw_mcp must not depend on ironclaw_capabilities; MCP dispatcher adapters are host-runtime-private composition"
     );
 }
 
@@ -1942,7 +1946,8 @@ fn wasm_sandbox_core_module_stays_domain_free_v1_parity_kernel() {
     let source = std::fs::read_to_string(&module).expect("WASM sandbox core module is readable");
     for forbidden in [
         "ironclaw_product",
-        "ironclaw_dispatcher",
+        // WS8 re-point: was `ironclaw_dispatcher` until that shim was deleted.
+        "ironclaw_capabilities",
         "ironclaw_extensions",
         "ironclaw_filesystem",
         "ironclaw_network",
@@ -2632,7 +2637,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         BoundaryRule {
             crate_name: "ironclaw_product",
             forbidden: vec![
-                "ironclaw_dispatcher",
                 "ironclaw_host_runtime",
                 "ironclaw_mcp",
                 "ironclaw_wasm",
@@ -2656,7 +2660,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_authorization",
                 "ironclaw_capabilities",
                 "ironclaw_conversations",
-                "ironclaw_dispatcher",
                 "ironclaw_engine",
                 "ironclaw_event_projections",
                 "ironclaw_extensions",
@@ -2706,7 +2709,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_legacy",
                 "ironclaw_capabilities",
                 "ironclaw_conversations",
-                "ironclaw_dispatcher",
                 "ironclaw_engine",
                 "ironclaw_event_projections",
                 "ironclaw_event_streams",
@@ -2759,7 +2761,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_authorization",
                 "ironclaw_capabilities",
                 "ironclaw_conversations",
-                "ironclaw_dispatcher",
                 "ironclaw_engine",
                 "ironclaw_events",
                 "ironclaw_extensions",
@@ -2801,7 +2802,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_authorization",
                 "ironclaw_capabilities",
                 "ironclaw_conversations",
-                "ironclaw_dispatcher",
                 "ironclaw_engine",
                 "ironclaw_events",
                 "ironclaw_extensions",
@@ -2837,7 +2837,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_authorization",
                 "ironclaw_capabilities",
                 "ironclaw_conversations",
-                "ironclaw_dispatcher",
                 "ironclaw_engine",
                 "ironclaw_events",
                 "ironclaw_extensions",
@@ -2912,7 +2911,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_authorization",
                 "ironclaw_capabilities",
                 "ironclaw_conversations",
-                "ironclaw_dispatcher",
                 "ironclaw_engine",
                 "ironclaw_events",
                 "ironclaw_extensions",
@@ -2952,7 +2950,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_authorization",
                 "ironclaw_capabilities",
-                "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_filesystem",
                 "ironclaw_host_runtime",
@@ -2975,7 +2972,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
-                "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_extensions",
                 "ironclaw_host_runtime",
@@ -2995,7 +2991,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
-                "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_extensions",
                 // ironclaw_filesystem is permitted: ResourceGovernorStore
@@ -3018,7 +3013,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
-                "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_extensions",
                 "ironclaw_filesystem",
@@ -3039,7 +3033,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
-                "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_first_party_extensions",
                 "ironclaw_first_party_extension_ports",
@@ -3092,7 +3085,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
-                "ironclaw_dispatcher",
                 "ironclaw_extensions",
                 "ironclaw_host_runtime",
                 "ironclaw_secrets",
@@ -3118,7 +3110,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
-                "ironclaw_dispatcher",
                 "ironclaw_extensions",
                 "ironclaw_filesystem",
                 "ironclaw_host_runtime",
@@ -3141,7 +3132,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
                 "ironclaw_conversations",
-                "ironclaw_dispatcher",
                 "ironclaw_engine",
                 "ironclaw_events",
                 "ironclaw_extensions",
@@ -3191,7 +3181,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_auth",
                 "ironclaw_capabilities",
                 "ironclaw_conversations",
-                "ironclaw_dispatcher",
                 "ironclaw_engine",
                 "ironclaw_event_projections",
                 "ironclaw_events",
@@ -3234,7 +3223,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
                 "ironclaw_conversations",
-                "ironclaw_dispatcher",
                 "ironclaw_extensions",
                 // ironclaw_filesystem is permitted: OutboundStateStore
                 // routes outbound persistence through ScopedFilesystem under
@@ -3268,7 +3256,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
-                "ironclaw_dispatcher",
                 "ironclaw_engine",
                 "ironclaw_events",
                 "ironclaw_extensions",
@@ -3309,7 +3296,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
-                "ironclaw_dispatcher",
                 "ironclaw_extensions",
                 "ironclaw_host_runtime",
                 "ironclaw_secrets",
@@ -3328,7 +3314,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
-                "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_extensions",
                 // ironclaw_filesystem is permitted: SecretStore /
@@ -3351,7 +3336,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
-                "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_extensions",
                 "ironclaw_filesystem",
@@ -3370,7 +3354,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             forbidden: vec![
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
-                "ironclaw_dispatcher",
                 "ironclaw_extensions",
                 "ironclaw_host_runtime",
                 "ironclaw_secrets",
@@ -3390,7 +3373,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
-                "ironclaw_dispatcher",
                 "ironclaw_engine",
                 "ironclaw_events",
                 "ironclaw_extensions",
@@ -3420,7 +3402,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             crate_name: "ironclaw_approvals",
             forbidden: vec![
                 "ironclaw_capabilities",
-                "ironclaw_dispatcher",
                 "ironclaw_extensions",
                 "ironclaw_host_runtime",
                 "ironclaw_secrets",
@@ -3438,7 +3419,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
-                "ironclaw_dispatcher",
                 "ironclaw_extensions",
                 "ironclaw_host_runtime",
                 "ironclaw_secrets",
@@ -3455,7 +3435,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_authorization",
                 "ironclaw_capabilities",
-                "ironclaw_dispatcher",
                 "ironclaw_extensions",
                 // ironclaw_filesystem is permitted for agent-turn projections.
                 // routes turn-coordination persistence through ScopedFilesystem
@@ -3485,7 +3464,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_authorization",
                 "ironclaw_capabilities",
-                "ironclaw_dispatcher",
                 "ironclaw_extensions",
                 "ironclaw_filesystem",
                 "ironclaw_host_runtime",
@@ -3515,7 +3493,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_authorization",
                 "ironclaw_capabilities",
                 "ironclaw_conversations",
-                "ironclaw_dispatcher",
                 "ironclaw_engine",
                 "ironclaw_event_projections",
                 "ironclaw_event_streams",
@@ -3555,26 +3532,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         BoundaryRule {
             crate_name: "ironclaw_capabilities",
             forbidden: vec![
-                "ironclaw_dispatcher",
                 "ironclaw_host_runtime",
                 "ironclaw_secrets",
                 "ironclaw_network",
                 "ironclaw_mcp",
-                "ironclaw_scripts",
-                "ironclaw_wasm",
-            ],
-        },
-        BoundaryRule {
-            crate_name: "ironclaw_dispatcher",
-            forbidden: vec![
-                "ironclaw_authorization",
-                "ironclaw_approvals",
-                "ironclaw_host_runtime",
-                "ironclaw_secrets",
-                "ironclaw_network",
-                "ironclaw_mcp",
-                "ironclaw_processes",
-                "ironclaw_approvals",
                 "ironclaw_scripts",
                 "ironclaw_wasm",
             ],

@@ -18,7 +18,6 @@ hooks across the Reborn loop. It does not own:
 ironclaw_turns       -> no dependency on ironclaw_hooks
 ironclaw_hooks       -> depends on ironclaw_turns + ironclaw_host_api
 ironclaw_runner      -> depends on ironclaw_hooks for host composition (follow-up)
-ironclaw_engine      -> no hook ownership; optional future driver consumer
 ```
 
 Architecture test in `ironclaw_architecture::tests::reborn_dependency_boundaries`
@@ -31,15 +30,20 @@ Hooks have **four** trust classes; the framework enforces the differences
 an external source; the fourth is run-scoped only.
 
 - **Builtin** — compiled into IronClaw, identity = crate path + symbol. May
-  produce any decision kind via `BuiltinHookSink`.
+  produce any decision kind: installs through the *privileged* hook traits
+  (`install_builtin_*` takes `Privileged*Hook`), whose sinks
+  (`PrivilegedGateSink` / `PrivilegedMutatorSink`) expose `allow`.
 - **Trusted** — user-placed in `~/.ironclaw/hooks/` or workspace `hooks/`. Cannot
   register at `runtime`-class points (e.g., the inner side of capability
-  attenuation). Uses `TrustedHookSink`.
+  attenuation). Also installs through the *privileged* traits — this tier's
+  restriction is on registration points, not on the sink.
 - **Installed** — extension registry, eventually WASM-hosted. Restricted to
   `Observer` and `Effect` kinds by default; `Gate` and `Mutator` require an
-  explicit per-extension grant. Uses `InstalledHookSink`, which exposes only
-  monotonic-restriction constructors. An `Installed` hook cannot mint
-  `Decision::Allow` — that variant is not reachable from the sink trait.
+  explicit per-extension grant. Installs through the *restricted* traits
+  (`install_installed_*` takes `Restricted*Hook`), whose sinks
+  (`RestrictedGateSink` / `RestrictedMutatorSink`) omit `allow` entirely. An
+  `Installed` hook cannot mint `Decision::Allow` — that method is not on the
+  sink trait.
 - **SelfAuthored** — the agent authors a hook for the current run via
   `SelfAuthoredEvaluator` (typically after user ratification). The sink
   (`SelfAuthoredHookSink`) is monotonic-restriction only: no `Allow`, no
@@ -90,7 +94,7 @@ dispatcher and calls `install_*`. The contract is:
 If the dispatcher's install API changes in the future (new installer, renamed
 method, additional trust tier), the loader contract must be re-evaluated:
 the `tier_specific_installers_are_documented_as_loader_contract` test in
-`dispatch.rs` is the regression guard that flags such changes.
+`src/dispatch/mod.rs` is the regression guard that flags such changes.
 
 ## Non-negotiable invariants
 
@@ -107,8 +111,8 @@ the `tier_specific_installers_are_documented_as_loader_contract` test in
 - `Gate` / `Mutator` hooks fail closed.
 - `Observer` / `Effect` hooks fail isolated with redacted audit.
 - All model-visible hook output is bounded, typed, redacted/trust-labeled, and
-  envelope-wrapped when untrusted (reuses the prompt envelope from
-  `ironclaw_host_runtime::memory_context` once that helper is extracted).
+  envelope-wrapped when untrusted (reuses the extracted
+  `ironclaw_prompt_envelope` crate, which this crate already depends on).
 - A hook that demonstrates protocol violation (timeout, panic, malformed
   decision) gets its slot poisoned for the rest of the current turn run.
 
@@ -121,7 +125,7 @@ the `tier_specific_installers_are_documented_as_loader_contract` test in
   `prompt`, `observer`)
 - `kinds/` — sealed decision types (`gate`, `mutator`, `observer`); only the
   dispatcher and matching hook sinks can mint them
-- `sink` — `BuiltinHookSink` / `TrustedHookSink` / `InstalledHookSink`
+- `sink` — the trust-tiered sink/hook traits (`PrivilegedGateSink` / `RestrictedGateSink` / `PrivilegedMutatorSink` / `RestrictedMutatorSink` / `ObserverSink`, and the matching `*BeforeCapabilityHook` / `*BeforePromptHook` / `ObserverHook` / `EventTriggeredHook`)
 - `ordering` — `HookPhase`, `HookPriority`, stable composition
 - `failure_policy` — `FailureCategory` taxonomy and per-kind behavior
 - `registry` — `HookRegistry`, `HookBinding`, run-profile-sourced resolution
@@ -179,11 +183,18 @@ same `Arc`, so a hook poisoned in run N stays poisoned for run N+1. New
 call sites should reach for `with_hook_dispatcher_factory` for real per-run
 isolation.
 
-Cross-run isolation is regression-tested in
-`crates/ironclaw_runner/tests/hooks_integration.rs`:
-`per_build_dispatcher_state_does_not_leak_across_runs` installs a panicking
-hook and proves that the inner port still never receives the call on build
-2 (because the fresh dispatcher's slot is un-poisoned and re-applies the
-fail-closed deny). `legacy_with_hook_dispatcher_shares_state_across_builds`
-pins the shared-state semantic of the legacy adapter as the explicit
-opt-in baseline.
+Cross-run isolation was described here as covered by
+`crates/ironclaw_runner/tests/hooks_integration.rs` with the tests
+`per_build_dispatcher_state_does_not_leak_across_runs` and
+`legacy_with_hook_dispatcher_shares_state_across_builds`. **None of those
+exist** (`ls crates/ironclaw_runner/tests/`; `rg` for either name returns only
+this file). The intended semantic — a fresh dispatcher per build has an
+un-poisoned slot and re-applies the fail-closed deny, while the legacy
+`with_hook_dispatcher` adapter shares state across builds — is currently
+**unpinned by any test**, tracked in
+[#6945](https://github.com/nearai/ironclaw/issues/6945). The property holds in
+production today (composition wires the isolating
+`with_hook_dispatcher_builder_factory`), but nothing fails if that changes.
+`dispatch/mod.rs::poisoned_during_dispatch_skips_subsequent_invocations` covers
+poisoning *within* one dispatcher, not across builds. Treat the legacy adapter
+as the explicit opt-in baseline.

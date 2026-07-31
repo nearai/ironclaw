@@ -33,10 +33,11 @@ use ironclaw_memory::{
 };
 use serde_json::{Map, Value, json};
 
-// The host-facing operation shapes + the `MemoryService` trait moved to
-// `ironclaw_memory`; re-exported so `crate::service::*` and the crate's
-// public API stay unchanged while `NativeMemoryService` (below) keeps the native
-// adapter behavior here.
+// The host-facing operation shapes and the `MemoryService` trait are owned by
+// `ironclaw_memory`; consumers import them from there. The imports above are
+// private to this module — #6943 deleted the re-export shim that used to
+// republish them under `ironclaw_memory_native::` — and this module exports
+// only `NativeMemoryService`, the native adapter implemented below.
 
 const MEMORY_PATH: &str = "MEMORY.md";
 const HEARTBEAT_PATH: &str = "HEARTBEAT.md";
