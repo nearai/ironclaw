@@ -1,6 +1,7 @@
 # ironclaw_turns guardrails
 
-- Own host-layer turn coordination contracts only: canonical turn scope, turn/run IDs, adapter-safe coordinator APIs, runner transition ports, store traits, and redacted lifecycle events.
+- Own host-layer turn coordination contracts only: adapter-safe coordinator APIs, admission, runner transition ports, store traits, and redacted lifecycle events.
+- Do **not** own the turn vocabulary. Scope/actor, turn+run+checkpoint+lease ids, the bounded refs, `TurnStatus` and its `GateKind`/`BlockedReason` correspondence, `EventCursor`, and `RunOriginAdapter` live in `ironclaw_host_api::turn`. The prelude re-export in `lib.rs` exists so crates that already depend on this one keep a single import; it is not an ownership claim, and a crate that needs *only* vocabulary must depend on `ironclaw_host_api` directly instead of taking a dependency here. Never re-alias a host_api turn type to a second name (the deleted `ids.rs` did exactly that with `GateRef`, colliding with the unrelated `ironclaw_host_api::ids::GateRef`).
 - Stay above the Reborn kernel service. Do not depend on or re-export raw `CapabilityHost`, dispatcher, process host, runtime-lane adapters, raw filesystem, network, secrets, MCP, script, or WASM handles.
 - Product adapters use `TurnCoordinator` methods only. Trusted workers may import `ironclaw_turns::runner` explicitly; do not add runner transition APIs to the public prelude.
 - Mutating adapter-facing APIs must take scoped idempotency keys. `submit_turn` accepts requested run-profile hints and `received_at`; responses/state expose resolved profile id+version, not lower runtime handles.

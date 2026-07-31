@@ -29,7 +29,7 @@ use ironclaw_host_api::ids::ExtensionId;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
-use ironclaw_turns::{TurnRunId, TurnScope};
+use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 
 use crate::product_auth::credentials::manual_token_flow::{
     PortBackedManualTokenFlowService, RebornManualTokenFlowService,

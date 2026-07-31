@@ -33,7 +33,6 @@ ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
-ironclaw_turns = { path = "../ironclaw_turns" }
 # Compile-time Mozilla Public Suffix List: DCR issuer/resource origin binding
 # needs real eTLD+1 resolution (naive label-splitting treats every `*.co.uk`
 # as one registrable domain — the PR #6116 security-high finding). Static data

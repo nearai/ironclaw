@@ -12,17 +12,14 @@ mod checkpoint_state;
 mod coordinator;
 pub mod events;
 mod external_tool_catalog;
-mod ids;
 pub mod loop_exit;
 mod origin;
 pub mod process_projection;
-pub mod product_adapter;
 pub mod product_context;
 mod request;
 mod response;
 pub mod run_profile;
 pub mod runner;
-pub mod scope;
 mod status;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -47,7 +44,7 @@ pub use coordinator::{
     TurnSpawnTreePort,
 };
 pub use events::{
-    EventCursor, InMemoryTurnEventSink, MAX_TURN_EVENT_PROJECTION_LIMIT, TurnBlockedGateKind,
+    InMemoryTurnEventSink, MAX_TURN_EVENT_PROJECTION_LIMIT, TurnBlockedGateKind,
     TurnBlockedGateMetadata, TurnCommittedEventObserver, TurnEventKind, TurnEventPage,
     TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
     TurnEventProjectionService, TurnEventProjectionSnapshot, TurnEventProjectionSource,
@@ -58,14 +55,19 @@ pub use external_tool_catalog::{
     ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, ExternalToolSpecError,
     InMemoryExternalToolCatalog, PendingExternalCall,
 };
-pub use ids::{
-    AcceptedMessageRef, CapabilityActivityId, GateRef, IdempotencyKey, LoopExitId, LoopGateRef,
-    LoopMessageRef, LoopResultRef, ReplyTargetBindingRef, RunProfileId, RunProfileRequest,
-    RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId,
-    TurnRunnerId,
-};
+// The turn vocabulary itself is `ironclaw_host_api::turn`'s, not this crate's:
+// ids, refs, scope/actor/owner, status and its gate correspondence, the event
+// cursor, the run-origin adapter identity, and the sanitized failure/cancel
+// shapes. This crate names them because it coordinates turns; it re-exports
+// them only so its own consumers keep one import for the kernel API they
+// already depend on. A crate that needs *only* vocabulary must depend on
+// `ironclaw_host_api` directly — see this crate's CLAUDE.md.
 pub use ironclaw_host_api::turn::{
-    ModelInvalidOutputDetailReason, SanitizedCancelReason, SanitizedFailure, TurnOwner,
+    AcceptedMessageRef, BlockedReason, CapabilityActivityId, EventCursor, GateKind, IdempotencyKey,
+    LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, ModelInvalidOutputDetailReason,
+    ReplyTargetBindingRef, RunOriginAdapter, RunProfileId, RunProfileRequest, RunProfileVersion,
+    SanitizedCancelReason, SanitizedFailure, SourceBindingRef, TurnActor, TurnCheckpointId,
+    TurnGateRef, TurnId, TurnLeaseToken, TurnOwner, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
 };
 pub use loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
@@ -74,7 +76,7 @@ pub use loop_exit::{
     LoopExitEvidencePort, LoopExitMapping, LoopExitValidationDecision, LoopExitViolation,
     LoopExitViolationKind, LoopFailed, LoopFailureKind,
 };
-pub use origin::{ProductTurnContext, RunOriginAdapter, TurnOriginKind, TurnSurfaceType};
+pub use origin::{ProductTurnContext, TurnOriginKind, TurnSurfaceType};
 pub use process_projection::{
     AGENT_TURN_PROCESS_KIND, AgentTurnProcessCommitObserver, AgentTurnProcessMetadata,
     AgentTurnProcessRuntime, AgentTurnProcessStateMetadata, ProcessJournalStoreTurnAdapter,
@@ -102,9 +104,7 @@ pub use run_profile::{
     RunProfileResolutionRequest, RunProfileResolver, RunProfileSourceLayer, RunProfileSourceRef,
     RunnerPoolId, RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
 };
-pub use scope::{TurnActor, TurnScope};
 pub use status::{
-    AdmissionRejection, AdmissionRejectionReason, BlockedReason, GateKind, TurnActiveRunRefState,
-    TurnCapacityResource, TurnError, TurnErrorCategory, TurnRunProfile, TurnRunState, TurnStatus,
-    is_recoverability_critical,
+    AdmissionRejection, AdmissionRejectionReason, TurnActiveRunRefState, TurnCapacityResource,
+    TurnError, TurnErrorCategory, TurnRunProfile, TurnRunState, is_recoverability_critical,
 };

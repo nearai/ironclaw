@@ -4,12 +4,12 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use ironclaw_host_api::ids::ProcessId;
+use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 use ironclaw_processes::{
     CloseProcessDependencyRequest, ProcessDependencyPort, ProcessDependencyQuery,
     ProcessDependencyRecord, ProcessDependencyState, ProcessJournalStoreError,
     ProcessLifecycleStatus, ProcessTerminalEvidence, SettleProcessDependencyRequest,
 };
-use ironclaw_turns::{TurnRunId, TurnScope};
 
 use super::{
     AwaitEdge, AwaitEdgeState, AwaitEdgeStoreError, EdgeTerminalKind, ReservationReleaseState,
@@ -155,7 +155,7 @@ impl AwaitEdgeStore {
         &self,
         scope: &TurnScope,
         parent_run_id: TurnRunId,
-        gate_ref: &ironclaw_turns::GateRef,
+        gate_ref: &ironclaw_host_api::turn::TurnGateRef,
     ) -> Result<Vec<(TurnRunId, AwaitEdge)>, AwaitEdgeStoreError> {
         self.dependencies
             .query_process_dependencies(Self::query(
@@ -262,13 +262,14 @@ impl crate::loop_exit_applier::AwaitDependentRunEvidenceStore for AwaitEdgeStore
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
-        gate_ref: &ironclaw_turns::LoopGateRef,
+        gate_ref: &ironclaw_host_api::turn::LoopGateRef,
     ) -> Result<bool, ironclaw_turns::TurnError> {
-        let gate_ref = ironclaw_turns::GateRef::new(gate_ref.as_str()).map_err(|reason| {
-            ironclaw_turns::TurnError::InvalidRequest {
-                reason: format!("awaited child gate evidence has invalid gate ref: {reason}"),
-            }
-        })?;
+        let gate_ref =
+            ironclaw_host_api::turn::TurnGateRef::new(gate_ref.as_str()).map_err(|reason| {
+                ironclaw_turns::TurnError::InvalidRequest {
+                    reason: format!("awaited child gate evidence has invalid gate ref: {reason}"),
+                }
+            })?;
         let group = self
             .list_group(scope, run_id, &gate_ref)
             .await
@@ -312,12 +313,12 @@ fn map_process_error(error: ironclaw_processes::ProcessJournalStoreError) -> Awa
 mod tests {
     use chrono::Utc;
     use ironclaw_host_api::ids::{AgentId, CapabilityId, ProcessId, TenantId, ThreadId, UserId};
-    use ironclaw_loop_host::{AwaitedChildSetRecord, SpawnSubagentMode, SubagentKindId};
-    use ironclaw_processes::{ProcessDependencyRecord, ProcessDependencyState};
-    use ironclaw_turns::{
-        GateRef, LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnActor, TurnRunId,
+    use ironclaw_host_api::turn::{
+        LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnActor, TurnGateRef, TurnRunId,
         TurnScope,
     };
+    use ironclaw_loop_host::{AwaitedChildSetRecord, SpawnSubagentMode, SubagentKindId};
+    use ironclaw_processes::{ProcessDependencyRecord, ProcessDependencyState};
 
     use super::*;
 
@@ -359,7 +360,7 @@ mod tests {
                 parent_thread_id,
                 parent_run_context,
                 tree_root_run_id: parent_run_id,
-                gate_ref: GateRef::new("gate:store-transition").expect("gate"),
+                gate_ref: TurnGateRef::new("gate:store-transition").expect("gate"),
                 source_binding_ref: SourceBindingRef::new("source:store-transition")
                     .expect("source"),
                 reply_target_binding_ref: ReplyTargetBindingRef::new("reply:store-transition")

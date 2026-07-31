@@ -3,3 +3,4 @@
 //! canonical module convention).
 
 pub mod conformance;
+pub mod fakes;

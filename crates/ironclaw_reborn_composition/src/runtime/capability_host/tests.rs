@@ -15,6 +15,9 @@ mod tests {
     };
     use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStorePort};
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
+    use ironclaw_host_api::turn::{
+        AcceptedMessageRef, ReplyTargetBindingRef, TurnActor, TurnId, TurnRunId, TurnScope,
+    };
     use ironclaw_host_api::{
         action::NetworkPolicy,
         capability::{EffectKind, GrantConstraints},
@@ -56,8 +59,7 @@ mod tests {
         ToolResultSafeSummary,
     };
     use ironclaw_turns::{
-        AcceptedMessageRef, ReplyTargetBindingRef, RunProfileResolutionRequest, RunProfileResolver,
-        TurnActor, TurnId, TurnRunId, TurnScope,
+        RunProfileResolutionRequest, RunProfileResolver,
         run_profile::{
             CapabilityApprovalResume, CapabilityCallCandidate, CapabilityInputIssue,
             CapabilityInputRef, CapabilityResumeToken, InMemoryLoopHostMilestoneSink,
@@ -4096,8 +4098,9 @@ mod tests {
         let missing_invocation_id = InvocationId::parse(missing_resume_token.as_str())
             .expect("missing-target resume token carries invocation id");
         let missing_approval_request_id = {
-            let routing_ref = ironclaw_turns::GateRef::new(missing_gate_origin.as_str())
-                .expect("routing gate ref is valid");
+            let routing_ref =
+                ironclaw_host_api::turn::TurnGateRef::new(missing_gate_origin.as_str())
+                    .expect("routing gate ref is valid");
             ironclaw_product::approval_request_id_from_gate_ref(&routing_ref)
                 .expect("read model recovers the approval request id from the routing ref")
         };
@@ -4242,7 +4245,7 @@ mod tests {
         // durable approval record (correlation id) — see the missing-target
         // reconstruction above; confirm against the post-flip resume contract.
         let approval_request_id = {
-            let routing_ref = ironclaw_turns::GateRef::new(set_gate_origin.as_str())
+            let routing_ref = ironclaw_host_api::turn::TurnGateRef::new(set_gate_origin.as_str())
                 .expect("routing gate ref is valid");
             ironclaw_product::approval_request_id_from_gate_ref(&routing_ref)
                 .expect("read model recovers the approval request id from the routing ref")
@@ -4280,7 +4283,7 @@ mod tests {
             // The routing ref the loop carries is `gate:approval-{id}`; the product
             // read model recovers the approval id from it, agreeing with the id the
             // gate was raised under.
-            let routing_ref = ironclaw_turns::GateRef::new(set_gate_origin.as_str())
+            let routing_ref = ironclaw_host_api::turn::TurnGateRef::new(set_gate_origin.as_str())
                 .expect("routing gate ref is valid");
             let recovered_id = approval_request_id_from_gate_ref(&routing_ref)
                 .expect("read model recovers the approval request id from the routing ref");
@@ -5000,7 +5003,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(LoopRequest {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
@@ -5034,7 +5037,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(LoopRequest {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
@@ -5143,7 +5146,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(LoopRequest {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(SKILL_INSTALL_CAPABILITY_ID)
                     .expect("skill_install capability id"), // safety: built-in capability id is a valid literal.
@@ -5314,7 +5317,7 @@ mod tests {
             .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
         let outcome = port
             .invoke_capability(LoopRequest {
-                activity_id: ironclaw_turns::CapabilityActivityId::new(),
+                activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.

@@ -18,11 +18,11 @@
 
 use std::sync::Arc;
 
+use ironclaw_host_api::turn::{TurnActor, TurnScope};
 use ironclaw_turns::run_profile::{
     CommunicationContextFetch, CommunicationContextProvider, CommunicationRuntimeContext,
     ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
 };
-use ironclaw_turns::scope::{TurnActor, TurnScope};
 
 /// A [`CommunicationContextProvider`] that returns a pre-resolved
 /// [`CommunicationRuntimeContext`] regardless of scope/actor. Mirrors the

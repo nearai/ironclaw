@@ -572,8 +572,8 @@ pub trait CommunicationContextProvider: Send + Sync {
     /// returning so its cost overlaps loop-start work.
     fn begin_communication_context(
         &self,
-        scope: crate::scope::TurnScope,
-        actor: Option<crate::scope::TurnActor>,
+        scope: ironclaw_host_api::turn::TurnScope,
+        actor: Option<ironclaw_host_api::turn::TurnActor>,
     ) -> CommunicationContextFetch;
 }
 

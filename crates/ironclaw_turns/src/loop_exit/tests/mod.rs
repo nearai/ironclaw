@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    BlockedReason, GateRef, SanitizedFailure, TurnCheckpointId, TurnStatus,
+    BlockedReason, SanitizedFailure, TurnCheckpointId, TurnGateRef, TurnStatus,
     runner::TurnRunnerOutcome,
 };
 use serde_json::json;
@@ -31,7 +31,7 @@ fn await_dependent_run_blocked_kind_maps_to_dependent_run_reason() {
     assert_eq!(
         reason,
         BlockedReason::AwaitDependentRun {
-            gate_ref: GateRef::new(gate_ref.as_str()).unwrap()
+            gate_ref: TurnGateRef::new(gate_ref.as_str()).unwrap()
         }
     );
     assert_eq!(reason.status(), TurnStatus::BlockedDependentRun);
@@ -340,7 +340,7 @@ fn validation_policy_requires_final_checkpoint_only_when_configured() {
 fn blocked_exit_maps_to_block_run_outcome_with_verified_checkpoint_and_gate_ref() {
     let checkpoint_id = TurnCheckpointId::new();
     let loop_gate_ref = loop_gate_ref("gate:approval-gate");
-    let gate_ref = GateRef::new(loop_gate_ref.as_str()).unwrap();
+    let gate_ref = TurnGateRef::new(loop_gate_ref.as_str()).unwrap();
     let state_ref = checkpoint_state_ref();
     let decision = LoopExit::Blocked(LoopBlocked {
         kind: LoopBlockedKind::Approval,
@@ -927,7 +927,7 @@ fn blocked_variants_map_to_correct_blocked_reason() {
     ] {
         let checkpoint_id = TurnCheckpointId::new();
         let lg = loop_gate_ref("gate:test-gate");
-        let gate_ref = GateRef::new(lg.as_str()).unwrap();
+        let gate_ref = TurnGateRef::new(lg.as_str()).unwrap();
         let state_ref = checkpoint_state_ref();
 
         let decision = LoopExit::Blocked(LoopBlocked {

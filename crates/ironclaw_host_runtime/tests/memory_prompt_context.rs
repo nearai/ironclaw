@@ -9,6 +9,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use ironclaw_host_api::turn::{TurnActor, TurnScope};
 use ironclaw_host_api::{
     ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
     memory::{MemoryDescriptor, MemoryLifecycleHook},
@@ -21,7 +22,6 @@ use ironclaw_turns::run_profile::{
     ContextProfileId, MemoryPromptContextRequest, MemoryPromptContextService,
     memory_snippet_display_ref,
 };
-use ironclaw_turns::scope::{TurnActor, TurnScope};
 
 use ironclaw_host_runtime::memory_context::ProductionMemoryPromptContextService;
 

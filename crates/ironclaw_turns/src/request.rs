@@ -2,9 +2,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AcceptedMessageRef, GateKind, GateRef, IdempotencyKey, ProductTurnContext,
-    ReplyTargetBindingRef, RunProfileRequest, SanitizedCancelReason, SourceBindingRef, TurnActor,
-    TurnRunId, TurnScope, TurnStatus,
+    AcceptedMessageRef, GateKind, IdempotencyKey, ProductTurnContext, ReplyTargetBindingRef,
+    RunProfileRequest, SanitizedCancelReason, SourceBindingRef, TurnActor, TurnGateRef, TurnRunId,
+    TurnScope, TurnStatus,
 };
 
 pub type TurnTimestamp = DateTime<Utc>;
@@ -125,7 +125,7 @@ pub struct ResumeTurnRequest {
     pub scope: TurnScope,
     pub actor: TurnActor,
     pub run_id: TurnRunId,
-    pub gate_resolution_ref: GateRef,
+    pub gate_resolution_ref: TurnGateRef,
     pub source_binding_ref: SourceBindingRef,
     pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub idempotency_key: IdempotencyKey,
@@ -181,7 +181,7 @@ mod tests {
             },
             actor: TurnActor::new(UserId::from_trusted("user:test".to_string())),
             run_id: TurnRunId::new(),
-            gate_resolution_ref: GateRef::new("gate:test-gate").expect("valid gate ref"),
+            gate_resolution_ref: TurnGateRef::new("gate:test-gate").expect("valid gate ref"),
             source_binding_ref: SourceBindingRef::new("source-binding").expect("valid source ref"),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-target")
                 .expect("valid reply target ref"),

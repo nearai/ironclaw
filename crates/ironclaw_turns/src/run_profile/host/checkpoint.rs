@@ -18,7 +18,7 @@ pub struct LoopCheckpointRequest {
     /// Defaults to `None` for backward-compatible deserialization of older
     /// records that predate this field.
     #[serde(default)]
-    pub gate_ref: Option<crate::ids::LoopGateRef>,
+    pub gate_ref: Option<crate::LoopGateRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

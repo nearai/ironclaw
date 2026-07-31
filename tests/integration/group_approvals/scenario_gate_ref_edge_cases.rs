@@ -1,22 +1,22 @@
 //! C-DENYEDGE rows 7 & 10: gate-ref edge cases the happy-path
 //! `approve_gate`/`deny_gate` helpers cannot reach because they always
 //! resolve the local-dev approval AND resume the coordinator with the SAME
-//! `GateRef`.
+//! `TurnGateRef`.
 //!
 //! - `stale_gate_ref_resume` (row 7): the LOCAL-DEV approval resolve succeeds
 //!   (using the run's real, correct gate_ref) but the COORDINATOR resume is
-//!   issued with a different, stale `GateRef` — reaching
+//!   issued with a different, stale `TurnGateRef` — reaching
 //!   `resume_turn_once`'s `record.gate_ref != Some(&request.gate_resolution_ref)`
 //!   check (`TurnError::InvalidRequest { reason: "gate resolution reference
 //!   mismatch" }`), distinct from a bogus ref failing earlier inside
 //!   `approve_standalone_gate`'s own request-id lookup.
 //! - `missing_gate_bare_resolve` (row 10): a syntactically well-formed but
-//!   never-issued `GateRef` is resolved on a thread that never raised any
+//!   never-issued `TurnGateRef` is resolved on a thread that never raised any
 //!   gate — pins the harness's own request-not-found rejection.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
-use ironclaw_turns::{GateRef, TurnStatus};
+use ironclaw_host_api::turn::{TurnGateRef, TurnStatus};
 use serde_json::json;
 
 pub async fn stale_gate_ref_resume(g: &RebornIntegrationGroup) -> HarnessResult<()> {
@@ -38,7 +38,7 @@ pub async fn stale_gate_ref_resume(g: &RebornIntegrationGroup) -> HarnessResult<
 
     // A syntactically valid but WRONG gate ref, distinct from the run's real,
     // still-blocked `gate_ref`.
-    let stale_gate_ref = GateRef::new("gate:approval-00000000-0000-0000-0000-000000000000")
+    let stale_gate_ref = TurnGateRef::new("gate:approval-00000000-0000-0000-0000-000000000000")
         .expect("valid bounded gate ref string");
     if gate_ref.as_str() == stale_gate_ref.as_str() {
         return Err("the stale ref fixture must not coincidentally match the real gate ref".into());
@@ -79,7 +79,7 @@ pub async fn missing_gate_bare_resolve(g: &RebornIntegrationGroup) -> HarnessRes
     // Syntactically well-formed but NEVER-ISSUED gate ref: no capability call
     // on this thread recorded this request id, so `approve_gate`'s local-dev
     // resolve fails on the lookup before `resume_run` is ever reached.
-    let bogus_gate_ref = GateRef::new("gate:approval-11111111-1111-1111-1111-111111111111")
+    let bogus_gate_ref = TurnGateRef::new("gate:approval-11111111-1111-1111-1111-111111111111")
         .expect("valid bounded gate ref string");
 
     let err = h

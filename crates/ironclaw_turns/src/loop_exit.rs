@@ -10,9 +10,9 @@ use ironclaw_processes::{
 use serde::{Deserialize, Serialize, de};
 
 use crate::{
-    BlockedReason, CapabilityActivityId, GateKind, GateRef, LoopExitId, LoopGateRef,
-    LoopMessageRef, LoopResultRef, ResolvedRunProfile, SanitizedFailure, TurnCheckpointId,
-    TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
+    BlockedReason, CapabilityActivityId, GateKind, LoopExitId, LoopGateRef, LoopMessageRef,
+    LoopResultRef, ResolvedRunProfile, SanitizedFailure, TurnCheckpointId, TurnError, TurnGateRef,
+    TurnId, TurnRunId, TurnRunState, TurnScope,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{ClaimedTurnRun, TurnRunnerOutcome},
 };
@@ -581,7 +581,7 @@ impl LoopBlockedKind {
         gate_ref: LoopGateRef,
         credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     ) -> Result<BlockedReason, ()> {
-        let gate_ref = GateRef::new(gate_ref.as_str()).map_err(|_| ())?;
+        let gate_ref = TurnGateRef::new(gate_ref.as_str()).map_err(|_| ())?;
         Ok(GateKind::from(self).into_blocked_reason(gate_ref, credential_requirements))
     }
 }

@@ -22,7 +22,7 @@ use async_trait::async_trait;
 
 use super::host::{AgentLoopHostError, LoopContextSnippet};
 use super::refs::ContextProfileId;
-use crate::scope::{TurnActor, TurnScope};
+use crate::{TurnActor, TurnScope};
 
 /// Request to load memory snippets for the current loop context.
 #[derive(Debug, Clone)]

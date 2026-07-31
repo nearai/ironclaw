@@ -3532,7 +3532,14 @@ struct LayerMatrixException {
 /// number is therefore a ceiling that only ever moves **down**: when a wave
 /// deletes exceptions, lower it in the same PR so the new floor is locked in.
 /// The ratchet below refuses growth; it cannot make the list shrink on its own.
-const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 20;
+///
+/// **20 → 15 (WS1.1, turn-vocabulary completion).** `auth`, `event_streams`,
+/// `outbound`, `triggers`, and `event_projections` reached `ironclaw_turns`
+/// for turn vocabulary only. That vocabulary is now complete in
+/// `ironclaw_host_api::turn`, those five crates import it from there, and
+/// their `ironclaw_turns` dependency is gone — so the five exceptions were not
+/// waived, their edges no longer exist.
+const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 15;
 
 const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
     LayerMatrixException {
@@ -3571,20 +3578,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         reason: "runtime process management still depends on resource contracts currently classed with kernel behavior",
     },
     LayerMatrixException {
-        crate_name: "ironclaw_event_projections",
-        dependency_name: "ironclaw_turns",
-        introduced: "2026-07-09",
-        removes_in: "W4.3",
-        reason: "projection state reads turn DTOs that move to turn_contracts if the JIT split fires",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_triggers",
-        dependency_name: "ironclaw_turns",
-        introduced: "2026-07-09",
-        removes_in: "W4.3",
-        reason: "trigger state reads turn DTOs that move to turn_contracts if the JIT split fires",
-    },
-    LayerMatrixException {
         crate_name: "ironclaw_conversations",
         dependency_name: "ironclaw_turns",
         introduced: "2026-07-09",
@@ -3604,20 +3597,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         introduced: "2026-07-09",
         removes_in: "W6",
         reason: "hooks still reuse the WASM limiter crate before the directory re-layout verifies runtime/substrate placement",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_outbound",
-        dependency_name: "ironclaw_turns",
-        introduced: "2026-07-09",
-        removes_in: "W4.3",
-        reason: "outbound delivery still names turn DTOs that move to turn_contracts if the JIT split fires",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_event_streams",
-        dependency_name: "ironclaw_turns",
-        introduced: "2026-07-09",
-        removes_in: "W4.3",
-        reason: "event stream contracts still name turn DTOs that move to turn_contracts if the JIT split fires",
     },
     LayerMatrixException {
         crate_name: "ironclaw_agent_loop",
@@ -3667,13 +3646,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         introduced: "2026-07-09",
         removes_in: "W7",
         reason: "the runner intentionally composes loop-host adapters until kernel consolidation introduces a neutral dispatch boundary",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_auth",
-        dependency_name: "ironclaw_turns",
-        introduced: "2026-07-23",
-        removes_in: "follow-up: neutral auth/turn gate host API port",
-        reason: "product-auth owns the recipe-driven blocked-gate OAuth flow driver while it still receives TurnScope/TurnRunId from the turn gate prompt seam",
     },
 ];
 

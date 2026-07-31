@@ -9,6 +9,11 @@ use ironclaw_auth::{
     TurnRunRef,
 };
 use ironclaw_events::{InMemorySecurityAuditSink, SecurityBoundary, SecurityDecision};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, IdempotencyKey, ReplyTargetBindingRef, RunProfileId,
+    RunProfileRequest, RunProfileVersion, SourceBindingRef, TurnActor, TurnGateRef, TurnId,
+    TurnRunId, TurnScope, TurnStatus,
+};
 use ironclaw_host_api::{
     http::{
         RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
@@ -24,10 +29,8 @@ use ironclaw_processes::{
 use ironclaw_product::ProductAuthTurnGateResumeDispatcher;
 use ironclaw_secrets::SecretStore;
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
-    GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, RunProfileId, RunProfileRequest,
-    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    CancelRunRequest, CancelRunResponse, GetRunStateRequest, SubmitTurnRequest, SubmitTurnResponse,
+    TurnCoordinator, TurnError, TurnRunState,
 };
 use secrecy::SecretString;
 use std::sync::Mutex;
@@ -93,7 +96,7 @@ fn auth_error_mapping_run_state(request: &GetRunStateRequest) -> TurnRunState {
         model_usage: None,
         received_at: Utc::now(),
         checkpoint_id: None,
-        gate_ref: Some(GateRef::new("gate:auth-error").unwrap()), // safety: fixed test gate literal is valid.
+        gate_ref: Some(TurnGateRef::new("gate:auth-error").unwrap()), // safety: fixed test gate literal is valid.
         blocked_activity_id: None,
         credential_requirements: Vec::new(),
         failure: None,
@@ -207,7 +210,7 @@ async fn standalone_oauth_turn_gate_callback_resumes_default_turn_coordinator() 
         .await
         .expect("submit turn");
     let SubmitTurnResponse::Accepted { run_id, .. } = submit;
-    let gate_ref = ironclaw_turns::GateRef::new("gate:auth-callback").unwrap();
+    let gate_ref = ironclaw_host_api::turn::TurnGateRef::new("gate:auth-callback").unwrap();
     suspend_auth_process(
         runtime_surfaces.processes.transitions(),
         &scope,
@@ -848,7 +851,7 @@ async fn submit_and_block_provider_auth_run(
         transition,
         &scope,
         run_id,
-        GateRef::new(format!("gate:fanout-{suffix}")).unwrap(),
+        TurnGateRef::new(format!("gate:fanout-{suffix}")).unwrap(),
         vec![
             ironclaw_host_api::decision::RuntimeCredentialAuthRequirement {
                 provider: ironclaw_host_api::ids::VendorId::new(provider).unwrap(),
@@ -869,7 +872,7 @@ async fn suspend_auth_process(
     transition: Arc<dyn ProcessTransitionPort<Error = TurnError>>,
     scope: &TurnScope,
     run_id: TurnRunId,
-    gate_ref: GateRef,
+    gate_ref: TurnGateRef,
     credential_requirements: Vec<ironclaw_host_api::decision::RuntimeCredentialAuthRequirement>,
 ) {
     let worker_id = ProcessWorkerId::from_trusted(format!("auth-test-{run_id}"));
@@ -896,7 +899,7 @@ async fn suspend_auth_process(
             worker_id,
             lease_token: claimed.lease_token,
             checkpoint_ref: ProcessCheckpointRef::from_trusted(
-                ironclaw_turns::TurnCheckpointId::new()
+                ironclaw_host_api::turn::TurnCheckpointId::new()
                     .as_uuid()
                     .to_string(),
             ),
@@ -967,7 +970,7 @@ async fn submit_and_block_auth_run(
     scope: TurnScope,
     actor: TurnActor,
     gate_ref: &str,
-) -> ironclaw_turns::TurnRunId {
+) -> ironclaw_host_api::turn::TurnRunId {
     let submit = turn_coordinator
         .submit_turn(SubmitTurnRequest {
             requested_model: None,
@@ -992,7 +995,7 @@ async fn submit_and_block_auth_run(
         runtime_surfaces.processes.transitions(),
         &scope,
         run_id,
-        ironclaw_turns::GateRef::new(gate_ref).unwrap(),
+        ironclaw_host_api::turn::TurnGateRef::new(gate_ref).unwrap(),
         Vec::new(),
     )
     .await;

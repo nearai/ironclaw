@@ -222,6 +222,7 @@ fn lease_terms_unavailable() -> ProductSurfaceFailure {
 mod tests {
     use std::sync::Arc;
 
+    use ironclaw_host_api::turn::{TurnGateRef, TurnRunId};
     use ironclaw_host_api::{
         action::Action,
         approval::ApprovalRequest,
@@ -233,7 +234,6 @@ mod tests {
         resource::{ResourceEstimate, ResourceScope},
     };
     use ironclaw_product::approval_gate_ref;
-    use ironclaw_turns::{GateRef, TurnRunId};
 
     use crate::builtin_capability_policy::builtin_capability_policy;
     use ironclaw_extension_host::ActiveExtensionCapability;
@@ -543,7 +543,7 @@ mod tests {
             thread_id: Some(ThreadId::new("thread").expect("thread id")),
             invocation_id: InvocationId::new(),
         };
-        let gate_ref: GateRef = approval_gate_ref(request_id).expect("approval gate ref");
+        let gate_ref: TurnGateRef = approval_gate_ref(request_id).expect("approval gate ref");
         ApprovalGateRecord::new(
             resource_scope,
             TurnRunId::new(),

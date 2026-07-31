@@ -294,6 +294,7 @@ mod tests {
 
     use chrono::Utc;
     use ironclaw_host_api::ids::{AgentId, ThreadId};
+    use ironclaw_host_api::turn::{LoopResultRef, TurnGateRef, TurnRunId};
     use ironclaw_loop_host::{SpawnSubagentMode, SubagentKindId};
     use ironclaw_processes::{
         GetProcessInputRequest, ProcessInputPayload, ProcessInputPort, ProcessInputRecord,
@@ -303,7 +304,6 @@ mod tests {
         AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService,
         MessageContent,
     };
-    use ironclaw_turns::{GateRef, LoopResultRef, TurnRunId};
 
     use crate::subagent::flavors::SubagentFlavorId;
 
@@ -496,7 +496,7 @@ mod tests {
                 result_ref: LoopResultRef::new("result:subagent.prompt").unwrap(),
                 handoff: None,
                 parent_run_context: context.clone(),
-                gate_ref: GateRef::new("gate:subagent-prompt-test").unwrap(),
+                gate_ref: TurnGateRef::new("gate:subagent-prompt-test").unwrap(),
             })
             .unwrap()
         });

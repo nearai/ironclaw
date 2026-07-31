@@ -17,11 +17,11 @@ use chrono::{SecondsFormat, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
 use ironclaw_common::{AutomationName, AutomationNameError};
+use ironclaw_host_api::turn::TurnRunId;
 use ironclaw_host_api::{
     Timestamp,
     ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
 };
-use ironclaw_turns::TurnRunId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;

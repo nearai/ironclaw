@@ -23,6 +23,7 @@ use ironclaw_conversations::{
     AdapterInstallationId, AdapterKind, ExternalActorRef, InMemoryConversationServices,
     trusted_trigger_fire_submitter,
 };
+use ironclaw_host_api::turn::{TurnGateRef, TurnRunId, TurnScope, TurnStatus};
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_host::HostManagedModelGateway;
@@ -34,10 +35,7 @@ use ironclaw_triggers::{
     TrustedTriggerSubmitRequest,
 };
 use ironclaw_turns::run_profile::ModelProfileId;
-use ironclaw_turns::{
-    GateRef, GateResumeDisposition, ResumeTurnPrecondition, TurnRunId, TurnRunState, TurnScope,
-    TurnStatus,
-};
+use ironclaw_turns::{GateResumeDisposition, ResumeTurnPrecondition, TurnRunState};
 
 use super::builder::{INTERACTIVE_MODEL_PROFILE, RebornIntegrationHarness};
 use super::reply::RebornScriptedReply;
@@ -281,7 +279,7 @@ impl RebornIntegrationHarness {
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> HarnessResult<()> {
         self.capability_recorder
             .approve_standalone_gate(gate_ref)
@@ -304,7 +302,7 @@ impl RebornIntegrationHarness {
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> HarnessResult<()> {
         self.capability_recorder
             .deny_standalone_gate(gate_ref)
@@ -330,7 +328,7 @@ impl RebornIntegrationHarness {
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         resume_disposition: Option<GateResumeDisposition>,
         precondition: ResumeTurnPrecondition,
     ) -> HarnessResult<()> {

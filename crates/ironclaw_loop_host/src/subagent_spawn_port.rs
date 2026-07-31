@@ -10,6 +10,11 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, CapabilityActivityId, IdempotencyKey, LoopGateRef, LoopResultRef,
+    ReplyTargetBindingRef, RunProfileRequest, SanitizedCancelReason, SourceBindingRef, TurnActor,
+    TurnGateRef, TurnRunId, TurnScope,
+};
 use ironclaw_host_api::{
     ids::{CapabilityId, InvocationId, ProviderToolName, ThreadId},
     resolution::{Resolution, ResolutionBatch, Suspension},
@@ -22,10 +27,8 @@ use ironclaw_threads::{
     ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, AgentTurnSpawnTreeRuntimePort, CancelRunRequest, CapabilityActivityId,
-    GateRef, IdempotencyKey, LoopGateRef, LoopResultRef, ReplyTargetBindingRef, RunProfileRequest,
-    SanitizedCancelReason, SourceBindingRef, SubmitChildRunRequest, SubmitTurnResponse, TurnActor,
-    TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnScope, TurnSpawnTreePort,
+    AgentTurnSpawnTreeRuntimePort, CancelRunRequest, SubmitChildRunRequest, SubmitTurnResponse,
+    TurnCoordinator, TurnError, TurnErrorCategory, TurnSpawnTreePort,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailureDetail,
@@ -259,7 +262,7 @@ pub struct SubagentGoalRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AwaitedChildSetRecord {
-    pub gate_ref: GateRef,
+    pub gate_ref: TurnGateRef,
     pub parent_run_context: LoopRunContext,
     pub tree_root_run_id: TurnRunId,
     pub child_scope: TurnScope,
@@ -307,7 +310,7 @@ pub struct SubagentThreadMetadata {
     /// The spawn-time gate ref (also computed in `finish_spawn`), including
     /// the shared D3 batch-gate value when this spawn is part of a group —
     /// reconstruction has no other way to recover that shared value.
-    pub gate_ref: GateRef,
+    pub gate_ref: TurnGateRef,
 }
 
 #[async_trait]
@@ -390,7 +393,7 @@ struct SpawnContext {
     child_scope: ThreadScope,
     child_run_id: TurnRunId,
     tree_root: TurnRunId,
-    gate_override: Option<GateRef>,
+    gate_override: Option<TurnGateRef>,
 }
 
 #[derive(Default)]
@@ -681,7 +684,7 @@ impl SubagentSpawnCapabilityPort {
         &self,
         invocation: &LoopRequest,
         args: SpawnSubagentArgs,
-        gate_override: Option<GateRef>,
+        gate_override: Option<TurnGateRef>,
     ) -> Result<Resolution, AgentLoopHostError> {
         let mut compensation = SpawnCompensationState::default();
         self.handle_spawn_with_gate_recording(invocation, args, gate_override, &mut compensation)
@@ -692,7 +695,7 @@ impl SubagentSpawnCapabilityPort {
         &self,
         invocation: &LoopRequest,
         args: SpawnSubagentArgs,
-        gate_override: Option<GateRef>,
+        gate_override: Option<TurnGateRef>,
         compensation: &mut SpawnCompensationState,
     ) -> Result<Resolution, AgentLoopHostError> {
         let Some(spawn_slot) = self.reserve_spawn_slot() else {
@@ -864,7 +867,7 @@ impl SubagentSpawnCapabilityPort {
         let gate_ref = if let Some(gate_ref) = gate_override {
             gate_ref
         } else {
-            GateRef::new(format!("gate:subagent-{child_run_id}")).map_err(invalid_static_ref)?
+            TurnGateRef::new(format!("gate:subagent-{child_run_id}")).map_err(invalid_static_ref)?
         };
         let payload = spawn_result_payload(
             child_run_id,
@@ -1227,7 +1230,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         }
         let batch_blocking_gate = if blocking_count > 1 {
             Some(
-                GateRef::new(format!("gate:subagent-batch-{}", TurnRunId::new()))
+                TurnGateRef::new(format!("gate:subagent-batch-{}", TurnRunId::new()))
                     .map_err(invalid_static_ref)?,
             )
         } else {
