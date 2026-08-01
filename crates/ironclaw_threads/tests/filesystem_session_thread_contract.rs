@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{
     BackendCapabilities, CasExpectation, DirEntry, DiskFilesystem, Entry, Fault, FaultInjecting,
-    FileStat, FilesystemError, FilesystemOperation, Filter, InMemoryBackend, IndexSpec,
+    FaultKind, FileStat, FilesystemError, FilesystemOperation, Filter, InMemoryBackend, IndexSpec,
     OrderedPage, Page, RecordVersion, RootFilesystem, ScopedFilesystem, SeqNo, StorageTxn,
     TxnCapability, VersionedEntry,
 };
@@ -2404,6 +2404,61 @@ async fn filesystem_migration_backfills_legacy_derived_titles() {
         before_second,
         "after the migration, listing must be probe-free"
     );
+}
+
+/// Writer admission is where the observed QA failure happens: acquiring the
+/// sole libSQL writer can time out as `BackendBusy`, and the migration runs
+/// from the first transcript read. Classifying only the in-transaction calls
+/// left that arm escaping to the caller as the retryable timeline 503 the
+/// bounded retry exists to absorb.
+#[tokio::test]
+async fn filesystem_transcript_migration_retries_writer_admission_contention() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-migrate-admit", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("migrate-admit");
+    let thread_id = ThreadId::new("thread-migrate-admit").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            turn_run_id: "run-migrate-admit".into(),
+            content: MessageContent::text("assistant reply"),
+        })
+        .await
+        .unwrap();
+    let marker = backend
+        .recorded_paths(FilesystemOperation::WriteFile)
+        .into_iter()
+        .find(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .expect("seeding wrote the transcript migration marker");
+    backend.delete(&marker).await.unwrap();
+
+    // The migration's first attempt to take the writer times out.
+    backend.add_fault(
+        Fault::on(FilesystemOperation::BeginTxn)
+            .nth(1)
+            .returning(FaultKind::BackendBusy),
+    );
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+        })
+        .await
+        .expect("writer-admission contention must be retried, not surfaced as a 503");
+    assert_eq!(history.messages.len(), 1);
 }
 
 /// The one-time transcript-index migration runs on a scope's first transcript
