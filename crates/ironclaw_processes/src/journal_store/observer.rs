@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use ironclaw_filesystem::{CasExpectation, Entry, RootFilesystem};
+use ironclaw_filesystem::{CasExpectation, Entry, FilesystemError, RecordVersion, RootFilesystem};
 use ironclaw_host_api::{path::ScopedPath, resource::ResourceScope};
 use tokio::sync::Mutex;
 
@@ -35,6 +35,24 @@ pub(super) struct ObserverDeliveryState {
     /// the cursor row and page the journal back out of the backend just to
     /// rediscover what it had in memory.
     acknowledged: Option<ProcessJournalCursor>,
+    /// Version of the cursor row observed alongside `acknowledged`, or `None`
+    /// when the row was absent at that observation.
+    ///
+    /// Every cursor write is conditional on it. Two store instances can share
+    /// one observer id across a rolling restart; without the condition, an
+    /// instance holding a stale cache would overwrite a newer durable cursor
+    /// with a lower one and silently rewind acknowledged progress, redelivering
+    /// the difference after the next restart.
+    version: Option<RecordVersion>,
+}
+
+/// Why a cursor acknowledgement did not land.
+enum AcknowledgeError {
+    /// The durable row moved under us: another store instance advanced this
+    /// observer. The cached view is dropped and the caller must fall back to
+    /// the authoritative durable replay rather than retry the stale write.
+    Conflict,
+    Backend(String),
 }
 
 /// One or more committed transactions' deliverable entries, carried in memory
@@ -131,8 +149,22 @@ where
             )
             .await?;
         }
-        self.acknowledge_observer_cursor(observer, &mut delivery, batch.last)
+        match self
+            .acknowledge_observer_cursor(observer, &mut delivery, batch.last)
             .await
+        {
+            Ok(()) => Ok(()),
+            Err(AcknowledgeError::Backend(error)) => Err(error),
+            Err(AcknowledgeError::Conflict) => {
+                // Another instance owns newer progress. Re-derive from the
+                // durable row instead of forcing our cursor onto it; the
+                // entries above may be delivered twice, which every replay
+                // path already permits.
+                drop(delivery);
+                self.replay_durable_observer_once(observer, Some(batch.last))
+                    .await
+            }
+        }
     }
 
     /// Persist an observer's delivery cursor and refresh the cached value.
@@ -141,21 +173,39 @@ where
         observer: &RegisteredProcessObserver,
         delivery: &mut ObserverDeliveryState,
         cursor: ProcessJournalCursor,
-    ) -> Result<(), String> {
-        let cursor_path =
-            process_observer_cursor_path(&observer.id).map_err(|error| error.to_string())?;
-        let cursor_body = serde_json::to_vec(&cursor.0).map_err(|error| error.to_string())?;
-        self.filesystem
+    ) -> Result<(), AcknowledgeError> {
+        let cursor_path = process_observer_cursor_path(&observer.id)
+            .map_err(|error| AcknowledgeError::Backend(error.to_string()))?;
+        let cursor_body = serde_json::to_vec(&cursor.0)
+            .map_err(|error| AcknowledgeError::Backend(error.to_string()))?;
+        // Conditional on the version this process last observed, so the write
+        // can only advance the row it actually read.
+        let expectation = match delivery.version {
+            Some(version) => CasExpectation::Version(version),
+            None => CasExpectation::Absent,
+        };
+        match self
+            .filesystem
             .put(
                 &ResourceScope::system(),
                 &cursor_path,
                 Entry::bytes(cursor_body),
-                CasExpectation::Any,
+                expectation,
             )
             .await
-            .map_err(|error| error.to_string())?;
-        delivery.acknowledged = Some(cursor);
-        Ok(())
+        {
+            Ok(version) => {
+                delivery.acknowledged = Some(cursor);
+                delivery.version = Some(version);
+                Ok(())
+            }
+            Err(FilesystemError::VersionMismatch { .. }) => {
+                delivery.acknowledged = None;
+                delivery.version = None;
+                Err(AcknowledgeError::Conflict)
+            }
+            Err(error) => Err(AcknowledgeError::Backend(error.to_string())),
+        }
     }
 
     pub(super) async fn replay_durable_observer_once(
@@ -166,11 +216,13 @@ where
         let mut delivery = observer.delivery.lock().await;
         let cursor_path =
             process_observer_cursor_path(&observer.id).map_err(|error| error.to_string())?;
-        let mut after = self
+        let read_cursor = self
             .filesystem
             .get(&ResourceScope::system(), &cursor_path)
             .await
-            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        let version = read_cursor.as_ref().map(|versioned| versioned.version);
+        let mut after = read_cursor
             .map(|versioned| {
                 serde_json::from_slice::<u64>(&versioned.entry.body)
                     .map(ProcessJournalCursor)
@@ -182,6 +234,7 @@ where
         // "unknown") lets a journal that starts empty take the in-memory
         // delivery path from its very first batch.
         delivery.acknowledged = Some(after.unwrap_or(ProcessJournalCursor(0)));
+        delivery.version = version;
         loop {
             // A concurrent replay may already have delivered past this target
             // while this call waited for the delivery lock.
@@ -218,8 +271,34 @@ where
             // crash mid-page redelivers the page; observers already tolerate
             // redelivery because every retry path replays.
             if let Some(cursor) = delivered {
-                self.acknowledge_observer_cursor(observer, &mut delivery, cursor)
-                    .await?;
+                match self
+                    .acknowledge_observer_cursor(observer, &mut delivery, cursor)
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(AcknowledgeError::Backend(error)) => return Err(error),
+                    Err(AcknowledgeError::Conflict) => {
+                        // Another instance advanced this observer while the
+                        // page was in flight. Re-read the durable row and
+                        // resume from wherever it now stands; its cursor is
+                        // authoritative and may already cover the target.
+                        let read_cursor = self
+                            .filesystem
+                            .get(&ResourceScope::system(), &cursor_path)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        delivery.version = read_cursor.as_ref().map(|versioned| versioned.version);
+                        after = read_cursor
+                            .map(|versioned| {
+                                serde_json::from_slice::<u64>(&versioned.entry.body)
+                                    .map(ProcessJournalCursor)
+                                    .map_err(|error| error.to_string())
+                            })
+                            .transpose()?;
+                        delivery.acknowledged = Some(after.unwrap_or(ProcessJournalCursor(0)));
+                        continue;
+                    }
+                }
             }
             if reached_target || !page.truncated {
                 return Ok(());

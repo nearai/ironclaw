@@ -1541,6 +1541,9 @@ where
             )
             .await
         {
+            // silent-ok: the message is already durable; the recency stamp and
+            // derived label are advisory, and failing the accept here could
+            // make an un-idempotent caller retry and duplicate the message.
             tracing::debug!(
                 thread_id = %thread_id.as_str(),
                 ?error,

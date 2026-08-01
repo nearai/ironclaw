@@ -268,7 +268,7 @@ where
             responder,
             awaits_observer_delivery: !observer::inside_observer_delivery(),
         };
-        if self.flusher().await.submit(queued).is_err() {
+        if self.flusher().await.submit(queued).await.is_err() {
             return Err(flusher::backend_busy(self));
         }
         response

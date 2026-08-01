@@ -432,6 +432,11 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 1)]
     pub(crate) thread_list_users: usize,
 
+    /// Seed thread-list threads without titles, each carrying one accepted
+    /// user message — the shape that exercises sidebar title derivation.
+    #[arg(long, default_value_t = false)]
+    pub(crate) thread_list_untitled: bool,
+
     /// Page size used while walking the thread-list workload.
     #[arg(long, default_value_t = 50)]
     pub(crate) thread_list_page_size: usize,

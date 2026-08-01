@@ -398,6 +398,13 @@ impl OrderedPage {
     }
 }
 
+/// Number of projected key columns (`k0`..`k7`) an ordered index carries.
+///
+/// One definition for both SQL backends' projection DDL and the query-side
+/// tie-breaker guard: a second copy that drifts silently stops projecting the
+/// extra key.
+pub(crate) const MAX_ORDERED_INDEX_KEYS: usize = 8;
+
 /// All ancestor prefixes of `path`, **most specific first**, ending at `/`.
 ///
 /// Index-spec resolution walks this chain so a caller may declare an index on

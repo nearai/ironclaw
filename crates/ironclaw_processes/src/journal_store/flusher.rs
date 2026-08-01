@@ -46,16 +46,30 @@ pub(super) struct QueuedCommand {
     pub(super) awaits_observer_delivery: bool,
 }
 
+/// Queue depth for lifecycle commands awaiting a batch.
+///
+/// The funnel is the one writer, so an unbounded queue would let a stalled
+/// backend accumulate one boxed request per in-flight caller with no ceiling.
+/// A bounded queue turns that into backpressure at `execute`. It also bounds
+/// the delivery queue transitively: every delivery batch comes from commands
+/// that passed through here.
+const COMMAND_QUEUE_CAPACITY: usize = 1_024;
+
 pub(super) struct FlusherHandle {
-    commands: mpsc::UnboundedSender<QueuedCommand>,
+    commands: mpsc::Sender<QueuedCommand>,
 }
 
 /// The funnel is gone because every store handle that owned it was dropped.
 pub(super) struct FunnelClosed;
 
 impl FlusherHandle {
-    pub(super) fn submit(&self, queued: QueuedCommand) -> Result<(), FunnelClosed> {
-        match self.commands.send(queued) {
+    /// Enqueue a command, waiting for room when the funnel is saturated.
+    ///
+    /// Waiting here is the backpressure: the flusher drains continuously and
+    /// never blocks on a caller, so a queued caller cannot stall the drain
+    /// (including the re-entrant commands observer callbacks issue).
+    pub(super) async fn submit(&self, queued: QueuedCommand) -> Result<(), FunnelClosed> {
+        match self.commands.send(queued).await {
             Ok(()) => Ok(()),
             // The channel closes only when the flusher task is gone. The
             // command was never queued and its responder is dropped with it.
@@ -91,7 +105,12 @@ pub(super) fn spawn<F>(store: ProcessJournalStore<F>) -> FlusherHandle
 where
     F: RootFilesystem + Send + Sync + 'static,
 {
-    let (commands, command_receiver) = mpsc::unbounded_channel();
+    let (commands, command_receiver) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
+    // Deliveries stay unbounded deliberately. Observer callbacks re-enter the
+    // store (the await-edge resolver settles dependencies from inside one), so
+    // a full delivery queue would block the flusher while the delivery task
+    // waits on a command the flusher can no longer accept. Its depth is
+    // already bounded by the command queue that feeds it.
     let (deliveries, delivery_receiver) = mpsc::unbounded_channel();
     tokio::spawn(run_delivery(store.clone(), delivery_receiver));
     tokio::spawn(run_flusher(store, command_receiver, deliveries));
@@ -130,7 +149,7 @@ impl DeliveryBatch {
 
 async fn run_flusher<F>(
     store: ProcessJournalStore<F>,
-    mut receiver: mpsc::UnboundedReceiver<QueuedCommand>,
+    mut receiver: mpsc::Receiver<QueuedCommand>,
     deliveries: mpsc::UnboundedSender<DeliveryBatch>,
 ) where
     F: RootFilesystem + Send + Sync + 'static,
@@ -317,6 +336,8 @@ where
         for command in pending.iter().filter(|command| command.is_live()) {
             references.merge_from(&command.references);
         }
+        // One pass over the fully merged batch, so a row is read once.
+        references.normalize();
         let mut loaded = match rows::load(store.filesystem.as_ref(), &references).await {
             Ok(loaded) => loaded,
             Err(ProcessJournalStoreError::Filesystem(error))

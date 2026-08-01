@@ -449,6 +449,8 @@ where
         )
         .await;
         if let Err(error) = result {
+            // silent-ok: opportunistic heal; listing already holds the label
+            // for this response and the next request simply probes again.
             tracing::debug!(
                 thread_id = %thread_id.as_str(),
                 ?error,
@@ -735,10 +737,20 @@ where
                     let virtual_path = self
                         .filesystem
                         .resolve(&scope.to_resource_scope(), &lookup_path)?;
-                    if matches!(expectation, CasExpectation::Absent)
-                        && txn.get(&virtual_path).await?.is_some()
-                    {
-                        continue;
+                    if matches!(expectation, CasExpectation::Absent) {
+                        // This read can lose the same writer race as the
+                        // writes below (BackendBusy under contention on both
+                        // SQL backends); classify it the same way or the
+                        // bounded-retry contract has a hole.
+                        match txn.get(&virtual_path).await {
+                            Ok(Some(_)) => continue,
+                            Ok(None) => {}
+                            Err(error) if transcript_migration_conflict(&error) => {
+                                txn.rollback().await;
+                                return Ok(TranscriptPageOutcome::Conflict(error));
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
                     }
                     match txn.put(&virtual_path, lookup_entry, expectation).await {
                         Ok(_) => {}

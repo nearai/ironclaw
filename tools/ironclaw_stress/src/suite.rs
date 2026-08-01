@@ -83,6 +83,8 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
         crate::trace::prepare_trace_outputs(&case_args).await?;
         let started = Instant::now();
         let case_result = run_once(&case_args, &run_id).await;
+        // Measure the workload, not the teardown that follows it.
+        let duration_ms = started.elapsed().as_millis();
         if let Some(path) = case_args
             .libsql_path
             .as_ref()
@@ -93,7 +95,6 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
         let captured = case_result?;
         let metrics = captured.metrics();
         let summary = captured.summary_value();
-        let duration_ms = started.elapsed().as_millis();
         let top_failure_bucket = top_failure_bucket(&summary);
         let top_operation_group = top_operation_group(&summary);
         let record = json!({

@@ -28,6 +28,9 @@ pub(in crate::journal_store) struct LoadReferences {
 
 impl LoadReferences {
     /// Fold another command's references into this batch-wide set.
+    /// Append `other`'s references. The caller normalizes once after folding
+    /// the whole batch — normalizing per merge would re-sort collections that
+    /// the previous fold already sorted.
     pub(in crate::journal_store) fn merge_from(&mut self, other: &Self) {
         self.process_ids.extend(other.process_ids.iter().copied());
         self.tree_roots.extend(other.tree_roots.iter().copied());
@@ -42,7 +45,6 @@ impl LoadReferences {
         self.claims.extend(other.claims.iter().cloned());
         self.recover_expired
             .extend(other.recover_expired.iter().cloned());
-        self.normalize();
     }
 
     /// Sort and dedupe the reference sets that address individual rows so a

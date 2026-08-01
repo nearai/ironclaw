@@ -2123,8 +2123,7 @@ async fn ensure_postgres_ordered_projection(
     path: &VirtualPath,
     spec: &IndexSpec,
 ) -> Result<(), FilesystemError> {
-    const MAX_ORDERED_INDEX_KEYS: usize = 8;
-    if spec.keys.len() > MAX_ORDERED_INDEX_KEYS {
+    if spec.keys.len() > crate::index::MAX_ORDERED_INDEX_KEYS {
         return Err(FilesystemError::Unsupported {
             path: path.clone(),
             operation: FilesystemOperation::EnsureIndex,
@@ -2238,7 +2237,7 @@ async fn ensure_postgres_static_ordered_projection(
          OR (NEW.path >= s.prefix || '/' AND NEW.path < s.prefix || '0'))";
     let mut key_values = Vec::new();
     let mut key_presence = Vec::new();
-    for i in 0..MAX_ORDERED_INDEX_KEYS_STATIC {
+    for i in 0..crate::index::MAX_ORDERED_INDEX_KEYS {
         key_values.push(format!(
             "CASE WHEN jsonb_array_length(s.keys) > {i} \
              THEN NEW.indexed -> (s.keys ->> {i}) END"
@@ -2251,10 +2250,13 @@ async fn ensure_postgres_static_ordered_projection(
     }
     let key_values = key_values.join(", ");
     let key_presence = key_presence.join(" AND ");
-    let updates = (0..MAX_ORDERED_INDEX_KEYS_STATIC)
+    let updates = (0..crate::index::MAX_ORDERED_INDEX_KEYS)
         .map(|position| format!("k{position} = EXCLUDED.k{position}"))
         .collect::<Vec<_>>()
         .join(", ");
+    // DROP + CREATE rather than CREATE OR REPLACE TRIGGER: the latter needs
+    // PostgreSQL 14+, and this whole block runs in one advisory-locked
+    // transaction, so the drop is never observable to another writer.
     let ddl = format!(
         "CREATE INDEX IF NOT EXISTS idx_root_filesystem_ordered_rows_path \
            ON root_filesystem_ordered_index_rows(path); \
@@ -2282,21 +2284,22 @@ async fn ensure_postgres_static_ordered_projection(
            RETURN NEW; \
          END; \
          $projection$; \
-         CREATE OR REPLACE TRIGGER rfs_ordered_projection_v3_ai \
+         DROP TRIGGER IF EXISTS rfs_ordered_projection_v3_ai ON root_filesystem_entries; \
+         DROP TRIGGER IF EXISTS rfs_ordered_projection_v3_au ON root_filesystem_entries; \
+         DROP TRIGGER IF EXISTS rfs_ordered_projection_v3_ad ON root_filesystem_entries; \
+         CREATE TRIGGER rfs_ordered_projection_v3_ai \
            AFTER INSERT ON root_filesystem_entries \
            FOR EACH ROW EXECUTE FUNCTION rfs_ordered_projection_v3(); \
-         CREATE OR REPLACE TRIGGER rfs_ordered_projection_v3_au \
+         CREATE TRIGGER rfs_ordered_projection_v3_au \
            AFTER UPDATE ON root_filesystem_entries \
            FOR EACH ROW EXECUTE FUNCTION rfs_ordered_projection_v3(); \
-         CREATE OR REPLACE TRIGGER rfs_ordered_projection_v3_ad \
+         CREATE TRIGGER rfs_ordered_projection_v3_ad \
            AFTER DELETE ON root_filesystem_entries \
            FOR EACH ROW EXECUTE FUNCTION rfs_ordered_projection_v3();"
     );
     transaction.batch_execute(&ddl).await.map_err(map_err)?;
     transaction.commit().await.map_err(map_err)
 }
-
-const MAX_ORDERED_INDEX_KEYS_STATIC: usize = 8;
 
 /// Translate a [`Filter`] tree into a postgres WHERE-clause fragment.
 /// Bound parameters use `$N` placeholders sized from `params.len() + 1`.

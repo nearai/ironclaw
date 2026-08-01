@@ -1613,6 +1613,120 @@ async fn observer_registration_replays_commits_durably_after_restart() {
     .expect("durable observer replay");
 }
 
+/// Two store instances can share one observer id across a rolling restart, and
+/// each caches its own view of the shared cursor row. The instance holding the
+/// older view must never overwrite the newer durable cursor: rewinding it
+/// silently redelivers the difference after the next restart, and the persisted
+/// acknowledgement stops representing real progress.
+///
+/// The newer position is written directly here so the stale-cache window is
+/// deterministic — the contiguity check hides it whenever the other instance's
+/// entries also land in this instance's journal view.
+#[tokio::test]
+async fn observer_cursor_never_rewinds_from_a_stale_cache() {
+    let filesystem = in_memory_backed_processes_filesystem();
+    let store = ProcessJournalStore::new(Arc::clone(&filesystem));
+    let scope = scope();
+    let submit = async |store: &ProcessJournalStore<_>| {
+        store
+            .submit_process(SubmitProcessRequest {
+                process_id: ProcessId::new(),
+                process_kind: ProcessKind::Internal,
+                scope: scope.clone(),
+                exclusive_within_scope: false,
+                operation_id: None,
+                owner_user_id: Some(scope.user_id.clone()),
+                concurrency_class: None,
+                parent_process_id: None,
+                root_process_id: None,
+                spawn_tree_descendant_cap: None,
+                dependency: None,
+                checkpoint_ref: None,
+                input: None,
+                created_at: Utc::now(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .expect("submit");
+    };
+    let observer = Arc::new(RecordingProcessObserver::default());
+    store
+        .subscribe_process_observer(observer.clone())
+        .expect("subscribe observer");
+
+    // Deliver once so this instance caches the cursor row it just wrote.
+    submit(&store).await;
+    let cursor_path = observer_cursor_path();
+    await_observer_cursor(&filesystem, &cursor_path).await;
+
+    // A second instance races ahead of this one's cached view.
+    const AHEAD: u64 = 9_999;
+    filesystem
+        .put(
+            &ResourceScope::system(),
+            &cursor_path,
+            Entry::bytes(serde_json::to_vec(&AHEAD).expect("cursor body")),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("simulate a second instance advancing the shared cursor");
+
+    // This instance commits again on its stale cache. Its next entry is
+    // contiguous with what it cached, so it takes the in-memory delivery path.
+    submit(&store).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if read_observer_cursor(&filesystem, &cursor_path).await != Some(AHEAD) {
+                tokio::task::yield_now().await;
+                continue;
+            }
+            // Give a rewind a chance to appear before declaring success.
+            tokio::task::yield_now().await;
+            if read_observer_cursor(&filesystem, &cursor_path).await == Some(AHEAD) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap_or(());
+    let observed = read_observer_cursor(&filesystem, &cursor_path).await;
+    assert_eq!(
+        observed,
+        Some(AHEAD),
+        "a stale cache must never rewind the durable observer cursor"
+    );
+}
+
+fn observer_cursor_path() -> ScopedPath {
+    let digest = blake3::hash(b"recording-process-observer").to_hex();
+    ScopedPath::new(format!("/processes/materialized/observer-cursor/{digest}"))
+        .expect("cursor path")
+}
+
+async fn read_observer_cursor(
+    filesystem: &Arc<ScopedFilesystem<InMemoryBackend>>,
+    path: &ScopedPath,
+) -> Option<u64> {
+    filesystem
+        .get(&ResourceScope::system(), path)
+        .await
+        .expect("read cursor")
+        .map(|versioned| serde_json::from_slice::<u64>(&versioned.entry.body).expect("cursor body"))
+}
+
+async fn await_observer_cursor(
+    filesystem: &Arc<ScopedFilesystem<InMemoryBackend>>,
+    path: &ScopedPath,
+) -> u64 {
+    for _ in 0..2_000 {
+        if let Some(cursor) = read_observer_cursor(filesystem, path).await {
+            return cursor;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("observer cursor row was never written");
+}
+
 #[tokio::test]
 async fn observer_failure_retries_until_durable_cursor_is_acknowledged() {
     let filesystem = in_memory_backed_processes_filesystem();
@@ -1708,14 +1822,20 @@ async fn group_committed_submissions_deliver_every_entry_once_before_returning()
     let snapshots = futures::future::join_all(submissions).await;
     assert_eq!(snapshots.len(), process_ids.len());
 
-    // The 32 group-committed submissions reach the observer as one batched
-    // call, not 32: delivery sits between the commit and the caller's response,
-    // so a per-entry hand-off there costs a round trip per entry.
+    // The group-committed submissions reach the observer batched, not one call
+    // per entry: delivery sits between the commit and the caller's response, so
+    // a per-entry hand-off there costs a round trip per entry. Asserted as a
+    // property rather than an exact batch size, which depends on how far the
+    // runtime lets submissions queue before the flusher drains them.
     let batch_sizes = observer.batch_sizes.lock().expect("observer batch sizes");
+    let largest = batch_sizes.iter().copied().max().unwrap_or_default();
     assert!(
-        batch_sizes.contains(&process_ids.len()),
-        "expected one delivery of {} commits, saw batches {batch_sizes:?}",
-        process_ids.len()
+        largest > 1,
+        "expected batched delivery, saw only per-entry calls {batch_sizes:?}"
+    );
+    assert!(
+        batch_sizes.len() < process_ids.len(),
+        "expected fewer deliveries than commits, saw batches {batch_sizes:?}"
     );
     drop(batch_sizes);
 

@@ -2488,8 +2488,7 @@ async fn ensure_libsql_ordered_projection(
     path: &VirtualPath,
     spec: &IndexSpec,
 ) -> Result<(), FilesystemError> {
-    const MAX_ORDERED_INDEX_KEYS: usize = 8;
-    if spec.keys.len() > MAX_ORDERED_INDEX_KEYS {
+    if spec.keys.len() > crate::index::MAX_ORDERED_INDEX_KEYS {
         return Err(FilesystemError::Unsupported {
             path: path.clone(),
             operation: FilesystemOperation::EnsureIndex,
@@ -2574,7 +2573,7 @@ async fn ensure_libsql_static_ordered_projection(
          OR (new.path >= s.prefix || '/' AND new.path < s.prefix || '0'))";
     let mut key_values = Vec::new();
     let mut key_presence = Vec::new();
-    for i in 0..8 {
+    for i in 0..crate::index::MAX_ORDERED_INDEX_KEYS {
         key_values.push(format!(
             "CASE WHEN json_array_length(s.keys) > {i} \
              THEN json_extract(new.indexed, '$.' || json_extract(s.keys, '$[{i}]')) END"
