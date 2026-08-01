@@ -1,3 +1,6 @@
+use ironclaw_product_contracts::lifecycle_service::{
+    LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
+};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -19,9 +22,8 @@ use ironclaw_product_contracts::surface::{
 
 use crate::{
     ChannelAuthAccountState, ChannelConnectionService, LifecycleExtensionSummary,
-    LifecycleInstalledExtensionSummary, LifecycleProductAction, LifecycleProductContext,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductService,
-    LifecycleProductSurfaceContext, ProductView, RebornAccountBindingSource, RebornAuthAccount,
+    LifecycleInstalledExtensionSummary, LifecycleProductAction, LifecycleProductPayload,
+    LifecycleProductResponse, ProductView, RebornAccountBindingSource, RebornAuthAccount,
     RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionRegistryEntry,
     RebornExtensionRegistryResponse, RebornExtensionSurface, RebornVendorAuthAccounts,
 };

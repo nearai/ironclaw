@@ -11,6 +11,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelContext, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, VerifiedInbound,
+};
 use ironclaw_extension_contracts::tool_adapter::{
     RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
     ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
@@ -18,9 +21,6 @@ use ironclaw_extension_contracts::tool_adapter::{
 use ironclaw_extensions::{ExtensionManifestRecord, ManifestSource, ResolvedExtensionManifest};
 use ironclaw_host_api::host_port::{
     HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortId,
-};
-use ironclaw_product::{
-    ChannelContext, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, VerifiedInbound,
 };
 
 use crate::entrypoint::{BindContext, BindError, ExtensionBindings, ExtensionEntrypoint};
@@ -469,8 +469,8 @@ pub struct RecordingPairingOutcomeObserver {
 impl crate::extension_ingress::ChannelPairingOutcomeObserver for RecordingPairingOutcomeObserver {
     async fn observe_pairing_outcome(
         &self,
-        _conversation: ironclaw_product::ExternalConversationRef,
-        _event_id: ironclaw_product::ExternalEventId,
+        _conversation: ironclaw_extension_contracts::external::ExternalConversationRef,
+        _event_id: ironclaw_extension_contracts::external::ExternalEventId,
         outcome: crate::channel_pairing::ChannelPairingConsumeOutcome,
     ) {
         match self.outcomes.lock() {

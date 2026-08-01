@@ -6,7 +6,7 @@ use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement, dispatch::CredentialStageError,
     resource::ResourceScope,
 };
-use ironclaw_product::ProductSurfaceFailure;
+use ironclaw_product_contracts::error::ProductOperationFailure;
 
 use ironclaw_auth::product_auth::credentials::runtime_credentials::{
     RuntimeCredentialAccountSelectionService, missing_runtime_credential_auth_requirements,
@@ -51,7 +51,7 @@ impl ExtensionActivationCredentialGate for RuntimeExtensionActivationCredentialG
     async fn ensure_credentials(
         &self,
         package: &ExtensionPackage,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         match self.credential_readiness(package).await? {
             ExtensionActivationCredentialReadiness::Ready => Ok(()),
             ExtensionActivationCredentialReadiness::Missing(_) => {
@@ -63,7 +63,7 @@ impl ExtensionActivationCredentialGate for RuntimeExtensionActivationCredentialG
     async fn credential_readiness(
         &self,
         package: &ExtensionPackage,
-    ) -> Result<ExtensionActivationCredentialReadiness, ProductSurfaceFailure> {
+    ) -> Result<ExtensionActivationCredentialReadiness, ProductOperationFailure> {
         let missing = self
             .missing_requirements(package_runtime_credential_auth_requirements(package))
             .await
@@ -76,12 +76,12 @@ impl ExtensionActivationCredentialGate for RuntimeExtensionActivationCredentialG
     }
 }
 
-fn map_activation_credential_stage_error(error: CredentialStageError) -> ProductSurfaceFailure {
+fn map_activation_credential_stage_error(error: CredentialStageError) -> ProductOperationFailure {
     match error {
-        CredentialStageError::AuthRequired => ProductSurfaceFailure::InvalidBindingRequest {
+        CredentialStageError::AuthRequired => ProductOperationFailure::InvalidBindingRequest {
             reason: "extension requires product auth credentials before activation".to_string(),
         },
-        CredentialStageError::Backend => ProductSurfaceFailure::Transient {
+        CredentialStageError::Backend => ProductOperationFailure::Transient {
             reason: "extension product auth credential state is temporarily unavailable"
                 .to_string(),
         },

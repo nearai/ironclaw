@@ -10,11 +10,11 @@ use ironclaw_host_api::{
 };
 use ironclaw_product::{
     RebornGetRunStateRequest, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornViewPage, RebornViewQuery,
 };
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
 };
+use ironclaw_product_contracts::views::{RebornViewPage, RebornViewQuery};
 
 type InvokeHandler = dyn Fn(
         ProductSurfaceCaller,

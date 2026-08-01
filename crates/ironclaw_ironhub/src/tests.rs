@@ -17,9 +17,10 @@ use ironclaw_host_api::{
     resource::ResourceScope,
     runtime::RuntimeKind,
 };
-use ironclaw_product::{
+use ironclaw_product_contracts::ironhub::{
     IronhubInstallDeliveryRequest, IronhubLinkError, IronhubLinkService, IronhubRegisterRequest,
 };
+use ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContext;
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_skills::ManagedSkillSource;
 use std::collections::{HashMap, VecDeque};
@@ -65,7 +66,7 @@ impl RebornIronHubRuntime for MissingEgressRuntime {
         None
     }
 
-    fn ironhub_surface_context(&self) -> ironclaw_product::LifecycleProductSurfaceContext {
+    fn ironhub_surface_context(&self) -> LifecycleProductSurfaceContext {
         unreachable!("missing egress must fail before surface context is requested")
     }
 
@@ -82,7 +83,7 @@ struct WiredRuntime {
     skill_management: Arc<ironclaw_skills::ScopedSkillManagementPort>,
     extension_management: Arc<ironclaw_extension_host::ExtensionLifecycleManager>,
     egress: Arc<dyn RuntimeHttpEgress>,
-    context: ironclaw_product::LifecycleProductSurfaceContext,
+    context: LifecycleProductSurfaceContext,
     state: Arc<IronhubLinkStateStore>,
     manifest_url: super::IronhubManifestUrl,
 }
@@ -102,7 +103,7 @@ impl RebornIronHubRuntime for WiredRuntime {
         Some(Arc::clone(&self.egress))
     }
 
-    fn ironhub_surface_context(&self) -> ironclaw_product::LifecycleProductSurfaceContext {
+    fn ironhub_surface_context(&self) -> LifecycleProductSurfaceContext {
         self.context.clone()
     }
 
@@ -183,7 +184,7 @@ async fn reborn_runtime_wrapper_wires_authenticated_scope_and_mediated_egress() 
         skill_management: services.skill_management,
         extension_management: services.extension_management,
         egress: egress.clone(),
-        context: ironclaw_product::LifecycleProductSurfaceContext {
+        context: LifecycleProductSurfaceContext {
             tenant_id: scope.tenant_id.clone(),
             user_id: scope.user_id.clone(),
             agent_id: scope.agent_id.clone(),

@@ -28,14 +28,15 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_extension_contracts::recipe::RecipeSecretField;
 use ironclaw_host_api::ids::{ExtensionId, TenantId, UserId};
-use ironclaw_product::{AdapterInstallationId, ProductAdapterId};
-use ironclaw_product::{
+use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
+use ironclaw_product_contracts::error::ProductOperationFailure;
+use ironclaw_product_contracts::subject_route::{
     ProductConversationSubjectRouteResolutionRequest, ProductConversationSubjectRouteResolver,
-    ProductSurfaceFailure,
 };
 use sha2::{Digest, Sha256};
 
 use crate::ChannelConfigService;
+use crate::channel_config::ChannelConfigError;
 
 const ALLOWED_CHANNELS_FIELD: &str = "allowed_channels";
 const SUBJECT_ROUTES_FIELD: &str = "subject_routes";
@@ -143,13 +144,26 @@ impl ChannelConfigSubjectRouteResolver {
         }
     }
 
-    async fn config_value(&self, handle: &str) -> Result<Option<String>, ProductSurfaceFailure> {
+    async fn config_value(&self, handle: &str) -> Result<Option<String>, ProductOperationFailure> {
         self.channel_config
             .non_secret_value(&self.extension_id, handle)
             .await
-            .map_err(|error| ProductSurfaceFailure::Transient {
-                reason: format!("channel admission config unavailable: {error}"),
-            })
+            .map_err(channel_config_unavailable)
+    }
+}
+
+/// A config-store failure is **transient**, never a rejection.
+///
+/// The distinction is load-bearing and is why this is a named function rather
+/// than an inline closure: `Transient` projects to a retryable 503, while any
+/// rejection variant would project to a permanent 4xx. Classifying an
+/// unavailable store as permanent would make a shared channel look
+/// mis-configured — and stay that way for the caller — during what is really a
+/// storage blip. Naming it also makes the classification directly testable
+/// without having to fault-inject the whole config service.
+fn channel_config_unavailable(error: ChannelConfigError) -> ProductOperationFailure {
+    ProductOperationFailure::Transient {
+        reason: format!("channel admission config unavailable: {error}"),
     }
 }
 
@@ -168,7 +182,7 @@ impl ProductConversationSubjectRouteResolver for ChannelConfigSubjectRouteResolv
     async fn resolve_product_conversation_subject_route(
         &self,
         request: ProductConversationSubjectRouteResolutionRequest,
-    ) -> Result<Option<UserId>, ProductSurfaceFailure> {
+    ) -> Result<Option<UserId>, ProductOperationFailure> {
         if request.adapter_id != self.adapter_id || request.installation_id != self.installation_id
         {
             return Ok(None);
@@ -181,7 +195,7 @@ impl ProductConversationSubjectRouteResolver for ChannelConfigSubjectRouteResolv
                 Ok(routes) => {
                     if let Some(subject) = routes.get(conversation_id) {
                         return UserId::new(subject.clone()).map(Some).map_err(|error| {
-                            ProductSurfaceFailure::InvalidBindingRequest {
+                            ProductOperationFailure::InvalidBindingRequest {
                                 reason: format!("configured subject route is invalid: {error}"),
                             }
                         });
@@ -214,7 +228,9 @@ impl ProductConversationSubjectRouteResolver for ChannelConfigSubjectRouteResolv
                             conversation_id,
                         )
                         .map(Some)
-                        .map_err(|reason| ProductSurfaceFailure::InvalidBindingRequest { reason });
+                        .map_err(|reason| {
+                            ProductOperationFailure::InvalidBindingRequest { reason }
+                        });
                     }
                 }
                 Err(error) => {
@@ -247,7 +263,8 @@ mod tests {
         path::{MountAlias, VirtualPath},
         resource::ResourceScope,
     };
-    use ironclaw_product::ProductConversationRouteKey;
+    use ironclaw_product_contracts::subject_route::ProductConversationRouteKey;
+    use ironclaw_product_contracts::surface::ProductSurfaceError;
     use ironclaw_secrets::{SecretStore, SecretStorePort};
 
     use super::*;
@@ -458,6 +475,42 @@ supports_threads = false
             )
             .await
             .expect("config save");
+    }
+
+    /// Every way the config store can fail is transient, so an unavailable
+    /// store yields a retryable 503 rather than a permanent rejection that
+    /// would leave a correctly-configured channel looking broken to its caller.
+    ///
+    /// Driven directly rather than by fault-injecting the config service — the
+    /// reason the mapping is a named function. Asserted through the projection
+    /// the caller actually sees, not just the discriminant, so a variant swap
+    /// that kept the enum shape but changed the status still fails.
+    #[test]
+    fn every_config_store_failure_is_transient_and_projects_to_a_retryable_503() {
+        for error in [
+            ChannelConfigError::NotInstalled {
+                extension_id: "channel-fixture".to_string(),
+            },
+            ChannelConfigError::UnknownField {
+                handle: "subject_routes".to_string(),
+            },
+            ChannelConfigError::Storage {
+                reason: "backend offline".to_string(),
+            },
+            ChannelConfigError::Reactivation {
+                reason: "restart failed".to_string(),
+            },
+        ] {
+            let mapped = channel_config_unavailable(error.clone());
+            assert!(
+                matches!(mapped, ProductOperationFailure::Transient { .. }),
+                "{error:?} must be transient, got {mapped:?}"
+            );
+
+            let projected: ProductSurfaceError = mapped.into();
+            assert_eq!(projected.status_code, 503, "status for {error:?}");
+            assert!(projected.retryable, "retryable for {error:?}");
+        }
     }
 
     #[test]

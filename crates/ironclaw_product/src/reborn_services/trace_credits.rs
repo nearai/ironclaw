@@ -7,7 +7,8 @@
 //! always derived from the authenticated caller's tenant + user id (see
 //! [`ironclaw_reborn_traces::contribution::trace_scope_key`]).
 
-use chrono::{DateTime, Utc};
+use ironclaw_product_contracts::views::RebornViewProvider;
+
 use ironclaw_host_api::ids::{TenantId, UserId};
 use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
 use ironclaw_reborn_traces::contribution::{
@@ -15,9 +16,13 @@ use ironclaw_reborn_traces::contribution::{
     mint_account_login_link, read_trace_policy_for_scope, resolve_trace_credentials,
     scoped_credit_view,
 };
-use serde::{Deserialize, Serialize};
 
-use super::{ProductCapabilityInvoker, ProductView, RebornServices, RebornViewProvider};
+use super::{ProductCapabilityInvoker, ProductView, RebornServices};
+
+pub use ironclaw_product_contracts::product_wire::{
+    RebornAccountLoginLinkResponse, RebornAccountTrace, RebornAccountTracesResponse,
+    RebornTraceCreditsResponse, RebornTraceHold, RebornTraceHoldAuthorizeResponse,
+};
 
 pub const TRACE_CREDITS_VIEW: ProductView<serde_json::Value, RebornTraceCreditsResponse> =
     ProductView::unpaginated("trace_credits");
@@ -30,103 +35,6 @@ pub const TRACE_ACCOUNT_TRACES_VIEW: ProductView<serde_json::Value, RebornAccoun
 pub(super) const TRACE_CREDITS_NOTE: &str = "Local view as of last sync; final credit can change \
      after privacy review, replay/eval, duplicate checks, and downstream utility scoring. \
      The authoritative ledger is server-side.";
-
-/// Read-only Trace Commons credit summary scoped to one user.
-///
-/// All aggregates are the contributor-local view as of the last credit
-/// sync (see [`TRACE_CREDITS_NOTE`]). A user with no local Trace
-/// Commons state gets the unenrolled zero-state, never an error.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RebornTraceCreditsResponse {
-    /// Whether the caller's standing trace-contribution policy is enabled.
-    pub enrolled: bool,
-    pub pending_credit: f32,
-    pub final_credit: f32,
-    pub delayed_credit_delta: f32,
-    pub submissions_total: u32,
-    pub submissions_submitted: u32,
-    pub submissions_accepted: u32,
-    pub submissions_revoked: u32,
-    pub submissions_expired: u32,
-    pub credit_events_total: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_submission_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_credit_sync_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub recent_explanations: Vec<String>,
-    /// Count of traces held awaiting the caller's manual-review authorization
-    /// (e.g. High residual-PII-risk). These are retained, not submitted.
-    #[serde(default)]
-    pub manual_review_hold_count: u32,
-    /// The held traces awaiting authorization. Sanitized: submission id and a
-    /// safe hold reason only — never raw trace content.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub holds: Vec<RebornTraceHold>,
-    /// Server-authoritative framing — always [`TRACE_CREDITS_NOTE`].
-    pub note: String,
-}
-
-/// One trace held awaiting the caller's manual-review authorization. Carries
-/// only the submission id (to authorize against) and a sanitized hold reason;
-/// no raw trace payload is ever exposed.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RebornTraceHold {
-    pub submission_id: String,
-    pub reason: String,
-}
-
-/// One submitted trace record as returned by the Trace Commons server.
-/// Carries only the fields the UI needs; unknown server fields are ignored.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RebornAccountTrace {
-    pub submission_id: String,
-    pub status: String,
-    pub pending_credit: f32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub final_credit: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub received_at: Option<String>,
-}
-
-/// Read-only list of the caller's submitted Trace Commons traces.
-///
-/// `enrolled` mirrors the caller's contribution-policy enrollment status
-/// (same semantics as [`RebornTraceCreditsResponse::enrolled`]).
-/// `traces` is the server-returned list in reverse-chronological order;
-/// an empty list is normal for an enrolled user who has not yet submitted
-/// any traces.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RebornAccountTracesResponse {
-    pub enrolled: bool,
-    pub traces: Vec<RebornAccountTrace>,
-}
-
-/// Result of authorizing a held trace for submission.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RebornTraceHoldAuthorizeResponse {
-    /// True when a held trace matching the submission id was found and
-    /// authorized for submission; false when there was no such held trace
-    /// (already authorized, already submitted, or never held).
-    pub authorized: bool,
-}
-
-/// One-time Trace Commons browser login link, minted for the authenticated
-/// caller. SECURITY: the `url` is a code-bearing account-access credential.
-/// It is delivered ONLY over the authenticated WebUI response to the caller's
-/// own browser — it must never be logged, persisted, or placed on any
-/// model-visible surface.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RebornAccountLoginLinkResponse {
-    /// Whether a link was minted. `false` with `enrolled: false` is the
-    /// unenrolled zero-state, not an error.
-    pub minted: bool,
-    pub enrolled: bool,
-    /// The one-time login URL (present iff `minted`). Expires shortly and is
-    /// single-use.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-}
 
 /// Typed failure for [`account_login_link_for_user`]. Mirrors
 /// [`AccountTracesError`]: the operation is named and the cause chain is

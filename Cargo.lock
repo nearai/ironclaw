@@ -3797,6 +3797,7 @@ dependencies = [
  "toml 1.1.3+spec-1.1.0",
  "tower 0.5.3",
  "tracing",
+ "tracing-subscriber",
  "url",
  "zip",
 ]
@@ -4437,6 +4438,7 @@ dependencies = [
  "chrono",
  "ironclaw_extension_contracts",
  "ironclaw_host_api",
+ "secrecy",
  "serde",
  "serde_json",
  "static_assertions",
@@ -4724,6 +4726,7 @@ dependencies = [
  "http-body-util",
  "ironclaw_attachments",
  "ironclaw_common",
+ "ironclaw_extension_contracts",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_product",

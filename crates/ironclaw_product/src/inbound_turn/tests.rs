@@ -1,3 +1,4 @@
+use ironclaw_product_contracts::action::SourceBindingKey;
 use std::{
     collections::VecDeque,
     future::pending,
@@ -37,8 +38,6 @@ use ironclaw_turns::{
     RetryTurnRequest, RetryTurnResponse, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator,
     TurnError, TurnOriginKind, TurnRunState, TurnSurfaceType,
 };
-
-use crate::action::SourceBindingKey;
 
 use super::*;
 

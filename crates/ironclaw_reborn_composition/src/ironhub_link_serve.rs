@@ -15,7 +15,9 @@ use ironclaw_host_api::ingress::{
 };
 use ironclaw_host_api::{action::NetworkMethod, host_port::HostPortId};
 use ironclaw_host_ingress::PublicRouteMount;
-use ironclaw_product::{IronhubLinkError, IronhubLinkService, IronhubRegisterRequest};
+use ironclaw_product_contracts::ironhub::{
+    IronhubLinkError, IronhubLinkService, IronhubRegisterRequest,
+};
 
 use crate::RebornBuildError;
 
@@ -137,8 +139,11 @@ mod tests {
         async fn deliver_install(
             &self,
             _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
-            _request: ironclaw_product::IronhubInstallDeliveryRequest,
-        ) -> Result<ironclaw_product::IronhubInstallDeliveryResult, IronhubLinkError> {
+            _request: ironclaw_product_contracts::ironhub::IronhubInstallDeliveryRequest,
+        ) -> Result<
+            ironclaw_product_contracts::ironhub::IronhubInstallDeliveryResult,
+            IronhubLinkError,
+        > {
             unreachable!("register route never delivers installs")
         }
     }

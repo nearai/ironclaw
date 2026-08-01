@@ -1,3 +1,9 @@
+use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
+use ironclaw_product_contracts::lifecycle_service::{
+    LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
+};
+use ironclaw_product_contracts::package_lifecycle::ChannelConfigField as RebornChannelConfigField;
+use ironclaw_product_contracts::views::RebornViewDescriptor;
 use std::collections::BTreeSet;
 
 use ironclaw_auth::AuthProductScope;
@@ -8,12 +14,10 @@ use ironclaw_product_contracts::surface::{
 };
 
 use crate::{
-    ChannelConfigProductService, LifecycleExtensionCredentialRequirement, LifecyclePackageKind,
-    LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext, LifecycleProductResponse,
-    LifecycleProductService, LifecycleProductSurfaceContext, ProductSetupExtensionRequest,
-    ProductSurfaceFailure, RebornChannelConfigField, RebornExtensionCredentialSetup,
-    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornSetupExtensionResponse,
-    RebornViewDescriptor, lifecycle_product_surface_error,
+    LifecycleExtensionCredentialRequirement, LifecyclePackageKind, LifecyclePackageRef,
+    LifecycleProductAction, LifecycleProductResponse, ProductSetupExtensionRequest,
+    ProductSurfaceFailure, RebornExtensionCredentialSetup, RebornExtensionSetupField,
+    RebornExtensionSetupSecret, RebornSetupExtensionResponse, lifecycle_product_surface_error,
 };
 
 use super::{

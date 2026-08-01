@@ -286,7 +286,7 @@ mod tests {
             ),
             (
                 IronHubCommandError::Product(
-                    ironclaw_product::ProductSurfaceFailure::InvalidBindingRequest {
+                    ironclaw_product_contracts::error::ProductOperationFailure::InvalidBindingRequest {
                         reason: "private".to_string(),
                     },
                 ),

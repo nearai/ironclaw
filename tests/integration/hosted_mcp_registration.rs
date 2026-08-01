@@ -43,8 +43,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_product::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload,
-    LifecycleProductService,
 };
+use ironclaw_product_contracts::lifecycle_service::LifecycleProductService;
 use ironclaw_product_contracts::surface::{ProductSurfaceErrorCode, ProductSurfaceErrorKind};
 use ironclaw_secrets::SecretStorePort;
 use secrecy::SecretString;

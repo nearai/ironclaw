@@ -12,7 +12,7 @@ use ironclaw_host_api::{
     path::{MountAlias, ScopedPath, VirtualPath},
     resource::ResourceScope,
 };
-use ironclaw_product::{
+use ironclaw_product_contracts::ironhub::{
     IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult, IronhubLinkError,
     IronhubLinkService, IronhubRegisterRequest,
 };
@@ -787,7 +787,7 @@ mod tests {
         ));
         assert!(matches!(
             map_install_error(IronHubCommandError::Product(
-                ironclaw_product::ProductSurfaceFailure::InvalidBindingRequest {
+                ironclaw_product_contracts::error::ProductOperationFailure::InvalidBindingRequest {
                     reason: "failed".to_string(),
                 },
             )),

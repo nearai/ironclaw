@@ -33,9 +33,21 @@ host-owned counterpart that binds the `TcpListener` and drives the serve loop.
 The "Native host surface" rules of `docs/reborn/how-to-port-channel-to-reborn.md`
 apply: host auth stays host-owned in this crate, and behavior is reached through
 `ironclaw_product_contracts::surface::ProductSurface`. The crate *does* carry a
-direct `ironclaw_product` dependency (see `Cargo.toml`), but it is limited to
-wire DTOs and ProductSurface descriptors — never behavior. Enforced by
-`ironclaw_architecture` (`tests/reborn_dependency_boundaries.rs`).
+direct `ironclaw_product` dependency (see `Cargo.toml`), but as of the WS5
+transport inversion it is limited to **the frozen operation inventory** — the
+`*_VIEW` / `*_COMMAND` / `*_CAPABILITY` descriptor constants a handler names to
+call the surface, which PROPOSAL §6.1.3 keeps in product — plus eleven wire DTOs
+whose fields name a crate `ironclaw_product_contracts` may not depend on. Every
+other DTO, request body, and descriptor *type* now comes from
+`ironclaw_product_contracts`. Never behavior.
+
+That residue is exact, enumerated with per-entry reasons, and shrink-only in
+`ironclaw_architecture` (`tests/reborn_transport_product_boundary.rs`, alongside
+`tests/reborn_dependency_boundaries.rs`). **Adding an import from
+`ironclaw_product` will fail that test** — put the type in
+`ironclaw_product_contracts` instead. Moving the inventory constants there to
+shrink the residue also fails it, deliberately: that is an unresolved §6.1.3 /
+§6.9.4 owner decision, not a cleanup.
 
 ## Surface
 

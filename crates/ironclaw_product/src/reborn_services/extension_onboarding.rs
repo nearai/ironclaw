@@ -6,7 +6,9 @@ use crate::{
 };
 
 use super::extension_credentials::ExtensionCredentialReadiness;
-use super::types::{RebornExtensionOnboardingPayload, RebornExtensionOnboardingState};
+use ironclaw_product_contracts::product_wire::{
+    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ExtensionOnboarding {

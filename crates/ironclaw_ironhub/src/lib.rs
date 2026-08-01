@@ -18,7 +18,7 @@
 //!   capabilities.
 //! - **deep-link install** ([`agent_link`], [`link_service`]): the
 //!   HMAC-shared-key register/deliver flow behind
-//!   `ironclaw_product::IronhubLinkService`; link state persists through
+//!   `ironclaw_product_contracts::ironhub::IronhubLinkService`; link state persists through
 //!   `RootFilesystem`.
 //!
 //! The *generic* registry seam stays in `ironclaw_extension_host`

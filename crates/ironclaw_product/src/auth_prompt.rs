@@ -15,11 +15,11 @@ use ironclaw_auth::{
 };
 use ironclaw_extension_contracts::auth_prompt::PairingPromptView;
 use ironclaw_host_api::{
-    capability::RuntimeCredentialAccountSetup,
-    decision::RuntimeCredentialAuthRequirement,
-    ids::{InvocationId, UserId},
+    capability::RuntimeCredentialAccountSetup, decision::RuntimeCredentialAuthRequirement,
+    ids::UserId,
 };
 use ironclaw_product_contracts::package_lifecycle::ChannelConnectionRequirement;
+use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
 use ironclaw_turns::{TurnRunId, TurnScope};
 
 /// Map a manifest display string onto the projection's optional field: a blank
@@ -164,21 +164,6 @@ pub trait BlockedAuthFlowCanceller: Send + Sync {
         run_id: TurnRunId,
         gate_ref: &str,
     ) -> Result<(), AuthProductError>;
-}
-
-/// Inputs for resolving a blocked-auth run's prompt view. One request shape
-/// for every renderer (delivery path, projection layer); the challenge
-/// provider is a separate argument, not request data.
-pub struct BlockedAuthPromptRequest<'a> {
-    pub fallback_owner_user_id: &'a UserId,
-    pub scope: &'a TurnScope,
-    pub run_id: TurnRunId,
-    pub gate_ref: &'a str,
-    /// Invocation the blocked capability ran under, when the renderer has it
-    /// (the projection layer does; the delivery path renders without one).
-    pub invocation_id: Option<InvocationId>,
-    pub body: String,
-    pub credential_requirements: &'a [RuntimeCredentialAuthRequirement],
 }
 
 /// Build the full blocked-auth prompt view: challenge enrichment when the

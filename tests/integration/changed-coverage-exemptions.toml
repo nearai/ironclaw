@@ -54,6 +54,150 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
+path = "crates/ironclaw_product/src/reborn_services/types.rs"
+lines = [483]
+owner = "@nearai/reborn"
+reason = "Struct field declaration; only the GateRef -> TurnGateRef type name changed. Not executable, so the file contributes no instrumented lines."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_host/src/product_lifecycle.rs"
+lines = [257]
+branch_lines = [223, 255]
+owner = "@serrrfirat"
+reason = "Concurrent install tests execute both permit acquisition states and waiter notification; rustc assigns zero-hit synthetic counters to the Arc identity guard and async await continuation that cannot be selected independently."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_host/src/available_extension_import.rs"
+lines = [190, 191, 192, 193, 194, 195, 196, 197, 198, 199]
+owner = "@serrrfirat"
+reason = "Import tests execute both static registry constructors through successful and rejected manifests; their error closures require duplicate entries in the compile-time host-port or contract definitions, which cannot be injected while the same definitions remain valid for the test process."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_host_api/src/credential_redaction.rs"
+branch_lines = [64, 111, 120]
+owner = "@serrrfirat"
+reason = "Boundary tests cover delimited, embedded, leading, trailing, and repeated credential markers; these remaining BRDA arms are rustc short-circuit bookkeeping without an independently reachable input outcome."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_contracts/src/recipe.rs"
+lines = [197, 310, 314, 501, 505]
+owner = "@serrrfirat"
+reason = "These serde declaration and container-closing lines produce no LLVM DA records; recipe variant and setup-metadata round trips execute the generated serializers and deserializers."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_ironhub/src/agent_link.rs"
+lines = [95]
+branch_lines = [94]
+owner = "@serrrfirat"
+reason = "HMAC-SHA256 accepts arbitrary key lengths, while IronhubSharedKey also validates the key first; the constructor-error let-else is a defensive arm with no constructible input."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_ironhub/src/catalog.rs"
+lines = [277, 283]
+branch_lines = [351, 406]
+owner = "@serrrfirat"
+reason = "Catalog tests execute capabilities, optional manifests, allowed/disallowed hosts, and username/password rejection; rustc leaves counters on multiline call continuations and short-circuit subexpressions that do not represent additional outcomes."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_ironhub/src/package.rs"
+lines = [55, 74]
+branch_lines = [52, 70]
+owner = "@serrrfirat"
+reason = "Package tests install tools with and without published schemas and setup instructions; LLVM leaves zero-hit counters on the multiline Option mapping continuations after both observable outcomes execute."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_ironhub/src/link_service.rs"
+lines = [143, 144, 145, 410, 411, 412, 428, 429, 430]
+owner = "@serrrfirat"
+reason = "ConsumedNonce, PrivateManifestState, and PublicManifestState contain only infallibly serializable strings and DateTime values; serde_json::to_vec cannot reach these defensive error closures for any value of the fixed records."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_ironhub/src/link_service.rs"
+lines = [196, 253]
+branch_lines = [155, 174, 182, 198, 238, 240]
+owner = "@serrrfirat"
+reason = "Durable replay tests execute nonce success/replay/backend failure and private/public absent, idempotent, conflict, stale, and newer CAS outcomes; rustc leaves zero-hit records on the let-else/call closers and synthetic expression branches with no additional observable outcome."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_ironhub/src/service.rs"
+lines = [284, 285, 286, 287, 288]
+owner = "@serrrfirat"
+reason = "Private URL validation constructs private_origin through Option::map(...).transpose(), so the two Options are correlated and the mixed Some/None match arm is structurally unreachable; lines 284 and 288 are tuple/expression closers LLVM groups with that arm."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_ironhub/src/service.rs"
+branch_lines = [487, 506, 733]
+owner = "@serrrfirat"
+reason = "Public/private manifest tests execute both fetch functions through valid, invalid, replay, and retry paths, and runtime wrapper tests execute IronhubManifestUrl::into_inner; these remaining BRDA records are rustc async-entry or return-expression bookkeeping without an independent input outcome."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_cli/src/commands/ironhub.rs"
+lines = [138, 219, 231]
+branch_lines = [203]
+owner = "@serrrfirat"
+reason = "CLI tests read private URL files, assemble and shut down the real runtime without network access, and cover all command/shutdown result combinations; the remaining records are multiline closers and the synthetic Option branch counter."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_cli/src/commands/serve.rs"
+lines = [592, 593, 594, 595, 596, 597]
+branch_lines = [592]
+owner = "@serrrfirat"
+reason = "The blocking serve adapter cannot return after mounting without running the HTTP server; composition tests execute both optional mount construction and the public IronHub route through its handler and strict policy."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/ironhub_link_serve.rs"
+lines = [59, 64, 65, 67, 68, 70, 71, 91]
+owner = "@serrrfirat"
+reason = "Route tests execute mount creation, policy inspection, valid/invalid JSON, success, and service failure; the error arms construct NonZero values from fixed nonzero literals and the other records are nested Result closing lines."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/runtime.rs"
+lines = [4064, 4065, 4066, 4067, 4068, 4069, 4078, 4079]
+owner = "@serrrfirat"
+reason = "The runtime integration test executes shared-key wiring with mediated egress; normal assembly always supplies that egress, and the fixed host capability identifier is compile-time-valid, leaving only defensive impossible error mappings."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_skills/src/management/install_bundle.rs"
+lines = [134, 135, 182, 184]
+branch_lines = [119, 180, 182, 197]
+owner = "@serrrfirat"
+reason = "Snapshot tests execute file/count/total caps, unsupported entries, complete restoration, write failure, cleanup success, and cleanup failure; remaining counters are match/async continuations or impossible parent/short-circuit bookkeeping for normalized bundle paths."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
 path = "crates/ironclaw_product/src/approval_prompt.rs"
 lines = [58]
 owner = "@nearai/reborn"
@@ -121,7 +265,7 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_product/src/reborn_services/types.rs"
-lines = [483]
+lines = [105]
 owner = "@nearai/reborn"
 reason = "Struct field declaration; only the GateRef -> TurnGateRef type name changed. Not executable, so the file contributes no instrumented lines."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
@@ -640,139 +784,162 @@ reason = "Type position only: a function parameter's `&ironclaw_extension_contra
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
-# IronHub PR #6780 exemptions retained across the mainline contract moves.
+# ---------------------------------------------------------------------------
+# WS2.1 extension_host port inversion (PR #6998). One entry, for one line.
+#
+# The port move deleted `ironclaw_product`'s re-export of
+# `ChannelConfigProductService`, so every signature naming it had to be
+# repointed. In this file the repoint let the signature fit on one line, which
+# makes the function's coverage region a *changed* line even though its body,
+# its callers, and its behavior are untouched.
+#
+# It is not an uncovered path. The accessor has two live callers, both of which
+# exercise it through the composed runtime:
+#   tests/integration/group_extensions/scenario_slack_channel_lifecycle_state_machine.rs:112
+#   crates/ironclaw_reborn_composition/tests/trigger_poller_e2e.rs:630
+# The service it hands back is itself covered: `RebornChannelConfigProductService`
+# is exercised by the extension_host channel-config suite, and the port contract
+# by `ironclaw_product_contracts::channel_config`'s own tests, both added in this
+# PR. What the merged lcov shows is the lane-attribution artifact #6963 tracks:
+# the caller lives in a lane whose lcov does not attribute hits back to this
+# `#[cfg(any(test, feature = "test-support"))]` accessor in the composition
+# bucket build.
+#
+# Every other changed line in this PR is covered by a test, not exempted --
+# including the five relocated port modules, which each gained a contract test
+# rather than a waiver.
 
 [[exemption]]
-path = "crates/ironclaw_extension_host/src/product_lifecycle.rs"
-lines = [257]
-branch_lines = [223, 255]
-owner = "@serrrfirat"
-reason = "Concurrent install tests execute both permit acquisition states and waiter notification; rustc assigns zero-hit synthetic counters to the Arc identity guard and async await continuation that cannot be selected independently."
-issue = "https://github.com/nearai/ironclaw/issues/6524"
-review_after = "2026-10-31"
-[[exemption]]
-path = "crates/ironclaw_extension_host/src/available_extension_import.rs"
-lines = [190, 191, 192, 193, 194, 195, 196, 197, 198, 199]
-owner = "@serrrfirat"
-reason = "Import tests execute both static registry constructors through successful and rejected manifests; their error closures require duplicate entries in the compile-time host-port or contract definitions, which cannot be injected while the same definitions remain valid for the test process."
-issue = "https://github.com/nearai/ironclaw/issues/6524"
+path = "crates/ironclaw_reborn_composition/src/factory/test_support.rs"
+lines = [330]
+owner = "@nearai/reborn"
+reason = "Signature repoint only: the `channel_config_service` dev-seam accessor's return type moved from `ironclaw_product`'s deleted re-export to `ironclaw_product_contracts::channel_config`, collapsing the signature onto one line. Body, callers, and behavior are unchanged; two integration callers exercise it (see the block comment above)."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
-[[exemption]]
-path = "crates/ironclaw_host_api/src/credential_redaction.rs"
-branch_lines = [64, 111, 120]
-owner = "@serrrfirat"
-reason = "Boundary tests cover delimited, embedded, leading, trailing, and repeated credential markers; these remaining BRDA arms are rustc short-circuit bookkeeping without an independently reachable input outcome."
-issue = "https://github.com/nearai/ironclaw/issues/6524"
-review_after = "2026-10-31"
+# ---------------------------------------------------------------------------
+# WS2.1, second tranche: the type-position residue.
+#
+# Deleting `ironclaw_product`'s re-exports forced every signature that named a
+# moved symbol to be rewritten. Where the name appears in a *type position* --
+# a struct field, a function parameter, a struct-literal field's enum path --
+# the rewrite changes the line but LLVM emits no coverage region for it, so the
+# line can never be covered and the file reports "contributed no instrumented
+# lines". This is the same class as the four WS1 entries above, from the same
+# cause, and each entry below names the exact construct.
+#
+# Everything in this PR that *can* be covered is covered by a test, not a
+# waiver: the ten relocated port modules, the two fail-closed error paths in
+# `extension_host`, and the `\0` arm of the bounded-token guard. The one
+# `tracing::debug!` body that read as uncovered is now exercised through a
+# real DEBUG subscriber rather than exempted.
 
 [[exemption]]
-path = "crates/ironclaw_extension_contracts/src/recipe.rs"
-lines = [197, 310, 314, 501, 505]
-owner = "@serrrfirat"
-reason = "These serde declaration and container-closing lines produce no LLVM DA records; recipe variant and setup-metadata round trips execute the generated serializers and deserializers."
-issue = "https://github.com/nearai/ironclaw/issues/6524"
-review_after = "2026-10-31"
-
-[[exemption]]
-path = "crates/ironclaw_ironhub/src/agent_link.rs"
-lines = [95]
-branch_lines = [94]
-owner = "@serrrfirat"
-reason = "HMAC-SHA256 accepts arbitrary key lengths, while IronhubSharedKey also validates the key first; the constructor-error let-else is a defensive arm with no constructible input."
-issue = "https://github.com/nearai/ironclaw/issues/6524"
-review_after = "2026-10-31"
-
-[[exemption]]
-path = "crates/ironclaw_ironhub/src/catalog.rs"
-lines = [277, 283]
-branch_lines = [351, 406]
-owner = "@serrrfirat"
-reason = "Catalog tests execute capabilities, optional manifests, allowed/disallowed hosts, and username/password rejection; rustc leaves counters on multiline call continuations and short-circuit subexpressions that do not represent additional outcomes."
-issue = "https://github.com/nearai/ironclaw/issues/6524"
-review_after = "2026-10-31"
-
-[[exemption]]
-path = "crates/ironclaw_ironhub/src/package.rs"
-lines = [55, 74]
-branch_lines = [52, 70]
-owner = "@serrrfirat"
-reason = "Package tests install tools with and without published schemas and setup instructions; LLVM leaves zero-hit counters on the multiline Option mapping continuations after both observable outcomes execute."
-issue = "https://github.com/nearai/ironclaw/issues/6524"
+path = "crates/ironclaw_extension_host/src/channel_host.rs"
+lines = [370]
+owner = "@nearai/reborn"
+reason = "Type position only: `GenericChannelHostAssembly::admin_users`'s `Arc<dyn AdminUserService>` field type. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_ironhub/src/link_service.rs"
-lines = [143, 144, 145, 410, 411, 412, 428, 429, 430]
-owner = "@serrrfirat"
-reason = "ConsumedNonce, PrivateManifestState, and PublicManifestState contain only infallibly serializable strings and DateTime values; serde_json::to_vec cannot reach these defensive error closures for any value of the fixed records."
-issue = "https://github.com/nearai/ironclaw/issues/6524"
+path = "crates/ironclaw_extension_host/src/channel_host.rs"
+lines = [1276]
+owner = "@nearai/reborn"
+reason = "Type position only: a function parameter's `ProductAdapterError` type, repointed to `ironclaw_host_api::product_adapter_error`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_ironhub/src/link_service.rs"
-lines = [196, 253]
-branch_lines = [155, 182, 198, 238, 240]
-owner = "@serrrfirat"
-reason = "Durable replay tests execute nonce success/replay/backend failure and private/public absent, idempotent, conflict, stale, and newer CAS outcomes; rustc leaves zero-hit records on the let-else/call closers and synthetic expression branches with no additional observable outcome."
-issue = "https://github.com/nearai/ironclaw/issues/6524"
+path = "crates/ironclaw_extension_host/src/extension_ingress.rs"
+lines = [70]
+owner = "@nearai/reborn"
+reason = "Type position only: a function parameter's `ProductAdapterError` type, repointed to `ironclaw_host_api::product_adapter_error`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_ironhub/src/service.rs"
-lines = [284, 285, 286, 287, 288]
-owner = "@serrrfirat"
-reason = "Private URL validation constructs private_origin through Option::map(...).transpose(), so the two Options are correlated and the mixed Some/None match arm is structurally unreachable; lines 284 and 288 are tuple/expression closers LLVM groups with that arm."
-issue = "https://github.com/nearai/ironclaw/issues/6524"
+path = "crates/ironclaw_extension_host/src/run_delivery_ports.rs"
+lines = [85]
+owner = "@nearai/reborn"
+reason = "Type position only: an `AuthChallengeView` struct-literal field's `AuthPromptChallengeKind::Pairing` path, repointed to `ironclaw_extension_contracts::auth_prompt`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_ironhub/src/service.rs"
-branch_lines = [487, 506, 733]
-owner = "@serrrfirat"
-reason = "Public/private manifest tests execute both fetch functions through valid, invalid, replay, and retry paths, and runtime wrapper tests execute IronhubManifestUrl::into_inner; these remaining BRDA records are rustc async-entry or return-expression bookkeeping without an independent input outcome."
-issue = "https://github.com/nearai/ironclaw/issues/6524"
+path = "crates/ironclaw_extension_host/src/run_delivery_ports.rs"
+lines = [173]
+owner = "@nearai/reborn"
+reason = "Type position only: a function parameter's `BlockedAuthPromptRequest<'_>` type, repointed to `ironclaw_product_contracts::prompt_source`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_reborn_cli/src/commands/ironhub.rs"
-lines = [138, 219, 231]
-branch_lines = [203]
-owner = "@serrrfirat"
-reason = "CLI tests read private URL files, assemble and shut down the real runtime without network access, and cover all command/shutdown result combinations; the remaining records are multiline closers and the synthetic Option branch counter."
-issue = "https://github.com/nearai/ironclaw/issues/6524"
+path = "crates/ironclaw_extension_host/src/test_support.rs"
+lines = [472]
+owner = "@nearai/reborn"
+reason = "Type position only: a function parameter's `ExternalConversationRef` type, repointed to `ironclaw_extension_contracts::external`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_reborn_cli/src/commands/serve.rs"
-lines = [592, 593, 594, 595, 596, 597]
-branch_lines = [592]
-owner = "@serrrfirat"
-reason = "The blocking serve adapter cannot return after mounting without running the HTTP server; composition tests execute both optional mount construction and the public IronHub route through its handler and strict policy."
-issue = "https://github.com/nearai/ironclaw/issues/6524"
+path = "crates/ironclaw_extension_host/src/test_support.rs"
+lines = [473]
+owner = "@nearai/reborn"
+reason = "Type position only: a function parameter's `ExternalEventId` type, repointed to `ironclaw_extension_contracts::external`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_reborn_composition/src/ironhub_link_serve.rs"
-lines = [59, 64, 65, 67, 68, 70, 71, 91]
-owner = "@serrrfirat"
-reason = "Route tests execute mount creation, policy inspection, valid/invalid JSON, success, and service failure; the error arms construct NonZero values from fixed nonzero literals and the other records are nested Result closing lines."
-issue = "https://github.com/nearai/ironclaw/issues/6524"
+path = "crates/ironclaw_reborn_composition/src/deployment.rs"
+lines = [266]
+owner = "@nearai/reborn"
+reason = "Type position only: `account_setup_descriptors`'s `Vec<ExtensionAccountSetupDescriptor>` field type. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_reborn_composition/src/runtime.rs"
-lines = [4064, 4065, 4066, 4067, 4068, 4069, 4078, 4079]
-owner = "@serrrfirat"
-reason = "The runtime integration test executes shared-key wiring with mediated egress; normal assembly always supplies that egress, and the fixed host capability identifier is compile-time-valid, leaving only defensive impossible error mappings."
-issue = "https://github.com/nearai/ironclaw/issues/6524"
+path = "crates/ironclaw_reborn_composition/src/factory/production_build_assembly.rs"
+lines = [340]
+owner = "@nearai/reborn"
+reason = "Type position only: `account_setup_descriptors`'s `Vec<ExtensionAccountSetupDescriptor>` field type. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
+# ---------------------------------------------------------------------------
+# WS2.1, third tranche: one `tracing` message literal.
+#
+# This one is worth reading, because the obvious conclusion is wrong. The line
+# is the message string inside a `tracing::debug!` invocation. It reads as
+# uncovered, but the event body *does* execute: the test
+# `output_serialization_failure_maps_to_output_decode_and_logs_the_detail`
+# installs a DEBUG subscriber over a shared writer and asserts the rendered
+# output contains that exact message, and it passes -- including in the
+# `extension-operator` bucket, which is green.
+#
+# Proof it is an attribution artifact rather than a dead path, from that same
+# bucket's own tracefile (`bucket-extension-operator.lcov`, run 30689416105):
+#
+#   line 213 (fn signature)      hits 1
+#   line 214 (macro invocation)  hits 1
+#   line 217 (message literal)   hits 0   <- this entry
+#   line 219 (error construction) hits 1
+#   line 220 (closing brace)     hits 1
+#
+# The function ran, the macro ran, and the error was built. What LLVM does not
+# count is the message literal: `tracing` bakes it into the callsite's `static`
+# `Metadata`, so the region on that line belongs to a static initializer and is
+# never attributed to an executed path. No subscriber, test, or restructuring
+# short of changing the log target (a behavior change this move-shaped PR will
+# not make) can move that counter.
+#
+# Every `tracing::debug!` in this workspace has the same shape; they simply do
+# not enter this gate's denominator because their lines are not in the diff.
+
 [[exemption]]
-path = "crates/ironclaw_skills/src/management/install_bundle.rs"
-lines = [134, 135, 182, 184]
-branch_lines = [119, 180, 182, 197]
-owner = "@serrrfirat"
-reason = "Snapshot tests execute file/count/total caps, unsupported entries, complete restoration, write failure, cleanup success, and cleanup failure; remaining counters are match/async continuations or impossible parent/short-circuit bookkeeping for normalized bundle paths."
-issue = "https://github.com/nearai/ironclaw/issues/6524"
+path = "crates/ironclaw_extension_host/src/extension_lifecycle_capabilities.rs"
+lines = [217]
+owner = "@nearai/reborn"
+reason = "A `tracing::debug!` message literal. `tracing` bakes the message into the callsite's `static` Metadata, so LLVM attributes this line's region to a static initializer and never counts it as executed -- while the surrounding lines 213/214/219/220 each score 1 hit in the same tracefile and the event body is asserted by a DEBUG-subscriber test. Attribution artifact, not a dead path; see the block comment above for the per-line evidence."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"

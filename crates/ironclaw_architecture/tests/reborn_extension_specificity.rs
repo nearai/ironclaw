@@ -57,19 +57,16 @@
 //! owner's next decision: do NOT casually "fix" one — degenericize by routing
 //! on a manifest capability, or carve deliberately with a one-line justification.
 
+#[allow(dead_code)]
+mod ratchet_support;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::Value;
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("architecture crate under crates")
-        .to_path_buf()
-}
+use ratchet_support::workspace_root;
 
 // ---------------------------------------------------------------------------
 // Inventory-derived forbidden terms
@@ -1097,22 +1094,26 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "telegram",
     ),
     ("crates/ironclaw_product/Cargo.toml", "telegram"),
-    (
-        "crates/ironclaw_product/src/conversation_binding.rs",
-        "slack",
-    ),
+    // `conversation_binding.rs` was carved for a vendor example in
+    // `ProductConversationRouteKey`'s doc. WS2.2 moved that type to
+    // `ironclaw_product_contracts::subject_route`, where a vendor name is
+    // forbidden outright, so the example was rewritten generically rather than
+    // re-carved. The entry is deleted, not repointed — the allowlist shrinks.
     ("crates/ironclaw_product/src/lib.rs", "telegram"),
     ("crates/ironclaw_product/src/reborn_services.rs", "slack"),
+    // WS5 port inversion: these three wire-DTO sites moved to the contracts
+    // crate with their code (`NearAiAuthProvider`'s OAuth identity providers and
+    // the project-metadata doc example). Same terms, same debt, new file.
     (
-        "crates/ironclaw_product/src/reborn_services/llm_config.rs",
+        "crates/ironclaw_product_contracts/src/operator_llm.rs",
         "github",
     ),
     (
-        "crates/ironclaw_product/src/reborn_services/llm_config.rs",
+        "crates/ironclaw_product_contracts/src/operator_llm.rs",
         "google",
     ),
     (
-        "crates/ironclaw_product/src/reborn_services/projects.rs",
+        "crates/ironclaw_product_contracts/src/workspace_views.rs",
         "github",
     ),
     ("crates/ironclaw_product/src/workflow.rs", "slack"),
@@ -1437,7 +1438,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// the gate above (an entry that no longer matches fails); this ceiling is the
 /// other half — the list cannot *grow* untracked either. Lower it in the same
 /// PR that deletes entries so the new floor is locked in.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 130;
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 129;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 #[test]

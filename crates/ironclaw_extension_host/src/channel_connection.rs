@@ -521,7 +521,7 @@ mod tests {
     use std::sync::Mutex;
 
     use ironclaw_host_api::ids::{AgentId, UserId};
-    use ironclaw_product::AdapterInstallationId;
+    use ironclaw_host_api::product_adapter::AdapterInstallationId;
 
     use super::*;
     use ironclaw_extension_host::product_extension_host_api_contract_registry;

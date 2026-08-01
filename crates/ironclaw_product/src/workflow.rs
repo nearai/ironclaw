@@ -6,6 +6,9 @@
 
 use std::sync::Arc;
 
+use ironclaw_product_contracts::action::{ActionFingerprintKey, ProductActionId, SourceBindingKey};
+use ironclaw_product_contracts::command::ProductCommandContext;
+
 use crate::{
     ApprovalDecision, ExternalConversationRef, ParsedProductInbound, ProductAdapterError,
     ProductCommandResultPayload, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
@@ -33,7 +36,7 @@ use ironclaw_turns::{AdmissionRejectionReason, TurnError, TurnErrorCategory};
 use sha2::{Digest, Sha256};
 use tracing::debug;
 
-use crate::action::{ActionDispatchKind, ActionFingerprintKey, SourceBindingKey};
+use crate::action::ActionDispatchKind;
 use crate::approval_interaction::{
     ApprovalInteractionDecision, ApprovalInteractionRejectionKind, ApprovalInteractionService,
     ListPendingApprovalsRequest, RejectingApprovalInteractionService,
@@ -52,7 +55,7 @@ use crate::binding_ref::{
     DEFAULT_BINDING_REF_RAW_MAX_BYTES, binding_ref_segment, bounded_idempotency_key,
 };
 use crate::command_dispatch::{
-    ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
+    ProductCommandAdmission, ProductCommandAdmissionService,
     RejectingProductCommandAdmissionService,
 };
 use crate::commands::{
@@ -1139,7 +1142,7 @@ fn validate_projection_thread_hint(
 
 async fn dispatch_payload(
     envelope: &ProductInboundEnvelope,
-    action_id: crate::ProductActionId,
+    action_id: ProductActionId,
     action_fingerprint: ActionFingerprintKey,
     ports: DispatchPorts<'_>,
     attachment_admission: InboundAttachmentAdmission,
@@ -1721,7 +1724,7 @@ fn product_surface_failure(error: ProductSurfaceError) -> ProductSurfaceFailure 
 
 async fn dispatch_product_command(
     envelope: &ProductInboundEnvelope,
-    action_id: crate::ProductActionId,
+    action_id: ProductActionId,
     binding_service: &dyn ConversationBindingService,
     command_surface: Option<&dyn ProductSurface>,
     command: ProductCommand,

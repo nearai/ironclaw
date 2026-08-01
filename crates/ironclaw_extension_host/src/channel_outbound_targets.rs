@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::preference_target::{
     PreferenceTargetCodec, PreferenceTargetEncodeRequest,
 };
@@ -30,8 +31,8 @@ use ironclaw_extension_contracts::recipe::RecipeSecretField;
 use ironclaw_extension_host::SnapshotWatch;
 use ironclaw_extension_host::active::ActiveExtension;
 use ironclaw_host_api::ids::{AgentId, ExtensionId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::product_adapter::AdapterInstallationId;
 use ironclaw_outbound::{OutboundError, RunFinalReplyDestination};
-use ironclaw_product::{AdapterInstallationId, ExternalConversationRef};
 use ironclaw_turns::ReplyTargetBindingRef;
 
 use crate::channel_host::GenericChannelHostAssembly;

@@ -18,6 +18,14 @@ use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
 use ironclaw_extension_contracts::channel_adapter::{ChannelAdapter, NormalizedInboundMessage};
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelAttachmentRef, ChannelError, DeliveryReport, ImmediateResponse, InboundBatchFragment,
+    InboundOutcome, OutboundEnvelope, ProductTriggerReason, VerifiedInbound,
+};
+use ironclaw_extension_contracts::external::{
+    ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
+    ProductAttachmentKind,
+};
 use ironclaw_extension_host::inbound_batches::{
     InboundBatchKey, InboundBatchStageOutcome, InboundBatchStageRequest, InboundBatchStore,
 };
@@ -35,11 +43,6 @@ use ironclaw_extension_host::{
 };
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::ids::{SecretHandle, TenantId, UserId};
-use ironclaw_product::{
-    ChannelAttachmentRef, ChannelError, DeliveryReport, ExternalActorRef, ExternalConversationRef,
-    ExternalEventId, ImmediateResponse, InboundBatchFragment, InboundOutcome, OutboundEnvelope,
-    ProductAttachmentDescriptor, ProductAttachmentKind, ProductTriggerReason, VerifiedInbound,
-};
 
 /// What the scripted adapter observed per call: forwarded headers, body,
 /// resolved installation id, and host-selected non-secret configuration.

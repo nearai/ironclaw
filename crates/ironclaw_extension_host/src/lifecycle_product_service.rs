@@ -1,16 +1,20 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::lifecycle_id::LifecyclePackageId;
 use ironclaw_extension_contracts::state::InstallationState;
 use ironclaw_host_api::{
     ids::{ExtensionId, InvocationId, UserId},
     resource::ResourceScope,
 };
-use ironclaw_product::{
-    LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
-    LifecycleProductContext, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleProductService, LifecycleReadinessBlocker, LifecycleSkillSource,
-    LifecycleSkillSummary, ProductSurfaceFailure, lifecycle_product_surface_error,
+use ironclaw_product_contracts::error::ProductOperationFailure;
+use ironclaw_product_contracts::lifecycle_service::{
+    LifecycleProductContext, LifecycleProductService,
+};
+use ironclaw_product_contracts::package_lifecycle::{
+    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload,
+    LifecycleProductResponse, LifecycleReadinessBlocker, LifecycleSkillSource,
+    LifecycleSkillSummary,
 };
 use ironclaw_product_contracts::surface::ProductSurfaceError;
 #[cfg(test)]
@@ -72,7 +76,7 @@ impl ExtensionHostLifecycleProductService {
         &self,
         context: LifecycleProductContext,
         action: LifecycleProductAction,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         match action {
             LifecycleProductAction::ExtensionRegisterHostedMcp { request } => {
                 let Some(extension_management) = &self.extension_management else {
@@ -236,7 +240,7 @@ impl ExtensionHostLifecycleProductService {
                     return unsupported_extension_auth_configure_projection(Some(package_ref));
                 };
                 let extension_id = ExtensionId::new(package_ref.id.as_str()).map_err(|error| {
-                    ProductSurfaceFailure::InvalidBindingRequest {
+                    ProductOperationFailure::InvalidBindingRequest {
                         reason: format!("invalid extension id: {error}"),
                     }
                 })?;
@@ -259,7 +263,7 @@ impl ExtensionHostLifecycleProductService {
         extension_management: &RebornLocalExtensionManagementPort,
         package_ref: &LifecyclePackageRef,
         caller: &UserId,
-    ) -> Result<Option<RuntimeExtensionActivationCredentialGate>, ProductSurfaceFailure> {
+    ) -> Result<Option<RuntimeExtensionActivationCredentialGate>, ProductOperationFailure> {
         // The requirements preflight checks ownership first, so a non-owner
         // exits here with the masked "is not installed" denial before any
         // credential or hosted-MCP probing can leak the install's existence.
@@ -288,7 +292,7 @@ impl ExtensionHostLifecycleProductService {
         extension_management: &RebornLocalExtensionManagementPort,
         package_ref: LifecyclePackageRef,
         caller: &UserId,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         let install_response = extension_management
             .install(package_ref.clone(), caller)
             .await?;
@@ -324,7 +328,7 @@ impl ExtensionHostLifecycleProductService {
         extension_management: &RebornLocalExtensionManagementPort,
         package_ref: LifecyclePackageRef,
         caller: &UserId,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         let credential_gate = self
             .extension_activation_credential_gate(
                 context,
@@ -384,6 +388,22 @@ fn install_response_with_activation(
     install_response
 }
 
+/// Project this crate's own lifecycle failure onto the sanitized surface
+/// error, logging the transient cause first.
+///
+/// The status table itself lives with the contract
+/// (`ProductOperationFailure` -> `ProductSurfaceError`), so this path and
+/// `ironclaw_product`'s `lifecycle_product_surface_error` cannot answer
+/// differently for the same failure. Only the logging is local: contracts may
+/// not log, and the 503 body is sanitized, so without this line the cause is
+/// dropped entirely and the failure is undiagnosable.
+fn lifecycle_surface_error(error: ProductOperationFailure) -> ProductSurfaceError {
+    if let ProductOperationFailure::Transient { reason } = &error {
+        tracing::warn!(reason = %reason, "lifecycle action failed with a transient error");
+    }
+    error.into()
+}
+
 fn activation_response_has_credential_blocker(response: &LifecycleProductResponse) -> bool {
     matches!(
         response.payload.as_ref(),
@@ -395,12 +415,12 @@ fn activation_response_has_credential_blocker(response: &LifecycleProductRespons
 }
 
 fn install_activation_error(
-    error: ProductSurfaceFailure,
+    error: ProductOperationFailure,
     install_response: LifecycleProductResponse,
-) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+) -> Result<LifecycleProductResponse, ProductOperationFailure> {
     match error {
-        ProductSurfaceFailure::ProviderInstanceNotConfigured { .. } => Err(error),
-        ProductSurfaceFailure::Transient { reason } => {
+        ProductOperationFailure::ProviderInstanceNotConfigured { .. } => Err(error),
+        ProductOperationFailure::Transient { reason } => {
             tracing::debug!(
                 target: "ironclaw::reborn::extension_lifecycle",
                 %reason,
@@ -408,7 +428,7 @@ fn install_activation_error(
             );
             Ok(install_response)
         }
-        ProductSurfaceFailure::InvalidBindingRequest { reason }
+        ProductOperationFailure::InvalidBindingRequest { reason }
             if reason.starts_with("hosted MCP catalog preparation failed:")
                 || reason
                     == "generic extension host rejected the activation: hosted MCP discovery published no callable tools" =>
@@ -440,7 +460,7 @@ impl LifecycleProductService for ExtensionHostLifecycleProductService {
     ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
         self.execute_action(context, action)
             .await
-            .map_err(lifecycle_product_surface_error)
+            .map_err(lifecycle_surface_error)
     }
 
     async fn project_package(
@@ -459,7 +479,7 @@ impl LifecycleProductService for ExtensionHostLifecycleProductService {
             unsupported_projection(Some(package_ref))
         }
         .await;
-        result.map_err(lifecycle_product_surface_error)
+        result.map_err(lifecycle_surface_error)
     }
 
     async fn import_extension_bundle(
@@ -469,14 +489,14 @@ impl LifecycleProductService for ExtensionHostLifecycleProductService {
     ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
         let result = async {
             let Some(extension_management) = &self.extension_management else {
-                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                return Err(ProductOperationFailure::InvalidBindingRequest {
                     reason: "extension management is not available in this runtime".to_string(),
                 });
             };
             extension_management.import_bundle(bundle).await
         }
         .await;
-        result.map_err(lifecycle_product_surface_error)
+        result.map_err(lifecycle_surface_error)
     }
 
     /// Project the durable installation records' redacted `last_error` so the
@@ -494,17 +514,17 @@ impl LifecycleProductService for ExtensionHostLifecycleProductService {
             }
             None => Ok(std::collections::HashMap::new()),
         };
-        result.map_err(lifecycle_product_surface_error)
+        result.map_err(lifecycle_surface_error)
     }
 }
 
-fn skill_package_ref(name: &str) -> Result<LifecyclePackageRef, ProductSurfaceFailure> {
+fn skill_package_ref(name: &str) -> Result<LifecyclePackageRef, ProductOperationFailure> {
     Ok(LifecyclePackageRef::new(LifecyclePackageKind::Skill, name)?)
 }
 
 fn lifecycle_resource_scope(
     context: &LifecycleProductContext,
-) -> Result<ResourceScope, ProductSurfaceFailure> {
+) -> Result<ResourceScope, ProductOperationFailure> {
     match context {
         LifecycleProductContext::Surface(context) => Ok(ResourceScope {
             tenant_id: context.tenant_id.clone(),
@@ -525,7 +545,7 @@ fn lifecycle_resource_scope(
             let caller = lifecycle_caller(context)?;
             let mut scope =
                 ResourceScope::local_default(caller, InvocationId::new()).map_err(|error| {
-                    ProductSurfaceFailure::InvalidBindingRequest {
+                    ProductOperationFailure::InvalidBindingRequest {
                         reason: format!("command lifecycle scope is invalid: {error}"),
                     }
                 })?;
@@ -542,11 +562,11 @@ fn lifecycle_resource_scope(
 /// Surface callers carry a typed [`UserId`]; command callers derive it from
 /// the verified auth claim minted by host authentication — commands must stay
 /// owner-attributed, not fall back to an ownerless path.
-fn lifecycle_caller(context: &LifecycleProductContext) -> Result<UserId, ProductSurfaceFailure> {
+fn lifecycle_caller(context: &LifecycleProductContext) -> Result<UserId, ProductOperationFailure> {
     match context {
         LifecycleProductContext::Surface(context) => Ok(context.user_id.clone()),
         LifecycleProductContext::Command(context) => UserId::new(context.auth_claim.subject())
-            .map_err(|error| ProductSurfaceFailure::InvalidBindingRequest {
+            .map_err(|error| ProductOperationFailure::InvalidBindingRequest {
                 reason: format!(
                     "command auth subject is not a valid lifecycle caller identity: {error}"
                 ),
@@ -570,7 +590,7 @@ pub fn response_with_payload(
 
 fn skill_summary(
     skill: ironclaw_skills::SkillSummary,
-) -> Result<LifecycleSkillSummary, ProductSurfaceFailure> {
+) -> Result<LifecycleSkillSummary, ProductOperationFailure> {
     Ok(LifecycleSkillSummary {
         name: LifecyclePackageId::new(skill.name)?,
         version: skill.version,
@@ -588,7 +608,7 @@ fn skill_summary(
 
 fn unsupported_projection(
     package_ref: Option<LifecyclePackageRef>,
-) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+) -> Result<LifecycleProductResponse, ProductOperationFailure> {
     Ok(LifecycleProductResponse::projection(
         package_ref,
         InstallationState::Unsupported,
@@ -600,7 +620,7 @@ fn unsupported_projection(
 
 fn unsupported_extension_auth_configure_projection(
     package_ref: Option<LifecyclePackageRef>,
-) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+) -> Result<LifecycleProductResponse, ProductOperationFailure> {
     Ok(LifecycleProductResponse::projection(
         package_ref,
         InstallationState::Unsupported,
@@ -615,7 +635,7 @@ fn unsupported_extension_auth_configure_projection(
 /// by its manifest descriptor, so which map a value rode in is advisory).
 fn parse_channel_config_payload(
     payload: Option<&serde_json::Value>,
-) -> Result<Vec<(String, String)>, ProductSurfaceFailure> {
+) -> Result<Vec<(String, String)>, ProductOperationFailure> {
     #[derive(Default, serde::Deserialize)]
     struct ConfigurePayload {
         #[serde(default)]
@@ -626,7 +646,7 @@ fn parse_channel_config_payload(
     let decoded = match payload {
         Some(payload) => {
             serde_json::from_value::<ConfigurePayload>(payload.clone()).map_err(|error| {
-                ProductSurfaceFailure::InvalidBindingRequest {
+                ProductOperationFailure::InvalidBindingRequest {
                     reason: format!("invalid extension configure payload: {error}"),
                 }
             })?
@@ -638,40 +658,44 @@ fn parse_channel_config_payload(
 
 fn map_channel_config_error(
     error: ironclaw_extension_host::ChannelConfigError,
-) -> ProductSurfaceFailure {
+) -> ProductOperationFailure {
     use ironclaw_extension_host::ChannelConfigError;
     match error {
-        ChannelConfigError::Storage { reason } => ProductSurfaceFailure::Transient { reason },
+        ChannelConfigError::Storage { reason } => ProductOperationFailure::Transient { reason },
         ChannelConfigError::NotInstalled { .. }
         | ChannelConfigError::UnknownField { .. }
-        | ChannelConfigError::Reactivation { .. } => ProductSurfaceFailure::InvalidBindingRequest {
-            reason: error.to_string(),
-        },
+        | ChannelConfigError::Reactivation { .. } => {
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: error.to_string(),
+            }
+        }
     }
 }
 
-fn map_skill_error(error: SkillManagementError) -> ProductSurfaceFailure {
+fn map_skill_error(error: SkillManagementError) -> ProductOperationFailure {
     match error.kind() {
         SkillManagementErrorKind::InvalidInput
         | SkillManagementErrorKind::NotFound
         | SkillManagementErrorKind::Conflict
-        | SkillManagementErrorKind::InvalidSkill => ProductSurfaceFailure::InvalidBindingRequest {
-            reason: error
-                .reason()
-                .unwrap_or("skill management request rejected")
-                .to_string(),
-        },
-        SkillManagementErrorKind::FilesystemDenied => ProductSurfaceFailure::BindingAccessDenied,
-        SkillManagementErrorKind::Resource => ProductSurfaceFailure::Transient {
+        | SkillManagementErrorKind::InvalidSkill => {
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: error
+                    .reason()
+                    .unwrap_or("skill management request rejected")
+                    .to_string(),
+            }
+        }
+        SkillManagementErrorKind::FilesystemDenied => ProductOperationFailure::BindingAccessDenied,
+        SkillManagementErrorKind::Resource => ProductOperationFailure::Transient {
             reason: "skill management resource unavailable".to_string(),
         },
     }
 }
 
-fn map_local_skill_management_error(error: ScopedSkillManagementError) -> ProductSurfaceFailure {
+fn map_local_skill_management_error(error: ScopedSkillManagementError) -> ProductOperationFailure {
     match error {
         ScopedSkillManagementError::InvalidContext { reason } => {
-            ProductSurfaceFailure::InvalidBindingRequest { reason }
+            ProductOperationFailure::InvalidBindingRequest { reason }
         }
         ScopedSkillManagementError::Skill(error) => map_skill_error(error),
     }
@@ -686,7 +710,60 @@ mod tests {
         mount::{MountGrant, MountPermissions, MountView},
         path::{HostPath, MountAlias, VirtualPath},
     };
-    use ironclaw_product::LifecycleProductSurfaceContext;
+    use ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContext;
+
+    /// This crate's projection must answer exactly what the contract's own
+    /// projection answers — the status table lives there and this wrapper adds
+    /// only the transient log. Drift here means the WebUI reports one status
+    /// through product's lifecycle service and a different one through the
+    /// extension host's, for the identical failure.
+    ///
+    /// The `Transient` case also drives the logging branch, which is the only
+    /// line in this function that is not a delegation.
+    #[test]
+    fn lifecycle_surface_error_matches_the_contract_projection_for_every_variant() {
+        for failure in [
+            ProductOperationFailure::BindingResolutionFailed {
+                reason: "no tenant".into(),
+            },
+            ProductOperationFailure::BindingAccessDenied,
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "bad ref".into(),
+            },
+            ProductOperationFailure::ProviderInstanceNotConfigured {
+                reason: "ironclaw config set google.client_id <id>".into(),
+            },
+            ProductOperationFailure::UnsupportedActionKind {
+                kind: "teleport".into(),
+            },
+            ProductOperationFailure::Transient {
+                reason: "db timeout".into(),
+            },
+        ] {
+            let projected = lifecycle_surface_error(failure.clone());
+            let expected: ProductSurfaceError = failure.clone().into();
+            assert_eq!(projected, expected, "projection drifted for {failure:?}");
+        }
+    }
+
+    /// The two statuses a caller acts on differently: a transient failure is
+    /// retryable and a rejected request is not. Pinned separately from the
+    /// table above so a change that made everything retryable would fail here
+    /// with an obvious message rather than as an equality mismatch.
+    #[test]
+    fn transient_lifecycle_failures_are_retryable_and_invalid_requests_are_not() {
+        let transient = lifecycle_surface_error(ProductOperationFailure::Transient {
+            reason: "db timeout".into(),
+        });
+        assert_eq!(transient.status_code, 503);
+        assert!(transient.retryable);
+
+        let invalid = lifecycle_surface_error(ProductOperationFailure::InvalidBindingRequest {
+            reason: "bad ref".into(),
+        });
+        assert_eq!(invalid.status_code, 400);
+        assert!(!invalid.retryable);
+    }
 
     #[test]
     fn installed_skill_source_remains_installed_in_lifecycle_projection() {
@@ -803,7 +880,7 @@ mod tests {
             .expect_err("skill remove must reject non-skill package refs");
         assert!(matches!(
             wrong_kind,
-            ProductSurfaceFailure::InvalidBindingRequest { .. }
+            ProductOperationFailure::InvalidBindingRequest { .. }
         ));
         assert!(
             storage_root
@@ -983,7 +1060,7 @@ mod tests {
             .expect_err("invalid skill content should fail");
         assert!(matches!(
             invalid_install,
-            ProductSurfaceFailure::InvalidBindingRequest { .. }
+            ProductOperationFailure::InvalidBindingRequest { .. }
         ));
 
         let missing_remove = service
@@ -1001,7 +1078,7 @@ mod tests {
             .expect_err("missing skill remove should fail");
         assert!(matches!(
             missing_remove,
-            ProductSurfaceFailure::InvalidBindingRequest { .. }
+            ProductOperationFailure::InvalidBindingRequest { .. }
         ));
     }
 

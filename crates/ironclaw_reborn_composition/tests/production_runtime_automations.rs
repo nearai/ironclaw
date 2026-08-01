@@ -30,6 +30,7 @@ use ironclaw_product::{
     AUTOMATIONS_VIEW, ProductListAutomationsRequest, RebornListAutomationsResponse,
 };
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
+use ironclaw_product_contracts::views::RebornViewPage;
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornRuntimeProcessBinding, build_reborn_runtime,
@@ -138,7 +139,7 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
     )
     .await
     .expect("production automation service must be reachable (not 503)");
-    let result = ironclaw_product::RebornViewPage {
+    let result = RebornViewPage {
         payload: result
             .items
             .into_iter()

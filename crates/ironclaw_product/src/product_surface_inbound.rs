@@ -1,8 +1,22 @@
-//! Product-surface inbound DTO contract.
+//! Product-surface inbound normalization.
 //!
-//! These DTOs normalize authenticated terminal callers plus request bodies into
-//! canonical Reborn commands without depending on route handlers, protocol auth
-//! evidence, WASM, or adapter registries.
+//! The request *body shapes* moved to
+//! [`ironclaw_product_contracts::inbound_requests`] with the WS5 port inversion
+//! (PROPOSAL §6.1.3) so WebUI and the OpenAI-compatible adapter can construct
+//! them without compiling this crate. What stays here is everything that could
+//! not follow them across the contracts allowlist:
+//!
+//! - [`ProductInboundCommand`] — its `CancelRun` variant carries
+//!   `ironclaw_turns::CancelRunRequest`.
+//! - [`ProductAttachmentCapabilities`] / [`product_attachment_capabilities`] —
+//!   the budgets are `ironclaw_attachments` types.
+//! - the validation/normalization that turns a body into a canonical command,
+//!   which produces the two above and is not contract vocabulary in any case.
+//!
+//! Because the DTOs now live in another crate, the normalization is exposed as
+//! the [`IntoProductInboundCommand`] and [`DecodeInboundAttachments`] extension
+//! traits rather than inherent methods; call sites are unchanged apart from
+//! bringing the trait into scope.
 
 use ironclaw_attachments::{AttachmentBudgets, DEFAULT_ATTACHMENT_BUDGETS};
 use ironclaw_host_api::turn::{IdempotencyKey, SanitizedCancelReason, TurnGateRef, TurnRunId};
@@ -10,6 +24,10 @@ use ironclaw_host_api::{
     attachment::InboundAttachment,
     ids::ThreadId,
     turn::{TurnActor, TurnScope},
+};
+use ironclaw_product_contracts::inbound_requests::{
+    ProductCancelRunRequest, ProductCreateThreadRequest, ProductGateResolution,
+    ProductResolveGateRequest, ProductRetryRunRequest, ProductSubmitTurnRequest,
 };
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode,
@@ -29,7 +47,7 @@ const ATTACHMENT_FILENAME_MAX_BYTES: usize = 256;
 /// Carries the `accept` tokens generated from the shared
 /// [`ironclaw_common`] format registry (so the file picker can never drift
 /// from the server's allowed MIME set) plus the same budgets
-/// [`ProductSubmitTurnRequest::decode_attachments`] enforces. The browser
+/// [`DecodeInboundAttachments::decode_attachments`] enforces. The browser
 /// uses this only for pre-submit hints; the server-side decode remains the
 /// sole authority on what is accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,63 +74,21 @@ pub fn product_attachment_capabilities() -> ProductAttachmentCapabilities {
     }
 }
 
-/// Browser body for WebUI create-thread mutation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct ProductCreateThreadRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_action_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub requested_thread_id: Option<String>,
-    /// Optional project the new thread should be scoped to. The browser only
-    /// *proposes* it — the service authorizes the caller's access to the project
-    /// before adopting it as scope, so the body is never trusted on its own.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<String>,
-}
-
-/// One inline attachment in a browser send-message body.
-///
-/// `data_base64` is the base64-encoded file bytes; `mime_type` is validated
-/// against the shared attachment format registry. This is the only place raw
-/// upload bytes enter the workflow — they are decoded, budgeted, and landed in
-/// storage, never carried on the (serializable) inbound command.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct ProductInboundAttachment {
-    pub mime_type: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filename: Option<String>,
-    pub data_base64: String,
-}
-
-/// Browser body for WebUI send-message mutation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct ProductSubmitTurnRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_action_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thread_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attachments: Vec<ProductInboundAttachment>,
-    /// Caller-selected model for this turn. A hint routed to when the operator
-    /// has it configured, otherwise the run falls back to the deployment's
-    /// active model. The `"default"` alias and empty values are treated as "no
-    /// selection". `None` for clients that don't pick a model.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-}
-
-impl ProductSubmitTurnRequest {
-    /// Validate and decode the inline attachments into bytes-bearing
-    /// [`InboundAttachment`]s ready for landing.
+/// Decode the inline attachments a submit-turn body carries into bytes-bearing
+/// [`InboundAttachment`]s ready for landing.
+pub trait DecodeInboundAttachments {
+    /// Validate and decode the inline attachments.
     ///
     /// Enforces the per-file / per-message / count budgets and rejects
     /// unsupported MIME types (per the shared format registry) and malformed
     /// base64 with a stable validation error. Kept separate from
-    /// [`Self::into_command`] so the serializable command never carries raw
-    /// bytes.
-    pub fn decode_attachments(&self) -> Result<Vec<InboundAttachment>, ProductSurfaceError> {
+    /// [`IntoProductInboundCommand::into_command`] so the serializable command
+    /// never carries raw bytes.
+    fn decode_attachments(&self) -> Result<Vec<InboundAttachment>, ProductSurfaceError>;
+}
+
+impl DecodeInboundAttachments for ProductSubmitTurnRequest {
+    fn decode_attachments(&self) -> Result<Vec<InboundAttachment>, ProductSurfaceError> {
         use base64::Engine;
 
         if self.attachments.len() > DEFAULT_ATTACHMENT_BUDGETS.max_count {
@@ -183,182 +159,6 @@ impl ProductSubmitTurnRequest {
     }
 }
 
-/// Browser body for WebUI cancel-run mutation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct ProductCancelRunRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_action_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thread_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-/// Browser body for WebUI failed-run retry mutation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct ProductRetryRunRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_action_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thread_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
-}
-
-/// Browser query for WebUI list-threads read.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct ProductListThreadsRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub candidate_thread_id: Option<String>,
-    #[serde(default)]
-    pub needs_approval: bool,
-}
-
-impl ProductListThreadsRequest {
-    pub fn set_limit(mut self, limit: u32) -> Self {
-        self.limit = Some(limit);
-        self
-    }
-
-    pub fn set_cursor(mut self, cursor: impl Into<String>) -> Self {
-        self.cursor = Some(cursor.into());
-        self
-    }
-
-    pub fn set_candidate_thread_id(mut self, candidate_thread_id: impl Into<String>) -> Self {
-        self.candidate_thread_id = Some(candidate_thread_id.into());
-        self
-    }
-
-    pub fn set_needs_approval(mut self, needs_approval: bool) -> Self {
-        self.needs_approval = needs_approval;
-        self
-    }
-}
-
-/// Browser query for WebUI automation listing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct ProductListAutomationsRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_limit: Option<u32>,
-    /// When `true`, soft-completed (fire-once) automations are included in the
-    /// response alongside active ones. Defaults to `false` (active-only) so
-    /// existing callers that do not set this flag are unaffected.
-    #[serde(default)]
-    pub include_completed: bool,
-}
-
-impl ProductListAutomationsRequest {
-    pub fn set_limit(mut self, limit: u32) -> Self {
-        self.limit = Some(limit);
-        self
-    }
-
-    pub fn set_run_limit(mut self, run_limit: u32) -> Self {
-        self.run_limit = Some(run_limit);
-        self
-    }
-
-    pub fn set_include_completed(mut self, include_completed: bool) -> Self {
-        self.include_completed = include_completed;
-        self
-    }
-}
-
-/// Browser body for WebUI automation rename mutation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct ProductRenameAutomationRequest {
-    /// Optional at the DTO boundary so `{}` returns the stable field-level
-    /// `missing_field` validation error instead of a generic JSON rejection.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-}
-
-/// Browser body for WebUI extension-setup interaction.
-///
-/// This is the v2 entrypoint inventory's "extensions onboarding" row.
-/// The native service exposes the route surface so callers can
-/// inventory the API without v1 dependency. Concrete implementations return a
-/// product-safe lifecycle projection; auth, approval, and pairing requirements
-/// remain blockers owned by their dedicated Reborn services, not lifecycle
-/// phases.
-///
-/// The package id is not part of the body — it is bound from the route
-/// path and lifted into a lifecycle package ref by the handler before
-/// it crosses the service boundary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct ProductSetupExtensionRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_action_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub action: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub payload: Option<serde_json::Value>,
-}
-
-/// Browser body for WebUI gate-resolution mutation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct ProductResolveGateRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_action_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thread_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gate_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolution: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub always: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credential_ref: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProductCancelReason {
-    UserRequested,
-    Superseded,
-    Timeout,
-    OperatorRequested,
-    Policy,
-}
-
-impl From<ProductCancelReason> for SanitizedCancelReason {
-    fn from(value: ProductCancelReason) -> Self {
-        match value {
-            ProductCancelReason::UserRequested => Self::UserRequested,
-            ProductCancelReason::Superseded => Self::Superseded,
-            ProductCancelReason::Timeout => Self::Timeout,
-            ProductCancelReason::OperatorRequested => Self::OperatorRequested,
-            ProductCancelReason::Policy => Self::Policy,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "resolution", rename_all = "snake_case")]
-pub enum ProductGateResolution {
-    Approved {
-        #[serde(default)]
-        always: bool,
-    },
-    /// Unified decline variant — covers both user-initiated approval denial
-    /// and auth-gate cancellation; the wire value is "declined".
-    Declined,
-    /// A host-stored credential reference, not a raw secret/token.
-    CredentialProvided { credential_ref: String },
-}
-
 /// Canonical route-independent WebUI command produced after validation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
@@ -397,8 +197,20 @@ pub enum ProductInboundCommand {
     },
 }
 
-impl ProductCreateThreadRequest {
-    pub fn into_command(
+/// Normalize a transport request body into the canonical inbound command.
+///
+/// One trait rather than five inherent methods because the bodies now live in
+/// `ironclaw_product_contracts` and the normalization — which produces
+/// [`ProductInboundCommand`] — cannot follow them there.
+pub trait IntoProductInboundCommand {
+    fn into_command(
+        self,
+        caller: ProductSurfaceCaller,
+    ) -> Result<ProductInboundCommand, ProductSurfaceError>;
+}
+
+impl IntoProductInboundCommand for ProductCreateThreadRequest {
+    fn into_command(
         self,
         caller: ProductSurfaceCaller,
     ) -> Result<ProductInboundCommand, ProductSurfaceError> {
@@ -416,8 +228,8 @@ impl ProductCreateThreadRequest {
     }
 }
 
-impl ProductSubmitTurnRequest {
-    pub fn into_command(
+impl IntoProductInboundCommand for ProductSubmitTurnRequest {
+    fn into_command(
         self,
         caller: ProductSurfaceCaller,
     ) -> Result<ProductInboundCommand, ProductSurfaceError> {
@@ -443,8 +255,8 @@ impl ProductSubmitTurnRequest {
     }
 }
 
-impl ProductCancelRunRequest {
-    pub fn into_command(
+impl IntoProductInboundCommand for ProductCancelRunRequest {
+    fn into_command(
         self,
         caller: ProductSurfaceCaller,
     ) -> Result<ProductInboundCommand, ProductSurfaceError> {
@@ -465,8 +277,8 @@ impl ProductCancelRunRequest {
     }
 }
 
-impl ProductRetryRunRequest {
-    pub fn into_command(
+impl IntoProductInboundCommand for ProductRetryRunRequest {
+    fn into_command(
         self,
         caller: ProductSurfaceCaller,
     ) -> Result<ProductInboundCommand, ProductSurfaceError> {
@@ -483,8 +295,8 @@ impl ProductRetryRunRequest {
     }
 }
 
-impl ProductResolveGateRequest {
-    pub fn into_command(
+impl IntoProductInboundCommand for ProductResolveGateRequest {
+    fn into_command(
         self,
         caller: ProductSurfaceCaller,
     ) -> Result<ProductInboundCommand, ProductSurfaceError> {

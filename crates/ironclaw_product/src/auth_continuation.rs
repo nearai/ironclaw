@@ -5,6 +5,10 @@
 //! boundary as the WebUI gate-resolution path. It intentionally does not define
 //! another auth-flow model or handle non-turn continuation variants.
 
+use ironclaw_product_contracts::lifecycle_service::{
+    LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
+};
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -22,8 +26,7 @@ use crate::binding_ref::{
 };
 use crate::{
     AuthContinuationRejectionKind, LifecyclePackageKind, LifecyclePackageRef,
-    LifecycleProductAction, LifecycleProductContext, LifecycleProductService,
-    LifecycleProductSurfaceContext, ProductSurfaceFailure,
+    LifecycleProductAction, ProductSurfaceFailure,
 };
 
 struct LifecycleAuthContinuationDispatcher {

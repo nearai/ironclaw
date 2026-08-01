@@ -31,12 +31,15 @@ use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
     ids::{AgentId, CapabilityId, ExtensionId, SecretHandle, TenantId, UserId},
 };
-use ironclaw_product::{
-    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
-    AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornOperatorToolCatalog,
-    RebornOperatorToolInfo, RebornServices, RebornStreamEventsRequest,
-};
 use ironclaw_product::{ProductOutboundEnvelope, ProductOutboundPayload};
+use ironclaw_product::{RebornServices, RebornStreamEventsRequest};
+use ironclaw_product_contracts::admin_users::{
+    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
+    AdminUserSecretMeta, AdminUserService, AdminUserStatus,
+};
+use ironclaw_product_contracts::operator_tools::{
+    RebornOperatorToolCatalog, RebornOperatorToolInfo,
+};
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceStreamRequest,
 };

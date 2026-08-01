@@ -10,8 +10,9 @@ use ironclaw_auth::{
 };
 use ironclaw_product::{
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-    ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialSetup,
+    ExtensionCredentialSubmitRequest,
 };
+use ironclaw_product_contracts::package_lifecycle::LifecycleExtensionCredentialSetup;
 use ironclaw_product_contracts::surface::{
     ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
@@ -196,10 +197,8 @@ mod tests {
         ids::{ExtensionId, InvocationId, SecretHandle, TenantId, UserId},
         resource::ResourceScope,
     };
-    use ironclaw_product::{
-        ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-        LifecycleExtensionCredentialSetup,
-    };
+    use ironclaw_product::{ExtensionCredentialSetupService, ExtensionCredentialStatusRequest};
+    use ironclaw_product_contracts::package_lifecycle::LifecycleExtensionCredentialSetup;
 
     struct NoopDispatcher;
 

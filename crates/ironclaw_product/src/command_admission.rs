@@ -11,31 +11,17 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_product_contracts::admin_users::AdminUserRole;
+use ironclaw_product_contracts::command::{CommandActorRoleResolver, ProductCommandContext};
 use ironclaw_product_contracts::surface::ProductSurfaceError;
 
 use crate::binding::route_kind_for_trigger;
-use crate::command_dispatch::{
-    ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
-};
+use crate::command_dispatch::{ProductCommandAdmission, ProductCommandAdmissionService};
 use crate::commands::{
     CommandAudience, ProductCommand, UnknownProductCommandName, declared_command_help_text,
     required_audience, validate_declared_product_command,
 };
-use crate::reborn_services::AdminUserRole;
 use crate::{ProductConversationRouteKind, ProductRejection, ProductRejectionKind};
-
-/// Resolves the admin-boundary role of the ACTIVE bound user behind an
-/// inbound channel actor. `Ok(None)` means unbound actor, missing record, or
-/// suspended account — all treated as not-admin (fail closed). `Err` means
-/// transient resolution failure; the command fails retryable rather than
-/// silently degrading to member or admin treatment.
-#[async_trait]
-pub trait CommandActorRoleResolver: Send + Sync {
-    async fn actor_role(
-        &self,
-        context: &ProductCommandContext,
-    ) -> Result<Option<AdminUserRole>, ProductSurfaceError>;
-}
 
 /// Admit only manifest-enabled commands from direct conversations, then gate
 /// admin-audience commands on the actor's admin-users role.

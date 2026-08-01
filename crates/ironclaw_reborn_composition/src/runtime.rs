@@ -72,9 +72,10 @@ use ironclaw_product::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
     ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
     DefaultApprovalInteractionService, DefaultAuthInteractionService,
-    LifecycleProductSurfaceContext, OutboundPreferencesProductService,
-    PersistentApprovalGranteeResolver, RunStateApprovalInteractionReadModel,
+    OutboundPreferencesProductService, PersistentApprovalGranteeResolver,
+    RunStateApprovalInteractionReadModel,
 };
+use ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContext;
 use ironclaw_product_contracts::projection::ProjectionStream;
 use ironclaw_product_contracts::surface::ProductSurface;
 use ironclaw_runner::loop_exit_applier::{
@@ -397,13 +398,17 @@ pub(crate) use capability_host::RESULT_READ_CAPABILITY_ID_FOR_TEST;
 pub(crate) use capability_host::SKILL_ACTIVATE_CAPABILITY_ID;
 
 pub use skills::{
-    RebornSkillActivation, RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle,
-    RebornSkillExecutionPlan, RebornSkillExecutionResult, RebornSkillSourceKind,
+    RebornSkillActivation, RebornSkillActivationMode, RebornSkillActivationSource,
+    RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan, RebornSkillExecutionResult,
 };
 
 use skills::skill_asset_error;
 
 use ironclaw_operator::ResolvedRebornLlm;
+use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::admin_users::AdminUserService;
+use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
+use ironclaw_product_contracts::delivery::ChannelDeliveryResolver;
 
 /// Stable identifier for a Reborn CLI conversation. Wraps a `ThreadId`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -571,7 +576,8 @@ pub struct RebornRuntime {
     pub(crate) ironhub_manifest_url: ironclaw_ironhub::IronhubManifestUrl,
     /// Single composed IronHub deep-link service. `None` is the default-off
     /// registration gate; the same option controls facade and route wiring.
-    pub(crate) ironhub_link_service: Option<Arc<dyn ironclaw_product::IronhubLinkService>>,
+    pub(crate) ironhub_link_service:
+        Option<Arc<dyn ironclaw_product_contracts::ironhub::IronhubLinkService>>,
     pub(crate) owner_user_id: UserId,
     pub(crate) extension_filesystem: Arc<CompositeRootFilesystem>,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
@@ -597,8 +603,7 @@ pub struct RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
     pub(crate) channel_pairing: Option<Arc<ChannelPairingRegistry>>,
-    pub(crate) channel_delivery_resolver:
-        Option<Arc<dyn ironclaw_product::ChannelDeliveryResolver>>,
+    pub(crate) channel_delivery_resolver: Option<Arc<dyn ChannelDeliveryResolver>>,
     #[cfg(feature = "test-support")]
     pub(crate) channel_egress_credential_bridges:
         Option<Arc<ironclaw_extension_host::channel_egress::BridgedChannelEgressCredentials>>,
@@ -834,7 +839,7 @@ impl RebornRuntime {
 
     pub(crate) fn ironhub_link_service(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product::IronhubLinkService>> {
+    ) -> Option<Arc<dyn ironclaw_product_contracts::ironhub::IronhubLinkService>> {
         self.ironhub_link_service.as_ref().map(Arc::clone)
     }
 
@@ -913,6 +918,7 @@ impl RebornRuntime {
         self.extension_management
             .install(package_ref, &self.actor_user_id)
             .await
+            .map_err(ironclaw_product::ProductSurfaceFailure::from)
     }
 
     /// Test-only caller for the production static activation path with the
@@ -929,6 +935,7 @@ impl RebornRuntime {
         self.extension_management
             .activate_with_prechecked_credentials_for_test(package_ref)
             .await
+            .map_err(ironclaw_product::ProductSurfaceFailure::from)
     }
 
     /// Test-support handles onto the approval/lease/gate stores the integration
@@ -1084,7 +1091,7 @@ impl RebornRuntime {
             channel_config: Arc::clone(&self.channel_config_service),
             channel_pairing: self.channel_pairing.clone(),
         };
-        let admin_users: Arc<dyn ironclaw_product::AdminUserService> =
+        let admin_users: Arc<dyn AdminUserService> =
             Arc::new(crate::admin_user_directory::RebornAdminUserDirectory::new(
                 self.reborn_user_directory(),
                 self.reborn_admin_secret_provisioner(),
@@ -1211,7 +1218,7 @@ impl RebornRuntime {
     pub fn pairing_connection_notices_for_test(
         &self,
         extension_id: &str,
-    ) -> Option<ironclaw_product::ChannelConnectionNoticePolicy> {
+    ) -> Option<ChannelConnectionNoticePolicy> {
         let service = self.channel_pairing.as_ref()?.get(extension_id)?;
         Some(service.connection_notices().clone())
     }
@@ -1230,9 +1237,7 @@ impl RebornRuntime {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn channel_config_service(
-        &self,
-    ) -> Option<Arc<dyn ironclaw_product::ChannelConfigProductService>> {
+    pub fn channel_config_service(&self) -> Option<Arc<dyn ChannelConfigProductService>> {
         Some(Arc::new(
             ironclaw_extension_host::RebornChannelConfigProductService::new(Arc::clone(
                 &self.channel_config_service,
@@ -1328,7 +1333,8 @@ impl RebornRuntime {
         Some(
             self.extension_management
                 .publish_bundled_package_for_test(package, resolved)
-                .await,
+                .await
+                .map_err(ironclaw_product::ProductSurfaceFailure::from),
         )
     }
 
@@ -4078,7 +4084,10 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 reason: error.to_string(),
             })?
             .with_manifest_url(ironhub_manifest_url.clone());
-            Some(Arc::new(service) as Arc<dyn ironclaw_product::IronhubLinkService>)
+            Some(Arc::new(service)
+                as Arc<
+                    dyn ironclaw_product_contracts::ironhub::IronhubLinkService,
+                >)
         }
         None => None,
     };
