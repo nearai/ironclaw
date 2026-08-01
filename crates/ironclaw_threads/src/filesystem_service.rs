@@ -1532,6 +1532,11 @@ where
         // lands when the thread has no title yet). Best-effort: the message is
         // already durable, so a touch failure must not fail (and retry) the
         // accept.
+        // Only the first user message may seed the label. A pre-upgrade thread
+        // has messages but no cached label, and seeding from whatever arrives
+        // next would show the newest message where the sidebar contract
+        // promises the first — the probe-and-heal path derives those correctly.
+        let derived_title_candidate = (sequence == 1).then_some(derived_title_candidate).flatten();
         if let Err(error) = self
             .touch_thread_index_updated_at_with_derived_title(
                 &scope,
@@ -2283,6 +2288,11 @@ where
                     Ok(())
                 },
             )
+            .await?;
+        // The cached sidebar label may be a copy of the text just redacted.
+        // Propagating the removal is a redaction obligation, not best-effort:
+        // failing here is correct if the copy cannot be cleared.
+        self.clear_derived_title(&request.scope, &request.thread_id)
             .await?;
         self.touch_thread_updated_at_best_effort_at(&request.scope, &request.thread_id, now)
             .await;

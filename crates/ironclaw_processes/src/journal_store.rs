@@ -110,6 +110,13 @@ pub enum ProcessJournalStoreError {
     Deserialization(String),
     #[error("process journal observer error: {0}")]
     Observer(String),
+    /// A group commit failed as a whole and was deliberately not replayed.
+    ///
+    /// Nothing in the batch committed. Replaying to attribute the failure
+    /// would let a command whose write was meant to fail succeed on the second
+    /// attempt, so every command in the batch observes this instead.
+    #[error("process journal group commit failed and was not replayed: {reason}")]
+    GroupCommitFailed { reason: String },
     #[error("legacy process lifecycle data requires migration before row-native initialization")]
     MigrationRequired,
 }

@@ -94,6 +94,7 @@ fn error_class(error: ProcessJournalStoreError) -> &'static str {
         ProcessJournalStoreError::Deserialization(_) => "deserialization",
         ProcessJournalStoreError::Observer(_) => "observer",
         ProcessJournalStoreError::MigrationRequired => "migration",
+        ProcessJournalStoreError::GroupCommitFailed { .. } => "group_commit",
     }
 }
 

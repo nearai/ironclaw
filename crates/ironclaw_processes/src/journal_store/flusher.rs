@@ -289,19 +289,35 @@ async fn flush_batch<F>(
         respond_first_live(&mut live, error);
         return;
     }
-    // The transaction failed for the batch as a whole. Retry each command in
-    // its own transaction so every caller observes the error its own command
-    // produced instead of a neighbour's.
-    tracing::warn!(
+    // The transaction failed as a whole and nothing in it committed. Every
+    // live command observes that failure.
+    //
+    // Re-executing them individually to attribute the error would be wrong:
+    // the batch already consumed whatever externally observable effect the
+    // backend applied before failing, so a command whose write was supposed
+    // to fail can succeed on the replay and report a durable state it never
+    // reached (a one-shot store fault reaching its retry, observed as
+    // Completed/Failed where the contract requires Running). Reporting the
+    // rollback to all of them is truthful — none of them committed — and a
+    // caller that wants another attempt re-issues its own command.
+    tracing::debug!(
         %error,
         commands = live.len(),
-        "process journal group commit failed; retrying commands individually"
+        "process journal group commit failed; failing the batch without replay"
     );
-    for command in live {
-        let mut single = vec![command];
-        if let Err(error) = commit_pending(store, &mut single, deliveries).await {
-            respond_first_live(&mut single, error);
-        }
+    for command in live.iter_mut() {
+        command.respond(Err(clone_transaction_error(&error)));
+    }
+}
+
+/// Reproduce a batch-wide transaction failure for each caller.
+///
+/// `ProcessJournalStoreError` is not `Clone` (it carries backend error types),
+/// so the batch failure is re-expressed per command with its cause preserved
+/// in the message.
+fn clone_transaction_error(error: &ProcessJournalStoreError) -> ProcessJournalStoreError {
+    ProcessJournalStoreError::GroupCommitFailed {
+        reason: error.to_string(),
     }
 }
 

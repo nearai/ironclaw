@@ -409,6 +409,46 @@ where
         Ok(())
     }
 
+    /// Drop the cached sidebar label for a thread.
+    ///
+    /// The label is a copy of user message text, so whatever removes that text
+    /// must remove the copy: redaction clears the message content but the
+    /// listing serves the index row, which would otherwise keep showing the
+    /// redacted words. Clearing (rather than re-deriving here) keeps redaction
+    /// off the transcript-read path; the next list falls back to the probe,
+    /// which now sees the redacted message.
+    pub(super) async fn clear_derived_title(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<(), SessionThreadError> {
+        let path = thread_index_record_path(scope, thread_id)?;
+        let resource_scope = scope.to_resource_scope();
+        cas_update(
+            self.filesystem.as_ref(),
+            &resource_scope,
+            &path,
+            |bytes: &[u8]| deserialize::<ThreadIndexRecord>(bytes),
+            |record: &ThreadIndexRecord| Self::thread_index_entry(record),
+            |current: Option<ThreadIndexRecord>| async move {
+                let Some(mut index) = current else {
+                    return Ok(CasApply::no_op(
+                        no_op_thread_index_record(scope.clone(), thread_id.clone()),
+                        (),
+                    ));
+                };
+                if index.derived_title.is_none() {
+                    return Ok(CasApply::no_op(index, ()));
+                }
+                index.derived_title = None;
+                Ok(CasApply::new(index, ()))
+            },
+        )
+        .await
+        .map_err(map_cas_error)?;
+        Ok(())
+    }
+
     /// One-time heal for index rows that predate write-time title derivation:
     /// persist the probed label (never bumping activity) so the thread stops
     /// paying a transcript probe on every list request. Best-effort — listing
@@ -696,13 +736,24 @@ where
         messages: bool,
         rows: Vec<ironclaw_filesystem::VersionedEntry>,
     ) -> Result<TranscriptPageOutcome, SessionThreadError> {
-        let mut txn = self
+        // Writer admission is exactly where the observed QA failure happens:
+        // acquiring the sole libSQL writer can time out as `BackendBusy`, and
+        // propagating it here would escape as the retryable timeline 503 this
+        // retry loop exists to absorb.
+        let mut txn = match self
             .filesystem
             .begin(
                 &scope.to_resource_scope(),
                 &scoped_path(crate::filesystem_service::THREADS_PREFIX)?,
             )
-            .await?;
+            .await
+        {
+            Ok(txn) => txn,
+            Err(error) if transcript_migration_conflict(&error) => {
+                return Ok(TranscriptPageOutcome::Conflict(error));
+            }
+            Err(error) => return Err(error.into()),
+        };
         for listed_row in rows {
             // The listing runs before BEGIN IMMEDIATE owns the
             // writer lock. Re-read inside the transaction so a

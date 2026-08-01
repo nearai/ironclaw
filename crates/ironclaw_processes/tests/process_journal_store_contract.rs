@@ -254,6 +254,86 @@ async fn process_journal_rows_serialize_concurrent_store_handles() {
     assert_ne!(first_result.is_ok(), second_result.is_ok());
 }
 
+/// A one-shot backend write fault must be observed by a caller.
+///
+/// Group commit made this a durability question: when the batch transaction
+/// fails non-retryably, replaying its commands individually re-runs their
+/// externally observable semantics against a backend whose fault the aborted
+/// batch already consumed. The command whose write was supposed to fail then
+/// succeeds on the replay, and its caller is told a durable state was reached
+/// that never was. The batch therefore fails as a whole instead of replaying.
+#[tokio::test]
+async fn group_commit_does_not_replay_a_consumed_one_shot_write_fault() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&backend),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/processes").expect("process alias"),
+            VirtualPath::new("/engine/processes").expect("process target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("process mount"),
+    ));
+    let store = ProcessJournalStore::new(filesystem);
+    let resource_scope = scope();
+    // Materialize the store and its funnel before arming, so the fault lands
+    // on a batch of real submissions rather than on startup bookkeeping.
+    submit_internal_process(&store, &resource_scope, ProcessId::new()).await;
+
+    // A non-retryable write failure somewhere inside the next batch.
+    backend.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .nth(1)
+            .backend("one-shot journal write failure"),
+    );
+
+    let process_ids = (0..16).map(|_| ProcessId::new()).collect::<Vec<_>>();
+    let submissions = process_ids.iter().map(|process_id| {
+        let store = &store;
+        let scope = resource_scope.clone();
+        let process_id = *process_id;
+        async move {
+            store
+                .submit_process(SubmitProcessRequest {
+                    process_id,
+                    process_kind: ProcessKind::Internal,
+                    scope,
+                    exclusive_within_scope: false,
+                    operation_id: None,
+                    owner_user_id: None,
+                    concurrency_class: None,
+                    parent_process_id: None,
+                    root_process_id: None,
+                    spawn_tree_descendant_cap: None,
+                    dependency: None,
+                    checkpoint_ref: None,
+                    input: None,
+                    created_at: Utc::now(),
+                    metadata: serde_json::Value::Null,
+                })
+                .await
+        }
+    });
+    let outcomes = futures::future::join_all(submissions).await;
+
+    assert!(
+        outcomes.iter().any(|outcome| outcome.is_err()),
+        "an armed one-shot write fault must surface to a caller; replaying the \
+         batch would consume it silently and report durable state that was \
+         never committed"
+    );
+    // Re-submitting a failed command is the caller's own decision and must
+    // still work: the batch rolled back, so nothing conflicts.
+    let failed = process_ids
+        .iter()
+        .zip(outcomes.iter())
+        .filter_map(|(process_id, outcome)| outcome.as_ref().err().map(|_| *process_id))
+        .collect::<Vec<_>>();
+    for process_id in failed {
+        submit_internal_process(&store, &resource_scope, process_id).await;
+    }
+}
+
 #[tokio::test]
 async fn process_journal_retries_transient_transaction_setup_contention() {
     let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));

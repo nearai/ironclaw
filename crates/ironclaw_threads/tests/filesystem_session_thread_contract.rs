@@ -2206,6 +2206,80 @@ async fn filesystem_list_threads_derives_titles_without_transcript_probes() {
     );
 }
 
+/// The sidebar label is a copy of user message text, so redaction has to
+/// remove the copy too. Serving listings from the index row made this a real
+/// exposure: redaction clears the message body, but a cached label kept the
+/// redacted words visible in every thread list.
+#[tokio::test]
+async fn filesystem_redaction_clears_the_cached_sidebar_title() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-title-redact", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("title-redact");
+    let thread_id = ThreadId::new("thread-title-redact").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: Some("binding-title-redact".into()),
+            reply_target_binding_id: None,
+            external_event_id: Some("event-title-redact".into()),
+            content: MessageContent::text("my social security number is 000-00-0000"),
+        })
+        .await
+        .unwrap();
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        listed.threads[0]
+            .title
+            .as_deref()
+            .is_some_and(|title| title.contains("000-00-0000")),
+        "precondition: the label was seeded from the message text"
+    );
+
+    service
+        .redact_message(RedactMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            message_id: accepted.message_id,
+            redaction_ref: "redaction/audit/title".into(),
+        })
+        .await
+        .expect("redaction succeeds");
+
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let title = listed.threads[0].title.as_deref().unwrap_or_default();
+    assert!(
+        !title.contains("000-00-0000"),
+        "redacted text must not survive in the sidebar label, got {title:?}"
+    );
+}
+
 /// Rows written before write-time seeding existed carry no derived label:
 /// the first list probes the transcript once and persists the label; the
 /// second list must be probe-free.

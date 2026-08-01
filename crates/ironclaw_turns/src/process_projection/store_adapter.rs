@@ -390,7 +390,11 @@ pub fn turn_error_from_process_journal_store_error(error: ProcessJournalStoreErr
                 cap.into(),
             )
         }
-        ProcessJournalStoreError::InvalidLease { .. }
+        // A group commit that rolled back is a transient storage-side failure
+        // from the caller's perspective: nothing committed, and re-issuing the
+        // command is the correct response.
+        ProcessJournalStoreError::GroupCommitFailed { .. }
+        | ProcessJournalStoreError::InvalidLease { .. }
         | ProcessJournalStoreError::InvalidPath(_)
         | ProcessJournalStoreError::Filesystem(_)
         | ProcessJournalStoreError::Serialization(_)
