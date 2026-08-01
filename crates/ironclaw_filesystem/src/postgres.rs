@@ -2130,130 +2130,173 @@ async fn ensure_postgres_ordered_projection(
             operation: FilesystemOperation::EnsureIndex,
         });
     }
-    let trigger_base = sql_index_name(path.as_str(), spec.name.as_str());
-    let legacy_trigger_name = format!(
-        "{}_sync",
-        sql_index_name("/ordered_projection", spec.name.as_str())
-    );
-    // Hash each final identifier independently. Appending suffixes to an
-    // already-capped 62-byte base lets PostgreSQL truncate every trigger name
-    // to the same identifier on long tenant paths.
-    let function_name = sql_index_name(
-        path.as_str(),
-        &format!("{}_ordered_sync_fn", spec.name.as_str()),
-    );
-    let insert_trigger_name = sql_index_name(
-        path.as_str(),
-        &format!("{}_ordered_insert", spec.name.as_str()),
-    );
-    let update_trigger_name = sql_index_name(
-        path.as_str(),
-        &format!("{}_ordered_update", spec.name.as_str()),
-    );
-    let delete_trigger_name = sql_index_name(
-        path.as_str(),
-        &format!("{}_ordered_delete", spec.name.as_str()),
-    );
-    let legacy_scoped_trigger_name = format!("{trigger_base}_sync");
-    let index_name = spec.name.as_str().replace('\'', "''");
-    let escaped_prefix = path.as_str().replace('\'', "''");
-    let (prefix_lower, prefix_upper) = descendant_path_range(path);
-    let prefix_lower = prefix_lower.replace('\'', "''");
-    let prefix_upper = prefix_upper.replace('\'', "''");
-    let new_path_matches = format!(
-        "(NEW.path = '{escaped_prefix}' OR (NEW.path >= '{prefix_lower}' AND NEW.path < '{prefix_upper}'))"
-    );
-    let old_path_matches = format!(
-        "(OLD.path = '{escaped_prefix}' OR (OLD.path >= '{prefix_lower}' AND OLD.path < '{prefix_upper}'))"
-    );
-    let projected_values = spec
-        .keys
-        .iter()
-        .map(|key| format!("NEW.indexed->'{}'", key.as_str()))
-        .chain(
-            std::iter::repeat_with(|| "NULL".to_string())
-                .take(MAX_ORDERED_INDEX_KEYS.saturating_sub(spec.keys.len())),
+    ensure_postgres_static_ordered_projection(client, path).await
+}
+
+/// Projection triggers are static: three triggers sharing one function, whose
+/// body projects by joining the spec catalog on prefix containment. The
+/// previous design installed a plpgsql function plus three row triggers per
+/// (declaration prefix, spec); every entries write then evaluated every
+/// trigger ever declared — O(total declarations) per statement, the same
+/// accumulation pathology measured on libSQL (3,750 triggers after a 50-user
+/// run). The catalog join is O(catalog rows); declaration becomes a pure
+/// catalog insert.
+///
+/// Semantics are unchanged, including "declaration never backfills": triggers
+/// only fire on writes after the fact, and a spec projects exactly the
+/// subtree of its declared prefix.
+async fn ensure_postgres_static_ordered_projection(
+    client: &mut deadpool_postgres::Object,
+    path: &VirtualPath,
+) -> Result<(), FilesystemError> {
+    let map_err = |error: tokio_postgres::Error| {
+        db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+    };
+    // Fast path: the static trigger set is installed and no legacy
+    // per-declaration triggers remain. Re-running the DDL would take
+    // ShareRowExclusive locks on the entries table on every declaration and
+    // convoy concurrent writers.
+    let ensured = client
+        .query_opt(
+            "SELECT 1              FROM pg_trigger t              JOIN pg_class c ON c.oid = t.tgrelid              WHERE c.relname = 'root_filesystem_entries'                AND t.tgname = 'rfs_ordered_projection_v3_ai'                AND NOT EXISTS (                 SELECT 1 FROM pg_trigger l                  JOIN pg_class lc ON lc.oid = l.tgrelid                  WHERE lc.relname = 'root_filesystem_entries'                    AND NOT l.tgisinternal                    AND (l.tgname LIKE 'idx\\_rfs\\_%' \
+                        OR (l.tgname LIKE 'rfs\\_ordered\\_projection\\_%' \
+                            AND l.tgname NOT LIKE 'rfs\\_ordered\\_projection\\_v3\\_%')))",
+            &[],
         )
-        .collect::<Vec<_>>()
-        .join(", ");
-    let predicate = spec
-        .keys
-        .iter()
-        .map(|key| {
-            format!(
-                "(NEW.indexed->'{}') IS NOT NULL AND (NEW.indexed->'{}') <> 'null'::jsonb",
-                key.as_str(),
-                key.as_str()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" AND ");
-    let updates = (0..MAX_ORDERED_INDEX_KEYS)
+        .await
+        .map_err(map_err)?;
+    if ensured.is_some() {
+        return Ok(());
+    }
+    let transaction = client.transaction().await.map_err(map_err)?;
+    // One writer at a time for projection DDL, matching the per-declaration
+    // design's advisory lock.
+    transaction
+        .execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&"rfs_ordered_projection_v3"],
+        )
+        .await
+        .map_err(map_err)?;
+
+    // Sweep the legacy per-declaration generation: every trigger this crate
+    // ever installed on the entries table is `idx_rfs_`-prefixed (FTS and
+    // vector never used triggers on PostgreSQL), and its function is resolved
+    // through the trigger row rather than by name pattern because
+    // sql_index_name hash-truncates long identifiers.
+    let legacy = transaction
+        .query(
+            "SELECT t.tgname, p.proname \
+             FROM pg_trigger t \
+             JOIN pg_class c ON c.oid = t.tgrelid \
+             JOIN pg_proc p ON p.oid = t.tgfoid \
+             WHERE c.relname = 'root_filesystem_entries' \
+               AND NOT t.tgisinternal \
+               AND (t.tgname LIKE 'idx\\_rfs\\_%' \
+                    OR (t.tgname LIKE 'rfs\\_ordered\\_projection\\_%' \
+                        AND t.tgname NOT LIKE 'rfs\\_ordered\\_projection\\_v3\\_%'))",
+            &[],
+        )
+        .await
+        .map_err(map_err)?;
+    let mut drops = String::new();
+    let mut functions = std::collections::BTreeSet::new();
+    for row in &legacy {
+        let trigger: String = row.get(0);
+        let function: String = row.get(1);
+        if trigger
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            drops.push_str(&format!(
+                "DROP TRIGGER IF EXISTS {trigger} ON root_filesystem_entries;"
+            ));
+        }
+        if (function.starts_with("idx_rfs_")
+            || (function.starts_with("rfs_ordered_projection_")
+                && function != "rfs_ordered_projection_v3"))
+            && function
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            functions.insert(function);
+        }
+    }
+    for function in functions {
+        drops.push_str(&format!("DROP FUNCTION IF EXISTS {function}();"));
+    }
+    if !drops.is_empty() {
+        transaction.batch_execute(&drops).await.map_err(map_err)?;
+    }
+
+    // Containment: spec.prefix is the path itself or a proper ancestor. The
+    // half-open band `(prefix || '/', prefix || '0')` matches
+    // descendant_path_range; '/' needs its own arm because '//' breaks the
+    // band trick.
+    let containment = "(s.prefix = '/' \
+         OR NEW.path = s.prefix \
+         OR (NEW.path >= s.prefix || '/' AND NEW.path < s.prefix || '0'))";
+    let mut key_values = Vec::new();
+    let mut key_presence = Vec::new();
+    for i in 0..MAX_ORDERED_INDEX_KEYS_STATIC {
+        key_values.push(format!(
+            "CASE WHEN jsonb_array_length(s.keys) > {i} \
+             THEN NEW.indexed -> (s.keys ->> {i}) END"
+        ));
+        key_presence.push(format!(
+            "(jsonb_array_length(s.keys) <= {i} \
+             OR ((NEW.indexed -> (s.keys ->> {i})) IS NOT NULL \
+                 AND (NEW.indexed -> (s.keys ->> {i})) <> 'null'::jsonb))"
+        ));
+    }
+    let key_values = key_values.join(", ");
+    let key_presence = key_presence.join(" AND ");
+    let updates = (0..MAX_ORDERED_INDEX_KEYS_STATIC)
         .map(|position| format!("k{position} = EXCLUDED.k{position}"))
         .collect::<Vec<_>>()
         .join(", ");
     let ddl = format!(
-        "CREATE OR REPLACE FUNCTION {function_name}() RETURNS trigger \
+        "CREATE INDEX IF NOT EXISTS idx_root_filesystem_ordered_rows_path \
+           ON root_filesystem_ordered_index_rows(path); \
+         CREATE OR REPLACE FUNCTION rfs_ordered_projection_v3() RETURNS trigger \
          LANGUAGE plpgsql AS $projection$ \
          BEGIN \
+           IF TG_OP IN ('UPDATE', 'DELETE') THEN \
+             DELETE FROM root_filesystem_ordered_index_rows WHERE path = OLD.path; \
+           END IF; \
            IF TG_OP = 'DELETE' THEN \
-             IF {old_path_matches} THEN \
-               DELETE FROM root_filesystem_ordered_index_rows \
-                WHERE index_name = '{index_name}' AND path = OLD.path; \
-             END IF; \
              RETURN OLD; \
            END IF; \
-           IF TG_OP = 'UPDATE' AND {old_path_matches} THEN \
-             DELETE FROM root_filesystem_ordered_index_rows \
-              WHERE index_name = '{index_name}' AND path = OLD.path; \
-           END IF; \
-           IF {new_path_matches} AND NEW.is_dir = FALSE AND {predicate} THEN \
+           IF NEW.is_dir = FALSE AND NEW.indexed IS NOT NULL THEN \
              INSERT INTO root_filesystem_ordered_index_rows(\
                index_name, path, k0, k1, k2, k3, k4, k5, k6, k7\
-             ) VALUES ('{index_name}', NEW.path, {projected_values}) \
+             ) \
+             SELECT DISTINCT ON (s.name) s.name, NEW.path, {key_values} \
+             FROM root_filesystem_index_specs s \
+             WHERE s.kind IN ('exact', 'prefix') \
+               AND {containment} \
+               AND {key_presence} \
+             ORDER BY s.name, length(s.prefix) DESC \
              ON CONFLICT (index_name, path) DO UPDATE SET {updates}; \
            END IF; \
            RETURN NEW; \
          END; \
          $projection$; \
-         DROP TRIGGER IF EXISTS {legacy_trigger_name} ON root_filesystem_entries; \
-         DROP TRIGGER IF EXISTS {legacy_scoped_trigger_name} ON root_filesystem_entries; \
-         DROP TRIGGER IF EXISTS {insert_trigger_name} ON root_filesystem_entries; \
-         DROP TRIGGER IF EXISTS {update_trigger_name} ON root_filesystem_entries; \
-         DROP TRIGGER IF EXISTS {delete_trigger_name} ON root_filesystem_entries; \
-         CREATE TRIGGER {insert_trigger_name} \
+         CREATE OR REPLACE TRIGGER rfs_ordered_projection_v3_ai \
            AFTER INSERT ON root_filesystem_entries \
-           FOR EACH ROW WHEN ({new_path_matches}) \
-           EXECUTE FUNCTION {function_name}(); \
-         CREATE TRIGGER {update_trigger_name} \
+           FOR EACH ROW EXECUTE FUNCTION rfs_ordered_projection_v3(); \
+         CREATE OR REPLACE TRIGGER rfs_ordered_projection_v3_au \
            AFTER UPDATE ON root_filesystem_entries \
-           FOR EACH ROW WHEN ({old_path_matches} OR {new_path_matches}) \
-           EXECUTE FUNCTION {function_name}(); \
-         CREATE TRIGGER {delete_trigger_name} \
+           FOR EACH ROW EXECUTE FUNCTION rfs_ordered_projection_v3(); \
+         CREATE OR REPLACE TRIGGER rfs_ordered_projection_v3_ad \
            AFTER DELETE ON root_filesystem_entries \
-           FOR EACH ROW WHEN ({old_path_matches}) \
-           EXECUTE FUNCTION {function_name}();"
+           FOR EACH ROW EXECUTE FUNCTION rfs_ordered_projection_v3();"
     );
-    let transaction = client
-        .transaction()
-        .await
-        .map_err(|error| db_error(path.clone(), FilesystemOperation::EnsureIndex, error))?;
-    transaction
-        .execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-            &[&spec.name.as_str()],
-        )
-        .await
-        .map_err(|error| db_error(path.clone(), FilesystemOperation::EnsureIndex, error))?;
-    transaction
-        .batch_execute(&ddl)
-        .await
-        .map_err(|error| db_error(path.clone(), FilesystemOperation::EnsureIndex, error))?;
-    transaction
-        .commit()
-        .await
-        .map_err(|error| db_error(path.clone(), FilesystemOperation::EnsureIndex, error))
+    transaction.batch_execute(&ddl).await.map_err(map_err)?;
+    transaction.commit().await.map_err(map_err)
 }
+
+const MAX_ORDERED_INDEX_KEYS_STATIC: usize = 8;
 
 /// Translate a [`Filter`] tree into a postgres WHERE-clause fragment.
 /// Bound parameters use `$N` placeholders sized from `params.len() + 1`.

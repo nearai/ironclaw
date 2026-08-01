@@ -2535,7 +2535,9 @@ async fn ensure_libsql_static_ordered_projection(
         .query(
             "SELECT name FROM sqlite_master \
              WHERE type = 'trigger' \
-               AND name LIKE 'idx_rfs_%' \
+               AND (name LIKE 'idx_rfs_%' \
+                    OR (name LIKE 'rfs_ordered_projection_%' \
+                        AND name NOT LIKE 'rfs_ordered_projection_v3_%')) \
                AND sql LIKE '%root_filesystem_ordered_index_rows%'",
             (),
         )
@@ -2594,21 +2596,22 @@ async fn ensure_libsql_static_ordered_projection(
            AND {containment} \
            AND new.is_dir = 0 \
            AND new.indexed IS NOT NULL \
-           AND {key_presence};"
+           AND {key_presence} \
+         ORDER BY LENGTH(s.prefix) ASC;"
     );
     let statements = format!(
         "CREATE INDEX IF NOT EXISTS idx_root_filesystem_ordered_rows_path \
            ON root_filesystem_ordered_index_rows(path);\
-         CREATE TRIGGER IF NOT EXISTS rfs_ordered_projection_v2_ai \
+         CREATE TRIGGER IF NOT EXISTS rfs_ordered_projection_v3_ai \
            AFTER INSERT ON root_filesystem_entries \
            BEGIN {project} END;\
-         CREATE TRIGGER IF NOT EXISTS rfs_ordered_projection_v2_au \
+         CREATE TRIGGER IF NOT EXISTS rfs_ordered_projection_v3_au \
            AFTER UPDATE ON root_filesystem_entries \
            BEGIN \
              DELETE FROM root_filesystem_ordered_index_rows WHERE path = old.path; \
              {project} \
            END;\
-         CREATE TRIGGER IF NOT EXISTS rfs_ordered_projection_v2_ad \
+         CREATE TRIGGER IF NOT EXISTS rfs_ordered_projection_v3_ad \
            AFTER DELETE ON root_filesystem_entries \
            BEGIN \
              DELETE FROM root_filesystem_ordered_index_rows WHERE path = old.path; \
@@ -3481,9 +3484,9 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "rfs_ordered_projection_v2_ad".to_string(),
-                "rfs_ordered_projection_v2_ai".to_string(),
-                "rfs_ordered_projection_v2_au".to_string(),
+                "rfs_ordered_projection_v3_ad".to_string(),
+                "rfs_ordered_projection_v3_ai".to_string(),
+                "rfs_ordered_projection_v3_au".to_string(),
             ],
             "five declarations leave exactly the static trigger set and the \
              legacy per-declaration trigger is swept"
