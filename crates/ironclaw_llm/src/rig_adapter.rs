@@ -912,11 +912,26 @@ fn saturate_u32(val: u64) -> u32 {
     val.min(u32::MAX as u64) as u32
 }
 
+/// Downgrade a requested cache retention to `None` for models without
+/// prompt-cache support. Shared by both Anthropic transports so the
+/// construction-time decision (rig `prompt_caching` flag, OAuth breakpoint
+/// application) always agrees with `with_cache_retention`'s validation.
+pub(crate) fn effective_cache_retention(
+    retention: CacheRetention,
+    model_name: &str,
+) -> CacheRetention {
+    if retention != CacheRetention::None && !supports_prompt_cache(model_name) {
+        CacheRetention::None
+    } else {
+        retention
+    }
+}
+
 /// Returns `true` if the model supports Anthropic prompt caching.
 ///
 /// Per Anthropic docs, only Claude 3+ models support prompt caching.
 /// Unsupported: claude-2, claude-2.1, claude-instant-*.
-pub(crate) fn supports_prompt_cache(name: &str) -> bool {
+fn supports_prompt_cache(name: &str) -> bool {
     let lower = name.to_lowercase();
     // Strip optional provider prefix (e.g. "anthropic/claude-...")
     let model = lower.strip_prefix("anthropic/").unwrap_or(&lower);
@@ -3584,6 +3599,30 @@ mod tests {
         let moved = params["tools"].as_array().expect("raw tools array");
         assert_eq!(moved[0]["cache_control"]["type"], "ephemeral");
         assert_eq!(moved[0]["cache_control"]["ttl"], "1h");
+    }
+
+    #[test]
+    fn test_effective_cache_retention_downgrades_unsupported_models() {
+        assert_eq!(
+            effective_cache_retention(CacheRetention::Short, "claude-2.1"),
+            CacheRetention::None
+        );
+        assert_eq!(
+            effective_cache_retention(CacheRetention::Long, "claude-instant-1.2"),
+            CacheRetention::None
+        );
+        assert_eq!(
+            effective_cache_retention(CacheRetention::Short, "claude-opus-4-6"),
+            CacheRetention::Short
+        );
+        assert_eq!(
+            effective_cache_retention(CacheRetention::Long, "anthropic/claude-sonnet-4-5"),
+            CacheRetention::Long
+        );
+        assert_eq!(
+            effective_cache_retention(CacheRetention::None, "claude-opus-4-6"),
+            CacheRetention::None
+        );
     }
 
     #[test]
