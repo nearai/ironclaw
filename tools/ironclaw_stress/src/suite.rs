@@ -82,7 +82,15 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
         );
         crate::trace::prepare_trace_outputs(&case_args).await?;
         let started = Instant::now();
-        let captured = run_once(&case_args, &run_id).await?;
+        let case_result = run_once(&case_args, &run_id).await;
+        if let Some(path) = case_args
+            .libsql_path
+            .as_ref()
+            .filter(|path| Some(*path) != args.libsql_path.as_ref())
+        {
+            crate::cleanup_generated_libsql_path(path).await;
+        }
+        let captured = case_result?;
         let metrics = captured.metrics();
         let summary = captured.summary_value();
         let duration_ms = started.elapsed().as_millis();
@@ -276,6 +284,15 @@ fn apply_case(base_args: &Args, case: &SuiteCase, case_args: &mut Args, run_id: 
     case_args.compare_json = None;
     case_args.human_read = false;
     case_args.bottleneck_report = false;
+    // Every case gets its own database file. Sharing the parent's generated
+    // path let each case's runtime contend on the same SQLite file with the
+    // previous cases' still-running background pollers, drowning later cases
+    // (tool-*) in cross-runtime write-lock waits that no production deployment
+    // shape has — one libSQL file is owned by one process runtime.
+    if matches!(case_args.backend, crate::Backend::Libsql) && !case_args.scenario.is_api_capacity()
+    {
+        case_args.libsql_path = Some(crate::default_libsql_path());
+    }
     case_args.prefill_threads = 0;
     case_args.prefill_turns_per_thread = 0;
 

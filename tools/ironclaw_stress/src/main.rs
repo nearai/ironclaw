@@ -2315,7 +2315,7 @@ pub(crate) fn default_libsql_path() -> PathBuf {
     ))
 }
 
-async fn cleanup_generated_libsql_path(path: &Path) {
+pub(crate) async fn cleanup_generated_libsql_path(path: &Path) {
     for candidate in [
         path.to_path_buf(),
         path.with_extension("db-wal"),
