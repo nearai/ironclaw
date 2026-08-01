@@ -1,4 +1,7 @@
-import DOMPurify from "dompurify";
+import DOMPurify, {
+  type DOMPurify as DOMPurifyInstance,
+  type WindowLike,
+} from "dompurify";
 import { marked } from "marked";
 import {
   workspaceFileHrefFromPath,
@@ -12,8 +15,8 @@ import {
 // After sanitization, mark workspace anchors for the chat renderer's delegated
 // click handler. Keep the existing external-link hardening attributes as a safe
 // fallback for renderer call sites that do not install that handler.
-function createSanitizer() {
-  const sanitizer = DOMPurify(window);
+function createSanitizer(currentWindow: WindowLike) {
+  const sanitizer = DOMPurify(currentWindow);
   const validatedWorkspacePaths = new WeakMap<Element, string>();
   sanitizer.addHook("uponSanitizeAttribute", (node, data, config) => {
     const workspaceFileLinks = Boolean(
@@ -61,7 +64,16 @@ function createSanitizer() {
   return sanitizer;
 }
 
-const sanitizer = createSanitizer();
+const sanitizers = new WeakMap<object, DOMPurifyInstance>();
+
+function sanitizerForCurrentWindow(): DOMPurifyInstance {
+  const currentWindow = window;
+  const existing = sanitizers.get(currentWindow);
+  if (existing) return existing;
+  const sanitizer = createSanitizer(currentWindow);
+  sanitizers.set(currentWindow, sanitizer);
+  return sanitizer;
+}
 
 type RenderMarkdownOptions = {
   workspaceFileLinks?: boolean;
@@ -77,5 +89,6 @@ export function renderMarkdown(
     gfm: true,
     breaks: true,
   }) as string;
+  const sanitizer = sanitizerForCurrentWindow();
   return String(sanitizer.sanitize(raw, { workspaceFileLinks } as never));
 }
