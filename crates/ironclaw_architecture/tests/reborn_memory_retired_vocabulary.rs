@@ -43,8 +43,9 @@ const RETIRED_TERMS: &[&str] = &[
 /// Path fragments allowed to reference retired vocabulary.
 ///
 /// Shrink-only, and pinned to reality by
-/// `sanctioned_paths_all_match_real_files`: a fragment matching no scanned file
-/// exempts nothing, so it is dead text that reads as policy. The
+/// `sanctioned_paths_each_resolve_to_exactly_one_file`: a fragment matching no
+/// scanned file exempts nothing, so it is dead text that reads as policy, and a
+/// fragment matching *more than one* exempts more than it says. The
 /// `crates/ironclaw_gateway/` entry had already outlived its crate when that
 /// check was added — invisibly, because a fragment that matches nothing simply
 /// never sanctions anything.
