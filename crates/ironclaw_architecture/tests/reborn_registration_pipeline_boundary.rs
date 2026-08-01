@@ -50,8 +50,15 @@
 //! how this gate would come back as a false positive against the registration
 //! pipeline's own owner.
 
+// Each integration-test binary compiles the shared module independently; this
+// binary uses only the workspace-root search.
+#[allow(dead_code)]
+mod ratchet_support;
+
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+use ratchet_support::{find_workspace_root, workspace_root};
 
 /// Registration-pipeline vocabulary. Naming any of these outside the owning
 /// files below means a registration concept has entered generic code.
@@ -228,7 +235,7 @@ impl CrateInventory {
         }
 
         let mut manifests = Vec::new();
-        collect_manifest_directories(&crates_root, root, &mut manifests);
+        collect_manifest_directories(&crates_root, root, &mut manifests)?;
 
         // Shallowest first so the outermost owner of a path is always seen
         // before any manifest nested inside it.
@@ -274,22 +281,27 @@ impl CrateInventory {
     }
 }
 
-fn collect_manifest_directories(dir: &Path, root: &Path, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+fn collect_manifest_directories(
+    dir: &Path,
+    root: &Path,
+    out: &mut Vec<String>,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|error| read_failure(dir, error))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| entry_failure(dir, error))?;
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if path.is_dir() {
-            // Build outputs and dotted directories can hold vendored manifests
-            // that are not workspace crates (`cargo-fuzz` builds into
-            // `crates/<x>/fuzz/target/` by default).
-            if name == "target" || name.starts_with('.') {
+            // Build outputs, vendored frontend packages, and dotted directories
+            // can hold manifests that are not workspace crates (`cargo-fuzz`
+            // builds into `crates/<x>/fuzz/target/` by default; a pnpm install
+            // fills `crates/ironclaw_webui/frontend/node_modules` with thousands
+            // of packages, some of which ship a `Cargo.toml` and `src/*.rs`).
+            if name == "target" || name == "node_modules" || name.starts_with('.') {
                 continue;
             }
-            collect_manifest_directories(&path, root, out);
+            collect_manifest_directories(&path, root, out)?;
         } else if name == "Cargo.toml"
             && let Some(parent) = path.parent()
             && let Ok(relative) = parent.strip_prefix(root)
@@ -297,6 +309,26 @@ fn collect_manifest_directories(dir: &Path, root: &Path, out: &mut Vec<String>) 
             out.push(relative.to_string_lossy().replace('\\', "/"));
         }
     }
+    Ok(())
+}
+
+/// One phrasing for every I/O refusal in this gate, so the message reads the
+/// same whichever walk hit it.
+///
+/// Dropping these errors was a fail-open: a single unreadable crate `src/` tree
+/// keeps `scanned_files` and every owned-scope count above their floors, so the
+/// gate reported "no violations" for a subtree it never read (CHECKLIST WS0,
+/// #6963).
+fn read_failure(path: &Path, error: std::io::Error) -> String {
+    format!(
+        "failed to read {} — an unreadable path must fail this gate, not vanish from the \
+         scan: {error}",
+        path.display()
+    )
+}
+
+fn entry_failure(dir: &Path, error: std::io::Error) -> String {
+    format!("failed to read an entry in {}: {error}", dir.display())
 }
 
 /// Resolve `OWNED_SCOPES` / `EXCLUDED_CRATES` against this tree's real layout.
@@ -331,7 +363,7 @@ fn measured_scan(root: &Path, floors: Floors) -> Result<ScanOutcome, String> {
     }
 
     let scopes = resolve_scopes(&inventory)?;
-    let outcome = scan_tree(root, &scopes);
+    let outcome = scan_tree(root, &scopes)?;
 
     if outcome.scanned_files < floors.scanned_files {
         return Err(format!(
@@ -360,7 +392,7 @@ fn measured_scan(root: &Path, floors: Floors) -> Result<ScanOutcome, String> {
     Ok(outcome)
 }
 
-fn scan_tree(root: &Path, scopes: &ResolvedScopes) -> ScanOutcome {
+fn scan_tree(root: &Path, scopes: &ResolvedScopes) -> Result<ScanOutcome, String> {
     let mut outcome = ScanOutcome {
         owned_prefix_files: scopes
             .owned
@@ -369,8 +401,8 @@ fn scan_tree(root: &Path, scopes: &ResolvedScopes) -> ScanOutcome {
             .collect(),
         ..ScanOutcome::default()
     };
-    collect_hits(&root.join("crates"), root, scopes, &mut outcome);
-    outcome
+    collect_hits(&root.join("crates"), root, scopes, &mut outcome)?;
+    Ok(outcome)
 }
 
 fn is_owned(relative: &str, owned: &[String]) -> bool {
@@ -397,14 +429,26 @@ fn is_scannable(relative: &str) -> bool {
     !relative.contains("/tests/")
 }
 
-fn collect_hits(dir: &Path, root: &Path, scopes: &ResolvedScopes, outcome: &mut ScanOutcome) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+fn collect_hits(
+    dir: &Path,
+    root: &Path,
+    scopes: &ResolvedScopes,
+    outcome: &mut ScanOutcome,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|error| read_failure(dir, error))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| entry_failure(dir, error))?;
         let path = entry.path();
         if path.is_dir() {
-            collect_hits(&path, root, scopes, outcome);
+            // Same exclusions as the manifest walk: build output and vendored
+            // frontend packages are not production source, and counting them
+            // would inflate `scanned_files` past its floor with files nothing
+            // in this workspace wrote.
+            let name = entry.file_name();
+            if matches!(name.to_string_lossy().as_ref(), "target" | "node_modules") {
+                continue;
+            }
+            collect_hits(&path, root, scopes, outcome)?;
             continue;
         }
         let Ok(relative) = path.strip_prefix(root) else {
@@ -426,39 +470,12 @@ fn collect_hits(dir: &Path, root: &Path, scopes: &ResolvedScopes, outcome: &mut 
             continue;
         }
         outcome.scanned_files += 1;
-        let Ok(source) = std::fs::read_to_string(&path) else {
-            continue;
-        };
+        let source = std::fs::read_to_string(&path).map_err(|error| read_failure(&path, error))?;
         for term in scan_source(&source) {
             outcome.hits.insert((relative.clone(), term));
         }
     }
-}
-
-/// The workspace root: the nearest ancestor holding both `crates/` and a
-/// `Cargo.toml`.
-///
-/// Deliberately a search, not `CARGO_MANIFEST_DIR.parent().parent()`. The fixed
-/// two-level form encoded "this crate sits directly under `crates/`", which the
-/// family move makes false — and its failure is silent, because a wrong root
-/// makes the scan find no `crates/` directory and visit zero files.
-fn find_workspace_root(start: &Path) -> Result<PathBuf, String> {
-    let mut current = Some(start);
-    while let Some(directory) = current {
-        if directory.join("crates").is_dir() && directory.join("Cargo.toml").is_file() {
-            return Ok(directory.to_path_buf());
-        }
-        current = directory.parent();
-    }
-    Err(format!(
-        "no workspace root above {} — expected an ancestor holding both crates/ and Cargo.toml",
-        start.display()
-    ))
-}
-
-fn workspace_root() -> PathBuf {
-    find_workspace_root(Path::new(env!("CARGO_MANIFEST_DIR")))
-        .expect("architecture crate must sit inside the workspace")
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -696,6 +713,60 @@ fn fail_closed_when_an_owned_scope_matches_no_files() {
         error.contains("ironclaw_extensions/src/hosted_mcp_"),
         "the error must name the scope that stopped matching, got: {error}"
     );
+}
+
+/// An unreadable path fails the scan instead of disappearing from it.
+///
+/// The floors cannot cover this shape: one unreadable crate `src/` tree leaves
+/// `scanned_files` and every owned-scope count comfortably above their floors,
+/// so the gate would report "no violations" for a subtree it never read. Both
+/// walks and the source read are pinned, each failing for a deterministic,
+/// platform-independent reason rather than a chmod that root ignores in a
+/// container.
+#[test]
+fn an_unreadable_path_fails_the_scan_rather_than_disappearing_from_it() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let not_a_directory = temp.path().join("regular-file");
+    std::fs::write(&not_a_directory, "// fixture\n").expect("fixture file");
+
+    let mut manifests = Vec::new();
+    let error = collect_manifest_directories(&not_a_directory, temp.path(), &mut manifests)
+        .expect_err("the manifest walk must refuse an unreadable directory");
+    assert!(
+        error.contains("must fail this gate, not vanish from the scan"),
+        "expected an I/O refusal naming the path, got: {error}"
+    );
+
+    let scopes = ResolvedScopes {
+        owned: Vec::new(),
+        excluded: Vec::new(),
+    };
+    let mut outcome = ScanOutcome::default();
+    let error = collect_hits(&not_a_directory, temp.path(), &scopes, &mut outcome)
+        .expect_err("the hit walk must refuse an unreadable directory");
+    assert!(
+        error.contains("must fail this gate, not vanish from the scan"),
+        "expected an I/O refusal naming the path, got: {error}"
+    );
+
+    // A *file* the walk found but cannot read is the harder half: it sits inside
+    // an otherwise healthy scan, so no floor can see it. A dangling symlink is
+    // the deterministic stand-in — the walk enumerates it as a scannable `.rs`
+    // and the read then fails.
+    #[cfg(unix)]
+    {
+        let src = temp.path().join("crates/ironclaw_product/src");
+        std::fs::create_dir_all(&src).expect("source tree");
+        std::os::unix::fs::symlink(src.join("gone"), src.join("lifecycle.rs"))
+            .expect("dangling source");
+        let mut outcome = ScanOutcome::default();
+        let error = collect_hits(&src, temp.path(), &scopes, &mut outcome)
+            .expect_err("an unreadable source must refuse");
+        assert!(
+            error.contains("lifecycle.rs") && error.contains("must fail this gate"),
+            "expected the refusal to name the unreadable source, got: {error}"
+        );
+    }
 }
 
 /// A crate this gate names going missing is an error, not a skipped scope.

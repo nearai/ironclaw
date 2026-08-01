@@ -46,10 +46,21 @@ assert_contains() {
 tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
 
-# crate_tree.py's fail-closed floor is MIN_CRATE_DIRECTORIES=20, so a fixture
-# that exercises discovery must be a real-enough workspace. Padding crates carry
-# only a manifest.
-CRATE_FLOOR_PADDING=24
+# A fixture that exercises discovery must be a real-enough workspace to clear
+# crate_tree.py's fail-closed floor. Padding crates carry only a manifest.
+# The discovery floor is `crate_tree.py`'s own MIN_CRATE_DIRECTORIES, read from
+# the module rather than copied: a literal here goes stale the moment the floor
+# moves, and the fixture then fails with an error pointing at the fixture
+# instead of at the change that raised the floor.
+read_crate_floor() {
+    python3 -c 'import importlib.util, sys
+spec = importlib.util.spec_from_file_location("crate_tree", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(module.MIN_CRATE_DIRECTORIES)' "$1"
+}
+CRATE_FLOOR_HEADROOM=4
+CRATE_FLOOR_PADDING=$(( $(read_crate_floor "${crate_tree}") + CRATE_FLOOR_HEADROOM ))
 
 # Build a fixture repo: the script under test + the discovery library + a crates
 # tree whose first-party extension crate sits at $2 (repo-relative).

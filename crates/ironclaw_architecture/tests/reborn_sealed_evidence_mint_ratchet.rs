@@ -121,20 +121,53 @@ fn all_mint_fns() -> Vec<&'static str> {
         .collect()
 }
 
-/// Walk production Rust sources under `crates/`. Test trees are skipped for the
-/// *call-site* rules (a test standing in for the host is the sanctioned
+/// Read a file the walk already found, failing loudly on an I/O error.
+///
+/// `read_to_string(..).unwrap_or_default()` was the shape here, and it is
+/// fail-open by construction: a file the census cannot read contributes no impl
+/// headers and no offenders, so an unreadable source scans exactly like a clean
+/// one and the gate reports success on an incomplete census. These traits are
+/// unsealed with *provided* mint methods, so this census IS the enforcement
+/// (CHECKLIST WS0, #6963).
+fn read_source(path: &Path) -> String {
+    fs::read_to_string(path).unwrap_or_else(|error| {
+        panic!(
+            "failed to read {} — a source this census cannot read must fail the gate, \
+             not scan as empty: {error}",
+            path.display()
+        )
+    })
+}
+
+/// Walk production Rust sources under a member root. Test trees are skipped for
+/// the *call-site* rules (a test standing in for the host is the sanctioned
 /// `ProtocolAuthEvidence::test_verified` seam, and test doubles are not
 /// inventoried — the same convention `reborn_authorized_seal_ratchet` relies
 /// on). The implementor rule below re-uses the same walk for the same reason.
+///
+/// An unreadable directory or entry fails: a subtree that silently vanishes
+/// from the walk is the same fail-open as an unreadable file.
 fn collect_production_rs(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    let entries = fs::read_dir(dir).unwrap_or_else(|error| {
+        panic!(
+            "failed to read {} — a directory this census cannot read must fail the gate, \
+             not vanish from the walk: {error}",
+            dir.display()
+        )
+    });
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| {
+            panic!("failed to read an entry in {}: {error}", dir.display())
+        });
         let path = entry.path();
         if path.is_dir() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if matches!(name, "tests" | "examples" | "benches" | "target") {
+            // `node_modules` holds vendored frontend packages after a pnpm
+            // install; nothing there is workspace source.
+            if matches!(
+                name,
+                "tests" | "examples" | "benches" | "target" | "node_modules"
+            ) {
                 continue;
             }
             collect_production_rs(&path, out);
@@ -144,6 +177,73 @@ fn collect_production_rs(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+/// Every top-level directory the root manifest's `[workspace] members` list
+/// names — `crates/` plus `tools/` today.
+///
+/// The census used to walk `crates/` alone. `tools/ironclaw_stress` is a
+/// workspace member that depends on `ironclaw_host_api`, so it can implement a
+/// witness trait and mint `ProtocolAuthEvidence::Verified` exactly as a crate
+/// can — and it sat outside every scan while the `> 500` file floor stayed
+/// comfortably cleared. Derived from the manifest rather than hardcoded so a new
+/// member root joins the census automatically.
+fn member_roots(root: &Path) -> Vec<PathBuf> {
+    let manifest = read_source(&root.join("Cargo.toml"));
+    let parsed: toml::Value = toml::from_str(&manifest)
+        .unwrap_or_else(|error| panic!("root Cargo.toml does not parse: {error}"));
+    let members = parsed
+        .get("workspace")
+        .and_then(|workspace| workspace.get("members"))
+        .and_then(|members| members.as_array())
+        .unwrap_or_else(|| {
+            panic!(
+                "root Cargo.toml declares no `[workspace] members` — this census resolves \
+                   its scan roots from that list, and cannot guess them"
+            )
+        });
+
+    let mut names = BTreeSet::new();
+    for member in members {
+        let Some(text) = member.as_str() else {
+            continue;
+        };
+        let Some(top) = text.split('/').next() else {
+            continue;
+        };
+        // `"."` is the workspace root package, which owns no `src/` tree.
+        if top.is_empty() || top == "." {
+            continue;
+        }
+        names.insert(top.to_string());
+    }
+
+    assert!(
+        names.contains("crates"),
+        "the member list no longer names `crates/`, so this census would scan the wrong \
+         tree entirely: {names:?}"
+    );
+    let mut roots = Vec::new();
+    for name in names {
+        let path = root.join(&name);
+        assert!(
+            path.is_dir(),
+            "workspace member root {} does not exist — repoint the members list rather than \
+             letting the census scan nothing",
+            path.display()
+        );
+        roots.push(path);
+    }
+    roots
+}
+
+/// Every production Rust source across every workspace member root.
+fn collect_workspace_production_rs(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for member_root in member_roots(root) {
+        collect_production_rs(&member_root, &mut files);
+    }
+    files
 }
 
 fn owning_crate(root: &Path, path: &Path) -> String {
@@ -163,10 +263,17 @@ fn render(root: &Path, path: &Path) -> String {
 
 /// Every `Cargo.toml` in the workspace (crates, tools, and the root).
 fn collect_manifests(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    let entries = fs::read_dir(dir).unwrap_or_else(|error| {
+        panic!(
+            "failed to read {} — an unreadable directory must fail this walk, not silently \
+             shrink it: {error}",
+            dir.display()
+        )
+    });
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| {
+            panic!("failed to read an entry in {}: {error}", dir.display())
+        });
         let path = entry.path();
         if path.is_dir() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -203,7 +310,7 @@ fn retired_host_auth_mint_feature_is_absent_from_every_manifest() {
 
     let mut offenders = Vec::new();
     for manifest in &manifests {
-        let source = fs::read_to_string(manifest).unwrap_or_default();
+        let source = read_source(manifest);
         for (index, line) in source.lines().enumerate() {
             // Comments in a manifest are prose about the change, not a gate.
             if line.trim_start().starts_with('#') {
@@ -243,17 +350,32 @@ fn retired_host_auth_mint_feature_is_absent_from_ci_scripts() {
     for dir in ["scripts", ".github/workflows"] {
         let mut stack = vec![root.join(dir)];
         while let Some(current) = stack.pop() {
-            let Ok(entries) = fs::read_dir(&current) else {
-                continue;
-            };
-            for entry in entries.flatten() {
+            let entries = fs::read_dir(&current).unwrap_or_else(|error| {
+                panic!(
+                    "failed to read {} — an unreadable directory must fail this scan, not \
+                     silently shrink it: {error}",
+                    current.display()
+                )
+            });
+            for entry in entries {
+                let entry = entry.unwrap_or_else(|error| {
+                    panic!("failed to read an entry in {}: {error}", current.display())
+                });
                 let path = entry.path();
                 if path.is_dir() {
                     stack.push(path);
                     continue;
                 }
-                let Ok(source) = fs::read_to_string(&path) else {
-                    continue;
+                // Non-UTF-8 files (compiled fixtures, images) are not CI recipes
+                // and are the one legitimate skip here; an I/O *failure* is not.
+                let source = match fs::read_to_string(&path) {
+                    Ok(source) => source,
+                    Err(error) if error.kind() == std::io::ErrorKind::InvalidData => continue,
+                    Err(error) => panic!(
+                        "failed to read {} — an unreadable CI recipe must fail this scan, not \
+                         scan as empty: {error}",
+                        path.display()
+                    ),
                 };
                 scanned += 1;
                 for (index, line) in source.lines().enumerate() {
@@ -308,8 +430,7 @@ fn channel_ingress_verifier_is_implemented_only_by_the_generic_verifier() {
 
 fn assert_sole_implementor(trait_name: &str, permitted_crate: &str) {
     let root = workspace_root();
-    let mut files = Vec::new();
-    collect_production_rs(&root.join("crates"), &mut files);
+    let files = collect_workspace_production_rs(&root);
     assert!(
         files.len() > 500,
         "production walk found only {} files — the walk is broken, not the workspace",
@@ -320,7 +441,7 @@ fn assert_sole_implementor(trait_name: &str, permitted_crate: &str) {
     let mut permitted_impls = 0usize;
     let mut headers_seen = 0usize;
     for file in &files {
-        let source = fs::read_to_string(file).unwrap_or_default();
+        let source = read_source(file);
         // Comments and string literals are stripped, so doc mentions and error
         // text cannot false-positive. Headers are then collapsed onto one line
         // and in-file `use … as …` aliases resolved, so neither a line break
@@ -519,6 +640,16 @@ fn header_implements(header: &str, names: &BTreeSet<String>) -> bool {
                 continue;
             }
             let mut cursor = index + name.chars().count();
+            // Whitespace may separate the name from its generic arguments —
+            // `impl Trait <> for X {}` compiles, and the header collapse *makes*
+            // that space whenever a line break falls between the two. Skipping
+            // it before looking for `<` is what keeps the normalization total;
+            // without it the generic-argument branch is never entered, the
+            // whitespace loop below lands on `<`, `for` is not found, and the
+            // impl mints evidence undetected.
+            while chars.get(cursor).is_some_and(|c| c.is_whitespace()) {
+                cursor += 1;
+            }
             // Skip the trait's own generic arguments: `Trait<T> for X`.
             if chars.get(cursor) == Some(&'<') {
                 let mut depth = 0usize;
@@ -569,19 +700,110 @@ fn starts_word(chars: &[char], index: usize, word: &str) -> bool {
     !chars.get(cursor).is_some_and(|c| is_ident_char(*c))
 }
 
-/// Whether a stripped source line re-exports one of the two witness traits.
+/// Every `pub`-visible `use` **item** in already-stripped `source` that names one
+/// of the two witness traits, as `(1-based line of the visibility, collapsed
+/// item text)`.
 ///
-/// `pub`-prefixed covers `pub use`, `pub(crate) use`, `pub(super) use`, and
-/// `pub(in path) use` — every visibility that reaches beyond the declaring
-/// file, which is exactly what would put an alias binding out of the census's
-/// reach.
-fn reexports_a_grant_trait(line: &str) -> bool {
-    if !line.starts_with("pub") || !line.contains("use ") {
-        return false;
+/// Item-based, not line-based, for the same reason `impl_headers` is: rustfmt
+/// splits a long braced import, and the split puts `pub` and the trait name on
+/// different physical lines —
+///
+/// ```text
+/// pub(crate) use ironclaw_host_api::product_adapter::auth::{
+///     ChannelIngressVerifier as V,
+/// };
+/// ```
+///
+/// — so a `.lines()` scan sees a first line with no trait name and a second line
+/// that does not start with `pub`, returns `false` for both, and the two-file
+/// alias blind spot this guard exists to close reopens. Items run to their
+/// terminating `;` (a `use` tree contains none), so brace depth needs no
+/// tracking.
+///
+/// `pub`-visible covers `pub use`, `pub(crate) use`, `pub(super) use`, and
+/// `pub(in path) use` — every visibility that reaches beyond the declaring file,
+/// which is exactly what would put an alias binding out of the census's reach.
+fn grant_trait_reexports(source: &str) -> Vec<(usize, String)> {
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = Vec::new();
+    let mut line = 1usize;
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '\n' {
+            line += 1;
+            index += 1;
+            continue;
+        }
+        if !starts_word(&chars, index, "use") {
+            index += 1;
+            continue;
+        }
+        let Some(visibility) = preceding_pub_visibility(&chars, index) else {
+            index += "use".len();
+            continue;
+        };
+        let item_line = line
+            - chars[visibility..index]
+                .iter()
+                .filter(|c| **c == '\n')
+                .count();
+        let mut cursor = index;
+        while cursor < chars.len() && chars[cursor] != ';' {
+            if chars[cursor] == '\n' {
+                line += 1;
+            }
+            cursor += 1;
+        }
+        let item: String = chars[visibility..cursor].iter().collect();
+        let collapsed = item.split_whitespace().collect::<Vec<_>>().join(" ");
+        if ["HostProtocolAuthenticator", "ChannelIngressVerifier"]
+            .iter()
+            .any(|trait_name| mentions_symbol(&collapsed, trait_name))
+        {
+            out.push((item_line, collapsed));
+        }
+        index = cursor;
     }
-    ["HostProtocolAuthenticator", "ChannelIngressVerifier"]
-        .iter()
-        .any(|trait_name| mentions_symbol(line, trait_name))
+    out
+}
+
+/// Where the `pub` visibility preceding the `use` keyword at `index` starts, if
+/// there is one. Handles the restricted forms by matching the parenthesized
+/// qualifier backwards: `pub(crate)`, `pub(super)`, `pub(in crate::m)`.
+fn preceding_pub_visibility(chars: &[char], index: usize) -> Option<usize> {
+    let mut cursor = index;
+    while cursor > 0 && chars[cursor - 1].is_whitespace() {
+        cursor -= 1;
+    }
+    if cursor > 0 && chars[cursor - 1] == ')' {
+        let mut depth = 0usize;
+        while cursor > 0 {
+            cursor -= 1;
+            match chars[cursor] {
+                ')' => depth += 1,
+                '(' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if depth != 0 {
+            return None;
+        }
+        while cursor > 0 && chars[cursor - 1].is_whitespace() {
+            cursor -= 1;
+        }
+    }
+    let start = cursor.checked_sub("pub".len())?;
+    (starts_word(chars, start, "pub")).then_some(start)
+}
+
+/// The re-export census for one file, as the production scan runs it.
+fn file_reexports(source: &str) -> Vec<(usize, String)> {
+    grant_trait_reexports(&strip_comments_and_strings(source))
 }
 
 /// The full census for one file, as the production scan runs it. Self-tests
@@ -615,13 +837,12 @@ fn file_implements(source: &str, trait_name: &str) -> bool {
 #[test]
 fn no_crate_re_exports_a_mint_function_it_does_not_own() {
     let root = workspace_root();
-    let mut files = Vec::new();
-    collect_production_rs(&root.join("crates"), &mut files);
+    let files = collect_workspace_production_rs(&root);
 
     let mint_fns = all_mint_fns();
     let mut offenders = Vec::new();
     for file in &files {
-        let source = fs::read_to_string(file).unwrap_or_default();
+        let source = read_source(file);
         for raw in strip_comments_and_strings(&source).lines() {
             let line = raw.trim();
             if !line.contains("pub use") {
@@ -658,8 +879,7 @@ fn no_crate_re_exports_a_mint_function_it_does_not_own() {
 #[test]
 fn mint_functions_are_named_only_by_their_owners_and_sanctioned_minters() {
     let root = workspace_root();
-    let mut files = Vec::new();
-    collect_production_rs(&root.join("crates"), &mut files);
+    let files = collect_workspace_production_rs(&root);
 
     let permitted: BTreeSet<&str> = [
         EVIDENCE_TYPE_OWNER,
@@ -674,7 +894,7 @@ fn mint_functions_are_named_only_by_their_owners_and_sanctioned_minters() {
     let mut offenders = Vec::new();
     let mut sighted = 0usize;
     for file in &files {
-        let source = fs::read_to_string(file).unwrap_or_default();
+        let source = read_source(file);
         let owner = owning_crate(&root, file);
         for raw in strip_comments_and_strings(&source).lines() {
             let line = raw.trim();
@@ -724,8 +944,7 @@ fn mint_functions_are_named_only_by_their_owners_and_sanctioned_minters() {
 #[test]
 fn no_crate_re_exports_the_grant_traits() {
     let root = workspace_root();
-    let mut files = Vec::new();
-    collect_production_rs(&root.join("crates"), &mut files);
+    let files = collect_workspace_production_rs(&root);
     assert!(
         files.len() > 500,
         "production walk found only {} files — the walk is broken, not the workspace",
@@ -737,12 +956,8 @@ fn no_crate_re_exports_the_grant_traits() {
         if owning_crate(&root, file) == EVIDENCE_TYPE_OWNER {
             continue;
         }
-        let source = fs::read_to_string(file).unwrap_or_default();
-        for (index, raw) in strip_comments_and_strings(&source).lines().enumerate() {
-            let line = raw.trim();
-            if reexports_a_grant_trait(line) {
-                offenders.push(format!("{}:{}: {line}", render(&root, file), index + 1));
-            }
+        for (line, item) in file_reexports(&read_source(file)) {
+            offenders.push(format!("{}:{line}: {item}", render(&root, file)));
         }
     }
 
@@ -763,8 +978,7 @@ fn no_crate_re_exports_the_grant_traits() {
 #[test]
 fn each_mint_half_is_defined_only_in_the_crate_that_owns_it() {
     let root = workspace_root();
-    let mut files = Vec::new();
-    collect_production_rs(&root.join("crates"), &mut files);
+    let files = collect_workspace_production_rs(&root);
 
     let mut missing: Vec<&str> = Vec::new();
     let mut misplaced = Vec::new();
@@ -777,7 +991,7 @@ fn each_mint_half_is_defined_only_in_the_crate_that_owns_it() {
             let definition = format!("pub fn {name}(");
             let mut homes = Vec::new();
             for file in &files {
-                let source = fs::read_to_string(file).unwrap_or_default();
+                let source = read_source(file);
                 if strip_comments_and_strings(&source).contains(&definition) {
                     homes.push(file.clone());
                 }
@@ -885,6 +1099,16 @@ fn implementor_matcher_detects_a_rogue_impl_and_ignores_prose() {
             format!("use a::b::{{{trait_name} as V, Other}};\nimpl V for RogueAdapter {{}}"),
             format!("use a::{{b::{{{trait_name} as V}}}};\nimpl V for RogueAdapter {{}}"),
             format!("use a::b::{trait_name} as r#type;\nimpl r#type for RogueAdapter {{}}"),
+            // Fail-open #3: whitespace between the trait name and its generic
+            // argument list. `impl Trait <> for X {}` compiles today (verified
+            // against rustc: empty angle brackets with a leading space are
+            // accepted on a non-generic trait), and the header collapse *makes*
+            // that space whenever a line break falls there — so a matcher that
+            // only looks for `<` immediately after the name is evadable by
+            // reformatting alone.
+            format!("impl {trait_name} <> for RogueAdapter {{}}"),
+            format!("impl {trait_name}\n    <>\n    for RogueAdapter {{}}"),
+            format!("impl<T> {trait_name} <T> for Wrapper<T> {{}}"),
             // Both at once.
             format!("use a::b::{trait_name} as V;\nimpl V\n    for RogueAdapter {{}}"),
             // A macro body still spells the header out, so it is visible.
@@ -993,9 +1217,16 @@ fn reexport_guard_catches_every_escaping_visibility() {
         "pub(super) use a::b::HostProtocolAuthenticator as A;",
         "pub(in crate::m) use a::b::HostProtocolAuthenticator;",
         "pub use a::b::{ChannelIngressVerifier as V, Other};",
+        // rustfmt's own output for a long braced import: `pub` and the trait
+        // name never share a physical line, which is what made the line-based
+        // guard fail open.
+        "pub(crate) use ironclaw_host_api::product_adapter::auth::{\n    ChannelIngressVerifier as V,\n};",
+        "pub use a::b::{\n    HostProtocolAuthenticator,\n    Other,\n};",
+        "pub\n    use a::b::ChannelIngressVerifier;",
+        "pub(in crate::m)\nuse a::b::{\n    HostProtocolAuthenticator as A,\n};",
     ] {
         assert!(
-            reexports_a_grant_trait(offending),
+            !file_reexports(offending).is_empty(),
             "re-export guard missed a second import path: {offending}"
         );
     }
@@ -1005,18 +1236,36 @@ fn reexport_guard_catches_every_escaping_visibility() {
         // the census resolves its aliases, so it must not be flagged.
         "use ironclaw_host_api::product_adapter::auth::ChannelIngressVerifier;",
         "use a::b::ChannelIngressVerifier as V;",
+        "use a::b::{\n    ChannelIngressVerifier as V,\n};",
         // Re-exporting something else entirely.
         "pub use a::b::AuthRequirement;",
         // A near-miss name is a different type.
         "pub use a::b::ChannelIngressVerifierRegistry;",
         // Not a use statement at all.
         "pub struct ChannelIngressVerifierRegistry;",
+        // Prose and string literals are stripped before the scan.
+        "// pub use a::b::ChannelIngressVerifier;",
+        "let msg = \"pub use a::b::ChannelIngressVerifier;\";",
+        // A `use` inside a function body is private no matter what precedes it.
+        "pub fn f() {\n    use a::b::ChannelIngressVerifier;\n}",
     ] {
         assert!(
-            !reexports_a_grant_trait(benign),
-            "re-export guard fired on a sanctioned line: {benign}"
+            file_reexports(benign).is_empty(),
+            "re-export guard fired on a sanctioned shape: {benign}"
         );
     }
+
+    // The offender report must name the item's own first line, not the line the
+    // trait happens to land on.
+    let split = "fn a() {}\n\npub(crate) use a::b::{\n    ChannelIngressVerifier as V,\n};";
+    assert_eq!(
+        file_reexports(split),
+        vec![(
+            3,
+            "pub(crate) use a::b::{ ChannelIngressVerifier as V, }".to_string()
+        )],
+        "the offender must be reported at the visibility's line, collapsed onto one"
+    );
 }
 
 /// Alias resolution is scoped to the file that declares the binding, and only
@@ -1036,6 +1285,57 @@ fn alias_resolution_binds_only_the_renamed_trait() {
         !names.contains("W"),
         "an unrelated trait's alias must not be"
     );
+}
+
+/// The census reads every file the walk hands it, so an I/O failure must fail
+/// the gate rather than contribute an empty source. Both probes fail for a
+/// deterministic, platform-independent reason (`read_to_string` on a directory;
+/// `read_dir` on a regular file) rather than depending on a chmod that root
+/// ignores in a container.
+#[test]
+#[should_panic(expected = "must fail the gate, not scan as empty")]
+fn an_unreadable_source_fails_the_census() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _ = read_source(temp.path());
+}
+
+#[test]
+#[should_panic(expected = "not vanish from the walk")]
+fn an_unreadable_directory_fails_the_walk() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let not_a_directory = temp.path().join("regular-file");
+    fs::write(&not_a_directory, "// fixture\n").expect("fixture file");
+    let mut out = Vec::new();
+    collect_production_rs(&not_a_directory, &mut out);
+}
+
+/// The census resolves its scan roots from the root manifest's member list, so
+/// a workspace member outside `crates/` is covered. `tools/ironclaw_stress`
+/// depends on `ironclaw_host_api` and can therefore implement a witness trait;
+/// before this it sat outside every scan while the file floor stayed cleared.
+#[test]
+fn the_census_covers_every_workspace_member_root() {
+    let root = workspace_root();
+    let roots = member_roots(&root);
+    assert!(
+        roots.contains(&root.join("crates")),
+        "the crates/ member root must be scanned: {roots:?}"
+    );
+    assert!(
+        roots.len() > 1,
+        "the member list names roots outside crates/ ({roots:?}) — if that ever stops being \
+         true this assertion is the place to record it, not a silently narrowed scan"
+    );
+
+    let files = collect_workspace_production_rs(&root);
+    for member_root in &roots {
+        assert!(
+            files.iter().any(|file| file.starts_with(member_root)),
+            "the census walked no production source under {} — a member root that \
+             contributes nothing is a scan that stopped covering it",
+            member_root.display()
+        );
+    }
 }
 
 #[test]

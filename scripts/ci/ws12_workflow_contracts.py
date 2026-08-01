@@ -351,8 +351,22 @@ def extract_scope_regex(text: str, anchor: str) -> tuple[re.Pattern[str] | None,
 
 
 def extract_paths_globs(text: str) -> tuple[list[str], str | None]:
-    """Return the `paths:` trigger filter's glob list."""
+    """Return the `paths:` trigger filter's glob list.
 
+    Ambiguity is a refusal, matching `extract_scope_regex`: a workflow with two
+    `paths:` blocks (a `push:` filter beside the `pull_request:` one, say) would
+    otherwise have its FIRST block pinned unconditionally, and the contract would
+    read as green while governing a filter nobody asked it to check — the same
+    silent-resolution class this module exists to close.
+    """
+
+    blocks = PATHS_BLOCK.findall(text)
+    if len(blocks) > 1:
+        return [], (
+            f"found {len(blocks)} `paths:` trigger filters; this pin resolves one "
+            "unconditionally, so it cannot say which it validated. Split the contract "
+            "entry per filter rather than letting it pick"
+        )
     block = PATHS_BLOCK.search(text)
     if block is None:
         return [], "no `paths:` trigger filter found"

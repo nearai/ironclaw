@@ -129,22 +129,81 @@ fn scan_workspace(root: &Path) -> (Vec<String>, Vec<String>) {
     (hits, scanned)
 }
 
-/// An exemption that matches nothing exempts nothing. Mirrors the identical
-/// check in `reborn_retired_taxonomy.rs`, this gate's twin.
-#[test]
-fn sanctioned_paths_all_match_real_files() {
-    let (_, scanned) = scan_workspace(&workspace_root());
-    let stale: Vec<&str> = SANCTIONED_PATHS
+/// Which scanned file a sanctioned fragment resolves to, refusing both the
+/// stale and the ambiguous case.
+///
+/// `is_sanctioned` matches with `contains`, so a fragment is only as precise as
+/// the tree makes it: a second file whose path contains `"…retired_vocabulary.rs"`
+/// would be exempted too, silently and invisibly. Requiring exactly one match
+/// keeps the fragment form (a workspace-relative literal would re-key this list
+/// to the flat `crates/<name>/` depth this PR exists to remove) while making
+/// ambiguity a failure rather than a widening.
+fn resolve_sanctioned<'a>(fragment: &str, scanned: &'a [String]) -> Result<&'a str, String> {
+    let matches: Vec<&str> = scanned
         .iter()
-        .copied()
-        .filter(|fragment| !scanned.iter().any(|path| path.contains(fragment)))
+        .map(String::as_str)
+        .filter(|path| path.contains(fragment))
+        .collect();
+    match matches.as_slice() {
+        [single] => Ok(single),
+        [] => Err(format!(
+            "`{fragment}` matches no scanned file — delete it; this list is shrink-only and \
+             an entry that sanctions nothing is dead text that reads as policy"
+        )),
+        _ => Err(format!(
+            "`{fragment}` matches {} scanned files ({matches:?}) — an exemption must name \
+             exactly one file, or it silently exempts every future file whose path happens \
+             to contain the fragment. Lengthen the fragment until it is unambiguous",
+            matches.len()
+        )),
+    }
+}
+
+/// An exemption that matches nothing exempts nothing, and one that matches more
+/// than one file exempts more than it says. Mirrors the stale-entry check in
+/// `reborn_retired_taxonomy.rs`, this gate's twin, and adds the ambiguity half.
+#[test]
+fn sanctioned_paths_each_resolve_to_exactly_one_file() {
+    let (_, scanned) = scan_workspace(&workspace_root());
+    let problems: Vec<String> = SANCTIONED_PATHS
+        .iter()
+        .filter_map(|fragment| resolve_sanctioned(fragment, &scanned).err())
         .collect();
 
     assert!(
-        stale.is_empty(),
-        "SANCTIONED_PATHS entries match no scanned file — delete them; this list is \
-         shrink-only and an entry that sanctions nothing is dead text that reads as \
-         policy: {stale:?}"
+        problems.is_empty(),
+        "SANCTIONED_PATHS entries must each name exactly one scanned file:\n  - {}",
+        problems.join("\n  - ")
+    );
+}
+
+/// Both refusals are pinned directly, so the rule does not depend on today's
+/// tree happening to be unambiguous.
+#[test]
+fn the_sanctioned_path_resolver_refuses_stale_and_ambiguous_entries() {
+    let scanned = vec![
+        "crates/ironclaw_architecture/tests/reborn_memory_retired_vocabulary.rs".to_string(),
+        "crates/ironclaw_memory/src/lib.rs".to_string(),
+    ];
+    assert_eq!(
+        resolve_sanctioned("reborn_memory_retired_vocabulary.rs", &scanned),
+        Ok("crates/ironclaw_architecture/tests/reborn_memory_retired_vocabulary.rs")
+    );
+
+    let error = resolve_sanctioned("does_not_exist.rs", &scanned)
+        .expect_err("a fragment matching nothing must refuse");
+    assert!(
+        error.contains("matches no scanned file"),
+        "expected a stale-entry refusal, got: {error}"
+    );
+
+    let mut shadowed = scanned.clone();
+    shadowed.push("crates/ironclaw_memory/src/reborn_memory_retired_vocabulary.rs".to_string());
+    let error = resolve_sanctioned("reborn_memory_retired_vocabulary.rs", &shadowed)
+        .expect_err("a fragment matching two files must refuse");
+    assert!(
+        error.contains("matches 2 scanned files"),
+        "expected an ambiguity refusal naming the count, got: {error}"
     );
 }
 

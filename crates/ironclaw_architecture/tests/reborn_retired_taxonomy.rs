@@ -94,10 +94,11 @@ const SANCTIONED_PATHS: &[&str] = &[
 ];
 
 /// Sanity floor for the scan. Far below the real count (~1500) and never
-/// expected to bind. It exists because the walk swallows `read_dir` failures:
-/// with a wrong root every directory read fails, the hit list comes back empty,
-/// and "no retired taxonomy found" is indistinguishable from "nothing was
-/// looked at" (CHECKLIST WS0, #6963).
+/// expected to bind. An *unreadable* path now fails the walk outright, so what
+/// this floor is left guarding is the shape no I/O error can reveal: a `crates/`
+/// that exists and holds a fraction of the tree — the partial family move —
+/// where "no retired taxonomy found" is indistinguishable from "almost nothing
+/// was looked at" (CHECKLIST WS0, #6963).
 const MIN_SCANNED_FILES: usize = 500;
 
 fn is_sanctioned(path: &str) -> bool {
@@ -106,11 +107,19 @@ fn is_sanctioned(path: &str) -> bool {
         .any(|fragment| path.contains(fragment))
 }
 
-fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>, scanned: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+/// A scan error is a gate failure, not a skip: an unreadable directory or file
+/// could hold a reintroduced term, and the floor cannot see one subtree going
+/// missing from an otherwise healthy walk. Same shape as this gate's twin,
+/// `reborn_memory_retired_vocabulary.rs`.
+fn scan_dir(
+    root: &Path,
+    dir: &Path,
+    hits: &mut Vec<String>,
+    scanned: &mut Vec<String>,
+) -> std::io::Result<()> {
+    let entries = std::fs::read_dir(dir)?;
+    for entry in entries {
+        let entry = entry?;
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -118,7 +127,7 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>, scanned: &mut Vec<S
             if name == "target" || name == "node_modules" || name == ".git" {
                 continue;
             }
-            scan_dir(root, &path, hits, scanned);
+            scan_dir(root, &path, hits, scanned)?;
             continue;
         }
         let is_rust = name.ends_with(".rs");
@@ -140,9 +149,8 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>, scanned: &mut Vec<S
         if is_sanctioned(&relative) {
             continue;
         }
-        let Ok(contents) = std::fs::read_to_string(&path) else {
-            continue;
-        };
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|error| std::io::Error::new(error.kind(), format!("{relative}: {error}")))?;
         for term in RETIRED_TERMS {
             if contents.contains(term) {
                 hits.push(format!("{relative}: `{term}`"));
@@ -154,41 +162,63 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>, scanned: &mut Vec<S
             }
         }
     }
+    Ok(())
 }
 
 /// Every scanned path, plus the hits — so callers can ask whether the scan
-/// measured anything instead of reading an empty hit list as a clean bill.
-fn scan_workspace(root: &Path) -> (Vec<String>, Vec<String>) {
+/// measured anything instead of reading an empty hit list as a clean bill. An
+/// I/O error propagates: the caller decides, and every production caller fails.
+fn scan_workspace(root: &Path) -> std::io::Result<(Vec<String>, Vec<String>)> {
     let mut hits = Vec::new();
     let mut scanned = Vec::new();
-    scan_dir(root, &root.join("crates"), &mut hits, &mut scanned);
+    scan_dir(root, &root.join("crates"), &mut hits, &mut scanned)?;
     scan_dir(
         root,
         &root.join("tests/integration"),
         &mut hits,
         &mut scanned,
-    );
+    )?;
     hits.sort();
     hits.dedup();
-    (hits, scanned)
+    Ok((hits, scanned))
 }
 
-/// The failure this gate could not previously report: a root with no `crates/`
-/// yields an empty hit list, which without the floor reads exactly like a clean
-/// scan. Pins that the scan really does come back empty there, so the floor —
-/// not luck — is what turns it into a failure.
+/// Two distinct failures this gate could not previously report, both of which
+/// produced an empty hit list indistinguishable from a clean scan.
+///
+/// A wrong root is now refused at the read, not merely caught by the floor: an
+/// unreadable path (here, a `crates/` that is not there at all) fails instead of
+/// contributing nothing. The floor's remaining job is the *partial* shape — a
+/// `crates/` that exists and holds one family's worth of files, which is what a
+/// staged family move produces and what no I/O error can reveal.
 #[test]
-fn a_wrong_root_scans_nothing_and_the_floor_catches_it() {
+fn a_wrong_root_is_refused_and_a_partial_tree_hits_the_floor() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let (hits, scanned) = scan_workspace(temp.path());
+    let error = scan_workspace(temp.path()).expect_err("a missing scan root must refuse");
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::NotFound,
+        "expected the read itself to refuse, got: {error}"
+    );
 
-    assert!(
-        scanned.is_empty(),
-        "expected an empty scan, got {scanned:?}"
+    // One family's worth of source: real files, real directories, far too few.
+    let root = temp.path();
+    let family = root.join("crates/substrates/ironclaw_extensions/src");
+    std::fs::create_dir_all(&family).expect("family tree");
+    std::fs::create_dir_all(root.join("tests/integration")).expect("integration tree");
+    for index in 0..10 {
+        std::fs::write(family.join(format!("m{index}.rs")), "pub fn f() {}\n").expect("source");
+    }
+
+    let (hits, scanned) = scan_workspace(root).expect("a readable partial tree scans");
+    assert_eq!(
+        scanned.len(),
+        10,
+        "expected the partial tree, got {scanned:?}"
     );
     assert!(
         hits.is_empty(),
-        "an empty scan also yields an empty hit list — that is the whole problem"
+        "a partial scan also yields an empty hit list — that is the whole problem"
     );
     assert!(
         scanned.len() < MIN_SCANNED_FILES,
@@ -200,7 +230,8 @@ fn a_wrong_root_scans_nothing_and_the_floor_catches_it() {
 /// reads as policy. Both entries this check retired had outlived their code.
 #[test]
 fn sanctioned_paths_all_match_real_files() {
-    let (_, scanned) = scan_workspace(&workspace_root());
+    let (_, scanned) =
+        scan_workspace(&workspace_root()).expect("the workspace scan must not hit an I/O error");
     let stale: Vec<&str> = SANCTIONED_PATHS
         .iter()
         .copied()
@@ -218,12 +249,13 @@ fn sanctioned_paths_all_match_real_files() {
 #[test]
 fn reborn_code_never_references_retired_taxonomy() {
     let root = workspace_root();
-    let (hits, scanned) = scan_workspace(&root);
+    let (hits, scanned) =
+        scan_workspace(&root).expect("the workspace scan must not hit an I/O error");
     assert!(
         scanned.len() >= MIN_SCANNED_FILES,
         "the taxonomy scan visited only {} file(s) under {} (floor {}). The walk is \
-         broken, not the workspace — `scan_dir` swallows read_dir failures, so an \
-         empty hit list from an unvisited tree is indistinguishable from a clean one.",
+         broken, not the workspace — a partial tree yields an empty hit list that is \
+         indistinguishable from a clean one, and no I/O error reveals it.",
         scanned.len(),
         root.display(),
         MIN_SCANNED_FILES

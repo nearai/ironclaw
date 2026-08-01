@@ -311,6 +311,24 @@ class CrateScopeFilterSabotageTests(unittest.TestCase):
             errors = validate_crate_scope_filters(workflows, ROOT)
             self.assertTrue(any(needle in error for error in errors), errors)
 
+    def test_a_second_paths_block_is_an_ambiguity_not_a_silent_pick(self) -> None:
+        """`extract_scope_regex` refuses zero-or-many; the globs half took the
+        first `paths:` block unconditionally, so a workflow that grew a second
+        filter would have had the wrong one pinned with nothing to say so."""
+        text = self.workflows[STRESS_WORKFLOW]
+        start = text.index("    paths:\n")
+        end = text.index("\n\n", start)
+        duplicated = (
+            text[:end] + "\n  push:\n" + text[start:end] + text[end:]
+        )
+        errors = validate_crate_scope_filters(
+            {**self.workflows, STRESS_WORKFLOW: duplicated}, ROOT
+        )
+
+        self.assertTrue(
+            any("found 2 `paths:` trigger filters" in error for error in errors), errors
+        )
+
     def test_a_discovered_file_probe_that_discovers_nothing_fails_loudly(self) -> None:
         """The first-party manifest probe is derived from real files. If those
         files move (WS2 colocates extension packages), the probe must fail

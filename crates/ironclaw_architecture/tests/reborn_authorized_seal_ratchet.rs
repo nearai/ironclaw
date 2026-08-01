@@ -41,11 +41,38 @@ const KERNEL_CRATE_DIR: &str = "ironclaw_capabilities";
 /// scanned a fraction of the tree is the defect (CHECKLIST WS0, #6963).
 const MIN_SCANNED_FILES: usize = 500;
 
-fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+/// Read a file the walk already found. An I/O failure fails the gate.
+///
+/// `read_to_string(..).unwrap_or_default()` was the shape at the call site, and
+/// it is fail-open by construction: an unreadable file becomes an empty string,
+/// contributes no offenders, and scans exactly like a clean one. The floor
+/// below cannot see it — one unreadable file inside an otherwise healthy
+/// workspace keeps the count far above 500 — so the seal would report "no rogue
+/// implementors" for a file it never read (CHECKLIST WS0, #6963).
+fn read_source(path: &Path) -> Result<String, String> {
+    fs::read_to_string(path).map_err(|error| {
+        format!(
+            "failed to read {} — a source this seal cannot read must fail the gate, not scan \
+             as empty: {error}",
+            path.display()
+        )
+    })
+}
+
+/// Walk `dir` for production `.rs` files. An unreadable directory or entry is an
+/// error, not a silently skipped subtree: the floor only catches a scan that
+/// went almost entirely dark, never one subtree vanishing from it.
+fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|error| {
+        format!(
+            "failed to read {} — an unreadable directory must fail this walk, not vanish \
+             from it: {error}",
+            dir.display()
+        )
+    })?;
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| format!("failed to read an entry in {}: {error}", dir.display()))?;
         let path = entry.path();
         if path.is_dir() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -59,11 +86,12 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
             ) {
                 continue;
             }
-            collect_rs_files(&path, out);
+            collect_rs_files(&path, out)?;
         } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
             out.push(path);
         }
     }
+    Ok(())
 }
 
 /// Production Rust sources under `crates/`, refusing to return a set too small
@@ -78,7 +106,7 @@ fn scanned_production_files(crates_dir: &Path) -> Result<Vec<PathBuf>, String> {
         ));
     }
     let mut files = Vec::new();
-    collect_rs_files(crates_dir, &mut files);
+    collect_rs_files(crates_dir, &mut files)?;
     if files.len() < MIN_SCANNED_FILES {
         return Err(format!(
             "production walk under {} found only {} file(s) (floor {}). The walk is \
@@ -100,7 +128,7 @@ fn capability_authorizer_is_implemented_only_by_the_kernel() {
 
     let mut offenders = Vec::new();
     for file in files {
-        let source = fs::read_to_string(&file).unwrap_or_default();
+        let source = read_source(&file).expect("every scanned source must be readable");
         // Comments and string literals are stripped (shared ratchet lexer), so
         // doc mentions and error-message text cannot false-positive — and a
         // qualified path (`impl crate::CapabilityAuthorizer for`) or a
@@ -160,6 +188,45 @@ fn production_walk_refuses_a_scan_root_that_is_not_the_workspace() {
     assert!(
         error.contains("found only 10 file(s)"),
         "expected a measurement refusal naming the count, got: {error}"
+    );
+}
+
+/// The floor detects only a scan that went almost entirely dark. It cannot see
+/// a single unreadable directory or file inside an otherwise healthy workspace
+/// — and that file could be the one holding a rogue `CapabilityAuthorizer`
+/// impl. So the walk and the read both refuse, and both refusals are pinned
+/// here with failures that are deterministic on every platform (`read_dir` on a
+/// regular file; `read_to_string` on a directory) rather than a chmod that root
+/// ignores inside a container.
+#[test]
+fn an_unreadable_path_fails_the_scan_rather_than_disappearing_from_it() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let not_a_directory = temp.path().join("regular-file");
+    fs::write(&not_a_directory, "// fixture\n").expect("fixture file");
+    let mut files = Vec::new();
+    let error = collect_rs_files(&not_a_directory, &mut files)
+        .expect_err("an unreadable directory must refuse");
+    assert!(
+        error.contains("must fail this walk, not vanish from it"),
+        "expected a walk refusal naming the path, got: {error}"
+    );
+
+    let error = read_source(temp.path()).expect_err("an unreadable source must refuse");
+    assert!(
+        error.contains("must fail the gate, not scan as empty"),
+        "expected a read refusal naming the path, got: {error}"
+    );
+
+    // And the refusal reaches the gate's own entry point, not just the helper.
+    let crates_dir = temp.path().join("crates");
+    fs::create_dir_all(&crates_dir).expect("crates dir");
+    fs::write(crates_dir.join("not-a-crate-dir"), "x").expect("file");
+    let error = scanned_production_files(&crates_dir.join("not-a-crate-dir"))
+        .expect_err("a scan root that is not a directory must refuse");
+    assert!(
+        error.contains("no crates/ directory"),
+        "expected the scan-root refusal, got: {error}"
     );
 }
 

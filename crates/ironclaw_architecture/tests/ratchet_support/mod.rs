@@ -30,9 +30,14 @@ pub struct TypeDefOccurrence {
 /// family move (`crates/<family>/ironclaw_*`, PROPOSAL §5) makes false — and its
 /// failure is silent for any gate that walks a directory: a wrong root makes
 /// `root.join("crates")` resolve to `crates/crates`, the walk finds nothing, and
-/// the gate passes having scanned zero files (CHECKLIST WS0, #6963). Same rule
-/// as `reborn_registration_pipeline_boundary.rs`, which owns a private copy
-/// because it resolves scopes before this module is reachable.
+/// the gate passes having scanned zero files (CHECKLIST WS0, #6963).
+///
+/// This is the crate's ONLY definition of the rule — all twelve private copies
+/// were deleted in its favour, including
+/// `reborn_registration_pipeline_boundary.rs`'s (a review catch on #6996: it
+/// had been left behind with a comment claiming it needed one, which was never
+/// true — nothing about resolving scopes prevents a test binary from declaring
+/// `mod ratchet_support`).
 #[allow(dead_code)]
 pub fn find_workspace_root(start: &Path) -> Result<PathBuf, String> {
     let mut current = Some(start);

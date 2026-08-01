@@ -53,14 +53,26 @@ trap 'rm -rf "${tmp}"' EXIT
 #
 # Every crate carries a real Cargo.toml because the gate now resolves both its
 # numerator and its denominator through the crate inventory
-# (scripts/ci/lib/crate_tree.py), whose fail-closed floor is
-# MIN_CRATE_DIRECTORIES=20. The padding crates exist only to clear that floor
-# and deliberately have NO src/ tree, so they contribute 0 LOC and every share
-# assertion below stays exact. Padding the fixture rather than exempting it from
-# the floor is the point: these tests drive the same discovery path production
-# uses, so there is no weaker mode for the gate to silently degrade into.
+# (scripts/ci/lib/crate_tree.py). The padding crates exist only to clear that
+# module's fail-closed floor and deliberately have NO src/ tree, so they
+# contribute 0 LOC and every share assertion below stays exact. Padding the
+# fixture rather than exempting it from the floor is the point: these tests
+# drive the same discovery path production uses, so there is no weaker mode for
+# the gate to silently degrade into.
 # ---------------------------------------------------------------------------
-CRATE_FLOOR_PADDING=24
+# The discovery floor is `crate_tree.py`'s own MIN_CRATE_DIRECTORIES, read from
+# the module rather than copied: a literal here goes stale the moment the floor
+# moves, and the fixture then fails with an error pointing at the fixture
+# instead of at the change that raised the floor.
+read_crate_floor() {
+    python3 -c 'import importlib.util, sys
+spec = importlib.util.spec_from_file_location("crate_tree", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(module.MIN_CRATE_DIRECTORIES)' "$1"
+}
+CRATE_FLOOR_HEADROOM=4
+CRATE_FLOOR_PADDING=$(( $(read_crate_floor "${repo_root}/scripts/ci/lib/crate_tree.py") + CRATE_FLOOR_HEADROOM ))
 
 write_manifest() {  # dir crate_name
     mkdir -p "$1"
