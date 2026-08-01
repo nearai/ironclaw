@@ -828,13 +828,17 @@ async fn instruction_bundle_renders_runtime_context_section() {
         .iter()
         .position(|m| m.content_ref.as_str().starts_with("msg:runtime."))
         .expect("runtime message must exist in messages list");
+    // Runtime context rides the conversation tail (#6985): it re-renders
+    // every run (the clock), so it must sit AFTER the stable identity and
+    // instruction sections that form the provider-cached prompt prefix.
     assert!(
         runtime_msg_idx > identity_idx,
         "runtime must be after last identity message"
     );
     assert!(
-        runtime_msg_idx < instruction_idx,
-        "runtime must be before first instruction snippet"
+        runtime_msg_idx > instruction_idx,
+        "runtime must be after the instruction snippets — per-run context \
+         must not sit inside the cached prompt prefix"
     );
 }
 

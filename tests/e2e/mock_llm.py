@@ -1026,16 +1026,24 @@ def _message_text(msg: dict) -> str:
     return content
 
 
+def _is_host_reminder(msg: dict) -> bool:
+    # Tail-positioned host context (runtime clock, loop-control nudges) is
+    # delivered as `<system-reminder>`-framed user messages so the cached
+    # system prefix stays byte-stable (#6985). It is host guidance, not the
+    # user's ask — response matching must skip it.
+    return _message_text(msg).lstrip().startswith("<system-reminder>")
+
+
 def _last_user_content(messages: list[dict]) -> str:
     for msg in reversed(messages):
-        if msg.get("role") == "user":
+        if msg.get("role") == "user" and not _is_host_reminder(msg):
             return _message_text(msg)
     return ""
 
 
 def _last_user_message(messages: list[dict]) -> dict:
     for msg in reversed(messages):
-        if msg.get("role") == "user":
+        if msg.get("role") == "user" and not _is_host_reminder(msg):
             return msg
     return {}
 
