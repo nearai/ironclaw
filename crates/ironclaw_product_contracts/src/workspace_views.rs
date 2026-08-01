@@ -2,10 +2,14 @@
 //! wire DTO homes").
 //!
 //! The WebUI Projects page and the read-only Workspace/Files explorer both
-//! serialize these; the read ports that serve them (`ProjectService`,
-//! `ProjectFilesystemReader`, `FilesystemBrowseReader`) stay with their
-//! product-side implementations, because their method signatures name
-//! `ironclaw_threads::ThreadScope` — outside this crate's allowlist.
+//! serialize these. The read *ports* that serve them stayed in
+//! `ironclaw_product`, for two different reasons worth keeping straight:
+//! `ProjectFilesystemReader` **cannot** move — every method takes an
+//! `ironclaw_threads::ThreadScope`, outside this crate's allowlist — while
+//! `ProjectService` and `FilesystemBrowseReader` merely **have not**: §6.1.3's
+//! port list does not name them, and inverting a port without repointing its
+//! implementor (composition, in both cases) buys no dependency-edge removal.
+//! The WS5 `product` row owns that call.
 //!
 //! Never here: a repository, a path resolver, or any mount alias.
 
