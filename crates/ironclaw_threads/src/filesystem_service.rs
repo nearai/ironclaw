@@ -35,6 +35,7 @@
 mod message_lookup_index;
 mod message_read;
 mod thread_index;
+mod transcript_migration;
 
 use std::{
     collections::{HashMap, HashSet},
