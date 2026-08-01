@@ -347,6 +347,23 @@ impl SessionThreadService for InMemorySessionThreadService {
         Ok(message.clone())
     }
 
+    async fn read_thread_message(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        let mut state = self.state.lock().await;
+        let Ok(thread) = get_thread_mut(&mut state, scope, thread_id) else {
+            return Ok(None);
+        };
+        Ok(thread
+            .messages
+            .iter()
+            .find(|message| message.message_id == message_id)
+            .cloned())
+    }
+
     async fn append_assistant_draft(
         &self,
         request: AppendAssistantDraftRequest,

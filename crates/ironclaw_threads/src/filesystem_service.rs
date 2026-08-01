@@ -1648,6 +1648,21 @@ where
         .await
     }
 
+    async fn read_thread_message(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        if self.read_thread_versioned(scope, thread_id).await?.is_none() {
+            return Ok(None);
+        }
+        Ok(self
+            .read_message_versioned(scope, thread_id, message_id)
+            .await?
+            .map(|(message, _)| message))
+    }
+
     async fn append_assistant_draft(
         &self,
         request: AppendAssistantDraftRequest,

@@ -45,7 +45,7 @@ use ironclaw_host_api::{
     safe_summary::SafeSummary,
     scope::Principal,
 };
-use ironclaw_loop_host::{HostInputEnqueuePort, HostInputQueueError, RejectingInputEnqueue};
+use ironclaw_loop_host::{HostInputEnqueuePort, RejectingInputEnqueue};
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     ProductSurfaceValidationCode,
@@ -3689,68 +3689,36 @@ where
                     });
                 }
                 MessageStatus::Queued => {
+                    // Crash-orphan recovery: re-enqueue idempotently before
+                    // replaying `DeferredBusy` (see `steering.rs`); a queued
+                    // replay whose run is gone settles as `RejectedBusy`.
                     let run_id = parse_replay_run_id(replay.turn_run_id)?;
-                    // Crash-orphan recovery: the busy path persists `Queued`
-                    // BEFORE enqueueing, so a crash between the two leaves a
-                    // `Queued` row with no queue entry. Re-enqueue idempotently
-                    // (the queue dedups by the message's own input) before
-                    // replaying `DeferredBusy`; if the run is gone or steering
-                    // is now unavailable, settle the row as `RejectedBusy`.
                     let accepted_ref = accepted_message_ref(replay.message_id.to_string())?;
-                    match crate::steering::enqueue_busy_steering(
+                    match crate::steering::readmit_queued_steering(
                         &*self.turn_coordinator,
                         self.input_enqueue.as_ref(),
-                        scope.clone(),
-                        thread_scope.clone(),
-                        replay.thread_id.clone(),
-                        replay.message_id,
-                        &accepted_ref,
-                        run_id,
+                        &*self.thread_service,
+                        crate::steering::SteeringAdmissionRequest {
+                            turn_scope: scope.clone(),
+                            thread_scope: thread_scope.clone(),
+                            message_id: replay.message_id,
+                            accepted_message_ref: accepted_ref.clone(),
+                            active_run_id: run_id,
+                        },
                     )
                     .await
                     {
-                        Ok(()) => {
-                            let state = self
-                                .turn_coordinator
-                                .get_run_state(GetRunStateRequest {
-                                    scope: scope.clone(),
-                                    run_id,
-                                })
-                                .await
-                                .map_err(map_turn_error)?;
+                        Ok(crate::steering::SteeringAdmission::Deferred { run }) => {
                             return Ok(RebornSubmitTurnResponse::DeferredBusy {
                                 thread_id: replay.thread_id,
                                 accepted_message_ref: accepted_ref,
                                 active_run_id: run_id,
-                                status: state.status,
-                                event_cursor: state.event_cursor,
-                                notice: rejected_busy_notice(state.status),
+                                status: run.status,
+                                event_cursor: run.event_cursor,
+                                notice: rejected_busy_notice(run.status),
                             });
                         }
-                        Err(
-                            crate::steering::SteeringEnqueueError::Enqueue(
-                                HostInputQueueError::Disabled,
-                            )
-                            | crate::steering::SteeringEnqueueError::SteeringDisallowed
-                            | crate::steering::SteeringEnqueueError::ActiveRunGone,
-                        ) => {
-                            self.thread_service
-                                .mark_message_rejected_busy(
-                                    &thread_scope,
-                                    &replay.thread_id,
-                                    replay.message_id,
-                                )
-                                .await
-                                .map_err(|error| {
-                                    tracing::debug!(
-                                        thread_id = %replay.thread_id,
-                                        message_id = %replay.message_id,
-                                        %run_id,
-                                        %error,
-                                        "queued replay could not settle as rejected-busy"
-                                    );
-                                    ProductSurfaceError::service_unavailable(true)
-                                })?;
+                        Ok(crate::steering::SteeringAdmission::Rejected) => {
                             return Ok(RebornSubmitTurnResponse::RejectedBusy {
                                 thread_id: replay.thread_id,
                                 accepted_message_ref: accepted_ref,
@@ -3761,14 +3729,12 @@ where
                             });
                         }
                         Err(error) => {
-                            tracing::debug!(
-                                thread_id = %replay.thread_id,
-                                message_id = %replay.message_id,
-                                %run_id,
-                                %error,
-                                "queued replay re-enqueue failed"
-                            );
-                            return Err(ProductSurfaceError::service_unavailable(true));
+                            return Err(steering_admission_error(
+                                error,
+                                &replay.thread_id,
+                                replay.message_id,
+                                run_id,
+                            ));
                         }
                     }
                 }
@@ -3904,83 +3870,32 @@ where
                     "webui submit_turn deferred: thread busy with an active run"
                 );
                 self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
-                // Mark the message `Queued` BEFORE the steering input becomes
-                // drainable, so the loop's consumer always observes a `Queued`
-                // row and performs a deterministic `Queued` → `Submitted`
-                // transition. Enqueuing first leaves a window where the run can
-                // drain + submit the input while the transcript still reads
-                // `Accepted`, producing an out-of-order status write. If the
-                // enqueue then fails, roll the row back to `RejectedBusy` so it
-                // never sticks in `Queued` with no backing input.
-                match mark_message_queued_or_replay(
-                    &*self.thread_service,
-                    &thread_scope,
-                    &handoff,
-                    &client_action_id,
-                    busy.active_run_id.to_string(),
-                )
-                .await?
-                {
-                    QueuedMarkOutcome::Queued => {}
-                    // The row already settled as RejectedBusy (a concurrent
-                    // duplicate lost the race or a reconciler flipped it):
-                    // nothing was enqueued and nothing will be — report the
-                    // rejection instead of queueing a contradicting input.
-                    QueuedMarkOutcome::SettledRejectedBusy => {
-                        let notice = rejected_busy_notice(busy.status);
-                        return Ok(RebornSubmitTurnResponse::RejectedBusy {
-                            thread_id: handoff.thread_id,
-                            accepted_message_ref,
-                            active_run_id: Some(busy.active_run_id),
-                            status: Some(busy.status),
-                            event_cursor: Some(busy.event_cursor),
-                            notice,
-                        });
-                    }
-                }
-                match crate::steering::enqueue_busy_steering(
+                match crate::steering::admit_busy_steering(
                     &*self.turn_coordinator,
                     self.input_enqueue.as_ref(),
-                    scope.clone(),
-                    thread_scope.clone(),
-                    handoff.thread_id.clone(),
-                    handoff.message_id,
-                    &accepted_message_ref,
-                    busy.active_run_id,
+                    &*self.thread_service,
+                    crate::steering::SteeringAdmissionRequest {
+                        turn_scope: scope.clone(),
+                        thread_scope: thread_scope.clone(),
+                        message_id: handoff.message_id,
+                        accepted_message_ref: accepted_message_ref.clone(),
+                        active_run_id: busy.active_run_id,
+                    },
                 )
                 .await
                 {
-                    Ok(()) => {
-                        let notice = rejected_busy_notice(busy.status);
+                    Ok(crate::steering::SteeringAdmission::Deferred { run }) => {
+                        let notice = rejected_busy_notice(run.status);
                         Ok(RebornSubmitTurnResponse::DeferredBusy {
                             thread_id: handoff.thread_id,
                             accepted_message_ref,
                             active_run_id: busy.active_run_id,
-                            status: busy.status,
-                            event_cursor: busy.event_cursor,
+                            status: run.status,
+                            event_cursor: run.event_cursor,
                             notice,
                         })
                     }
-                    // Steering deliberately disabled: no queue wired for this
-                    // runtime, so reject the message as busy instead of
-                    // deferring it. This is the single mapped fallback for the
-                    // "no steering" mode (see RejectingInputEnqueue). The
-                    // rejected-busy mark also rolls the `Queued` row written
-                    // above back to its terminal `RejectedBusy` state.
-                    Err(
-                        crate::steering::SteeringEnqueueError::Enqueue(
-                            HostInputQueueError::Disabled,
-                        )
-                        | crate::steering::SteeringEnqueueError::SteeringDisallowed
-                        | crate::steering::SteeringEnqueueError::ActiveRunGone,
-                    ) => {
-                        mark_message_rejected_busy_or_replay(
-                            &*self.thread_service,
-                            &thread_scope,
-                            &handoff,
-                            &client_action_id,
-                        )
-                        .await?;
+                    Ok(crate::steering::SteeringAdmission::Rejected) => {
                         let notice = rejected_busy_notice(busy.status);
                         Ok(RebornSubmitTurnResponse::RejectedBusy {
                             thread_id: handoff.thread_id,
@@ -3991,55 +3906,12 @@ where
                             notice,
                         })
                     }
-                    // Any other enqueue failure leaves the `Queued` row above
-                    // with no drainable input. Best-effort roll it back to
-                    // `RejectedBusy` (preserving the original error), then
-                    // surface the sanitized failure.
-                    Err(other) => {
-                        if let Err(rollback) = mark_message_rejected_busy_or_replay(
-                            &*self.thread_service,
-                            &thread_scope,
-                            &handoff,
-                            &client_action_id,
-                        )
-                        .await
-                        {
-                            tracing::debug!(
-                                %rollback,
-                                thread_id = %handoff.thread_id,
-                                message_id = %handoff.message_id,
-                                active_run_id = %busy.active_run_id,
-                                "failed to roll back queued message to rejected-busy after steering enqueue failure"
-                            );
-                        }
-                        match other {
-                            crate::steering::SteeringEnqueueError::InvalidMessageRef(_) => {
-                                Err(ProductSurfaceError::internal_invariant())
-                            }
-                            crate::steering::SteeringEnqueueError::RunState(error) => {
-                                Err(map_turn_error(error))
-                            }
-                            crate::steering::SteeringEnqueueError::Enqueue(error) => {
-                                // Carry the cause to the server log; the
-                                // user-facing surface stays the sanitized 503
-                                // (error-handling.md).
-                                tracing::debug!(
-                                    %error,
-                                    thread_id = %handoff.thread_id,
-                                    message_id = %handoff.message_id,
-                                    active_run_id = %busy.active_run_id,
-                                    "failed to enqueue steering input for busy run"
-                                );
-                                Err(ProductSurfaceError::service_unavailable(false))
-                            }
-                            // Consumed by the rejected-busy fallback arm above;
-                            // kept for exhaustiveness.
-                            crate::steering::SteeringEnqueueError::SteeringDisallowed
-                            | crate::steering::SteeringEnqueueError::ActiveRunGone => {
-                                Err(ProductSurfaceError::internal_invariant())
-                            }
-                        }
-                    }
+                    Err(error) => Err(steering_admission_error(
+                        error,
+                        &handoff.thread_id,
+                        handoff.message_id,
+                        busy.active_run_id,
+                    )),
                 }
             }
             Err(error) => {
@@ -5828,92 +5700,6 @@ async fn mark_message_rejected_busy_or_replay(
     }
 }
 
-/// Outcome of [`mark_message_queued_or_replay`]: either the row is `Queued`
-/// (or already consumed by the run) and the enqueue may proceed, or the row
-/// settled as `RejectedBusy` and the caller must report the rejection instead.
-enum QueuedMarkOutcome {
-    Queued,
-    SettledRejectedBusy,
-}
-
-async fn mark_message_queued_or_replay(
-    thread_service: &dyn SessionThreadService,
-    thread_scope: &ThreadScope,
-    handoff: &AcceptedWebUiMessage,
-    client_action_id: &IdempotencyKey,
-    run_id: String,
-) -> Result<QueuedMarkOutcome, ProductSurfaceError> {
-    match thread_service
-        .mark_message_queued(
-            thread_scope,
-            &handoff.thread_id,
-            handoff.message_id,
-            run_id.clone(),
-        )
-        .await
-    {
-        Ok(_) => Ok(QueuedMarkOutcome::Queued),
-        Err(original_error) => {
-            // Lenient ONLY for the confirmed races: the row is already
-            // `Queued`/`Submitted` for this run (a duplicate submit or a fast
-            // loop won), or it settled as `RejectedBusy` (reported as such).
-            // Every other failure — including a failed reconciliation read —
-            // propagates so the caller's `?` actually fails: swallowing it
-            // would enqueue a drainable input whose row silently stays
-            // `Accepted` (fail-loud, `.claude/rules/error-handling.md`).
-            let replay = thread_service
-                .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
-                    scope: thread_scope.clone(),
-                    actor_id: handoff.actor_id.clone(),
-                    source_binding_id: handoff.source_binding_id.clone(),
-                    external_event_id: client_action_id.as_str().to_string(),
-                })
-                .await
-                .map_err(|error| {
-                    tracing::debug!(
-                        thread_id = %handoff.thread_id,
-                        message_id = %handoff.message_id,
-                        run_id = %run_id,
-                        %original_error,
-                        %error,
-                        "queued-status reconciliation read failed after mark_message_queued error"
-                    );
-                    error
-                });
-            let replay = match replay {
-                Ok(replay) => replay,
-                Err(_) => return Err(map_thread_error(original_error)),
-            };
-            match replay {
-                Some(replay)
-                    if replay.thread_id == handoff.thread_id
-                        && replay.message_id == handoff.message_id =>
-                {
-                    if matches!(
-                        replay.status,
-                        MessageStatus::Queued | MessageStatus::Submitted
-                    ) && replay.turn_run_id == Some(run_id)
-                    {
-                        return Ok(QueuedMarkOutcome::Queued);
-                    }
-                    if replay.status == MessageStatus::RejectedBusy {
-                        return Ok(QueuedMarkOutcome::SettledRejectedBusy);
-                    }
-                    tracing::debug!(
-                        thread_id = %handoff.thread_id,
-                        message_id = %handoff.message_id,
-                        status = ?replay.status,
-                        %original_error,
-                        "queued-status transition failed and the row was not consumed by the run"
-                    );
-                    Err(map_thread_error(original_error))
-                }
-                _ => Err(map_thread_error(original_error)),
-            }
-        }
-    }
-}
-
 async fn reconcile_terminal_duplicate(
     thread_service: &dyn SessionThreadService,
     thread_scope: &ThreadScope,
@@ -6843,26 +6629,46 @@ fn accepted_message_ref(message_id: String) -> Result<AcceptedMessageRef, Produc
     })
 }
 
+/// Map a fatal steering-admission failure into this surface's sanitized
+/// error. Classification already happened in the gateway; this is pure
+/// error-shape translation plus server-side diagnosis.
+fn steering_admission_error(
+    error: crate::steering::SteeringAdmissionError,
+    thread_id: &ThreadId,
+    message_id: ThreadMessageId,
+    run_id: TurnRunId,
+) -> ProductSurfaceError {
+    use crate::steering::SteeringAdmissionError;
+    match error {
+        SteeringAdmissionError::InvalidMessageRef(reason) => {
+            tracing::debug!(%reason, %thread_id, %message_id, %run_id, "invalid steering message ref");
+            ProductSurfaceError::internal_invariant()
+        }
+        SteeringAdmissionError::RunState(error) => map_turn_error(error),
+        SteeringAdmissionError::MarkQueued(error) | SteeringAdmissionError::SettleRejected(error) => {
+            map_thread_error(error)
+        }
+        SteeringAdmissionError::Enqueue(error) => {
+            // Carry the cause to the server log; the user-facing surface stays
+            // the sanitized retryable 503 (error-handling.md).
+            tracing::debug!(%error, %thread_id, %message_id, %run_id, "steering enqueue failed for busy run");
+            ProductSurfaceError::service_unavailable(true)
+        }
+    }
+}
+
 fn parse_replay_run_id(value: Option<String>) -> Result<TurnRunId, ProductSurfaceError> {
-    let Some(value) = value else {
-        return Err(ProductSurfaceError::from_status_kind(
+    crate::steering::parse_stored_run_id(value.as_deref()).map_err(|reason| {
+        tracing::debug!(%reason, "stored replay turn_run_id could not be parsed");
+        ProductSurfaceError::from_status_kind(
             ProductSurfaceErrorCode::Conflict,
             ProductSurfaceErrorKind::ReplayUnavailable,
             409,
             false,
-        ));
-    };
-    Uuid::parse_str(&value)
-        .map(TurnRunId::from_uuid)
-        .map_err(|_| {
-            ProductSurfaceError::from_status_kind(
-                ProductSurfaceErrorCode::Conflict,
-                ProductSurfaceErrorKind::ReplayUnavailable,
-                409,
-                false,
-            )
-        })
+        )
+    })
 }
+
 
 fn webui_source_binding_ref_from_raw(
     prefix: &str,

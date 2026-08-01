@@ -2380,6 +2380,40 @@ impl SessionThreadService for ScriptedThreadService {
         }
     }
 
+    async fn read_thread_message(
+        &self,
+        _scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        // Reconcile point-read for the mark-failure scenarios: report the row
+        // in the settled state the scripted behavior models.
+        let status = match &self.behavior {
+            ScriptedThreadBehavior::RejectedBusyMarkFails { .. } => MessageStatus::RejectedBusy,
+            ScriptedThreadBehavior::DeferredBusyMarkFails { .. } => MessageStatus::DeferredBusy,
+            _ => return scripted_stub_unreachable("read_thread_message"),
+        };
+        Ok(Some(ThreadMessageRecord {
+            message_id,
+            thread_id: thread_id.clone(),
+            sequence: 1,
+            kind: MessageKind::User,
+            status,
+            created_at: None,
+            updated_at: None,
+            actor_id: None,
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: None,
+            tool_result_ref: None,
+            tool_result_provider_call: None,
+            content: Some("scripted".to_string()),
+            attachments: Vec::new(),
+            redaction_ref: None,
+        }))
+    }
+
     async fn append_assistant_draft(
         &self,
         _request: AppendAssistantDraftRequest,
