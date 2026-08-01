@@ -16,7 +16,7 @@ use ironclaw_loop_contracts::AgentLoopDriverHost;
 
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointWrite, ExecutorStage, HostStage,
-    PendingInputAck, StageContext, cancelled_exit_with_reason, cancelled_reason_from_signal,
+    StageContext, cancelled_exit_with_reason, cancelled_reason_from_signal,
     checkpoint_kind_to_host, debug_host_unavailable,
 };
 
@@ -179,57 +179,6 @@ impl CheckpointStage {
                     None,
                 )?))
             }
-            Err(error) => Err(error),
-        }
-    }
-
-    pub(super) async fn cancel_if_requested_after_pending_input_ack(
-        &self,
-        ctx: StageContext<'_>,
-        state: LoopExecutionState,
-        pending_input_ack: &mut PendingInputAck,
-    ) -> Result<CancelCheck, AgentLoopExecutorError> {
-        let Some(signal) = ctx.host.observe_cancellation() else {
-            return Ok(CancelCheck::Continue(Box::new(state)));
-        };
-
-        let fallback_state = state.clone();
-        match self.write(ctx, state, CheckpointKind::Final).await {
-            Ok(checked) => {
-                pending_input_ack.ack(ctx.host).await?;
-                Ok(CancelCheck::Exit(cancelled_exit_with_reason(
-                    ctx.host,
-                    checked.state,
-                    cancelled_reason_from_signal(&signal),
-                    Some(checked.checkpoint_id),
-                )?))
-            }
-            // Permissive profile: absorb only checkpoint-write failures. The
-            // pending ack is intentionally NOT flushed here — no durable
-            // checkpoint was written, so advancing the input cursor would
-            // commit progress that the runner has no record of.
-            Err(
-                AgentLoopExecutorError::CheckpointFailed { .. }
-                | AgentLoopExecutorError::CheckpointRejected { .. },
-            ) if !ctx
-                .host
-                .run_context()
-                .resolved_run_profile
-                .checkpoint_policy
-                .require_final_checkpoint =>
-            {
-                Ok(CancelCheck::Exit(cancelled_exit_with_reason(
-                    ctx.host,
-                    fallback_state,
-                    cancelled_reason_from_signal(&signal),
-                    None,
-                )?))
-            }
-            // Strict profile (or non-checkpoint error variant): propagate the
-            // error so the runner sees the same failure mode as
-            // `cancel_if_requested`. Returning `Ok(LoopExit::failed)`
-            // would silently mask `HostUnavailable` and break the strict
-            // require-final-checkpoint contract.
             Err(error) => Err(error),
         }
     }
