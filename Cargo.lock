@@ -3468,6 +3468,7 @@ dependencies = [
  "ironclaw_first_party_extensions",
  "ironclaw_host_api",
  "ironclaw_operator",
+ "ironclaw_product_contracts",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
  "ironclaw_reborn_traces",
@@ -3727,11 +3728,13 @@ name = "ironclaw_extension_contracts"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "ironclaw_host_api",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
  "toml 1.1.3+spec-1.1.0",
+ "uuid",
 ]
 
 [[package]]
@@ -3769,6 +3772,7 @@ dependencies = [
  "ironclaw_outbound",
  "ironclaw_processes",
  "ironclaw_product",
+ "ironclaw_product_contracts",
  "ironclaw_reborn_config",
  "ironclaw_resources",
  "ironclaw_safety",
@@ -4261,6 +4265,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_llm",
  "ironclaw_product",
+ "ironclaw_product_contracts",
  "ironclaw_reborn_config",
  "ironclaw_safety",
  "ironclaw_secrets",
@@ -4370,6 +4375,7 @@ dependencies = [
  "ironclaw_outbound",
  "ironclaw_processes",
  "ironclaw_product",
+ "ironclaw_product_contracts",
  "ironclaw_projects",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_traces",
@@ -4394,6 +4400,23 @@ dependencies = [
  "tracing",
  "tracing-test",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "ironclaw_product_contracts"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_extension_contracts",
+ "ironclaw_host_api",
+ "serde",
+ "serde_json",
+ "static_assertions",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -4469,6 +4492,7 @@ dependencies = [
  "ironclaw_outbound",
  "ironclaw_processes",
  "ironclaw_product",
+ "ironclaw_product_contracts",
  "ironclaw_projects",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
@@ -4614,6 +4638,7 @@ dependencies = [
  "ironclaw_outbound",
  "ironclaw_processes",
  "ironclaw_product",
+ "ironclaw_product_contracts",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
  "ironclaw_reborn_openai_compat",
@@ -4675,6 +4700,7 @@ dependencies = [
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_product",
+ "ironclaw_product_contracts",
  "ironclaw_reborn_openai_compat",
  "ironclaw_threads",
  "ironclaw_turns",
@@ -4890,6 +4916,7 @@ dependencies = [
  "ironclaw_attachments",
  "ironclaw_extension_contracts",
  "ironclaw_host_api",
+ "ironclaw_product_contracts",
  "proptest",
  "serde",
  "serde_json",
@@ -4953,7 +4980,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "ironclaw_extension_contracts",
  "ironclaw_host_api",
+ "ironclaw_product_contracts",
  "proptest",
  "serde",
  "serde_json",
@@ -5109,6 +5138,7 @@ dependencies = [
  "ironclaw_host_ingress",
  "ironclaw_loop_host",
  "ironclaw_product",
+ "ironclaw_product_contracts",
  "ironclaw_reborn_openai_compat",
  "ironclaw_secrets",
  "ironclaw_threads",

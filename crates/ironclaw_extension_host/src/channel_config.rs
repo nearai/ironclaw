@@ -27,8 +27,10 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     ids::{ExtensionId, SecretHandle},
-    product_surface::{ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind},
     resource::ResourceScope,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
 use ironclaw_secrets::{SecretMaterial, SecretStorePort};
 

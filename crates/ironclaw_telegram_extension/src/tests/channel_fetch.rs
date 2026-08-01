@@ -1,10 +1,9 @@
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-use ironclaw_host_api::product_adapter::{
-    ChannelAttachmentRef, ProductAttachmentDescriptor, ProductAttachmentKind,
-};
-use ironclaw_host_api::tool_adapter::{RestrictedEgressError, RestrictedEgressResponse};
+use ironclaw_extension_contracts::channel_adapter::ChannelAttachmentRef;
+use ironclaw_extension_contracts::external::{ProductAttachmentDescriptor, ProductAttachmentKind};
+use ironclaw_extension_contracts::tool_adapter::{RestrictedEgressError, RestrictedEgressResponse};
 
 use super::*;
 

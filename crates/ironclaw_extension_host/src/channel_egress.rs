@@ -11,6 +11,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::tool_adapter::{RestrictedEgressError, RestrictedEgressResponse};
 use ironclaw_extension_host::egress::{ApprovedChannelEgress, ChannelEgressTransport};
 use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
@@ -18,7 +19,6 @@ use ironclaw_host_api::{
     ids::{CapabilityId, ExtensionId, InvocationId, SecretHandle},
     resource::ResourceScope,
     runtime::{RuntimeKind, TrustClass},
-    tool_adapter::{RestrictedEgressError, RestrictedEgressResponse},
 };
 use ironclaw_host_runtime::{
     HostRuntimeCredentialMaterial, HostRuntimeHttpEgressPort, HostRuntimeHttpEgressRequest,

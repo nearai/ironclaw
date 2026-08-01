@@ -17,9 +17,6 @@ layer = "kernel"
 [features]
 # Process-backed agent-turn fixtures for cross-crate tests.
 test-support = ["ironclaw_host_api/test-support"]
-# Enables trusted host-only helpers that mark product ingress authentication as
-# verified. Product terminals must not enable this directly.
-host-auth-mint = ["ironclaw_host_api/host-auth-mint"]
 
 [dependencies]
 async-trait = "0.1"

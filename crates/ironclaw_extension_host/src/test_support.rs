@@ -10,19 +10,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::tool_adapter::{
+    RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
+    ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
+};
 use ironclaw_extensions::{ExtensionManifestRecord, ManifestSource, ResolvedExtensionManifest};
-use ironclaw_host_api::{
-    host_port::{
-        HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortId,
-    },
-    tool_adapter::{
-        RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
-        ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
-    },
+use ironclaw_host_api::host_port::{
+    HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortId,
 };
 use ironclaw_product::{
-    ChannelAdapter, ChannelContext, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope,
-    VerifiedInbound,
+    ChannelContext, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, VerifiedInbound,
 };
 
 use crate::entrypoint::{BindContext, BindError, ExtensionBindings, ExtensionEntrypoint};

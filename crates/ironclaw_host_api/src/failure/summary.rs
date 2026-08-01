@@ -1,0 +1,527 @@
+//! Category→summary data tables — the user-facing sentence for a failed run.
+//!
+//! Moved here from `ironclaw_turn_runner::failure_summary` by PROPOSAL §6.1.1
+//! ("failure-summary *data* … joins the existing `failure` module so product
+//! stops depending on runner"). Everything in this module is a **pure lookup**:
+//! `&str` in, `&'static str` out, no host state and no internal dependency.
+//!
+//! What deliberately stayed with the producer (`ironclaw_turn_runner`), because
+//! it is typed on loop vocabulary this crate must never depend on:
+//!
+//! - `checkpoint_rejection_host_explanation`, the *writer* half of the
+//!   checkpoint-rejection envelope (it takes an `agent_loop` `CheckpointKind`
+//!   and a `loop_contracts` `LoopSafeSummary`), and its `checkpoint_stage_name`
+//!   stage renderer;
+//! - every classifier that decides *which* category applies.
+//!
+//! The envelope constants below are therefore the single shared definition the
+//! split writer and reader both key off. The writer's round-trip test
+//! (`checkpoint_rejection_explanation_round_trips_every_stage`) exercises this
+//! module across the crate boundary for all four checkpoint stages, so the two
+//! halves cannot drift apart silently.
+
+use crate::safe_summary::SafeSummary;
+use crate::turn::ModelInvalidOutputDetailReason;
+
+use super::categories::{
+    BUDGET_ACCOUNTING_FAILED_CATEGORY, CHECKPOINT_REJECTED_CATEGORY,
+    MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+    MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY, TRANSCRIPT_WRITE_FAILED_CATEGORY,
+};
+
+/// Opening literal of the host-authored checkpoint-rejection envelope. Shared
+/// with the writer in `ironclaw_turn_runner::failure_summary`.
+pub const CHECKPOINT_REJECTION_PREFIX: &str = "The host rejected the ";
+/// Separator between the checkpoint stage name and the bounded cause.
+pub const CHECKPOINT_REJECTION_CAUSE_SEPARATOR: &str = " checkpoint because ";
+/// Closing remediation clause of the envelope.
+pub const CHECKPOINT_REJECTION_REMEDIATION: &str = ". No model or capability ran after the rejection. Start a new run. If this repeats, ask an operator to inspect checkpoint storage and run-profile compatibility.";
+/// Pinned static explanation used when no valid envelope is available.
+pub const CHECKPOINT_REJECTION_FALLBACK: &str = "The host rejected a checkpoint, so the run stopped before continuing. No model or capability ran from the rejected state. Start a new run. If this repeats, ask an operator to inspect checkpoint storage and run-profile compatibility.";
+
+/// The closed checkpoint-stage vocabulary the envelope admits. The writer's
+/// `checkpoint_stage_name` renders exactly these, one per `CheckpointKind`.
+const CHECKPOINT_STAGE_NAMES: [&str; 4] = ["pre-model", "pre-side-effect", "pre-block", "final"];
+
+/// Revalidate a durable checkpoint-rejection explanation before projecting it.
+///
+/// Persisted failure detail is intentionally generic for compatibility. This
+/// parser accepts only the exact host-authored envelope produced by
+/// `ironclaw_turn_runner::failure_summary::checkpoint_rejection_host_explanation`,
+/// with a closed checkpoint stage and a revalidated [`SafeSummary`] cause.
+/// Legacy or malformed detail falls back to the pinned static explanation and
+/// never reaches the failure-explainer model.
+///
+/// The cause is revalidated against [`SafeSummary`], the *canonical* redaction
+/// rule. The writer builds the cause from a `LoopSafeSummary`, whose validator
+/// delegates to this same rule and adds exactly one bypass — the fixed
+/// `INPUT_ENCODE_HUMAN_SUMMARY` literal, which independently satisfies
+/// `SafeSummary` (pinned by `loop_input_encode_sentinel_needs_no_bypass_here`).
+/// The two validators therefore accept the same set of causes, and moving the
+/// reader onto the canonical rule is behavior-preserving rather than a
+/// tightening.
+pub fn checkpoint_rejection_host_explanation_from_detail(detail: Option<&str>) -> Option<String> {
+    let detail = detail?;
+    let body = detail
+        .strip_prefix(CHECKPOINT_REJECTION_PREFIX)?
+        .strip_suffix(CHECKPOINT_REJECTION_REMEDIATION)?;
+    let (stage, cause) = body.split_once(CHECKPOINT_REJECTION_CAUSE_SEPARATOR)?;
+    if !CHECKPOINT_STAGE_NAMES.contains(&stage) {
+        return None;
+    }
+    if let Err(validation_error) = SafeSummary::new(cause.to_string()) {
+        tracing::debug!(
+            validation_error = %validation_error,
+            "persisted checkpoint rejection cause failed validation; using pinned fallback"
+        );
+        return None;
+    }
+    Some(detail.to_string())
+}
+
+pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static str {
+    let Some(category) = category else {
+        return unknown_failure_summary();
+    };
+
+    if let Some(summary) = pinned_failure_summary_for_category(category) {
+        return summary;
+    }
+
+    match category {
+        // Permanent model-stage failures. Each states plainly that retrying
+        // will not help, because these previously routed through the generic
+        // host-outage summary that told the user to "retry the run" — advice
+        // that could never work for a refused or malformed request.
+        "model_stage_request_invalid" => {
+            "The model request was rejected as invalid. Retrying it unchanged will not help; the request itself needs to change."
+        }
+        "model_stage_policy_denied" => {
+            "Policy does not permit this model request. Retrying will not help; the policy or the model profile needs to change."
+        }
+        "model_stage_scope_mismatch" => {
+            "The model request fell outside the granted scope. Retrying will not help; the scope or configuration needs to change."
+        }
+        "driver_not_found" => {
+            "The run could not start because the configured agent runtime was unavailable."
+        }
+        "driver_unavailable" => "The run could not start the agent runtime.",
+        "driver_failed" => "The agent runtime reported an internal error before producing a reply.",
+        "driver_invalid_request" => {
+            "The agent runtime rejected the request before producing a reply."
+        }
+        "scheduler_executor_panic" => "The agent runtime stopped unexpectedly.",
+        "crash_retry_exhausted" => {
+            "The run could not be recovered after repeated runner crashes. Retry the request, and contact support if it happens again."
+        }
+        "host_creation_failed" => {
+            "The run failed while preparing the runtime host. Retry the run, and contact support if startup keeps failing."
+        }
+        "route_snapshot_persistence_failed" => {
+            "The run failed while saving the selected model route. Retry the run."
+        }
+        "scheduler_heartbeat_failed" => {
+            "The run failed after the runner heartbeat could not be recorded."
+        }
+        "exit_application_failed" => {
+            "The run failed while recording its final result. Retry the run, and contact support if results keep failing to save."
+        }
+        "lease_expired" => "The run failed because its runner lease expired. Retry the run.",
+        "model_error" => {
+            "The run failed while calling the model. Check the selected model provider and try again."
+        }
+        "model_transient" => "The run failed after a temporary model error. Retry the run.",
+        "model_context_overflow" => {
+            "The run failed because the model context was too large. Retry with a shorter request or start a new thread."
+        }
+        "model_content_filtered" => {
+            "The run failed because the model provider filtered the response. Change the request and try again."
+        }
+        "model_unavailable" => {
+            "The run failed because the model provider was unavailable. Check the selected provider and retry the run."
+        }
+        "model_internal" => {
+            "The run failed because the model provider returned an internal error. Retry the run or choose a different provider."
+        }
+        "model_invalid_output" => {
+            "The run failed because the model returned output the runner could not use. Retry the run or choose a different model."
+        }
+        "model_output_truncated" => {
+            "The run failed because the model repeatedly reached its output limit. Retry with a request for a shorter answer or increase the output limit."
+        }
+        "model_stale_request" => {
+            "The run failed because the available tools changed while a model request was in flight. Retry the run."
+        }
+        "context_build_failed" => {
+            "The run failed while building the model context. Retry the run, and contact support if it keeps happening."
+        }
+        "capability_protocol_error" => {
+            "The run failed because a capability returned an invalid protocol response. Retry the run, and contact support if it keeps happening."
+        }
+        "capability_transient" => "The run failed after a temporary tool error. Retry the run.",
+        "capability_permanent" => {
+            "The run failed because a tool reported a permanent error. Change the request or tool configuration and try again."
+        }
+        "capability_input_invalid" => {
+            "The run failed because a tool rejected its input. Retry with a clearer or narrower request."
+        }
+        "capability_operation_failed" => {
+            "The run failed because a tool operation did not complete. Retry the run, and check the tool integration if it keeps happening."
+        }
+        "capability_policy_denied" => {
+            "The run failed because a tool policy denied the requested action. Change the request or permissions and try again."
+        }
+        "capability_unavailable" => {
+            "The run failed because a required tool was unavailable. Retry the run, and check the tool integration if it keeps happening."
+        }
+        "capability_internal" => {
+            "The run failed because a tool returned an internal error. Retry the run, and check the tool integration if it keeps happening."
+        }
+        "iteration_limit" => {
+            "The run stopped after reaching its iteration limit before producing a reply. Retry with a narrower request or increase the limit."
+        }
+        "invalid_model_output" => {
+            "The run failed because the model returned output the runner could not use. Retry the run or choose a different model."
+        }
+        CHECKPOINT_REJECTED_CATEGORY => CHECKPOINT_REJECTION_FALLBACK,
+        "checkpoint_unavailable" => {
+            "The run failed because the checkpoint could not be loaded. Retry the run, and contact support if the checkpoint remains unavailable."
+        }
+        "driver_bug" => {
+            "The agent runtime reported an internal error. Retry the run, and contact support if it happens again."
+        }
+        "interrupted_unexpectedly" => {
+            "The run stopped unexpectedly before it could finish. Retry the run."
+        }
+        "no_progress_detected" => {
+            "The run stopped because it repeated work without making progress. Retry with a clearer instruction or narrower scope."
+        }
+        "policy_denied" => {
+            "The run stopped because a policy denied the requested action. Change the request or permissions and try again."
+        }
+        "compaction_unavailable" => {
+            "The run failed because context compaction was unavailable. Retry with a shorter request or start a new thread."
+        }
+        "driver_protocol_violation" => {
+            "The run produced an invalid result and stopped before replying. Retry the run, and contact support if it keeps happening."
+        }
+        "compaction_invalid_cut_point" => {
+            "The run failed because context compaction selected an invalid cut point. Retry the run, and contact support if it keeps happening."
+        }
+        "compaction_unsupported_mode" => {
+            "The run failed because the requested context compaction mode is unsupported. Retry with a shorter request or start a new thread."
+        }
+        "compaction_input_too_large" => {
+            "The run failed because context compaction input was too large. Retry with a shorter request or start a new thread."
+        }
+        "compaction_security_rejected" => {
+            "The run failed because context compaction was rejected by a safety check. Change the request and try again."
+        }
+        "compaction_inference_failed" => {
+            "The run failed because context compaction could not complete. Retry with a shorter request or start a new thread."
+        }
+        "compaction_cancelled" => {
+            "The run stopped while context compaction was being cancelled. Retry the run if you still need a response."
+        }
+        "compaction_persistence_failed" => {
+            "The run failed while saving compacted context. Retry the run, and contact support if saving still fails."
+        }
+        "host_stage_unavailable_prompt" => {
+            "The run failed because the host prompt stage was unavailable. Retry the run, and contact support if it keeps happening."
+        }
+        "host_stage_unavailable_model" => {
+            "The run failed because the host model stage was unavailable. Check the model provider and try again."
+        }
+        "host_stage_unavailable_capability" => {
+            "The run failed because the host capability stage was unavailable. Retry the run, and check the tool integration if it keeps happening."
+        }
+        "host_stage_unavailable_transcript" => {
+            "The run failed because the host transcript stage was unavailable. Retry the run, and contact support if saving still fails."
+        }
+        "host_stage_unavailable_checkpoint" => {
+            "The run failed because the host checkpoint stage was unavailable. Retry the run, and contact support if checkpoints remain unavailable."
+        }
+        "host_stage_unavailable_input" => {
+            "The run failed because the host input stage was unavailable. Check the submitted message and try again."
+        }
+        "host_stage_unavailable_unknown" => {
+            "The run failed because a required host stage was unavailable. Retry the run, and contact support if it keeps happening."
+        }
+        "unknown_failure" => unknown_failure_summary(),
+        _ => unknown_failure_summary(),
+    }
+}
+
+pub fn reborn_failure_summary_for_category_and_detail(
+    category: Option<&str>,
+    detail: Option<ModelInvalidOutputDetailReason>,
+) -> &'static str {
+    let Some(category) = category else {
+        return unknown_failure_summary();
+    };
+
+    if let Some(summary) = pinned_failure_summary_for_category(category) {
+        return summary;
+    }
+
+    if matches!(category, "model_invalid_output" | "invalid_model_output")
+        && let Some(detail) = detail
+    {
+        return detail.failure_summary();
+    }
+
+    reborn_failure_summary_for_category(Some(category))
+}
+
+trait ModelInvalidOutputFailureSummary {
+    fn failure_summary(self) -> &'static str;
+}
+
+impl ModelInvalidOutputFailureSummary for ModelInvalidOutputDetailReason {
+    fn failure_summary(self) -> &'static str {
+        match self {
+            Self::EmptyAssistantResponse => {
+                "The run failed because the model returned an empty assistant response. Retry the run or choose a different model."
+            }
+            Self::TextualToolCallSyntax => {
+                "The run failed because the model returned a tool call as text instead of structured tool-call data. Retry the run or choose a different model."
+            }
+            Self::OutsideCapabilitySurface => {
+                "The run failed because the model tried to call a tool that was not available in this turn. Retry with a narrower request or choose a different model."
+            }
+            Self::ToolUseFinishWithoutToolCalls => {
+                "The run failed because the model requested tool use without providing structured tool calls. Retry the run or choose a different model."
+            }
+            Self::UnsupportedToolCallsForTextOnlyLoop => {
+                "The run failed because the model tried to call a tool when this turn required a text answer. Retry with a clearer request or choose a different model."
+            }
+            Self::InvalidReturnedToolName => {
+                "The run failed because the model returned an invalid tool name. Retry the run or choose a different model."
+            }
+            Self::InvalidToolCallArguments => {
+                "The run failed because the model returned invalid tool-call arguments. Retry with a clearer or narrower request."
+            }
+            Self::MalformedToolCallArguments => {
+                "The run failed because the model returned malformed tool-call arguments. Retry with a clearer or narrower request."
+            }
+        }
+    }
+}
+
+pub fn pinned_failure_summary_for_category(category: &str) -> Option<&'static str> {
+    match category {
+        MODEL_CREDITS_EXHAUSTED_CATEGORY => Some(
+            "The AI provider account is out of credits. Add credits or switch providers and try again.",
+        ),
+        MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY => Some(
+            "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL, then try again.",
+        ),
+        MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY => Some(
+            "The run stopped because its configured model spend budget was exhausted. Increase the budget or start a new run.",
+        ),
+        BUDGET_ACCOUNTING_FAILED_CATEGORY => Some(
+            "The run failed because resource accounting was temporarily unavailable. Retry the run, and contact support if it keeps happening.",
+        ),
+        TRANSCRIPT_WRITE_FAILED_CATEGORY => Some(
+            "The run failed while saving transcript output. Retry the run, and contact support if saving still fails.",
+        ),
+        CHECKPOINT_REJECTED_CATEGORY => Some(CHECKPOINT_REJECTION_FALLBACK),
+        _ => None,
+    }
+}
+
+fn unknown_failure_summary() -> &'static str {
+    "The run failed before producing a reply. Retry the run, and contact support if it keeps happening."
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dispatch::INPUT_ENCODE_HUMAN_SUMMARY;
+
+    #[test]
+    fn reborn_failure_summary_describes_known_category() {
+        assert_eq!(
+            reborn_failure_summary_for_category(Some("driver_invalid_request")),
+            "The agent runtime rejected the request before producing a reply."
+        );
+    }
+
+    #[test]
+    fn reborn_failure_summary_describes_iteration_limit() {
+        assert_eq!(
+            reborn_failure_summary_for_category(Some("iteration_limit")),
+            "The run stopped after reaching its iteration limit before producing a reply. Retry with a narrower request or increase the limit."
+        );
+    }
+
+    #[test]
+    fn reborn_failure_summary_falls_back_for_unknown_category() {
+        assert_eq!(
+            reborn_failure_summary_for_category(Some("unexpected_category")),
+            "The run failed before producing a reply. Retry the run, and contact support if it keeps happening."
+        );
+    }
+
+    #[test]
+    fn invalid_model_output_detail_summary_uses_shared_reason() {
+        assert_eq!(
+            reborn_failure_summary_for_category_and_detail(
+                Some("model_invalid_output"),
+                Some(ModelInvalidOutputDetailReason::EmptyAssistantResponse),
+            ),
+            "The run failed because the model returned an empty assistant response. Retry the run or choose a different model."
+        );
+    }
+
+    // The scheduler emits `scheduler_heartbeat_failed` / `scheduler_executor_panic`
+    // (see `ironclaw_turn_runner::turn_scheduler`), not the previously-matched
+    // `heartbeat_failed` / `driver_panic`. These two assertions pin the live
+    // mapping to the real producer strings.
+    #[test]
+    fn reborn_failure_summary_describes_scheduler_heartbeat_failure() {
+        assert_eq!(
+            reborn_failure_summary_for_category(Some("scheduler_heartbeat_failed")),
+            "The run failed after the runner heartbeat could not be recorded."
+        );
+    }
+
+    #[test]
+    fn reborn_failure_summary_describes_scheduler_executor_panic() {
+        assert_eq!(
+            reborn_failure_summary_for_category(Some("scheduler_executor_panic")),
+            "The agent runtime stopped unexpectedly."
+        );
+    }
+
+    #[test]
+    fn reborn_failure_summary_omits_internal_system_tool_language() {
+        for category in [
+            "driver_not_found",
+            "driver_unavailable",
+            "driver_failed",
+            "driver_invalid_request",
+            "scheduler_executor_panic",
+        ] {
+            let summary = reborn_failure_summary_for_category(Some(category)).to_ascii_lowercase();
+
+            assert!(
+                !summary.contains("system tool"),
+                "{category} leaked system tool wording"
+            );
+            assert!(
+                !summary.contains("temporarily unavailable"),
+                "{category} leaked transient host wording"
+            );
+            assert!(
+                !summary.contains("execution driver"),
+                "{category} leaked execution driver wording"
+            );
+        }
+    }
+
+    // Regression guard: categories emitted by `LoopFailureKind::as_str()`
+    // through the normal loop-exit path must map to specific, honest summaries
+    // instead of degrading to the generic fallback (which the LLM failure
+    // explainer then paraphrased into a vague "driver protocol error" that
+    // masked the real tool failure).
+    #[test]
+    fn reborn_failure_summary_describes_capability_protocol_error() {
+        assert_eq!(
+            reborn_failure_summary_for_category(Some("capability_protocol_error")),
+            "The run failed because a capability returned an invalid protocol response. Retry the run, and contact support if it keeps happening."
+        );
+    }
+
+    #[test]
+    fn reborn_failure_summary_maps_loop_failure_categories_specifically() {
+        let generic = reborn_failure_summary_for_category(None);
+        for category in [
+            "capability_protocol_error",
+            "model_error",
+            "context_build_failed",
+            "invalid_model_output",
+            "checkpoint_rejected",
+            "checkpoint_unavailable",
+            TRANSCRIPT_WRITE_FAILED_CATEGORY,
+            "driver_bug",
+            "policy_denied",
+            "compaction_unavailable",
+            "driver_protocol_violation",
+        ] {
+            let summary = reborn_failure_summary_for_category(Some(category));
+            assert_ne!(
+                summary, generic,
+                "{category} still degrades to the generic failure summary"
+            );
+        }
+    }
+
+    // Regression guard: the old, never-produced category strings must no longer
+    // be specially cased — they now fall through to the generic summary.
+    #[test]
+    fn reborn_failure_summary_treats_legacy_dead_categories_as_generic() {
+        assert_eq!(
+            reborn_failure_summary_for_category(Some("heartbeat_failed")),
+            "The run failed before producing a reply. Retry the run, and contact support if it keeps happening."
+        );
+        assert_eq!(
+            reborn_failure_summary_for_category(Some("driver_panic")),
+            "The run failed before producing a reply. Retry the run, and contact support if it keeps happening."
+        );
+    }
+
+    /// The reader moved here from `ironclaw_turn_runner` and swapped
+    /// `LoopSafeSummary::new` for the canonical [`SafeSummary::new`] it
+    /// delegates to. `validate_loop_safe_summary`'s *only* divergence is an
+    /// early return for this fixed literal — so if the literal independently
+    /// satisfies the canonical rule, the two validators accept exactly the same
+    /// set of causes and the move changed no behavior. This pins that premise:
+    /// should the sentinel ever gain a character the redaction rule rejects,
+    /// this fails rather than silently narrowing what the projection accepts.
+    #[test]
+    fn loop_input_encode_sentinel_needs_no_bypass_here() {
+        assert!(
+            SafeSummary::new(INPUT_ENCODE_HUMAN_SUMMARY).is_ok(),
+            "the loop validator's one bypass must be redundant under the canonical rule"
+        );
+    }
+
+    #[test]
+    fn checkpoint_rejection_reader_rejects_unknown_stage_and_malformed_envelope() {
+        let well_formed = format!(
+            "{CHECKPOINT_REJECTION_PREFIX}pre-model{CHECKPOINT_REJECTION_CAUSE_SEPARATOR}safe cause{CHECKPOINT_REJECTION_REMEDIATION}"
+        );
+        assert_eq!(
+            checkpoint_rejection_host_explanation_from_detail(Some(&well_formed)),
+            Some(well_formed.clone())
+        );
+
+        let unknown_stage = format!(
+            "{CHECKPOINT_REJECTION_PREFIX}unknown{CHECKPOINT_REJECTION_CAUSE_SEPARATOR}safe cause{CHECKPOINT_REJECTION_REMEDIATION}"
+        );
+        assert_eq!(
+            checkpoint_rejection_host_explanation_from_detail(Some(&unknown_stage)),
+            None
+        );
+
+        // A cause that fails the redaction rule falls back rather than
+        // projecting raw text at the user.
+        let unsafe_cause = format!(
+            "{CHECKPOINT_REJECTION_PREFIX}final{CHECKPOINT_REJECTION_CAUSE_SEPARATOR}path/to/secret{CHECKPOINT_REJECTION_REMEDIATION}"
+        );
+        assert_eq!(
+            checkpoint_rejection_host_explanation_from_detail(Some(&unsafe_cause)),
+            None
+        );
+
+        assert_eq!(
+            checkpoint_rejection_host_explanation_from_detail(None),
+            None
+        );
+        assert_eq!(
+            checkpoint_rejection_host_explanation_from_detail(Some("not an envelope")),
+            None
+        );
+    }
+}

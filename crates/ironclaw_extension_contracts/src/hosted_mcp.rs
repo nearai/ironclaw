@@ -9,7 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use ironclaw_host_api::error::HostApiError;
 use ironclaw_host_api::ids::ExtensionId;
 
-use crate::package_lifecycle::LifecyclePackageId;
+use crate::lifecycle_id::LifecyclePackageId;
 
 /// A bounded, redacted location advertised by a hosted MCP server while
 /// challenging an unauthenticated request.

@@ -51,16 +51,16 @@ use ironclaw_host_api::ingress::{
 };
 use ironclaw_host_api::{
     ids::{AgentId, ExtensionId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
-    product_surface::{
-        BoundProductSurface, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
-        ProductSurfaceQueryRequest,
-    },
     resource::ResourceScope,
 };
 use ironclaw_host_ingress::SplitRouteMount;
 use ironclaw_product::{
     EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, LifecyclePackageKind, RebornExtensionCredentialSetup,
     RebornExtensionListResponse, RebornSetupExtensionResponse,
+};
+use ironclaw_product_contracts::surface::{
+    BoundProductSurface, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
+    ProductSurfaceQueryRequest,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};

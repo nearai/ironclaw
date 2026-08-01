@@ -1114,7 +1114,7 @@ impl crate::extension_ingress::ChannelPairingInterceptor for ChannelPairingServi
     async fn intercept(
         &self,
         installation_id: &AdapterInstallationId,
-        message: &ironclaw_product::NormalizedInboundMessage,
+        message: &ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage,
     ) -> crate::extension_ingress::ChannelPairingInterception {
         use crate::extension_ingress::ChannelPairingInterception;
 

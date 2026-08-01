@@ -26,7 +26,7 @@ use ironclaw_auth::{
 use ironclaw_extension_contracts::hosted_mcp::{
     HostedMcpAuthSelection, HostedMcpEndpoint, RegisterHostedMcpRequest,
 };
-use ironclaw_extension_contracts::package_lifecycle::LifecyclePackageId;
+use ironclaw_extension_contracts::lifecycle_id::LifecyclePackageId;
 use ironclaw_extension_host::lifecycle_test_support::{
     build_lifecycle_test_services, build_lifecycle_test_services_with_auth_provider,
     invoke_with_standalone_approval, lifecycle_product_context,
@@ -38,7 +38,6 @@ use ironclaw_host_api::{
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
     ids::{CapabilityGrantId, CapabilityId, ExtensionId, SecretHandle},
     mount::MountView,
-    product_surface::{ProductSurfaceErrorCode, ProductSurfaceErrorKind},
     runtime::{RuntimeKind, TrustClass},
     scope::Principal,
 };
@@ -46,6 +45,7 @@ use ironclaw_product::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload,
     LifecycleProductService,
 };
+use ironclaw_product_contracts::surface::{ProductSurfaceErrorCode, ProductSurfaceErrorKind};
 use ironclaw_secrets::SecretStorePort;
 use secrecy::SecretString;
 use serde_json::json;
@@ -138,7 +138,7 @@ fn fixture_package_ref() -> LifecyclePackageRef {
 async fn install_fixture(
     services: &ironclaw_extension_host::lifecycle_test_support::ExtensionLifecycleTestServices,
     scope: ironclaw_host_api::resource::ResourceScope,
-) -> ironclaw_extension_contracts::package_lifecycle::LifecycleProductResponse {
+) -> ironclaw_product_contracts::package_lifecycle::LifecycleProductResponse {
     services
         .lifecycle_service
         .execute(
@@ -152,14 +152,14 @@ async fn install_fixture(
 }
 
 fn credential_provider_from_response(
-    response: &ironclaw_extension_contracts::package_lifecycle::LifecycleProductResponse,
+    response: &ironclaw_product_contracts::package_lifecycle::LifecycleProductResponse,
 ) -> AuthProviderId {
     response
         .blockers
         .iter()
         .find_map(|blocker| {
             match blocker {
-            ironclaw_extension_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential {
+            ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential {
                 ref_id: Some(provider),
             } => AuthProviderId::new(provider.as_str()).ok(),
             _ => None,
@@ -857,7 +857,7 @@ async fn bearer_registration_stays_setup_needed_until_the_existing_auth_continua
     assert!(
         unfinished_retry.blockers.iter().any(|blocker| matches!(
             blocker,
-            ironclaw_extension_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
+            ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
         )),
         "ordinary installation exposes credential readiness"
     );
@@ -987,7 +987,7 @@ async fn pending_oauth_registration_survives_fresh_restore_and_resumes_existing_
     let pending_provider = credential_provider_from_response(&pending);
     assert!(pending.blockers.iter().any(|blocker| matches!(
         blocker,
-        ironclaw_extension_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
+        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
     )));
 
     let restored_secret_store = Arc::new(OnceLock::new());
@@ -1024,7 +1024,7 @@ async fn pending_oauth_registration_survives_fresh_restore_and_resumes_existing_
     assert!(
         activation_only.blockers.iter().any(|blocker| matches!(
             blocker,
-            ironclaw_extension_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
+            ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
         )),
         "activation without a prior re-install must still surface the credential setup \
          blocker rather than \"is not installed\": {activation_only:#?}"
@@ -1047,7 +1047,7 @@ async fn pending_oauth_registration_survives_fresh_restore_and_resumes_existing_
     );
     assert!(resumed.blockers.iter().any(|blocker| matches!(
         blocker,
-        ironclaw_extension_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
+        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
     )));
     assert!(
         restored
@@ -1118,7 +1118,7 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
     assert!(
         install.blockers.iter().any(|blocker| matches!(
             blocker,
-            ironclaw_extension_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
+            ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
         )),
         "ordinary install discovers OAuth and returns the credential setup blocker: {install:#?}"
     );
@@ -1726,7 +1726,7 @@ async fn live_notion_oauth_registration_reaches_generic_setup() {
     assert!(
         install.blockers.iter().any(|blocker| matches!(
             blocker,
-            ironclaw_extension_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
+            ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
         )),
         "Notion install must hand off to generic setup: {install:#?}"
     );

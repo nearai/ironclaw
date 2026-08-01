@@ -15,11 +15,11 @@ use ironclaw_host_api::{
     capability::CapabilityDescriptor,
     error::HostApiError,
     ids::{CapabilityId, ExtensionId},
-    product_adapter::ChannelAdapter,
-    tool_adapter::ToolAdapter,
 };
 
 use crate::channel::ChannelDescriptor;
+use crate::channel_adapter::ChannelAdapter;
+use crate::tool_adapter::ToolAdapter;
 
 /// One loaded extension instance.
 ///

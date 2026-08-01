@@ -169,79 +169,99 @@ pub use in_memory_ledger::InMemoryIdempotencyLedger;
 pub use inbound_turn::{
     DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
 };
-pub use ironclaw_common::{AutomationName, AutomationNameError, MAX_AUTOMATION_NAME_BYTES};
+pub use ironclaw_extension_contracts::auth_prompt::{
+    AuthPromptChallengeKind, AuthPromptContextView, AuthPromptView, ConnectionPromptContext,
+};
+pub use ironclaw_extension_contracts::channel_adapter::{
+    ChannelAttachmentRef, ChannelContext, ChannelError, DeliveryReport, ImmediateResponse,
+    InboundBatchFragment, InboundOutcome, MAX_IMMEDIATE_RESPONSE_BYTES,
+    MAX_INBOUND_BATCH_REF_BYTES, MAX_INBOUND_BATCH_SETTLE_MILLIS, MAX_REPLY_CONTEXT_BYTES,
+    OutboundEnvelope, OutboundPart, OutboundTarget, PartDeliveryOutcome, ProductTriggerReason,
+    TargetCandidate, TargetQuery, VerifiedInbound,
+};
+pub use ironclaw_extension_contracts::egress::{
+    DeclaredEgressHost, DeclaredEgressTarget, DeliveryAttemptId, DeliveryStatus,
+    EgressCredentialHandle, EgressHeader, EgressMethod, EgressPath, EgressRequest, EgressResponse,
+};
+pub use ironclaw_extension_contracts::external::{
+    ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
+    ProductAttachmentKind,
+};
 #[cfg(any(test, feature = "test-support"))]
-pub use ironclaw_host_api::product_adapter::test_support::fakes::{
-    FakeOutboundDeliverySink, FakeProjectionStream, FakeProtocolHttpEgress, RecordedEgressCall,
+pub use ironclaw_extension_contracts::test_support::fakes::{
+    FakeOutboundDeliverySink, FakeProtocolHttpEgress, RecordedEgressCall,
 };
 pub use ironclaw_host_api::product_adapter::{
-    AdapterInstallationId, ApprovalDecision, ApprovalPromptActionView, ApprovalPromptContextView,
-    ApprovalPromptDestinationView, ApprovalPromptDetailView, ApprovalPromptScopeView,
-    ApprovalResolutionPayload, AuthPromptChallengeKind, AuthPromptContextView, AuthPromptView,
-    AuthRequirement, AuthResolutionPayload, AuthResolutionResult,
-    CAPABILITY_DISPLAY_KIND_MAX_BYTES, CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES,
-    CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
-    CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
-    CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput, ChannelAdapter,
-    ChannelAttachmentRef, ChannelContext, ChannelError, ChannelInboundClassification,
-    ConnectionPromptContext, DeclaredEgressHost, DeclaredEgressTarget, DeliveryAttemptId,
-    DeliveryReport, DeliveryStatus, EgressCredentialHandle, EgressHeader, EgressMethod, EgressPath,
-    EgressRequest, EgressResponse, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-    FinalReplyView, GatePromptView, ImmediateResponse, InboundBatchFragment, InboundCommandPayload,
-    InboundOutcome, InboundRetryDisposition, LinkedThreadActionPayload,
-    MAX_IMMEDIATE_RESPONSE_BYTES, MAX_INBOUND_BATCH_REF_BYTES, MAX_INBOUND_BATCH_SETTLE_MILLIS,
-    MAX_REPLY_CONTEXT_BYTES, NormalizedInboundMessage, OutboundDeliverySink, OutboundEnvelope,
-    OutboundPart, OutboundTarget, PROJECTION_SKILL_ACTIVATION_MAX_ITEMS,
+    AdapterInstallationId, AuthRequirement, ProductAdapterCapabilities, ProductAdapterError,
+    ProductAdapterId, ProductCapabilityFlag, ProductSurfaceKind, ProductSurfaceRejectionKind,
+    ProtocolAuthEvidence, ProtocolAuthFailure, ProtocolHttpEgressError, REDACTED_PLACEHOLDER,
+    RedactedDebug, RedactedString, VerifiedAuthClaim,
+};
+// WS1.5 deleted this crate's two re-export paths to the protocol-auth mint
+// family. Product is not a minter: bearer/session evidence comes from
+// `ironclaw_host_api::product_adapter::auth` (host transport only) and
+// channel/webhook evidence from
+// `ironclaw_extension_contracts::verified_inbound` (generic ingress verifier
+// only), both witness-gated. Re-exporting them here is what gave
+// `ironclaw_extension_host` and `ironclaw_webui` a product-shaped path to a
+// security seam neither should reach through product;
+// `reborn_sealed_evidence_mint_ratchet` pins that it stays deleted.
+pub use ironclaw_product_contracts::inbound::{
+    ApprovalDecision, ApprovalResolutionPayload, AuthResolutionPayload, AuthResolutionResult,
+    ChannelInboundClassification, InboundCommandPayload, InboundRetryDisposition,
+    LinkedThreadActionPayload, ParsedProductInbound, ProductCommandResultPayload,
+    ProductControlActionPayload, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+    ProductRejection, ProductRejectionDisposition, ProductRejectionKind,
+    ProductSlashCommandParseError, ProductSourceChannel, ProjectionReadPayload,
+    ProjectionSubscriptionPayload, ScopedApprovalResolutionPayload, TrustedInboundContext,
+    UserMessagePayload, classify_channel_inbound_text, parse_product_slash_command,
+};
+pub use ironclaw_product_contracts::interaction_commands::{
+    parse_interaction_resolution_text, strip_wrapping_inline_code,
+};
+pub use ironclaw_product_contracts::outbound::{
+    ApprovalPromptActionView, ApprovalPromptContextView, ApprovalPromptDestinationView,
+    ApprovalPromptDetailView, ApprovalPromptScopeView, CAPABILITY_DISPLAY_KIND_MAX_BYTES,
+    CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES, CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES,
+    CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES, CapabilityActivityStatusView, CapabilityActivityView,
+    CapabilityActivityViewInput, CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput,
+    FinalReplyView, GatePromptView, PROJECTION_SKILL_ACTIVATION_MAX_ITEMS,
     PROJECTION_SKILL_FEEDBACK_MAX_BYTES, PROJECTION_SKILL_NAME_MAX_BYTES,
-    PROJECTION_TEXT_MAX_BYTES, ParsedProductInbound, PartDeliveryOutcome,
-    ProductAdapterCapabilities, ProductAdapterError, ProductAdapterId, ProductAttachmentDescriptor,
-    ProductAttachmentKind, ProductCapabilityFlag, ProductCommandResultPayload,
-    ProductControlActionPayload, ProductGateKind, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
-    ProductProjectionItem, ProductProjectionReadInput, ProductProjectionState,
-    ProductProjectionSubject, ProductProjectionSubscribeInput, ProductRejection,
-    ProductRejectionDisposition, ProductRejectionKind, ProductRenderOutcome,
-    ProductSlashCommandParseError, ProductSourceChannel, ProductSurfaceKind,
-    ProductSurfaceRejectionKind, ProductSynchronousResponse, ProductTriggerReason,
-    ProductWorkSummaryPhase, ProgressKind, ProgressUpdateView, ProjectionCursor,
-    ProjectionReadPayload, ProjectionReadRequest, ProjectionStream, ProjectionStreamSubscription,
-    ProjectionSubscriptionPayload, ProjectionSubscriptionRequest, ProtocolAuthEvidence,
-    ProtocolAuthFailure, ProtocolHttpEgress, ProtocolHttpEgressError, REDACTED_PLACEHOLDER,
-    RedactedDebug, RedactedString, ScopedApprovalResolutionPayload, TargetCandidate, TargetQuery,
-    TrustedInboundContext, UserMessagePayload, VerifiedAuthClaim, VerifiedInbound,
-    classify_channel_inbound_text, parse_interaction_resolution_text, parse_product_slash_command,
-    strip_wrapping_inline_code,
+    PROJECTION_TEXT_MAX_BYTES, ProductGateKind, ProductOutboundEnvelope, ProductOutboundPayload,
+    ProductOutboundTarget, ProductProjectionItem, ProductProjectionState, ProductRenderOutcome,
+    ProductSynchronousResponse, ProductWorkSummaryPhase, ProgressKind, ProgressUpdateView,
+    ProjectionCursor,
 };
-#[cfg(feature = "host-auth-mint")]
-pub use ironclaw_host_api::product_adapter::{
-    mark_bearer_token_verified, mark_bearer_token_verified_for_tenant,
-    mark_request_signature_verified, mark_request_signature_verified_for_tenant,
-    mark_session_verified, mark_session_verified_for_tenant, mark_shared_secret_header_verified,
-    mark_shared_secret_header_verified_for_tenant,
+pub use ironclaw_product_contracts::projection::{
+    ProductProjectionReadInput, ProductProjectionSubject, ProductProjectionSubscribeInput,
+    ProjectionReadRequest, ProjectionStreamSubscription, ProjectionSubscriptionRequest,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use ironclaw_product_contracts::test_support::fakes::FakeProjectionStream;
 
 pub mod auth {
+    //! Protocol-auth *vocabulary* for product consumers. Deliberately not the
+    //! mint family: WS1.5 sealed minting behind witness grants held only by the
+    //! host transport and the generic ingress verifier, and this module used to
+    //! be the second of two paths product offered to it.
     pub use ironclaw_host_api::product_adapter::auth::{
         AuthRequirement, ProtocolAuthEvidence, VerifiedAuthClaim,
     };
     pub use ironclaw_host_api::product_adapter_error::ProtocolAuthFailure;
-
-    #[cfg(feature = "host-auth-mint")]
-    pub use ironclaw_host_api::product_adapter::auth::{
-        mark_bearer_token_verified, mark_bearer_token_verified_for_tenant,
-        mark_request_signature_verified, mark_request_signature_verified_for_tenant,
-        mark_session_verified, mark_session_verified_for_tenant,
-        mark_shared_secret_header_verified, mark_shared_secret_header_verified_for_tenant,
-    };
 }
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
-    pub use ironclaw_host_api::product_adapter::test_support::*;
-    pub use ironclaw_host_api::product_surface::{
+    // The channel-adapter conformance suite (§11.2.10) moved with
+    // `ChannelAdapter`; `fakes` split by the port each fake implements.
+    pub use ironclaw_extension_contracts::test_support::conformance;
+    pub use ironclaw_extension_contracts::test_support::conformance::*;
+    pub use ironclaw_extension_contracts::test_support::fakes::*;
+    pub use ironclaw_product_contracts::surface::{
         RecordedProductSurfaceInvoke, RecordedProductSurfaceQuery, RecordedProductSurfaceStream,
         RecordingProductSurface,
     };
+    pub use ironclaw_product_contracts::test_support::fakes::*;
 }
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
 pub use lifecycle::{

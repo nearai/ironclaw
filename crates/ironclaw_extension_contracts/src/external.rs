@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::product_adapter::error::ProductAdapterError;
+use ironclaw_host_api::product_adapter_error::ProductAdapterError;
 
 const MAX_REF_LEN: usize = 512;
 const MAX_FILENAME_LEN: usize = 256;

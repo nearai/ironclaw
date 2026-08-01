@@ -4,13 +4,20 @@
 //! or an owner.
 //!
 //! This crate is vocabulary and ports only — value types, manifest-surface
-//! descriptors, recipe schemas, lifecycle state machines, and the one
-//! vendor-implemented codec port. It parses no manifests, stores no
-//! installations, routes no ingress, and executes no lifecycle. Those live
-//! above it, in `ironclaw_extension_registry` (records) and
-//! `ironclaw_extension_host` (execution). See
-//! `docs/reborn/target-architecture/PROPOSAL.md` §6.1.2 and
+//! descriptors, recipe schemas, lifecycle state machines, the one
+//! vendor-implemented codec port, and the sealed verified-inbound evidence
+//! constructors. It parses no manifests, stores no installations, routes no
+//! ingress, and executes no lifecycle. Those live above it, in
+//! `ironclaw_extension_registry` (records) and `ironclaw_extension_host`
+//! (execution). See `docs/reborn/target-architecture/PROPOSAL.md` §6.1.2 and
 //! `families/contracts.md`.
+//!
+//! **Security role (§6.1.2, §12.1a):** this crate is the host↔extension
+//! membrane, and it owns inbound-verification evidence minting exclusively —
+//! see [`verified_inbound`]. A channel package may misreport parsed content but
+//! can never forge verification or scope, because the mint family is witness-
+//! gated and the sole grant source lives in the generic ingress verifier. It
+//! declares that seal; it never performs verification itself.
 //!
 //! Admission test for a type here (the contracts-family four-part test):
 //! it names a concept crossing the host↔extension membrane, it is neutral
@@ -31,16 +38,24 @@
 //!   prevent.
 #![warn(unreachable_pub)]
 
+pub mod auth_prompt;
 pub mod channel;
+pub mod channel_adapter;
 pub mod channel_identity;
+pub mod egress;
 pub mod extension;
+pub mod external;
 pub mod hosted_mcp;
+pub mod lifecycle_id;
 pub mod memory;
-pub mod package_lifecycle;
 pub mod preference_target;
 pub mod recipe;
 pub mod state;
 pub mod surface;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+pub mod tool_adapter;
+pub mod verified_inbound;
 
 // There is deliberately no flat prelude and no cross-module re-export here.
 // Every contract is reached through the module that owns it —

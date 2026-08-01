@@ -13,8 +13,8 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::{
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
-    product_surface::ProductSurfaceError,
 };
+use ironclaw_product_contracts::surface::ProductSurfaceError;
 use ironclaw_threads::{
     AttachmentKind, AttachmentRef, FilesystemSessionThreadService, InMemorySessionThreadService,
 };

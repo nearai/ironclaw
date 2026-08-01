@@ -403,9 +403,8 @@ mod tests {
         ExtensionInstallationStorePort as _, ExtensionManifestRecord, ExtensionManifestRef,
         ManifestSource,
     };
-    use ironclaw_host_api::{
-        ids::InvocationId, product_adapter::AdapterInstallationId, resource::ResourceScope,
-    };
+    use ironclaw_host_api::product_adapter::AdapterInstallationId;
+    use ironclaw_host_api::{ids::InvocationId, resource::ResourceScope};
 
     use super::*;
     use ironclaw_extension_host::product_extension_host_api_contract_registry;

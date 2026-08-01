@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, TimeDelta, Utc};
+use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
 use ironclaw_filesystem::{
     CasApply, CasUpdateError, ContentType, Entry, FilesystemError, RootFilesystem,
     ScopedFilesystem, cas_update,
@@ -26,8 +27,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_product::{
     ChannelAttachmentRef, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-    InboundBatchFragment, NormalizedInboundMessage, ProductAttachmentDescriptor,
-    ProductTriggerReason,
+    InboundBatchFragment, ProductAttachmentDescriptor, ProductTriggerReason,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

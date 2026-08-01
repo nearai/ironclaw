@@ -645,7 +645,7 @@ Rules:
 
 ## AuthPromptView v2 enrichment (issue #4112)
 
-`AuthPromptView` in `crates/ironclaw_host_api/src/product_adapter/outbound.rs` carries
+`AuthPromptView` in `crates/ironclaw_extension_contracts/src/auth_prompt.rs` carries
 five new optional fields added in #4112 for WebUI v2 OAuth/PAT rendering:
 
 | Field | Type | Present when |

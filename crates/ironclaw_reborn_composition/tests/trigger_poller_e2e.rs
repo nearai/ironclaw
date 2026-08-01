@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ExternalActorRef};
+use ironclaw_host_api::product_adapter::AdapterInstallationId as ProductAdapterInstallationId;
 use ironclaw_host_api::{
     action::NetworkPolicy,
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
@@ -24,7 +25,6 @@ use ironclaw_host_api::{
         UserId,
     },
     mount::MountView,
-    product_adapter::AdapterInstallationId as ProductAdapterInstallationId,
     resource::ResourceEstimate,
     runtime::{RuntimeKind, TrustClass},
     scope::{ExecutionContext, Principal},

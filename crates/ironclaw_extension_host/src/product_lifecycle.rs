@@ -20,7 +20,6 @@ use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
     ids::{ExtensionId, UserId, VendorId},
-    product_surface::{ProductSurfaceCaller, ProductSurfaceError},
     resource::ResourceScope,
 };
 use ironclaw_product::{
@@ -30,6 +29,7 @@ use ironclaw_product::{
     LifecycleProductPayload, LifecycleProductResponse, LifecycleReadinessBlocker,
     LifecycleSearchExtensionSummary, ProductSurfaceFailure, RebornChannelConnectStrategy,
 };
+use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
 fn unzip_extension_bundle_for_product(
@@ -3623,7 +3623,7 @@ output_schema_ref = "schemas/run.output.json"
         ));
 
         let register_request = ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest {
-            desired_id: ironclaw_extension_contracts::package_lifecycle::LifecyclePackageId::new(
+            desired_id: ironclaw_extension_contracts::lifecycle_id::LifecyclePackageId::new(
                 "lock-order-register",
             )
             .expect("package id"),

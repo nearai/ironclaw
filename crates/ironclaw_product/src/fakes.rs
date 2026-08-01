@@ -7,9 +7,9 @@ use std::time::Duration;
 use crate::{ProductInboundEnvelope, ProductInboundPayload, ProductRejection, UserMessagePayload};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{
-    ids::{AgentId, TenantId, ThreadId, UserId},
-    product_surface::{ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind},
+use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 

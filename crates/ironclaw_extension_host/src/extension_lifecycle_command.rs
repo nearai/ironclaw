@@ -3,13 +3,13 @@ use std::sync::Arc;
 use ironclaw_auth::RuntimeCredentialAccountSelectionService;
 use ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest;
 use ironclaw_extension_contracts::state::InstallationState;
-use ironclaw_host_api::product_surface::ProductSurfaceError;
 use ironclaw_product::{
     LifecycleExtensionSource, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
     LifecycleProductContext, LifecycleProductPayload, LifecycleProductResponse,
     LifecycleProductService, LifecycleProductSurfaceContext, LifecycleSearchExtensionSummary,
     ProductSurfaceFailure,
 };
+use ironclaw_product_contracts::surface::ProductSurfaceError;
 use thiserror::Error;
 
 use crate::extension_lifecycle::RebornLocalExtensionManagementPort;

@@ -10,16 +10,18 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
-use crate::{
+use ironclaw_extension_contracts::channel_adapter::{ChannelAdapter, NormalizedInboundMessage};
+use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
+use ironclaw_host_api::{
     ids::{ActivityId, AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
-    product_adapter::{
-        AdapterInstallationId, ChannelAdapter, ChannelInboundClassification,
-        NormalizedInboundMessage, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
-        ProductSourceChannel, ProtocolAuthEvidence,
-    },
+    product_adapter::ProtocolAuthEvidence,
+    product_adapter::identity::{AdapterInstallationId, ProductAdapterId},
     product_adapter_error::{ProductAdapterError, ProductSurfaceRejectionKind, RedactedString},
-    tool_adapter::RestrictedEgress,
     turn::{TurnActor, TurnScope},
+};
+
+use crate::inbound::{
+    ChannelInboundClassification, ProductInboundAck, ProductInboundEnvelope, ProductSourceChannel,
 };
 
 /// One verified, normalized channel message admitted through a product surface.
@@ -660,7 +662,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::ids::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
 
     #[test]
     fn product_stream_continuation_is_single_consumer() {

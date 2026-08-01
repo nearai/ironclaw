@@ -37,10 +37,7 @@ use crate::{
 use async_trait::async_trait;
 use axum::Json;
 use axum::response::{IntoResponse, Response};
-use ironclaw_host_api::{
-    ids::{ActivityId, ThreadId},
-    product_surface::{BoundProductSurface, ProductSurface},
-};
+use ironclaw_host_api::ids::{ActivityId, ThreadId};
 use ironclaw_product::{
     CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND, ProductCancelRunRequest, ProductCreateThreadRequest,
     ProductSubmitTurnRequest, SUBMIT_TURN_COMMAND,
@@ -49,6 +46,7 @@ use ironclaw_product::{
     ProductInboundAck, ProductRejection, ProductTriggerReason, ProjectionReadRequest,
     ProjectionSubscriptionRequest, UserMessagePayload,
 };
+use ironclaw_product_contracts::surface::{BoundProductSurface, ProductSurface};
 use uuid::Uuid;
 
 const DEFAULT_RESPONSES_WAIT_TIMEOUT: Duration = Duration::from_secs(30);

@@ -14,7 +14,6 @@ use ironclaw_host_api::{
         ApprovalRequestId, CapabilityGrantId, CapabilityId, CorrelationId, GateRef, InvocationId,
         UserId,
     },
-    product_surface::{ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode},
     resolution::Resolution,
     resource::{ResourceEstimate, ResourceScope},
     result_meta::FailureKind,
@@ -31,6 +30,9 @@ use ironclaw_loop_host::{
     SyntheticCapabilityHandler, SyntheticCapabilityInvocation,
 };
 use ironclaw_product::{OutboundPreferencesProductService, RebornOutboundDeliveryTargetId};
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+};
 use ironclaw_turns::LoopGateRef;
 
 use crate::outbound::{
@@ -866,8 +868,8 @@ fn approval_lease_outcome(
 mod tests {
     use super::*;
     use crate::runtime::capability_host::assert_recoverable_failure;
-    use ironclaw_host_api::product_surface::ProductSurfaceErrorKind;
     use ironclaw_loop_contracts::LoopSafeSummary;
+    use ironclaw_product_contracts::surface::ProductSurfaceErrorKind;
 
     fn service_error(code: ProductSurfaceErrorCode) -> ProductSurfaceError {
         ProductSurfaceError {

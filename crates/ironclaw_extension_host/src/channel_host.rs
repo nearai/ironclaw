@@ -33,7 +33,6 @@ use ironclaw_extension_host::ingress::{
 };
 use ironclaw_extension_host::{DeploymentChannelBinding, DeploymentChannelRegistry, SnapshotWatch};
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::product_surface::ChannelInboundProductSurface;
 use ironclaw_host_api::{
     ids::{AgentId, ExtensionId, ProjectId, SecretHandle, TenantId, ThreadId, UserId},
     mount::{MountGrant, MountPermissions, MountView},
@@ -56,6 +55,7 @@ use ironclaw_product::{
     RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
     StaticProductInstallationResolver,
 };
+use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::{TurnCoordinator, TurnScope};
 
@@ -276,61 +276,61 @@ pub struct ChannelHostDeliveryDeps {
 /// execution fails closed with retryable service unavailability.
 #[derive(Clone, Default)]
 struct SharedCommandSurface {
-    cell: Arc<std::sync::OnceLock<Arc<dyn ironclaw_host_api::product_surface::ProductSurface>>>,
+    cell: Arc<std::sync::OnceLock<Arc<dyn ironclaw_product_contracts::surface::ProductSurface>>>,
 }
 
 impl SharedCommandSurface {
-    fn set(&self, surface: Arc<dyn ironclaw_host_api::product_surface::ProductSurface>) -> bool {
+    fn set(&self, surface: Arc<dyn ironclaw_product_contracts::surface::ProductSurface>) -> bool {
         self.cell.set(surface).is_ok()
     }
 }
 
 #[async_trait]
-impl ironclaw_host_api::product_surface::ProductSurface for SharedCommandSurface {
+impl ironclaw_product_contracts::surface::ProductSurface for SharedCommandSurface {
     async fn invoke(
         &self,
-        caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
+        caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        request: ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest,
     ) -> Result<
-        ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse,
-        ironclaw_host_api::product_surface::ProductSurfaceError,
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
+        ironclaw_product_contracts::surface::ProductSurfaceError,
     > {
         match self.cell.get() {
             Some(surface) => surface.invoke(caller, request).await,
             None => Err(
-                ironclaw_host_api::product_surface::ProductSurfaceError::service_unavailable(true),
+                ironclaw_product_contracts::surface::ProductSurfaceError::service_unavailable(true),
             ),
         }
     }
 
     async fn query(
         &self,
-        caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
+        caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        request: ironclaw_product_contracts::surface::ProductSurfaceQueryRequest,
     ) -> Result<
-        ironclaw_host_api::product_surface::ProductSurfaceQueryPage,
-        ironclaw_host_api::product_surface::ProductSurfaceError,
+        ironclaw_product_contracts::surface::ProductSurfaceQueryPage,
+        ironclaw_product_contracts::surface::ProductSurfaceError,
     > {
         match self.cell.get() {
             Some(surface) => surface.query(caller, request).await,
             None => Err(
-                ironclaw_host_api::product_surface::ProductSurfaceError::service_unavailable(true),
+                ironclaw_product_contracts::surface::ProductSurfaceError::service_unavailable(true),
             ),
         }
     }
 
     async fn stream_events(
         &self,
-        caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
+        caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
     ) -> Result<
-        ironclaw_host_api::product_surface::ProductSurfaceStreamResponse,
-        ironclaw_host_api::product_surface::ProductSurfaceError,
+        ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
+        ironclaw_product_contracts::surface::ProductSurfaceError,
     > {
         match self.cell.get() {
             Some(surface) => surface.stream_events(caller, request).await,
             None => Err(
-                ironclaw_host_api::product_surface::ProductSurfaceError::service_unavailable(true),
+                ironclaw_product_contracts::surface::ProductSurfaceError::service_unavailable(true),
             ),
         }
     }
@@ -485,7 +485,7 @@ impl GenericChannelHostAssembly {
     /// authority under already-running channel graphs.
     pub fn set_product_command_surface(
         &self,
-        surface: Arc<dyn ironclaw_host_api::product_surface::ProductSurface>,
+        surface: Arc<dyn ironclaw_product_contracts::surface::ProductSurface>,
     ) -> bool {
         self.command_surface.set(surface)
     }

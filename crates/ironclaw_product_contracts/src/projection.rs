@@ -1,20 +1,20 @@
 //! Projection read/subscription contracts.
 
-use crate::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use crate::turn::{TurnActor, TurnScope};
 use async_trait::async_trait;
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::turn::{TurnActor, TurnScope};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::product_adapter::auth::VerifiedAuthClaim;
-use crate::product_adapter::error::ProductAdapterError;
-use crate::product_adapter::external::{
+use crate::inbound::{ProductInboundEnvelope, ProductInboundPayload};
+use crate::outbound::{ProductOutboundEnvelope, ProjectionCursor};
+use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
 };
-use crate::product_adapter::identity::{AdapterInstallationId, ProductAdapterId};
-use crate::product_adapter::inbound::{ProductInboundEnvelope, ProductInboundPayload};
-use crate::product_adapter::outbound::{ProductOutboundEnvelope, ProjectionCursor};
-use crate::product_adapter::redaction::RedactedString;
+use ironclaw_host_api::product_adapter::auth::VerifiedAuthClaim;
+use ironclaw_host_api::product_adapter::identity::{AdapterInstallationId, ProductAdapterId};
+use ironclaw_host_api::product_adapter_error::ProductAdapterError;
+use ironclaw_host_api::product_adapter_error::RedactedString;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductProjectionReadInput {

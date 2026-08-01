@@ -18,7 +18,7 @@ use crate::tool_adapter::{
 };
 use async_trait::async_trait;
 
-use crate::product_adapter::{
+use crate::channel_adapter::{
     ChannelAdapter, ChannelContext, ChannelError, InboundOutcome, OutboundEnvelope, OutboundPart,
     PartDeliveryOutcome, TargetQuery, VerifiedInbound,
 };

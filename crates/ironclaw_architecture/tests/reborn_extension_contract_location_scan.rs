@@ -103,10 +103,36 @@ const FROZEN_CONTRACT_NAMES: &[&str] = &[
 /// Names that are governed but whose *definition* the one-home half must not
 /// police, because an identically-named type legitimately exists elsewhere.
 ///
-/// Empty today, deliberately: the scan below proves the extension tier has no
-/// name collision with the rest of the workspace. An entry here needs the
-/// colliding definition named and a reason it is not the same concept.
-const COLLISION_EXEMPT: &[&str] = &[];
+/// Four entries, all surfaced by WS1.4 when `channel_adapter`, `external`, and
+/// `tool_adapter` arrived from `ironclaw_host_api` — where this scan could not
+/// see them, because it governs only the owner crate's own definitions. Each is
+/// recorded rather than silently passed, and each names the colliding
+/// definition:
+///
+/// - `ToolCall` / `ToolResult` — `ironclaw_llm::provider` (`src/provider.rs`).
+///   **Not the same concept.** The LLM pair is wire vocabulary: a tool call a
+///   *model* emitted and the result sent back to it, both `Serialize`. The
+///   extension pair is the in-process host→adapter invocation envelope, whose
+///   own module doc says "call vocabulary, not wire vocabulary: nothing here
+///   serializes". Two genuinely different types that happen to share the
+///   obvious English name; renaming either is a §5.1 type-name decision (WS10),
+///   not a contracts extraction.
+/// - `ExternalActorRef` / `ExternalConversationRef` — `ironclaw_conversations`
+///   (`src/ids.rs:48,72`). **The same concept, declared twice**, and this is a
+///   real duplicate-surface finding, not a false positive: `conversations::ids`
+///   carries a parallel copy of the adapter-identity vocabulary, including
+///   `AdapterInstallationId` and `ExternalEventId`, which this walk cannot even
+///   see because they are `bounded_string_id!` macro expansions (the same blind
+///   spot the module doc records for `LifecyclePackageRef`). Unifying them
+///   changes the conversations record grammar — a domain call. Exempted here so
+///   the finding is visible and attributable rather than blocking, and so the
+///   other two halves of the scan keep their reach.
+const COLLISION_EXEMPT: &[&str] = &[
+    "ExternalActorRef",
+    "ExternalConversationRef",
+    "ToolCall",
+    "ToolResult",
+];
 
 /// `macro_rules!` bodies declare types with metavariable names (`pub struct
 /// $name(String);` — the `bounded_lifecycle_string!` template in
@@ -369,6 +395,38 @@ fn the_import_path_half_governs_traits_and_the_frozen_value_types_only() {
     // collides with `ironclaw_auth`'s same-named type (see the module doc).
     assert!(!governed.contains("LifecyclePackageRef"));
     assert!(!governed.contains("LifecyclePackageId"));
+}
+
+/// The collision exemptions are a documented carve-out, not a hole: each one
+/// must still be a real type in the owner crate (so a rename cannot leave a
+/// dead exemption behind), and the one-import-path half must still govern the
+/// traits among them.
+#[test]
+fn collision_exemptions_name_live_owner_types_and_do_not_widen_the_import_path_half() {
+    let root = workspace_root();
+    let governed = governed_names(&root);
+    assert!(
+        !COLLISION_EXEMPT.is_empty(),
+        "the exemption self-test measured nothing"
+    );
+    for name in COLLISION_EXEMPT {
+        assert!(
+            governed.contains(*name),
+            "{name} is exempted from the one-home half but {OWNER} no longer defines it — \
+             delete the exemption with the type"
+        );
+    }
+    // The exemption is scoped to *definition* location only. Nothing here may
+    // gain a second import path: no crate may re-export these either.
+    let import_path_governed = single_import_path_names(&root);
+    assert!(
+        import_path_governed.contains("ToolAdapter"),
+        "the import-path half must still govern the tool tier's trait"
+    );
+    assert!(
+        import_path_governed.contains("ChannelAdapter"),
+        "the import-path half must still govern the channel tier's trait"
+    );
 }
 
 #[test]

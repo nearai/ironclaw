@@ -15,7 +15,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_host_api::product_surface::ProductSurfaceCaller;
 use ironclaw_host_api::{
     ids::{AgentId, TenantId, UserId},
     runtime_policy::{
@@ -30,6 +29,7 @@ use ironclaw_host_runtime::{
 use ironclaw_product::{
     AUTOMATIONS_VIEW, ProductListAutomationsRequest, RebornListAutomationsResponse,
 };
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornRuntimeProcessBinding, build_reborn_runtime,
@@ -125,10 +125,10 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
     // An empty list is fine — the key invariant is that the service is wired
     // (no 503) so the request reaches the repository rather than returning
     // ServiceUnavailable.
-    let result = ironclaw_host_api::product_surface::ProductSurface::query(
+    let result = ironclaw_product_contracts::surface::ProductSurface::query(
         bundle.as_ref(),
         caller,
-        ironclaw_host_api::product_surface::ProductSurfaceQueryRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceQueryRequest {
             view_id: AUTOMATIONS_VIEW.id.to_string(),
             input: serde_json::to_value(ProductListAutomationsRequest::default())
                 .expect("automation list params"),

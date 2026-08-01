@@ -7,27 +7,27 @@
 use std::sync::Arc;
 
 use crate::{
-    ApprovalDecision, ChannelAdapter, ExternalConversationRef, ParsedProductInbound,
-    ProductAdapterError, ProductCommandResultPayload, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductProjectionReadInput, ProductProjectionSubject,
-    ProductProjectionSubscribeInput, ProductRejection, ProductRejectionKind,
-    ProductSurfaceRejectionKind, ProjectionReadRequest, ProjectionSubscriptionRequest,
-    RedactedString, TrustedInboundContext, UserMessagePayload,
+    ApprovalDecision, ExternalConversationRef, ParsedProductInbound, ProductAdapterError,
+    ProductCommandResultPayload, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+    ProductProjectionReadInput, ProductProjectionSubject, ProductProjectionSubscribeInput,
+    ProductRejection, ProductRejectionKind, ProductSurfaceRejectionKind, ProjectionReadRequest,
+    ProjectionSubscriptionRequest, RedactedString, TrustedInboundContext, UserMessagePayload,
 };
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
+use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, IdempotencyKey, TurnActor, TurnGateRef, TurnRunId, TurnScope,
 };
 use ironclaw_host_api::{
     attachment::InboundAttachment,
     ids::{ActivityId, CapabilityId, ThreadId, UserId},
-    product_surface::{
-        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-        ProductSurfaceInvokeRequest,
-    },
-    tool_adapter::RestrictedEgress,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceInvokeRequest,
 };
 use ironclaw_turns::{AdmissionRejectionReason, TurnError, TurnErrorCategory};
 use sha2::{Digest, Sha256};
@@ -64,8 +64,10 @@ use crate::error::ProductSurfaceFailure;
 use crate::inbound_turn::{InboundTurnService, InboundUserMessageDispatch};
 use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
 use crate::policy::{BeforeInboundPolicy, NoopBeforeInboundPolicy};
+use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
+
 use crate::reborn_services::{
-    ChannelInboundProductSurface, ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
+    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
     ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
 };
 

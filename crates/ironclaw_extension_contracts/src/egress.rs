@@ -1,13 +1,13 @@
 //! Constrained protocol HTTP egress and outbound delivery sink.
 
-use crate::product_adapter_error::ProtocolHttpEgressError;
-use crate::turn::{ReplyTargetBindingRef, TurnRunId};
 use async_trait::async_trait;
+use ironclaw_host_api::product_adapter_error::ProtocolHttpEgressError;
+use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnRunId};
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
-use crate::product_adapter::error::ProductAdapterError;
-use crate::product_adapter::redaction::RedactedString;
+use ironclaw_host_api::product_adapter_error::ProductAdapterError;
+use ironclaw_host_api::product_adapter_error::RedactedString;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]

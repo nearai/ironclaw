@@ -7,12 +7,16 @@
 use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
 use std::collections::HashMap;
 
-use ironclaw_host_api::product_adapter::{ChannelAttachmentRef, ChannelError, PartDeliveryOutcome};
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelAttachmentRef, ChannelError, PartDeliveryOutcome,
+};
+use ironclaw_extension_contracts::tool_adapter::{
+    RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest,
+};
 use ironclaw_host_api::{
     action::NetworkMethod,
     attachment::{InboundAttachment, WorkspaceFile},
     ids::SecretHandle,
-    tool_adapter::{RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest},
 };
 use serde::Deserialize;
 use url::Url;

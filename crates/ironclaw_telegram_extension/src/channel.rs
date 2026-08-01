@@ -9,17 +9,14 @@
 //! never token bytes in adapter scope.
 
 use async_trait::async_trait;
-use ironclaw_host_api::product_adapter::{
-    AdapterInstallationId, ChannelAdapter, ChannelAttachmentRef, ChannelContext, ChannelError,
-    DeliveryReport, InboundOutcome, OutboundEnvelope, OutboundPart, PartDeliveryOutcome,
-    VerifiedInbound, render_channel_auth_prompt,
+use ironclaw_extension_contracts::auth_prompt::render_channel_auth_prompt;
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelAdapter, ChannelAttachmentRef, ChannelContext, ChannelError, DeliveryReport,
+    InboundOutcome, OutboundEnvelope, OutboundPart, PartDeliveryOutcome, VerifiedInbound,
 };
-use ironclaw_host_api::{
-    action::NetworkMethod,
-    attachment::InboundAttachment,
-    ids::SecretHandle,
-    tool_adapter::{RestrictedEgress, RestrictedEgressRequest},
-};
+use ironclaw_extension_contracts::tool_adapter::{RestrictedEgress, RestrictedEgressRequest};
+use ironclaw_host_api::product_adapter::AdapterInstallationId;
+use ironclaw_host_api::{action::NetworkMethod, attachment::InboundAttachment, ids::SecretHandle};
 
 use ironclaw_telegram_v2_adapter::{
     GroupTriggerPolicy, TELEGRAM_API_HOST, TelegramInboundEvent, normalize_telegram_update,
@@ -447,9 +444,9 @@ fn telegram_outcome_for_status(status: u16, reason: String) -> PartDeliveryOutco
 }
 
 pub(super) fn telegram_outcome_for_egress_error(
-    error: &ironclaw_host_api::tool_adapter::RestrictedEgressError,
+    error: &ironclaw_extension_contracts::tool_adapter::RestrictedEgressError,
 ) -> PartDeliveryOutcome {
-    use ironclaw_host_api::tool_adapter::RestrictedEgressError as EgressError;
+    use ironclaw_extension_contracts::tool_adapter::RestrictedEgressError as EgressError;
     match error {
         EgressError::Transport { .. } => PartDeliveryOutcome::Retryable {
             reason: error.to_string(),

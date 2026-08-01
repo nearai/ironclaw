@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::product_surface::ProductSurfaceError;
+use ironclaw_product_contracts::surface::ProductSurfaceError;
 
 use crate::binding::route_kind_for_trigger;
 use crate::command_dispatch::{

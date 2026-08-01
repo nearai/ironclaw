@@ -117,9 +117,9 @@ pub use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
 };
-/// Channel-adapter and codec contracts re-exported for the assembling
-/// binary's [`ChannelExtensionBinding`] construction.
-pub use ironclaw_product::{ChannelAdapter, NormalizedInboundMessage};
+/// The channel-adapter contract the assembling binary implements is reached at
+/// its owner, `ironclaw_extension_contracts::channel_adapter` — WS1.4 deleted
+/// the re-export chain that gave it a second import path through here.
 pub use ironclaw_product::{
     ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
     RebornChannelConnectStrategy,
@@ -130,12 +130,6 @@ pub use ironclaw_product::{
 };
 pub use ironclaw_runner::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
-// Re-exported for `ironclaw_reborn_cli` (`runtime/mod.rs` turn-failure display):
-// the CLI consumes composition as its facade and must not grow a direct
-// `ironclaw_runner` edge for one summary helper. All other run-failure
-// classifier items moved to `ironclaw_runner::{failure_lane, failure_summary,
-// retry_disposition}` with consumers repointed (no path-preservation shims).
-pub use ironclaw_runner::failure_summary::reborn_failure_summary_for_category;
 pub use ironclaw_runtime_policy::{
     ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
 };
@@ -171,7 +165,6 @@ pub use ironclaw_host_api::user_identity::{
     RebornUserIdentityBindingStore, RebornUserIdentityLookup, RebornUserIdentityLookupError,
     installation_scoped_provider_user_id,
 };
-pub use ironclaw_product::mark_bearer_token_verified_for_tenant;
 pub use observability::budget::build_default_budget_accountant;
 pub use observability::budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
 pub use observability::hooks::{

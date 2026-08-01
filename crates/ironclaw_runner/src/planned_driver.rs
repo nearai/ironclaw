@@ -25,11 +25,9 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_turns::{LoopExitId, RunProfileVersion};
 
+use crate::failure_summary::checkpoint_rejection_host_explanation;
 use crate::model_failure_mapping::host_stage_failure_category;
-use crate::{
-    failure_categories::CHECKPOINT_REJECTED_CATEGORY,
-    failure_summary::checkpoint_rejection_host_explanation,
-};
+use ironclaw_host_api::failure::categories::CHECKPOINT_REJECTED_CATEGORY;
 
 pub const PLANNED_DRIVER_DEFAULT_ID: &str = "reborn:planned-default";
 const PLANNED_DRIVER_VERSION: u64 = 1;
@@ -461,13 +459,13 @@ fn resumable_checkpoint_kind_from_host(kind: LoopCheckpointKind) -> Result<Check
 mod tests {
     use super::*;
     use crate::app_loop_family::build_loop_family_registry;
-    use crate::failure_categories::{
-        MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
-        MODEL_CREDITS_EXHAUSTED_REASON_KIND,
-    };
+    use crate::failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND;
     use ironclaw_agent_loop::test_support::{
         MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedCapabilityOutcome,
         test_run_context,
+    };
+    use ironclaw_host_api::failure::categories::{
+        MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
     };
     use ironclaw_loop_contracts::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
@@ -666,8 +664,9 @@ mod tests {
         assert_eq!(
             mapped,
             AgentLoopDriverError::Failed {
-                reason_kind: crate::failure_categories::TRANSCRIPT_WRITE_FAILED_CATEGORY
-                    .to_string(),
+                reason_kind:
+                    ironclaw_host_api::failure::categories::TRANSCRIPT_WRITE_FAILED_CATEGORY
+                        .to_string(),
                 detail: Some("assistant transcript write failed".to_string()),
             }
         );

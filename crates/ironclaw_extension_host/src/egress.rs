@@ -14,13 +14,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::tool_adapter::{
+    RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
+};
 use ironclaw_host_api::{
     action::{NetworkMethod, NetworkScheme},
     http::RuntimeCredentialTarget,
     ids::SecretHandle,
-    tool_adapter::{
-        RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
-    },
 };
 
 use crate::lifecycle::EgressFactory;
