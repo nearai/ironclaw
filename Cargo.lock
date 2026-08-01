@@ -3904,6 +3904,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "testcontainers-modules",
  "thiserror 2.0.19",
  "tokio",
  "tokio-postgres",

@@ -2140,13 +2140,69 @@ mod postgres_tests {
     };
     use ironclaw_host_api::path::VirtualPath;
 
+    /// One container per test binary, started on first use.
+    ///
+    /// Kept alive for the process: dropping the handle stops the database out
+    /// from under every later test. Each test still namespaces by a unique
+    /// path prefix, so sharing one instance is safe.
+    static POSTGRES_CONTAINER: tokio::sync::OnceCell<Option<ContainerUrl>> =
+        tokio::sync::OnceCell::const_new();
+
+    struct ContainerUrl {
+        url: String,
+        _container: testcontainers_modules::testcontainers::ContainerAsync<
+            testcontainers_modules::postgres::Postgres,
+        >,
+    }
+
+    /// The database these tests run against.
+    ///
+    /// An explicit URL wins, so a local run can point at an existing server.
+    /// Otherwise a container is provisioned, which is what lets these tests
+    /// actually run in CI lanes that have Docker but set no database URL —
+    /// previously every case here skipped there, leaving the PostgreSQL
+    /// projection code untested and uncovered.
+    async fn postgres_url() -> Option<String> {
+        if let Ok(url) = std::env::var("IRONCLAW_FILESYSTEM_POSTGRES_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+        {
+            return Some(url);
+        }
+        POSTGRES_CONTAINER
+            .get_or_init(|| async {
+                use testcontainers_modules::testcontainers::{ImageExt, runners::AsyncRunner};
+                let image = testcontainers_modules::postgres::Postgres::default()
+                    .with_db_name("ironclaw_test")
+                    .with_user("postgres")
+                    .with_password("postgres")
+                    .with_tag("16-alpine");
+                let container = match image.start().await {
+                    Ok(container) => container,
+                    Err(error) => {
+                        eprintln!(
+                            "skipping Postgres filesystem contract tests: \
+                             docker/testcontainers unavailable ({error})"
+                        );
+                        return None;
+                    }
+                };
+                let host = container.get_host().await.ok()?;
+                let port = container.get_host_port_ipv4(5432).await.ok()?;
+                Some(ContainerUrl {
+                    url: format!("postgres://postgres:postgres@{host}:{port}/ironclaw_test"),
+                    _container: container,
+                })
+            })
+            .await
+            .as_ref()
+            .map(|container| container.url.clone())
+    }
+
     async fn postgres_pool() -> Option<deadpool_postgres::Pool> {
         if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
             return None;
         }
-        let url = std::env::var("IRONCLAW_FILESYSTEM_POSTGRES_URL")
-            .or_else(|_| std::env::var("DATABASE_URL"))
-            .ok()?;
+        let url = postgres_url().await?;
         let config = url.parse::<tokio_postgres::Config>().ok()?;
         let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
         deadpool_postgres::Pool::builder(manager)
@@ -2164,8 +2220,8 @@ mod postgres_tests {
     /// a legacy trigger needs raw SQL, which belongs in the test rather than
     /// as a test-only method on the production filesystem type.
     async fn raw_postgres_client() -> tokio_postgres::Client {
-        let url = std::env::var("IRONCLAW_FILESYSTEM_POSTGRES_URL")
-            .or_else(|_| std::env::var("DATABASE_URL"))
+        let url = postgres_url()
+            .await
             .expect("postgres url present when postgres_root yielded a filesystem");
         let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
             .await
