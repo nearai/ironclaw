@@ -100,9 +100,10 @@ test("renderMarkdown installs workspace and external-link hooks once", async () 
   assert.equal(attrs.get("rel"), "noopener noreferrer");
 });
 
-test("renderMarkdown isolates sanitizers by workspace-link capability", async () => {
+test("renderMarkdown passes workspace-link capability per sanitize call", async () => {
   vi.resetModules();
   const created = [];
+  const sanitizeOptions = [];
   vi.doMock("marked", () => ({
     marked: {
       parse: (content) => `<p>${content}</p>`,
@@ -114,7 +115,10 @@ test("renderMarkdown isolates sanitizers by workspace-link capability", async ()
       created.push(hooks);
       return {
         addHook: (name) => hooks.push(name),
-        sanitize: (raw) => raw,
+        sanitize: (raw, options) => {
+          sanitizeOptions.push(options);
+          return raw;
+        },
       };
     },
   }));
@@ -124,14 +128,15 @@ test("renderMarkdown isolates sanitizers by workspace-link capability", async ()
   renderMarkdown("preview", { workspaceFileLinks: true });
   renderMarkdown("default again");
 
-  assert.equal(created.length, 2, "each capability mode reuses its own sanitizer");
+  assert.equal(created.length, 1, "the shared sanitizer installs hooks once");
   assert.deepEqual(created[0], [
     "uponSanitizeAttribute",
     "afterSanitizeAttributes",
   ]);
-  assert.deepEqual(created[1], [
-    "uponSanitizeAttribute",
-    "afterSanitizeAttributes",
+  assert.deepEqual(sanitizeOptions, [
+    { workspaceFileLinks: false },
+    { workspaceFileLinks: true },
+    { workspaceFileLinks: false },
   ]);
 });
 
