@@ -13,11 +13,15 @@
 //! `ironclaw_product::reborn_services::types`, each because its fields name a
 //! crate outside the contracts allowlist (`ironclaw_host_api` +
 //! `ironclaw_extension_contracts`): `RebornCreateThreadResponse`,
-//! `RebornListThreadsResponse`, `RebornTimelineResponse` (`ironclaw_threads`
-//! records), `RebornAuthAccount`, `RebornVendorAuthAccounts`,
-//! `RebornExtensionInfo`, `RebornExtensionListResponse` (`ironclaw_auth`
-//! account state), and `RebornGetRunStateResponse` (`ironclaw_common::RunCost`
-//! + `ironclaw_loop_contracts::LoopModelUsage`).
+//! `RebornListThreadsResponse` and `RebornTimelineResponse` carry
+//! `ironclaw_threads` records; `RebornAuthAccount`, `RebornVendorAuthAccounts`,
+//! `RebornExtensionInfo` and `RebornExtensionListResponse` carry `ironclaw_auth`
+//! account state; `RebornGetRunStateResponse` carries
+//! `ironclaw_common::llm_costs::RunCost` and
+//! `ironclaw_loop_contracts::LoopModelUsage`; and
+//! `RebornExecuteProductCommandResponse` carries
+//! `ironclaw_product::commands::CommandResultView`, the command grammar §6.9.1
+//! keeps there.
 //!
 //! The three `From<ironclaw_turns::…>` conversions stayed too — with both sides
 //! outside product they would be orphan impls, so they are free functions there.

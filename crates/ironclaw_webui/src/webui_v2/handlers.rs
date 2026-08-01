@@ -88,7 +88,6 @@ use ironclaw_product_contracts::outbound::{ProductOutboundEnvelope, ProjectionCu
 use ironclaw_product_contracts::package_lifecycle::{
     LifecyclePackageKind, LifecyclePackageRef, project_public_lifecycle_states,
 };
-use ironclaw_product_contracts::product_wire::SettingsToolPermissionState;
 use ironclaw_product_contracts::product_wire::{
     RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAttachmentRequest,
     RebornAutomationMutationResponse, RebornAutomationRequest, RebornCancelRunResponse,
@@ -105,6 +104,7 @@ use ironclaw_product_contracts::product_wire::{
     RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTraceCreditsResponse,
     RebornTraceHoldAuthorizeProductRequest, RebornTraceHoldAuthorizeResponse,
+    SettingsToolPermissionState,
 };
 use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewPage, RebornViewQuery};
 use ironclaw_product_contracts::workspace_views::{
