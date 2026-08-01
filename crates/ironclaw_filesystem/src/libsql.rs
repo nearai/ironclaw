@@ -2495,80 +2495,129 @@ async fn ensure_libsql_ordered_projection(
             operation: FilesystemOperation::EnsureIndex,
         });
     }
-    let trigger_base = sql_index_name(path.as_str(), spec.name.as_str());
-    let legacy_trigger_base = sql_index_name("/ordered_projection", spec.name.as_str());
-    let index_name = spec.name.as_str();
-    let escaped_prefix = path.as_str().replace('\'', "''");
-    let descendant_pattern = if path.as_str() == "/" {
-        "/%".to_string()
-    } else {
-        format!("{}/%", path.as_str().trim_end_matches('/'))
-    }
-    .replace('\'', "''");
-    let new_path_matches =
-        format!("(new.path = '{escaped_prefix}' OR new.path LIKE '{descendant_pattern}')");
-    let old_path_matches =
-        format!("(old.path = '{escaped_prefix}' OR old.path LIKE '{descendant_pattern}')");
-    let projected_values = spec
-        .keys
-        .iter()
-        .map(|key| format!("json_extract(new.indexed, '$.{}')", key.as_str()))
-        .chain(
-            std::iter::repeat_with(|| "NULL".to_string())
-                .take(MAX_ORDERED_INDEX_KEYS.saturating_sub(spec.keys.len())),
+    ensure_libsql_static_ordered_projection(conn)
+        .await
+        .map_err(|error| match error {
+            // The static ensure reports path-less infrastructure errors; the
+            // declaration seam's contract is a path-carrying backend error.
+            FilesystemError::Backend {
+                operation, reason, ..
+            }
+            | FilesystemError::BackendInfrastructure { operation, reason } => {
+                FilesystemError::Backend {
+                    path: path.clone(),
+                    operation,
+                    reason,
+                }
+            }
+            other => other,
+        })
+}
+
+/// Projection triggers are static: three triggers total, whose bodies project
+/// by joining the spec catalog on prefix containment. The previous design
+/// installed three triggers per (declaration prefix, spec); every entry write
+/// then evaluated every trigger ever declared — O(total declarations) per
+/// statement (measured 3,750 triggers and ~38ms/statement after a 50-user
+/// run). The catalog join is O(catalog rows) with a tiny constant, and
+/// declaration becomes a pure catalog insert.
+///
+/// Semantics are unchanged, including "declaration never backfills": triggers
+/// only fire on writes after the fact, and a spec projects exactly the
+/// subtree of its declared prefix.
+async fn ensure_libsql_static_ordered_projection(
+    conn: &libsql::Connection,
+) -> Result<(), FilesystemError> {
+    // Drop the legacy per-declaration triggers exactly once per database.
+    // SQLite has no dynamic DDL in plain SQL, so the sweep is done here; it
+    // is cheap when nothing matches (single catalog scan).
+    let mut legacy = conn
+        .query(
+            "SELECT name FROM sqlite_master \
+             WHERE type = 'trigger' \
+               AND name LIKE 'idx_rfs_%' \
+               AND sql LIKE '%root_filesystem_ordered_index_rows%'",
+            (),
         )
-        .collect::<Vec<_>>()
-        .join(", ");
-    let predicate = spec
-        .keys
-        .iter()
-        .map(|key| format!("json_type(new.indexed, '$.{}') IS NOT NULL", key.as_str()))
-        .collect::<Vec<_>>()
-        .join(" AND ");
-    let insert = format!(
-        "CREATE TRIGGER IF NOT EXISTS {trigger_base}_ai \
-         AFTER INSERT ON root_filesystem_entries \
-         WHEN {new_path_matches} \
-         BEGIN \
-           INSERT OR REPLACE INTO root_filesystem_ordered_index_rows(\
-             index_name, path, k0, k1, k2, k3, k4, k5, k6, k7\
-           ) \
-           SELECT '{index_name}', new.path, {projected_values} \
-           WHERE {new_path_matches} AND new.is_dir = 0 AND {predicate}; \
-         END;"
+        .await
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::EnsureIndex, error))?;
+    let mut drops = String::new();
+    while let Some(row) = legacy
+        .next()
+        .await
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::EnsureIndex, error))?
+    {
+        let name: String = row.get(0).map_err(|error| {
+            infrastructure_libsql_error(FilesystemOperation::EnsureIndex, error)
+        })?;
+        // Trigger names come from sql_index_name (ASCII alphanumerics and
+        // underscores only), but quote defensively anyway.
+        if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            drops.push_str(&format!("DROP TRIGGER IF EXISTS {name};"));
+        }
+    }
+    drop(legacy);
+    if !drops.is_empty() {
+        conn.execute_batch(&drops).await.map_err(|error| {
+            infrastructure_libsql_error(FilesystemOperation::EnsureIndex, error)
+        })?;
+    }
+
+    // Containment: spec.prefix is the path itself or a proper ancestor. The
+    // half-open band `(prefix || '/', prefix || '0')` is the range form of
+    // `LIKE prefix || '/%'` without wildcard-injection from stored prefixes;
+    // '/' needs its own arm because '//' breaks the band trick.
+    let containment = "(s.prefix = '/' \
+         OR new.path = s.prefix \
+         OR (new.path >= s.prefix || '/' AND new.path < s.prefix || '0'))";
+    let mut key_values = Vec::new();
+    let mut key_presence = Vec::new();
+    for i in 0..8 {
+        key_values.push(format!(
+            "CASE WHEN json_array_length(s.keys) > {i} \
+             THEN json_extract(new.indexed, '$.' || json_extract(s.keys, '$[{i}]')) END"
+        ));
+        key_presence.push(format!(
+            "(json_array_length(s.keys) <= {i} \
+             OR json_type(new.indexed, '$.' || json_extract(s.keys, '$[{i}]')) IS NOT NULL)"
+        ));
+    }
+    let key_values = key_values.join(", ");
+    let key_presence = key_presence.join(" AND ");
+    let project = format!(
+        "INSERT OR REPLACE INTO root_filesystem_ordered_index_rows(\
+           index_name, path, k0, k1, k2, k3, k4, k5, k6, k7\
+         ) \
+         SELECT s.name, new.path, {key_values} \
+         FROM root_filesystem_index_specs s \
+         WHERE s.kind IN ('exact', 'prefix') \
+           AND {containment} \
+           AND new.is_dir = 0 \
+           AND new.indexed IS NOT NULL \
+           AND {key_presence};"
     );
-    let update = format!(
-        "CREATE TRIGGER IF NOT EXISTS {trigger_base}_au \
-         AFTER UPDATE ON root_filesystem_entries \
-         WHEN {old_path_matches} OR {new_path_matches} \
-         BEGIN \
-           DELETE FROM root_filesystem_ordered_index_rows \
-             WHERE index_name = '{index_name}' AND path = old.path; \
-           INSERT OR REPLACE INTO root_filesystem_ordered_index_rows(\
-             index_name, path, k0, k1, k2, k3, k4, k5, k6, k7\
-           ) \
-           SELECT '{index_name}', new.path, {projected_values} \
-           WHERE {new_path_matches} AND new.is_dir = 0 AND {predicate}; \
-         END;"
+    let statements = format!(
+        "CREATE INDEX IF NOT EXISTS idx_root_filesystem_ordered_rows_path \
+           ON root_filesystem_ordered_index_rows(path);\
+         CREATE TRIGGER IF NOT EXISTS rfs_ordered_projection_v2_ai \
+           AFTER INSERT ON root_filesystem_entries \
+           BEGIN {project} END;\
+         CREATE TRIGGER IF NOT EXISTS rfs_ordered_projection_v2_au \
+           AFTER UPDATE ON root_filesystem_entries \
+           BEGIN \
+             DELETE FROM root_filesystem_ordered_index_rows WHERE path = old.path; \
+             {project} \
+           END;\
+         CREATE TRIGGER IF NOT EXISTS rfs_ordered_projection_v2_ad \
+           AFTER DELETE ON root_filesystem_entries \
+           BEGIN \
+             DELETE FROM root_filesystem_ordered_index_rows WHERE path = old.path; \
+           END;"
     );
-    let delete = format!(
-        "CREATE TRIGGER IF NOT EXISTS {trigger_base}_ad \
-         AFTER DELETE ON root_filesystem_entries \
-         WHEN {old_path_matches} \
-         BEGIN \
-           DELETE FROM root_filesystem_ordered_index_rows \
-             WHERE index_name = '{index_name}' AND path = old.path; \
-         END;"
-    );
-    let remove_legacy = format!(
-        "DROP TRIGGER IF EXISTS {legacy_trigger_base}_ai;\
-         DROP TRIGGER IF EXISTS {legacy_trigger_base}_au;\
-         DROP TRIGGER IF EXISTS {legacy_trigger_base}_ad;"
-    );
-    conn.execute_batch(&format!("{remove_legacy}{insert}{update}{delete}"))
+    conn.execute_batch(&statements)
         .await
         .map(|_| ())
-        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error))
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::EnsureIndex, error))
 }
 async fn ensure_libsql_events_table(conn: &libsql::Connection) -> Result<(), FilesystemError> {
     conn.execute_batch(LIBSQL_EVENTS_SCHEMA)
@@ -3382,6 +3431,63 @@ mod tests {
                 operation: FilesystemOperation::Append,
             } if error_path == path
         ));
+    }
+
+    /// The projection trigger set is static: declaring many specs at many
+    /// prefixes must leave exactly three triggers on the entries table, and a
+    /// surviving legacy per-declaration trigger must be swept on the next
+    /// declaration. The per-declaration design accumulated 3 triggers per
+    /// (prefix, spec) — O(total declarations) evaluated on every write.
+    #[tokio::test]
+    async fn ordered_projection_triggers_stay_constant_across_declarations() {
+        let (fs, _dir) = fresh_backend().await;
+        let writer = fs.migration_write_connection().await.unwrap();
+        // A survivor from the per-declaration era, shaped like sql_index_name
+        // output and touching the projection table so the sweep matches it.
+        writer
+            .execute_batch(
+                "CREATE TRIGGER idx_rfs_legacy_by_status_ai \
+                 AFTER INSERT ON root_filesystem_entries BEGIN \
+                   DELETE FROM root_filesystem_ordered_index_rows WHERE path = new.path; \
+                 END;",
+            )
+            .await
+            .unwrap();
+        drop(writer);
+
+        for i in 0..5 {
+            let path = VirtualPath::new(format!("/resources/trigger-count/{i}")).unwrap();
+            let spec = IndexSpec::new(
+                IndexName::new(format!("by_status_{i}")).unwrap(),
+                vec![IndexKey::new("status").unwrap()],
+                IndexKind::Exact,
+            );
+            fs.ensure_index(&path, &spec).await.unwrap();
+        }
+
+        let reader = fs.read_connection().await.unwrap();
+        let mut rows = reader
+            .query(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' \
+                 AND sql LIKE '%root_filesystem_ordered_index_rows%' ORDER BY name",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut names = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            names.push(row.get::<String>(0).unwrap());
+        }
+        assert_eq!(
+            names,
+            vec![
+                "rfs_ordered_projection_v2_ad".to_string(),
+                "rfs_ordered_projection_v2_ai".to_string(),
+                "rfs_ordered_projection_v2_au".to_string(),
+            ],
+            "five declarations leave exactly the static trigger set and the \
+             legacy per-declaration trigger is swept"
+        );
     }
 
     #[tokio::test]
