@@ -703,16 +703,16 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_ironhub/src/link_service.rs"
-lines = [143, 144]
+lines = [143, 144, 145, 410, 411, 412, 428, 429, 430]
 owner = "@serrrfirat"
-reason = "ConsumedNonce contains only an infallibly serializable DateTime; serde_json::to_vec cannot reach this defensive error closure for any value of the fixed record."
+reason = "ConsumedNonce, PrivateManifestState, and PublicManifestState contain only infallibly serializable strings and DateTime values; serde_json::to_vec cannot reach these defensive error closures for any value of the fixed records."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_ironhub/src/link_service.rs"
 lines = [196, 253]
-branch_lines = [155, 182, 238]
+branch_lines = [155, 182, 198, 238, 240]
 owner = "@serrrfirat"
 reason = "Durable replay tests execute nonce success/replay/backend failure and private/public absent, idempotent, conflict, stale, and newer CAS outcomes; rustc leaves zero-hit records on the let-else/call closers and synthetic expression branches with no additional observable outcome."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
@@ -720,9 +720,9 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_ironhub/src/service.rs"
-lines = [284, 285, 286, 287]
+lines = [284, 285, 286, 287, 288]
 owner = "@serrrfirat"
-reason = "Private URL validation constructs private_origin through Option::map(...).transpose(), so the two Options are correlated and the mixed Some/None match arm is structurally unreachable; line 284 is the preceding tuple closer LLVM groups with that arm."
+reason = "Private URL validation constructs private_origin through Option::map(...).transpose(), so the two Options are correlated and the mixed Some/None match arm is structurally unreachable; lines 284 and 288 are tuple/expression closers LLVM groups with that arm."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 

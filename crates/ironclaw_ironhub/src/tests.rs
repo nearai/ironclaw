@@ -1537,6 +1537,106 @@ async fn execute_rejects_artifact_size_and_sha256_mismatches() {
 }
 
 #[tokio::test]
+async fn execute_rejects_non_utf8_install_artifacts() {
+    let services = ironclaw_extension_host::lifecycle_test_support::build_lifecycle_test_services(
+        "ironhub-non-utf8-owner",
+        None,
+        false,
+    )
+    .await;
+    let scope =
+        ironclaw_extension_host::lifecycle_test_support::webui_gate_resource_scope_for_owner(
+            "ironhub-non-utf8-owner",
+        );
+
+    let skill_manifest_url = "https://hub.ironclaw.com/tests/non-utf8-skill/manifest.json";
+    let skill_url = "https://hub.ironclaw.com/tests/non-utf8-skill/SKILL.md";
+    let invalid_skill = vec![0xff, 0xfe];
+    let skill_manifest = signed_manifest(
+        skill_manifest_json(
+            "installed-skill",
+            "2026-01-07T00:00:00Z",
+            "0.1.0",
+            skill_url,
+            invalid_skill.len(),
+            &sha256_hex(&invalid_skill),
+        ),
+        &test_signing_key(),
+    );
+    let skill_error = configured_service(
+        Arc::clone(&services.skill_management),
+        Arc::clone(&services.extension_management),
+        Arc::new(RecordingEgress::new([
+            (skill_manifest_url, skill_manifest),
+            (skill_url, invalid_skill),
+        ])),
+        scope.clone(),
+        skill_manifest_url,
+    )
+    .execute(install_command(IronHubEntryKind::Skill, false))
+    .await
+    .expect_err("non-UTF-8 skill markdown is rejected");
+    assert!(matches!(
+        skill_error,
+        IronHubCommandError::Install { reason } if reason.contains("not UTF-8")
+    ));
+
+    let catalog_url = "https://hub.ironclaw.com/tests/non-utf8-tool/manifest.json";
+    let tool_url = "https://hub.ironclaw.com/tests/non-utf8-tool/tool.wasm";
+    let capabilities_url = "https://hub.ironclaw.com/tests/non-utf8-tool/capabilities.json";
+    let tool_manifest_url = "https://hub.ironclaw.com/tests/non-utf8-tool/manifest.toml";
+    let input_schema_url = "https://hub.ironclaw.com/tests/non-utf8-tool/invoke.input.v1.json";
+    let output_schema_url = "https://hub.ironclaw.com/tests/non-utf8-tool/raw_output.v1.json";
+    let tool_bytes =
+        include_bytes!("../../ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm")
+            .to_vec();
+    let capabilities_bytes = br#"{"capabilities":[]}"#.to_vec();
+    let invalid_tool_manifest = vec![0xff, 0xfe];
+    let mut catalog: serde_json::Value =
+        serde_json::from_str(&tool_manifest_json(ToolManifestFixture {
+            generated_at: "2026-01-08T00:00:00Z",
+            version: "0.1.0",
+            tool_url,
+            tool_size: tool_bytes.len(),
+            tool_sha: &sha256_hex(&tool_bytes),
+            capabilities_url,
+            capabilities_size: capabilities_bytes.len(),
+            capabilities_sha: &sha256_hex(&capabilities_bytes),
+            tool_manifest_url,
+            input_schema_url,
+            output_schema_url,
+        }))
+        .expect("tool catalog fixture");
+    catalog["tools"][0]["manifest"] = serde_json::json!({
+        "url": tool_manifest_url,
+        "size_bytes": invalid_tool_manifest.len(),
+        "sha256": sha256_hex(&invalid_tool_manifest),
+    });
+    let catalog = signed_manifest(catalog.to_string(), &test_signing_key());
+    let tool_error = configured_service(
+        Arc::clone(&services.skill_management),
+        Arc::clone(&services.extension_management),
+        Arc::new(RecordingEgress::new([
+            (catalog_url, catalog),
+            (tool_url, tool_bytes),
+            (capabilities_url, capabilities_bytes),
+            (tool_manifest_url, invalid_tool_manifest),
+            (input_schema_url, published_input_schema()),
+            (output_schema_url, published_output_schema()),
+        ])),
+        scope,
+        catalog_url,
+    )
+    .execute(install_command(IronHubEntryKind::Tool, false))
+    .await
+    .expect_err("non-UTF-8 tool manifest is rejected");
+    assert!(matches!(
+        tool_error,
+        IronHubCommandError::Catalog { reason } if reason.contains("not UTF-8")
+    ));
+}
+
+#[tokio::test]
 async fn execute_rejects_older_generated_at_after_cache_eviction() {
     let services = ironclaw_extension_host::lifecycle_test_support::build_lifecycle_test_services(
         "ironhub-replay-owner",

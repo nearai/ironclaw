@@ -877,6 +877,13 @@ mod tests {
                 .await,
             Err(IronhubLinkStateError::InvalidInput)
         );
+        let oversized_repo = "x".repeat(1025);
+        assert_eq!(
+            store
+                .record_private_manifest("host", &oversized_repo, Utc::now(), "digest")
+                .await,
+            Err(IronhubLinkStateError::InvalidInput)
+        );
         assert_eq!(
             store.record_public_manifest("", Utc::now(), "digest").await,
             Err(IronhubLinkStateError::InvalidInput)
