@@ -485,4 +485,348 @@ mod tests {
 
         assert!(AuthPromptContextView::from_auth_prompt(&prompt).is_err());
     }
+
+    fn pairing(deep_link: Option<&str>) -> PairingPromptView {
+        PairingPromptView {
+            channel: "telegram".to_string(),
+            display_name: "Telegram".to_string(),
+            instructions: "Open the app with the code.".to_string(),
+            code: "ABC-123".to_string(),
+            deep_link: deep_link.map(str::to_string),
+            expires_at: DateTime::from_timestamp(1_700_000_000, 0).expect("timestamp"),
+        }
+    }
+
+    fn view(pairing: Option<PairingPromptView>, url: Option<&str>) -> AuthPromptView {
+        AuthPromptView {
+            turn_run_id: TurnRunId::new(),
+            auth_request_ref: "gate:auth-1".to_string(),
+            invocation_id: None,
+            headline: "Authentication required".to_string(),
+            body: "Authenticate to continue this run.".to_string(),
+            challenge_kind: Some(AuthPromptChallengeKind::OAuthUrl),
+            provider: Some("github".to_string()),
+            account_label: None,
+            authorization_url: url.map(str::to_string),
+            expires_at: None,
+            connection: None,
+            pairing,
+        }
+    }
+
+    /// The rendering both shipped channel packages call from `deliver`: the DM
+    /// and non-DM cancel affordances differ, and the setup link only appears
+    /// when the challenge carries one.
+    #[test]
+    fn render_uses_the_body_and_switches_the_cancel_affordance_on_direct_message() {
+        let direct = render_channel_auth_prompt(&view(None, None), true);
+        assert!(
+            direct.starts_with("Authentication required\n\nAuthenticate to continue this run.")
+        );
+        assert!(direct.contains("Reply `auth deny gate:auth-1` here to cancel this run."));
+        assert!(!direct.contains("Mention me"));
+        assert!(!direct.contains("Setup link"));
+
+        let mention =
+            render_channel_auth_prompt(&view(None, Some("https://example.test/authorize")), false);
+        assert!(mention.contains(
+            "Mention me with `auth deny gate:auth-1` in this thread to cancel this run."
+        ));
+        assert!(mention.ends_with("\n\nSetup link: https://example.test/authorize"));
+    }
+
+    /// A pairing challenge replaces the body with the pairing instructions and
+    /// renders the code, expiry, and — only when present — the deep link.
+    #[test]
+    fn render_pairing_prefers_instructions_and_renders_the_optional_deep_link() {
+        let without = render_channel_auth_prompt(&view(Some(pairing(None)), None), true);
+        assert!(without.contains("Open the app with the code."));
+        assert!(!without.contains("Authenticate to continue this run."));
+        assert!(without.contains("Pairing code: `ABC-123`"));
+        assert!(without.contains("Expires: 2023-11-14T22:13:20+00:00"));
+        assert!(!without.contains("Open Telegram:"));
+
+        let with = render_channel_auth_prompt(
+            &view(Some(pairing(Some("https://t.me/bot?start=ABC-123"))), None),
+            true,
+        );
+        assert!(with.contains("Open Telegram: https://t.me/bot?start=ABC-123"));
+    }
+
+    #[test]
+    fn context_view_constructors_accept_a_valid_challenge_and_round_trip_the_wire() {
+        let built = AuthPromptContextView::new(
+            AuthPromptChallengeKind::ManualToken,
+            Some("github".to_string()),
+            Some("GitHub PAT".to_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("valid context");
+        assert_eq!(built.challenge_kind, AuthPromptChallengeKind::ManualToken);
+
+        let encoded = serde_json::to_value(&built).expect("serialize");
+        let decoded: AuthPromptContextView = serde_json::from_value(encoded).expect("deserialize");
+        assert_eq!(decoded, built);
+
+        let from_prompt = AuthPromptContextView::from_auth_prompt(&view(None, None))
+            .expect("valid")
+            .expect("challenge kind present");
+        assert_eq!(
+            from_prompt.challenge_kind,
+            AuthPromptChallengeKind::OAuthUrl
+        );
+    }
+
+    /// `from_auth_prompt` is `None` — not an error — when the gate predates the
+    /// challenge-kind field (#4112).
+    #[test]
+    fn context_view_is_absent_when_the_prompt_carries_no_challenge_kind() {
+        let mut prompt = view(None, None);
+        prompt.challenge_kind = None;
+        assert!(
+            AuthPromptContextView::from_auth_prompt(&prompt)
+                .expect("no error")
+                .is_none()
+        );
+    }
+
+    /// Every nested validator fails closed, and the deserializer runs them —
+    /// so an oversized field cannot enter through the wire either.
+    #[test]
+    fn nested_validators_reject_oversized_and_control_character_fields() {
+        let oversize = "x".repeat(PROJECTION_TEXT_MAX_BYTES + 1);
+
+        let mut bad_pairing = pairing(None);
+        bad_pairing.display_name = oversize.clone();
+        assert!(
+            AuthPromptContextView::new_with_pairing(
+                AuthPromptChallengeKind::Pairing,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(bad_pairing),
+            )
+            .is_err()
+        );
+
+        let bad_connection = ConnectionPromptContext {
+            channel: "telegram".to_string(),
+            strategy: None,
+            instructions: Some(format!("bad{}instructions", '\u{0}')),
+            input_placeholder: None,
+            submit_label: None,
+            error_message: None,
+        };
+        assert!(
+            AuthPromptContextView::new(
+                AuthPromptChallengeKind::Pairing,
+                None,
+                None,
+                None,
+                None,
+                Some(bad_connection),
+            )
+            .is_err()
+        );
+
+        assert!(
+            AuthPromptContextView::new(
+                AuthPromptChallengeKind::OAuthUrl,
+                None,
+                Some(oversize),
+                None,
+                None,
+                None,
+            )
+            .is_err()
+        );
+
+        // The wire path validates too: a hand-built payload cannot bypass it.
+        let wire = serde_json::json!({
+            "challenge_kind": "oauth_url",
+            "provider": format!("{}bad", '\u{0}'),
+        });
+        assert!(serde_json::from_value::<AuthPromptContextView>(wire).is_err());
+    }
+
+    /// An empty bounded field is rejected distinctly from an oversized one.
+    #[test]
+    fn bounded_text_rejects_empty_as_well_as_oversized() {
+        let mut empty_code = pairing(None);
+        empty_code.code = String::new();
+        assert!(
+            AuthPromptContextView::new_with_pairing(
+                AuthPromptChallengeKind::Pairing,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(empty_code),
+            )
+            .is_err()
+        );
+    }
+
+    /// Every optional field populated and valid, so each validator call in
+    /// `PairingPromptView::validate` and `ConnectionPromptContext::validate`
+    /// runs to completion instead of short-circuiting on the first rejection.
+    #[test]
+    fn fully_populated_pairing_and_connection_pass_every_validator_arm() {
+        let mut full_pairing = pairing(Some("https://t.me/bot?start=ABC-123"));
+        full_pairing.display_name = "Telegram".to_string();
+
+        let connection = ConnectionPromptContext {
+            channel: "telegram".to_string(),
+            strategy: Some("web_generated_code".to_string()),
+            instructions: Some("Open the app with the generated code.".to_string()),
+            input_placeholder: Some("Paste the code".to_string()),
+            submit_label: Some("Connect".to_string()),
+            error_message: Some("Invalid or expired pairing code.".to_string()),
+        };
+
+        let context = AuthPromptContextView::new_with_pairing(
+            AuthPromptChallengeKind::Pairing,
+            Some("telegram".to_string()),
+            Some("Telegram DM".to_string()),
+            Some("https://example.test/authorize".to_string()),
+            Some(DateTime::from_timestamp(1_700_000_000, 0).expect("timestamp")),
+            Some(connection),
+            Some(full_pairing),
+        )
+        .expect("every populated field is within bounds");
+
+        // Re-running validation from the public entry point exercises the same
+        // arms a second time through the nested `?` chain.
+        context.validate().expect("revalidation succeeds");
+
+        let decoded: AuthPromptContextView =
+            serde_json::from_value(serde_json::to_value(&context).expect("serialize"))
+                .expect("wire round-trip revalidates every arm");
+        assert_eq!(decoded, context);
+    }
+
+    /// Each connection field rejects independently, so a later arm cannot be
+    /// masked by an earlier one that already failed.
+    #[test]
+    fn every_connection_field_rejects_on_its_own() {
+        let oversize = "x".repeat(PROJECTION_TEXT_MAX_BYTES + 1);
+        let base = ConnectionPromptContext {
+            channel: "telegram".to_string(),
+            strategy: None,
+            instructions: None,
+            input_placeholder: None,
+            submit_label: None,
+            error_message: None,
+        };
+
+        for (label, mutate) in [
+            ("channel", 5usize),
+            ("strategy", 0usize),
+            ("instructions", 1),
+            ("input_placeholder", 2),
+            ("submit_label", 3),
+            ("error_message", 4),
+        ] {
+            let mut connection = base.clone();
+            match mutate {
+                5 => connection.channel = "x".repeat(PROJECTION_ITEM_ID_MAX_BYTES + 1),
+                0 => connection.strategy = Some("x".repeat(PROJECTION_ITEM_ID_MAX_BYTES + 1)),
+                1 => connection.instructions = Some(oversize.clone()),
+                2 => connection.input_placeholder = Some(oversize.clone()),
+                3 => connection.submit_label = Some(oversize.clone()),
+                _ => connection.error_message = Some(oversize.clone()),
+            }
+            assert!(
+                AuthPromptContextView::new(
+                    AuthPromptChallengeKind::Pairing,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(connection),
+                )
+                .is_err(),
+                "{label} must reject independently"
+            );
+        }
+    }
+
+    /// Same, for the pairing view's own bounded fields.
+    #[test]
+    fn every_pairing_field_rejects_on_its_own() {
+        let oversize = "x".repeat(PROJECTION_TEXT_MAX_BYTES + 1);
+        for mutate in 0..4usize {
+            let mut view = pairing(Some("https://t.me/bot?start=ABC-123"));
+            match mutate {
+                0 => view.channel = "x".repeat(PROJECTION_ITEM_ID_MAX_BYTES + 1),
+                1 => view.display_name = oversize.clone(),
+                2 => view.instructions = oversize.clone(),
+                _ => view.deep_link = Some(oversize.clone()),
+            }
+            assert!(
+                AuthPromptContextView::new_with_pairing(
+                    AuthPromptChallengeKind::Pairing,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(view),
+                )
+                .is_err(),
+                "pairing field {mutate} must reject independently"
+            );
+        }
+    }
+
+    /// `validate_bounded_text` treats newline and tab as legal formatting but
+    /// every other control character as a rejection. Both halves of that
+    /// predicate matter: the prompt copy channels render is multi-line, so a
+    /// stricter rule would reject real instructions.
+    #[test]
+    fn bounded_text_allows_newline_and_tab_but_rejects_other_control_characters() {
+        let mut formatted = pairing(None);
+        formatted.instructions = "Open the app.\n\n\tThen paste the code.".to_string();
+        let context = AuthPromptContextView::new_with_pairing(
+            AuthPromptChallengeKind::Pairing,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(formatted),
+        )
+        .expect("newline and tab are legal formatting in prompt copy");
+        assert!(
+            context
+                .pairing
+                .as_ref()
+                .expect("pairing")
+                .instructions
+                .contains('\t')
+        );
+
+        for control in ['\u{0}', '\u{1}', '\u{7}', '\u{1b}', '\u{7f}'] {
+            let mut bad = pairing(None);
+            bad.instructions = format!("Open{control}the app.");
+            assert!(
+                AuthPromptContextView::new_with_pairing(
+                    AuthPromptChallengeKind::Pairing,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(bad),
+                )
+                .is_err(),
+                "control character {control:?} must be rejected"
+            );
+        }
+    }
 }
