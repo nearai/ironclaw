@@ -334,6 +334,69 @@ async fn group_commit_does_not_replay_a_consumed_one_shot_write_fault() {
     }
 }
 
+/// Contention is retried, but not forever. When the backend stays busy past
+/// the retry bound the batch has to give the caller a definite answer rather
+/// than hang or claim success — every command in it observes the exhaustion.
+#[tokio::test]
+async fn group_commit_surfaces_retry_exhaustion_to_every_caller() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&backend),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/processes").expect("process alias"),
+            VirtualPath::new("/engine/processes").expect("process target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("process mount"),
+    ));
+    let store = ProcessJournalStore::new(filesystem);
+    let resource_scope = scope();
+    // Materialize the store first so the fault lands on real submissions.
+    submit_internal_process(&store, &resource_scope, ProcessId::new()).await;
+
+    // The writer never becomes available again.
+    backend.add_fault(Fault::on(FilesystemOperation::BeginTxn).returning(FaultKind::BackendBusy));
+
+    let process_ids = (0..4).map(|_| ProcessId::new()).collect::<Vec<_>>();
+    let submissions = process_ids.iter().map(|process_id| {
+        let store = &store;
+        let scope = resource_scope.clone();
+        let process_id = *process_id;
+        async move {
+            store
+                .submit_process(SubmitProcessRequest {
+                    process_id,
+                    process_kind: ProcessKind::Internal,
+                    scope,
+                    exclusive_within_scope: false,
+                    operation_id: None,
+                    owner_user_id: None,
+                    concurrency_class: None,
+                    parent_process_id: None,
+                    root_process_id: None,
+                    spawn_tree_descendant_cap: None,
+                    dependency: None,
+                    checkpoint_ref: None,
+                    input: None,
+                    created_at: Utc::now(),
+                    metadata: serde_json::Value::Null,
+                })
+                .await
+        }
+    });
+    let outcomes = tokio::time::timeout(
+        Duration::from_secs(30),
+        futures::future::join_all(submissions),
+    )
+    .await
+    .expect("retry exhaustion must terminate rather than hang");
+
+    assert!(
+        outcomes.iter().all(|outcome| outcome.is_err()),
+        "a permanently busy backend must fail every command in the batch"
+    );
+}
+
 #[tokio::test]
 async fn process_journal_retries_transient_transaction_setup_contention() {
     let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
