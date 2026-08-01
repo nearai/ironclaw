@@ -502,15 +502,32 @@ fn create_anthropic_from_registry(
         reason: format!("Failed to create Anthropic client: {e}"),
     })?;
 
-    let cache_retention = config.cache_retention;
+    // Downgrade retention up front for models without prompt-cache support so
+    // the rig `prompt_caching` flag below agrees with the adapter's own
+    // `with_cache_retention` validation.
+    let cache_retention = if config.cache_retention != CacheRetention::None
+        && !rig_adapter::supports_prompt_cache(&config.model)
+    {
+        CacheRetention::None
+    } else {
+        config.cache_retention
+    };
 
-    let model = client.completion_model(&config.model);
+    let mut model = client.completion_model(&config.model);
+
+    // Short retention: rig's typed breakpoints (system prompt + last message
+    // block, plain 5m ephemeral) complement the request-level automatic
+    // marker and the last-tool marker added in `build_rig_request`. Long
+    // retention must NOT set this — rig's markers cannot carry a TTL, and a
+    // 5m block marker alongside a 1h automatic marker is an API error
+    // (TTL conflict on the last block). See issue #6984.
+    model.prompt_caching = cache_retention == CacheRetention::Short;
 
     if cache_retention != CacheRetention::None {
         tracing::debug!(
             model = %config.model,
             retention = %cache_retention,
-            "Anthropic automatic prompt caching enabled"
+            "Anthropic prompt caching enabled (explicit breakpoints + automatic marker)"
         );
     }
 

@@ -98,6 +98,9 @@ pub(crate) struct AnthropicOAuthProvider {
     active_model: std::sync::RwLock<String>,
     /// Parameter names that this provider does not support.
     unsupported_params: HashSet<String>,
+    /// Anthropic prompt-cache retention; drives the explicit `cache_control`
+    /// breakpoints (system prompt, last tool, last message block). See #6984.
+    cache_retention: crate::config::CacheRetention,
 }
 
 impl AnthropicOAuthProvider {
@@ -127,6 +130,14 @@ impl AnthropicOAuthProvider {
         let unsupported_params: HashSet<String> =
             config.unsupported_params.iter().cloned().collect();
 
+        let cache_retention = if config.cache_retention != crate::config::CacheRetention::None
+            && !crate::rig_adapter::supports_prompt_cache(&config.model)
+        {
+            crate::config::CacheRetention::None
+        } else {
+            config.cache_retention
+        };
+
         Ok(Self {
             client,
             token: std::sync::RwLock::new(token),
@@ -134,6 +145,7 @@ impl AnthropicOAuthProvider {
             base_url,
             active_model,
             unsupported_params,
+            cache_retention,
         })
     }
 
@@ -326,16 +338,18 @@ impl LlmProvider for AnthropicOAuthProvider {
         let (system, messages) = convert_messages(req.messages);
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
 
-        let request = AnthropicRequest {
+        let mut request = AnthropicRequest {
             thinking: thinking_for_request(&model, max_tokens, req.temperature, false),
             model,
             messages,
-            system,
+            system: system.map(AnthropicSystem::Text),
             max_tokens,
             temperature: req.temperature,
             tools: None,
             tool_choice: None,
         };
+
+        apply_cache_breakpoints(&mut request, self.cache_retention);
 
         let response: AnthropicResponse = self.send_request(&request).await?;
         let extracted = extract_response_content(&response);
@@ -375,6 +389,7 @@ impl LlmProvider for AnthropicOAuthProvider {
                 name: t.name,
                 description: t.description,
                 input_schema: t.parameters,
+                cache_control: None,
             })
             .collect();
 
@@ -406,7 +421,7 @@ impl LlmProvider for AnthropicOAuthProvider {
         let has_tools = !tools.is_empty();
         let opt_tools = if has_tools { Some(tools) } else { None };
 
-        let request = AnthropicRequest {
+        let mut request = AnthropicRequest {
             thinking: if has_tools {
                 None
             } else {
@@ -414,12 +429,14 @@ impl LlmProvider for AnthropicOAuthProvider {
             },
             model,
             messages,
-            system,
+            system: system.map(AnthropicSystem::Text),
             max_tokens,
             temperature: req.temperature,
             tools: opt_tools,
             tool_choice,
         };
+
+        apply_cache_breakpoints(&mut request, self.cache_retention);
 
         let response: AnthropicResponse = self.send_request(&request).await?;
         let extracted = extract_response_content(&response);
@@ -486,7 +503,7 @@ struct AnthropicRequest {
     model: String,
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<AnthropicSystem>,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
@@ -504,6 +521,25 @@ struct AnthropicMessage {
     content: AnthropicContent,
 }
 
+/// Anthropic system prompt: a plain string (legacy wire shape, kept when
+/// caching is off) or content blocks so the last block can carry a
+/// `cache_control` breakpoint.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum AnthropicSystem {
+    Text(String),
+    Blocks(Vec<AnthropicSystemBlock>),
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicSystemBlock {
+    #[serde(rename = "type")]
+    block_type: &'static str,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<serde_json::Value>,
+}
+
 /// Anthropic content can be a simple string or a list of content blocks.
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
@@ -516,20 +552,44 @@ enum AnthropicContent {
 #[serde(tag = "type")]
 enum AnthropicContentBlock {
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<serde_json::Value>,
+    },
     #[serde(rename = "image")]
-    Image { source: AnthropicImageSource },
+    Image {
+        source: AnthropicImageSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<serde_json::Value>,
+    },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
         name: String,
         input: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<serde_json::Value>,
     },
     #[serde(rename = "tool_result")]
     ToolResult {
         tool_use_id: String,
         content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<serde_json::Value>,
     },
+}
+
+impl AnthropicContentBlock {
+    /// Stamp a `cache_control` breakpoint on this block.
+    fn set_cache_control(&mut self, marker: serde_json::Value) {
+        match self {
+            Self::Text { cache_control, .. }
+            | Self::Image { cache_control, .. }
+            | Self::ToolUse { cache_control, .. }
+            | Self::ToolResult { cache_control, .. } => *cache_control = Some(marker),
+        }
+    }
 }
 
 /// Inline base64 image source for an Anthropic `image` content block.
@@ -546,6 +606,8 @@ struct AnthropicTool {
     name: String,
     description: String,
     input_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -613,6 +675,7 @@ fn user_image_blocks(parts: &[ContentPart]) -> Vec<AnthropicContentBlock> {
             ContentPart::ImageUrl { image_url } => {
                 let (media_type, data) = image_url.decode_data_url()?;
                 Some(AnthropicContentBlock::Image {
+                    cache_control: None,
                     source: AnthropicImageSource {
                         source_type: "base64",
                         media_type: media_type.to_string(),
@@ -623,6 +686,56 @@ fn user_image_blocks(parts: &[ContentPart]) -> Vec<AnthropicContentBlock> {
             ContentPart::Text { .. } => None,
         })
         .collect()
+}
+
+/// Place the explicit Anthropic `cache_control` breakpoints (issue #6984):
+/// the system prompt, the last tool definition, and the last content block of
+/// the last message. Mirrors pi's placement so the tool/system prefix and the
+/// growing conversation each cache independently. All markers carry the same
+/// TTL, satisfying Anthropic's longer-TTL-first ordering rule. No-op when
+/// retention is `None`, preserving the legacy wire shape (plain-string
+/// system, no markers).
+fn apply_cache_breakpoints(
+    request: &mut AnthropicRequest,
+    retention: crate::config::CacheRetention,
+) {
+    let Some(marker) = retention.cache_control_json() else {
+        return;
+    };
+
+    if let Some(AnthropicSystem::Text(text)) = request.system.take() {
+        request.system = Some(AnthropicSystem::Blocks(vec![AnthropicSystemBlock {
+            block_type: "text",
+            text,
+            cache_control: Some(marker.clone()),
+        }]));
+    }
+
+    if let Some(tools) = request.tools.as_mut()
+        && let Some(last) = tools.last_mut()
+    {
+        last.cache_control = Some(marker.clone());
+    }
+
+    if let Some(last_message) = request.messages.last_mut() {
+        match &mut last_message.content {
+            // Empty text blocks cannot carry cache_control (API rejects
+            // them), so an empty trailing message keeps the string form.
+            AnthropicContent::Text(text) if !text.is_empty() => {
+                last_message.content =
+                    AnthropicContent::Blocks(vec![AnthropicContentBlock::Text {
+                        text: std::mem::take(text),
+                        cache_control: Some(marker),
+                    }]);
+            }
+            AnthropicContent::Text(_) => {}
+            AnthropicContent::Blocks(blocks) => {
+                if let Some(last_block) = blocks.last_mut() {
+                    last_block.set_cache_control(marker);
+                }
+            }
+        }
+    }
 }
 
 /// Convert ChatMessage list to Anthropic format.
@@ -649,7 +762,10 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                     image_blocks => {
                         let mut blocks = Vec::with_capacity(1 + image_blocks.len());
                         if !msg.content.is_empty() {
-                            blocks.push(AnthropicContentBlock::Text { text: msg.content });
+                            blocks.push(AnthropicContentBlock::Text {
+                                text: msg.content,
+                                cache_control: None,
+                            });
                         }
                         blocks.extend(image_blocks);
                         AnthropicContent::Blocks(blocks)
@@ -665,13 +781,17 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                     // Assistant message with tool calls → content blocks
                     let mut blocks: Vec<AnthropicContentBlock> = Vec::new();
                     if !msg.content.is_empty() {
-                        blocks.push(AnthropicContentBlock::Text { text: msg.content });
+                        blocks.push(AnthropicContentBlock::Text {
+                            text: msg.content,
+                            cache_control: None,
+                        });
                     }
                     for tc in tool_calls {
                         blocks.push(AnthropicContentBlock::ToolUse {
                             id: tc.id,
                             name: tc.name,
                             input: tc.arguments,
+                            cache_control: None,
                         });
                     }
                     anthropic_msgs.push(AnthropicMessage {
@@ -694,6 +814,7 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                 let block = AnthropicContentBlock::ToolResult {
                     tool_use_id: tool_call_id,
                     content: msg.content,
+                    cache_control: None,
                 };
                 // If the last message is already a user message of *only*
                 // tool-result blocks, append to it (Anthropic requires
@@ -799,6 +920,8 @@ fn extract_response_content(response: &AnthropicResponse) -> ExtractedAnthropicR
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CacheRetention;
+    use crate::provider::ToolDefinition;
 
     #[tokio::test]
     async fn complete_preserves_missing_retry_after_on_headerless_502() {
@@ -851,6 +974,214 @@ mod tests {
                 retry_after: None,
             } if provider == "anthropic_oauth"
         ));
+    }
+
+    /// One-shot loopback capture server: returns the base URL and a handle
+    /// resolving to the captured request body. Replies 400 — these tests
+    /// assert the request wire shape, not response handling.
+    async fn capture_one_request() -> (String, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let base_url = format!(
+            "http://{}",
+            listener.local_addr().expect("loopback address")
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = socket.read(&mut buffer).await.expect("read request");
+                if read == 0 {
+                    return;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers =
+                    std::str::from_utf8(&request[..header_end]).expect("request headers are UTF-8");
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then_some(value.trim())
+                    })
+                    .expect("content length header")
+                    .parse::<usize>()
+                    .expect("content length is numeric");
+                let body_start = header_end + 4;
+                if request.len() < body_start + content_length {
+                    continue;
+                }
+                tx.send(
+                    String::from_utf8(request[body_start..body_start + content_length].to_vec())
+                        .expect("request body is UTF-8"),
+                )
+                .expect("test receives captured request");
+                socket
+                    .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+                    .await
+                    .expect("write test response");
+                return;
+            }
+        });
+        (base_url, rx)
+    }
+
+    fn provider_with_retention(
+        base_url: &str,
+        retention: CacheRetention,
+    ) -> AnthropicOAuthProvider {
+        let mut config = RegistryProviderConfig::generic(
+            crate::registry::ProviderProtocol::Anthropic,
+            "anthropic_oauth",
+            None,
+            base_url,
+            "claude-opus-4-6",
+        );
+        config.oauth_token = Some(SecretString::from("test-token".to_string()));
+        config.cache_retention = retention;
+        AnthropicOAuthProvider::new(&config).expect("provider")
+    }
+
+    async fn captured_json(rx: tokio::sync::oneshot::Receiver<String>) -> serde_json::Value {
+        let body = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("request capture timed out")
+            .expect("captured request body");
+        serde_json::from_str(&body).expect("captured body is JSON")
+    }
+
+    /// Wire-level pin for issue #6984: under `Short` retention the OAuth
+    /// transport emits the three explicit cache breakpoints — system prompt
+    /// block, last tool definition, and the last content block of the last
+    /// message (here a tool_result, the common agent-loop tail).
+    #[tokio::test]
+    async fn oauth_short_retention_places_explicit_cache_breakpoints() {
+        let (base_url, captured) = capture_one_request().await;
+        let provider = provider_with_retention(&base_url, CacheRetention::Short);
+
+        let request = ToolCompletionRequest::new(
+            vec![
+                ChatMessage::system("You are helpful."),
+                ChatMessage::user("Run the tool."),
+                ChatMessage::assistant_with_tool_calls(
+                    None,
+                    vec![ToolCall {
+                        id: "call_1".to_string(),
+                        name: "alpha".to_string(),
+                        arguments: serde_json::json!({}),
+                        ..ToolCall::default()
+                    }],
+                ),
+                ChatMessage::tool_result("call_1", "alpha", "tool says hi"),
+            ],
+            vec![
+                ToolDefinition {
+                    name: "alpha".to_string(),
+                    description: "First tool".to_string(),
+                    parameters: serde_json::json!({"type": "object", "properties": {}}),
+                },
+                ToolDefinition {
+                    name: "beta".to_string(),
+                    description: "Second tool".to_string(),
+                    parameters: serde_json::json!({"type": "object", "properties": {}}),
+                },
+            ],
+        );
+        let _ = provider.complete_with_tools(request).await;
+        let body = captured_json(captured).await;
+
+        let system = body["system"]
+            .as_array()
+            .expect("system serialized as blocks when caching is on");
+        assert_eq!(
+            system.last().expect("system block")["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert!(system.last().unwrap()["cache_control"].get("ttl").is_none());
+
+        let tools = body["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 2);
+        assert!(tools[0].get("cache_control").is_none());
+        assert_eq!(tools[1]["name"], "beta");
+        assert_eq!(tools[1]["cache_control"]["type"], "ephemeral");
+
+        let messages = body["messages"].as_array().expect("messages");
+        let last_content = messages.last().expect("last message")["content"]
+            .as_array()
+            .expect("last message content blocks");
+        let last_block = last_content.last().expect("content block");
+        assert_eq!(last_block["type"], "tool_result");
+        assert_eq!(last_block["cache_control"]["type"], "ephemeral");
+        // Only the final block carries a marker.
+        for message in &messages[..messages.len() - 1] {
+            if let Some(blocks) = message["content"].as_array() {
+                for block in blocks {
+                    assert!(block.get("cache_control").is_none(), "{body}");
+                }
+            }
+        }
+    }
+
+    /// Wire-level pin: `Long` retention stamps a 1h TTL on every breakpoint
+    /// (uniform TTLs satisfy Anthropic's longer-before-shorter ordering rule).
+    #[tokio::test]
+    async fn oauth_long_retention_uses_1h_ttl_markers() {
+        let (base_url, captured) = capture_one_request().await;
+        let provider = provider_with_retention(&base_url, CacheRetention::Long);
+
+        let _ = provider
+            .complete(CompletionRequest::new(vec![
+                ChatMessage::system("You are helpful."),
+                ChatMessage::user("Question"),
+            ]))
+            .await;
+        let body = captured_json(captured).await;
+
+        let system = body["system"].as_array().expect("system blocks");
+        assert_eq!(system.last().unwrap()["cache_control"]["ttl"], "1h");
+
+        let messages = body["messages"].as_array().expect("messages");
+        let last_content = messages.last().unwrap()["content"]
+            .as_array()
+            .expect("last message content blocks");
+        assert_eq!(last_content.last().unwrap()["cache_control"]["ttl"], "1h");
+    }
+
+    /// Wire-level pin: retention `None` keeps the legacy wire shape — system
+    /// as a plain string, and no cache_control anywhere.
+    #[tokio::test]
+    async fn oauth_no_retention_keeps_legacy_wire_shape() {
+        let (base_url, captured) = capture_one_request().await;
+        let provider = provider_with_retention(&base_url, CacheRetention::None);
+
+        let _ = provider
+            .complete(CompletionRequest::new(vec![
+                ChatMessage::system("You are helpful."),
+                ChatMessage::user("Question"),
+            ]))
+            .await;
+        let body = captured_json(captured).await;
+
+        assert!(
+            body["system"].is_string(),
+            "system stays a plain string when caching is off: {body}"
+        );
+        assert!(
+            !serde_json::to_string(&body)
+                .unwrap()
+                .contains("cache_control"),
+            "no cache_control may be emitted when caching is off: {body}"
+        );
     }
 
     #[test]
