@@ -265,6 +265,8 @@ SEL_V2 = {
     "admin_suspended_status_name": "Suspended",
     "admin_suspend_button_name": "Suspend",
     "admin_activate_button_name": "Activate",
+    "admin_users_load_more": "[data-testid='admin-users-load-more']",
+    "admin_users_load_more_error": "[data-testid='admin-users-load-more-error']",
     "admin_user_detail_delete": "[data-testid='admin-user-detail-delete']",
     "admin_configuration_group_test_id": "admin-configuration-group",
     "admin_extension_configuration_heading_name": "Extension configuration",
