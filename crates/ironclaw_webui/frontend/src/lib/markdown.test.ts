@@ -156,8 +156,11 @@ test("renderMarkdown returns an empty string for falsy content", async () => {
 
 test("renderMarkdown only preserves workspace links for preview-enabled renderers", async () => {
   vi.resetModules();
-  vi.doUnmock("marked");
-  vi.doUnmock("dompurify");
+  // Force the real implementations into this import. `doUnmock` alone can
+  // leave a prior dynamic mock in Vitest's worker module cache when the full
+  // suite reuses a worker, making this integration assertion order-dependent.
+  vi.doMock("marked", async () => vi.importActual("marked"));
+  vi.doMock("dompurify", async () => vi.importActual("dompurify"));
 
   const { renderMarkdown } = await import("./markdown");
   const content =
