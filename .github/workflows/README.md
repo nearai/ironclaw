@@ -213,20 +213,23 @@ trail: the former in-run alert jobs and `nightly-alert-issue.sh` were removed
 in favor of this single external check, because an in-run alert dies with its
 own run on a startup_failure and can never see a cron that didn't fire.
 
-### Main branch alerting
+### Main branch and merge-queue alerting
 
 `main-ci-slack-alerts.yml` watches completed `workflow_run` events for the
-current `push` to `main` workflows: Code Style, Tests (Reborn), Reborn E2E,
-Platform & Compat, Replay Snapshot Gate, Code Coverage,
+current `push` to `main` and `merge_group` workflows: Code Style, Tests
+(Reborn), Reborn E2E, Platform & Compat, Replay Snapshot Gate, Code Coverage,
 nearai-bench dispatcher tests, and Release-plz. Any watched run that concludes
 `failure`, `timed_out`, `action_required`, or `startup_failure` posts a Slack
-message with the workflow, conclusion, failed job names, commit, actor, and run
-link.
+message with the workflow, conclusion, failed job and step names, available
+failure annotations, commit, actor, and run link. Merge-queue alerts also
+resolve the PR number from GitHub's `gh-readonly-queue/main/pr-<number>-...`
+ref and include the PR title, author, and link.
 
-Alerts go to `secrets.MAIN_CI_SLACK_WEBHOOK_URLS`; the value may be a single
-webhook URL or multiple URLs separated by newlines or commas. This is
-intentionally separate from the canary/nightly `SLACK_WEBHOOK_URL` so main CI
-alerts can target dedicated channels.
+Main-branch alerts go to `secrets.MAIN_CI_SLACK_WEBHOOK_URLS`; the value may be
+a single webhook URL or multiple URLs separated by newlines or commas.
+Merge-queue alerts go to `secrets.SLACK_WEBHOOK_URL`, the existing live-canary
+channel. This keeps post-merge CI alerts in their dedicated channels while
+making queue bounces visible alongside live-canary failures.
 When adding a new workflow that runs on `push` to `main`, add its workflow
 `name:` to the watched list in `main-ci-slack-alerts.yml`.
 
