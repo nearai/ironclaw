@@ -652,7 +652,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 [[exemption]]
 path = "crates/ironclaw_extension_host/src/available_extension_import.rs"
-lines = [191, 192, 193, 194, 196, 197, 198, 199]
+lines = [190, 191, 192, 193, 194, 195, 196, 197, 198, 199]
 owner = "@serrrfirat"
 reason = "Import tests execute both static registry constructors through successful and rejected manifests; their error closures require duplicate entries in the compile-time host-port or contract definitions, which cannot be injected while the same definitions remain valid for the test process."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
