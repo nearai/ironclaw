@@ -783,4 +783,50 @@ mod tests {
             );
         }
     }
+
+    /// `validate_bounded_text` treats newline and tab as legal formatting but
+    /// every other control character as a rejection. Both halves of that
+    /// predicate matter: the prompt copy channels render is multi-line, so a
+    /// stricter rule would reject real instructions.
+    #[test]
+    fn bounded_text_allows_newline_and_tab_but_rejects_other_control_characters() {
+        let mut formatted = pairing(None);
+        formatted.instructions = "Open the app.\n\n\tThen paste the code.".to_string();
+        let context = AuthPromptContextView::new_with_pairing(
+            AuthPromptChallengeKind::Pairing,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(formatted),
+        )
+        .expect("newline and tab are legal formatting in prompt copy");
+        assert!(
+            context
+                .pairing
+                .as_ref()
+                .expect("pairing")
+                .instructions
+                .contains('\t')
+        );
+
+        for control in ['\u{0}', '\u{1}', '\u{7}', '\u{1b}', '\u{7f}'] {
+            let mut bad = pairing(None);
+            bad.instructions = format!("Open{control}the app.");
+            assert!(
+                AuthPromptContextView::new_with_pairing(
+                    AuthPromptChallengeKind::Pairing,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(bad),
+                )
+                .is_err(),
+                "control character {control:?} must be rejected"
+            );
+        }
+    }
 }
