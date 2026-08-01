@@ -394,11 +394,13 @@ fn apply_breakpoints_marks_text_block_tail_and_skips_empty_blocks() {
         role: "user".to_string(),
         content: AnthropicContent::Blocks(Vec::new()),
     }]);
+    empty_blocks.tools = Some(Vec::new());
     apply_cache_breakpoints(&mut empty_blocks, CacheRetention::Short);
     assert!(matches!(
         &empty_blocks.messages[0].content,
         AnthropicContent::Blocks(blocks) if blocks.is_empty()
     ));
+    assert!(matches!(&empty_blocks.tools, Some(tools) if tools.is_empty()));
 }
 
 /// Branch coverage: a system value already in block form is restored
