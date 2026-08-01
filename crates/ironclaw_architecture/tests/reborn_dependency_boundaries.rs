@@ -1,4 +1,7 @@
 // arch-exempt: large_file, crate layer boundary gate stays with existing architecture suite, plan #5852
+#[allow(dead_code)]
+mod ratchet_support;
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::PathBuf,
@@ -6,6 +9,8 @@ use std::{
 };
 
 use serde_json::Value;
+
+use ratchet_support::workspace_root;
 
 #[test]
 fn reborn_boundary_rules_active_crates_are_workspace_members() {
@@ -2291,16 +2296,27 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
     ];
 
     let root = workspace_root();
+    // Every entry must resolve — asserted below. The silent `if !dir.exists()
+    // { continue }` this list used to rely on let `crates/ironclaw_reborn_api/src`
+    // sit here long after that crate was gone, scoping the rule over a crate
+    // that did not exist while looking fully populated (CHECKLIST WS0, #6963).
+    // `crates/ironclaw_product/src` also appeared three times, a leftover of the
+    // #6583 four-crate fold; duplicates only multiplied the reported violations.
+    //
+    // KNOWN GAP, deliberately not closed here: the trailing comment below
+    // describes a WebChat v2 route-surface entry that is absent, so the rule
+    // does not cover `crates/ironclaw_webui/src` at all. Adding it turns this
+    // gate red (that tree carries `axum::serve` and `TcpListener::bind` hits),
+    // which is an architecture decision — either webui owns server lifecycle it
+    // should not, or the rule owes it an `exempt`. Not a gate repoint; recorded
+    // for the owner rather than silently introduced by a CI-gates change.
     let reborn_product_api_src_roots = [
         "crates/ironclaw_runner/src",
         "crates/ironclaw_reborn_cli/src",
         "crates/ironclaw_reborn_composition/src",
         "crates/ironclaw_reborn_config/src",
         "crates/ironclaw_reborn_event_store/src",
-        "crates/ironclaw_reborn_api/src",
         "crates/ironclaw_reborn_openai_compat/src",
-        "crates/ironclaw_product/src",
-        "crates/ironclaw_product/src",
         "crates/ironclaw_product/src",
         "crates/ironclaw_telegram_extension/src",
         "crates/ironclaw_slack_extension/src",
@@ -2316,12 +2332,21 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
         // open for the new route crate.
     ];
 
+    let missing: Vec<&str> = reborn_product_api_src_roots
+        .iter()
+        .copied()
+        .filter(|relative_root| !root.join(relative_root).is_dir())
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "server-lifecycle rule names src trees that do not exist: {missing:?}. Repoint or \
+         drop them — a root that resolves to nothing scopes the rule over nothing while \
+         the list still looks populated."
+    );
+
     let mut violations = Vec::new();
     for relative_root in reborn_product_api_src_roots {
         let dir = root.join(relative_root);
-        if !dir.exists() {
-            continue;
-        }
         collect_forbidden_uses(&dir, &root, &forbidden, &mut violations);
     }
 
@@ -4144,14 +4169,6 @@ fn cargo_metadata() -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("cargo metadata output must be JSON")
-}
-
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("architecture crate must live under crates/ironclaw_architecture")
-        .to_path_buf()
 }
 
 fn extract_virtual_roots_const(source: &str) -> BTreeSet<String> {

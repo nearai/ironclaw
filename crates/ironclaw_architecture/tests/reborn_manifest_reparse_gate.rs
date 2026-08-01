@@ -14,16 +14,13 @@
 //! is updated with a justification; removing one — moving a projection onto the
 //! resolved record — fails the stale entry. The list can only shrink.
 
+#[allow(dead_code)]
+mod ratchet_support;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("architecture crate under crates/")
-        .to_path_buf()
-}
+use ratchet_support::workspace_root;
 
 /// Why a reparse site is *not* a projection reparse. Every allowlisted entry
 /// names one of these.
@@ -155,9 +152,24 @@ fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 fn manifest_reparse_stays_within_the_compiler_and_bundled_paths() {
     let root = workspace_root();
     let mut files = Vec::new();
-    for subtree in ["crates", "src"] {
-        collect_rust_files(&root.join(subtree), &mut files);
-    }
+    // The scan used to cover `["crates", "src"]`; `src` was the v1 monolith and
+    // is long gone. `collect_rust_files` skips a missing directory silently, so
+    // the dead entry was invisible — and the same silence is what a wrong root
+    // produces. The scan root must exist (CHECKLIST WS0, #6963).
+    let crates_dir = root.join("crates");
+    assert!(
+        crates_dir.is_dir(),
+        "manifest-reparse scan root {} does not exist — repoint it rather than \
+         scanning nothing",
+        crates_dir.display()
+    );
+    collect_rust_files(&crates_dir, &mut files);
+    assert!(
+        files.len() >= 500,
+        "manifest-reparse scan collected only {} file(s) — the walk is broken, not the \
+         workspace; an empty scan reports zero reparse sites and passes.",
+        files.len()
+    );
 
     // Production (test-stripped) reparse counts, keyed by workspace-relative path.
     let mut found: BTreeMap<String, usize> = BTreeMap::new();

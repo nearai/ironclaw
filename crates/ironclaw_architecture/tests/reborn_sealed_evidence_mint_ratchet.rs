@@ -316,27 +316,46 @@ fn assert_sole_implementor(trait_name: &str, permitted_crate: &str) {
         files.len()
     );
 
-    let needle = format!("{trait_name} for");
     let mut offenders = Vec::new();
     let mut permitted_impls = 0usize;
+    let mut headers_seen = 0usize;
     for file in &files {
         let source = fs::read_to_string(file).unwrap_or_default();
         // Comments and string literals are stripped, so doc mentions and error
-        // text cannot false-positive, and a qualified or generic impl header
-        // (`impl foo::Trait for`, `impl<T> Trait for`) still matches.
-        for raw in strip_comments_and_strings(&source).lines() {
-            let line = raw.trim();
-            if !line.contains(&needle) {
+        // text cannot false-positive. Headers are then collapsed onto one line
+        // and in-file `use … as …` aliases resolved, so neither a line break
+        // nor a rename at the import can hide an implementation.
+        let stripped = strip_comments_and_strings(&source);
+        let names = implementor_names(&stripped, trait_name);
+        for header in impl_headers(&stripped) {
+            headers_seen += 1;
+            if !header_implements(&header.text, &names) {
                 continue;
             }
             if owning_crate(&root, file) == permitted_crate {
                 permitted_impls += 1;
             } else {
-                offenders.push(format!("{}: {line}", render(&root, file)));
+                offenders.push(format!(
+                    "{}:{}: {}",
+                    render(&root, file),
+                    header.line,
+                    header.text
+                ));
             }
         }
     }
 
+    // The scan is only worth its verdict if the header extractor still parses
+    // the workspace. A normalizer that silently stopped producing headers would
+    // make every census read "no offenders" — the exact fail-open shape this
+    // gate exists to refute (#6963's zero-match principle).
+    assert!(
+        headers_seen > 1000,
+        "the impl-header scan found only {headers_seen} headers across {} production files — the \
+         extractor is broken, not the workspace. A census that parses nothing reports every trait \
+         as unimplemented, so this must fail loudly rather than pass.",
+        files.len()
+    );
     assert!(
         offenders.is_empty(),
         "`{trait_name}` may be implemented ONLY in `{permitted_crate}` — it is the sole source of \
@@ -351,6 +370,229 @@ fn assert_sole_implementor(trait_name: &str, permitted_crate: &str) {
          {permitted_impls}. Zero means the production minter lost its grant source (and the \
          scan now measures nothing); more than one means the trust role forked."
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Implementor census: header extraction, alias resolution, matching.
+//
+// These traits are deliberately NOT sealed to `ironclaw_host_api` (sealing
+// would lock out the one crate that legitimately implements each), and their
+// mint methods are *provided*, so `impl Trait for X {}` alone confers minting.
+// This census is therefore the enforcement, not a convenience check — every
+// shape it cannot see is a way to mint forged evidence.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One `impl … for …` header, collapsed onto a single line.
+struct ImplHeader {
+    /// 1-based line of the `impl` keyword, for the offender report.
+    line: usize,
+    text: String,
+}
+
+/// Every `impl` header in already-stripped `source`, whitespace-normalized.
+///
+/// Line-oriented matching is what let a rogue impl hide behind a line break:
+/// `impl ChannelIngressVerifier\n    for RogueAdapter` never puts the trait
+/// name and `for` on one line, so a `contains("<Trait> for")` scan over
+/// `.lines()` read it as absent. Collapsing the header first removes that
+/// formatting degree of freedom entirely.
+///
+/// The header region runs from the `impl` keyword to the first `{`, `;`, or
+/// `where`, or — at angle-bracket depth zero — `,` or `)`. The last two stop an
+/// `impl Trait` in argument position from swallowing a function body; the depth
+/// check keeps `impl T for HashMap<K, V>` intact. `impl` in return position
+/// (`-> impl Iterator<…>`) yields a header with no `for`, which matches nothing.
+fn impl_headers(source: &str) -> Vec<ImplHeader> {
+    let chars: Vec<char> = source.chars().collect();
+    let mut headers = Vec::new();
+    let mut line = 1usize;
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '\n' {
+            line += 1;
+            index += 1;
+            continue;
+        }
+        if !starts_word(&chars, index, "impl") {
+            index += 1;
+            continue;
+        }
+        let start_line = line;
+        let mut cursor = index + "impl".len();
+        let mut depth = 0usize;
+        let mut text = String::from("impl");
+        while cursor < chars.len() {
+            let ch = chars[cursor];
+            // `->` is an arrow, not a closing angle bracket. Without this a
+            // return type inside generics (`Box<dyn Fn() -> u8>`) would close
+            // the bracket early and truncate the header.
+            if ch == '-' && chars.get(cursor + 1) == Some(&'>') {
+                text.push_str("->");
+                cursor += 2;
+                continue;
+            }
+            match ch {
+                '{' | ';' => break,
+                '<' => depth += 1,
+                '>' => depth = depth.saturating_sub(1),
+                ',' | ')' if depth == 0 => break,
+                '\n' => line += 1,
+                _ => {}
+            }
+            if depth == 0 && starts_word(&chars, cursor, "where") {
+                break;
+            }
+            text.push(ch);
+            cursor += 1;
+        }
+        headers.push(ImplHeader {
+            line: start_line,
+            text: text.split_whitespace().collect::<Vec<_>>().join(" "),
+        });
+        index = cursor;
+    }
+    headers
+}
+
+/// The canonical trait name plus every name bound to it by a `use … as …` in
+/// this file.
+///
+/// `use path::ChannelIngressVerifier as Verifier; impl Verifier for Rogue {}`
+/// never names the trait on the impl line, so a census keyed only to the
+/// canonical spelling cannot see it. Braced groups
+/// (`use path::{Trait as V, Other}`) and raw-identifier aliases (`as r#type`)
+/// bind the same way and are resolved the same way. Cross-file re-export
+/// chains (`pub use … as …` in crate A, imported by crate B) stay out of reach
+/// of a per-file census — recorded as residual, not closed.
+fn implementor_names(source: &str, trait_name: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    names.insert(trait_name.to_string());
+    let chars: Vec<char> = source.chars().collect();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if !starts_word(&chars, index, trait_name) {
+            index += 1;
+            continue;
+        }
+        let mut cursor = index + trait_name.chars().count();
+        // ` as <ident>` — the only construct that can rename a trait in scope.
+        // A cast (`x as u64`) cannot apply to a trait name, so no disambiguation
+        // beyond the word boundary is needed.
+        while chars.get(cursor).is_some_and(|c| c.is_whitespace()) {
+            cursor += 1;
+        }
+        if starts_word(&chars, cursor, "as") {
+            cursor += 2;
+            while chars.get(cursor).is_some_and(|c| c.is_whitespace()) {
+                cursor += 1;
+            }
+            if chars.get(cursor) == Some(&'r') && chars.get(cursor + 1) == Some(&'#') {
+                cursor += 2;
+            }
+            let alias: String = chars[cursor..]
+                .iter()
+                .take_while(|c| is_ident_char(**c))
+                .collect();
+            if !alias.is_empty() {
+                names.insert(alias);
+            }
+        }
+        index += trait_name.chars().count();
+    }
+    names
+}
+
+/// Whether a collapsed header implements one of `names`.
+///
+/// Requires the name to appear on an identifier boundary — so a longer trait
+/// that merely ends in the same text (`MyChannelIngressVerifier`) is not a hit
+/// — followed, after any generic arguments, by the `for` keyword. Qualified
+/// paths (`a::b::Trait for`) and generic impls (`impl<T> Trait<T> for`) still
+/// match, which is what the pre-hardening scan did.
+fn header_implements(header: &str, names: &BTreeSet<String>) -> bool {
+    let chars: Vec<char> = header.chars().collect();
+    for name in names {
+        let mut index = 0usize;
+        while index < chars.len() {
+            if !starts_word(&chars, index, name) {
+                index += 1;
+                continue;
+            }
+            let mut cursor = index + name.chars().count();
+            // Skip the trait's own generic arguments: `Trait<T> for X`.
+            if chars.get(cursor) == Some(&'<') {
+                let mut depth = 0usize;
+                while cursor < chars.len() {
+                    // `->` inside the arguments is an arrow, not a closer.
+                    if chars[cursor] == '-' && chars.get(cursor + 1) == Some(&'>') {
+                        cursor += 2;
+                        continue;
+                    }
+                    match chars[cursor] {
+                        '<' => depth += 1,
+                        '>' => {
+                            depth = depth.saturating_sub(1);
+                            if depth == 0 {
+                                cursor += 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    cursor += 1;
+                }
+            }
+            while chars.get(cursor).is_some_and(|c| c.is_whitespace()) {
+                cursor += 1;
+            }
+            if starts_word(&chars, cursor, "for") {
+                return true;
+            }
+            index += name.chars().count();
+        }
+    }
+    false
+}
+
+/// Whether `word` starts at `index` on both-side identifier boundaries.
+fn starts_word(chars: &[char], index: usize, word: &str) -> bool {
+    if index > 0 && is_ident_char(chars[index - 1]) {
+        return false;
+    }
+    let mut cursor = index;
+    for expected in word.chars() {
+        if chars.get(cursor) != Some(&expected) {
+            return false;
+        }
+        cursor += 1;
+    }
+    !chars.get(cursor).is_some_and(|c| is_ident_char(*c))
+}
+
+/// Whether a stripped source line re-exports one of the two witness traits.
+///
+/// `pub`-prefixed covers `pub use`, `pub(crate) use`, `pub(super) use`, and
+/// `pub(in path) use` — every visibility that reaches beyond the declaring
+/// file, which is exactly what would put an alias binding out of the census's
+/// reach.
+fn reexports_a_grant_trait(line: &str) -> bool {
+    if !line.starts_with("pub") || !line.contains("use ") {
+        return false;
+    }
+    ["HostProtocolAuthenticator", "ChannelIngressVerifier"]
+        .iter()
+        .any(|trait_name| mentions_symbol(line, trait_name))
+}
+
+/// The full census for one file, as the production scan runs it. Self-tests
+/// drive this rather than reimplementing the pipeline, so a test cannot pass
+/// against logic the gate does not use.
+fn file_implements(source: &str, trait_name: &str) -> bool {
+    let stripped = strip_comments_and_strings(source);
+    let names = implementor_names(&stripped, trait_name);
+    impl_headers(&stripped)
+        .iter()
+        .any(|header| header_implements(&header.text, &names))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -464,6 +706,57 @@ fn mint_functions_are_named_only_by_their_owners_and_sanctioned_minters() {
     );
 }
 
+/// Closes the implementor census's one structural blind spot: an alias
+/// introduced in a *different* file from the `impl` that uses it.
+///
+/// `implementor_names` resolves `use … as …` within the file it scans, which
+/// covers every shape a single file can express. What it cannot see is a
+/// two-file split — `pub(crate) use …::ChannelIngressVerifier as V;` in one
+/// module, `use crate::m::V; impl V for Rogue {}` in another — because neither
+/// file alone names both the trait and the impl. Forbidding any `pub`-visible
+/// re-export of the two traits removes that second file: outside the owning
+/// crate the only way to bring either trait into scope is a private `use` in
+/// the same file as the impl, which the census does see.
+///
+/// Same rule §11.2.4 already applies to the mint functions
+/// (`no_crate_re_exports_a_mint_function_it_does_not_own`), applied to the
+/// witness traits that gate them.
+#[test]
+fn no_crate_re_exports_the_grant_traits() {
+    let root = workspace_root();
+    let mut files = Vec::new();
+    collect_production_rs(&root.join("crates"), &mut files);
+    assert!(
+        files.len() > 500,
+        "production walk found only {} files — the walk is broken, not the workspace",
+        files.len()
+    );
+
+    let mut offenders = Vec::new();
+    for file in &files {
+        if owning_crate(&root, file) == EVIDENCE_TYPE_OWNER {
+            continue;
+        }
+        let source = fs::read_to_string(file).unwrap_or_default();
+        for (index, raw) in strip_comments_and_strings(&source).lines().enumerate() {
+            let line = raw.trim();
+            if reexports_a_grant_trait(line) {
+                offenders.push(format!("{}:{}: {line}", render(&root, file), index + 1));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "`HostProtocolAuthenticator` and `ChannelIngressVerifier` are witness traits: implementing \
+         either mints protocol-auth evidence, so they have exactly one import path — \
+         `{EVIDENCE_TYPE_OWNER}`'s. A `pub`-visible re-export creates a second name for the trait \
+         in another crate, which also puts an alias binding in a different file from the `impl` \
+         that uses it — outside what the implementor census can attribute. Import the trait \
+         directly where it is implemented. Offenders: {offenders:?}"
+    );
+}
+
 /// Closed path #10 — the mint family drifting out of the crate PROPOSAL §6
 /// assigns it to. `#5`–`#9` police who *calls*; this polices where the
 /// definitions live, so "consolidated" stays true.
@@ -567,35 +860,181 @@ fn symbol_matcher_respects_word_boundaries() {
     ));
 }
 
+/// Both traits are unsealed with *provided* mint methods, so `impl Trait for X
+/// {}` alone confers minting and this census IS the enforcement. Every shape it
+/// cannot see is a way to forge verified evidence, so each is pinned here.
+/// Driven through `file_implements` — the same pipeline the gate runs — so a
+/// case cannot pass against logic production does not use.
 #[test]
 fn implementor_matcher_detects_a_rogue_impl_and_ignores_prose() {
-    let rogue = strip_comments_and_strings("impl ChannelIngressVerifier for RogueAdapter {}");
-    assert!(rogue.contains("ChannelIngressVerifier for"));
+    for trait_name in ["ChannelIngressVerifier", "HostProtocolAuthenticator"] {
+        for rogue in [
+            // Baseline: the shape the pre-hardening scan already caught.
+            format!("impl {trait_name} for RogueAdapter {{}}"),
+            format!("impl<T> {trait_name} for Wrapper<T> {{}}"),
+            format!("impl ironclaw_host_api::product_adapter::auth::{trait_name} for X {{}}"),
+            format!("unsafe impl {trait_name} for RogueAdapter {{}}"),
+            // Fail-open #1: the header split across lines, so the trait name
+            // and `for` never share a line.
+            format!("impl {trait_name}\n    for RogueAdapter\n{{\n}}"),
+            format!("impl<T>\n    {trait_name}\n    for Wrapper<T>\n{{\n}}"),
+            format!("impl\n    {trait_name}\n    for RogueAdapter {{}}"),
+            // Fail-open #2: renamed at the import, so the canonical spelling
+            // never appears on the impl at all.
+            format!("use a::b::{trait_name} as Verifier;\nimpl Verifier for RogueAdapter {{}}"),
+            format!("use a::b::{{{trait_name} as V, Other}};\nimpl V for RogueAdapter {{}}"),
+            format!("use a::{{b::{{{trait_name} as V}}}};\nimpl V for RogueAdapter {{}}"),
+            format!("use a::b::{trait_name} as r#type;\nimpl r#type for RogueAdapter {{}}"),
+            // Both at once.
+            format!("use a::b::{trait_name} as V;\nimpl V\n    for RogueAdapter {{}}"),
+            // A macro body still spells the header out, so it is visible.
+            format!(
+                "macro_rules! mint {{\n    ($t:ty) => {{\n        impl {trait_name} for $t {{}}\n    }};\n}}"
+            ),
+        ] {
+            assert!(
+                file_implements(&rogue, trait_name),
+                "census missed a minting implementation — it would forge verified evidence \
+                 undetected:\n{rogue}"
+            );
+        }
 
-    // Generic and qualified impl headers must still match ...
-    for head in [
-        "impl<T> ChannelIngressVerifier for Wrapper<T> {}",
-        "impl ironclaw_host_api::product_adapter::auth::ChannelIngressVerifier for X {}",
+        // Prose, string literals, the declaration, and near-miss names must not
+        // fire: a census that flags everything is as useless as one that flags
+        // nothing, and a false positive here blocks the seam's real owner.
+        for benign in [
+            format!("// impl {trait_name} for Foo (in docs)"),
+            format!("/// See {trait_name} for details"),
+            format!("let msg = \"impl {trait_name} for X\";"),
+            format!("pub trait {trait_name} {{"),
+            format!("fn f(x: &dyn {trait_name}) {{}}"),
+            // Longer name that merely ends in the governed one.
+            format!("impl My{trait_name} for X {{}}"),
+            // Inherent impl on a type whose name contains the trait's.
+            format!("impl {trait_name}Registry {{}}"),
+            // The alias binds a *different* trait, so `V` is not governed here.
+            format!("use a::b::Other as V;\nimpl V for X {{}}\n// {trait_name}"),
+        ] {
+            assert!(
+                !file_implements(&benign, trait_name),
+                "census fired on benign source, which would block the seam's own owner:\n{benign}"
+            );
+        }
+    }
+}
+
+/// The normalizer is now load-bearing: if `impl_headers` stopped producing
+/// headers the census would report every trait as unimplemented and pass. This
+/// pins that it parses real, multi-shape source rather than degrading quietly —
+/// the same zero-match principle as the `headers_seen` floor in the gate.
+#[test]
+fn impl_header_extraction_cannot_silently_degrade() {
+    let source = "\
+impl Alpha for One {}
+unsafe impl Beta
+    for Two
+{
+}
+impl<T> Gamma<T> for Three<T>
+where
+    T: Clone,
+{
+}
+impl Delta for HashMap<K, V> {}
+fn produces() -> impl Iterator<Item = u8> { core::iter::empty() }
+fn consumes(x: impl Into<String>, y: u8) {}
+impl Epsilon for Box<dyn Fn() -> u8> {}
+";
+    let headers = impl_headers(&strip_comments_and_strings(source));
+    let texts: Vec<&str> = headers.iter().map(|h| h.text.as_str()).collect();
+
+    // Every real header is collapsed onto one line, generics and all.
+    for expected in [
+        "impl Alpha for One",
+        "impl Beta for Two",
+        "impl<T> Gamma<T> for Three<T>",
+        "impl Delta for HashMap<K, V>",
+        "impl Epsilon for Box<dyn Fn() -> u8>",
     ] {
         assert!(
-            strip_comments_and_strings(head).contains("ChannelIngressVerifier for"),
-            "matcher must detect: {head}"
+            texts.contains(&expected),
+            "header extractor lost {expected:?}; got {texts:?}"
         );
     }
-    // ... while prose and the trait declaration must not.
-    for benign in [
-        "// impl ChannelIngressVerifier for Foo (in docs)",
-        "/// See ChannelIngressVerifier for details",
-        "let msg = \"impl ChannelIngressVerifier for X\";",
-    ] {
-        assert!(
-            !strip_comments_and_strings(benign).contains("ChannelIngressVerifier for"),
-            "matcher must not fire on: {benign}"
-        );
-    }
+    // `impl Trait` in return and argument position yields no `… for …`, so it
+    // cannot be mistaken for an implementation.
     assert!(
-        !strip_comments_and_strings("pub trait ChannelIngressVerifier {")
-            .contains("ChannelIngressVerifier for")
+        !texts
+            .iter()
+            .any(|text| text.contains("Iterator<Item = u8> for"))
+    );
+    assert!(!texts.iter().any(|text| text.contains("Into<String> for")));
+
+    // Line numbers point at the `impl` keyword, so offenders are actionable.
+    let beta = headers
+        .iter()
+        .find(|header| header.text == "impl Beta for Two")
+        .expect("multi-line header extracted");
+    assert_eq!(
+        beta.line, 2,
+        "offender report must name the impl's own line"
+    );
+}
+
+/// The re-export guard is what removes the census's two-file blind spot, so it
+/// has to fire on every visibility that can create a second file. Today's tree
+/// contains no re-export at all, so the guard's decision is pinned directly.
+#[test]
+fn reexport_guard_catches_every_escaping_visibility() {
+    for offending in [
+        "pub use ironclaw_host_api::product_adapter::auth::ChannelIngressVerifier;",
+        "pub use ironclaw_host_api::product_adapter::auth::ChannelIngressVerifier as V;",
+        "pub(crate) use a::b::ChannelIngressVerifier as V;",
+        "pub(super) use a::b::HostProtocolAuthenticator as A;",
+        "pub(in crate::m) use a::b::HostProtocolAuthenticator;",
+        "pub use a::b::{ChannelIngressVerifier as V, Other};",
+    ] {
+        assert!(
+            reexports_a_grant_trait(offending),
+            "re-export guard missed a second import path: {offending}"
+        );
+    }
+
+    for benign in [
+        // A private import in the implementing file is the sanctioned shape —
+        // the census resolves its aliases, so it must not be flagged.
+        "use ironclaw_host_api::product_adapter::auth::ChannelIngressVerifier;",
+        "use a::b::ChannelIngressVerifier as V;",
+        // Re-exporting something else entirely.
+        "pub use a::b::AuthRequirement;",
+        // A near-miss name is a different type.
+        "pub use a::b::ChannelIngressVerifierRegistry;",
+        // Not a use statement at all.
+        "pub struct ChannelIngressVerifierRegistry;",
+    ] {
+        assert!(
+            !reexports_a_grant_trait(benign),
+            "re-export guard fired on a sanctioned line: {benign}"
+        );
+    }
+}
+
+/// Alias resolution is scoped to the file that declares the binding, and only
+/// binds the trait actually renamed.
+#[test]
+fn alias_resolution_binds_only_the_renamed_trait() {
+    let names = implementor_names(
+        &strip_comments_and_strings(
+            "use a::b::ChannelIngressVerifier as V;\nuse a::b::Unrelated as W;\n",
+        ),
+        "ChannelIngressVerifier",
+    );
+
+    assert!(names.contains("ChannelIngressVerifier"));
+    assert!(names.contains("V"), "the renamed binding must be governed");
+    assert!(
+        !names.contains("W"),
+        "an unrelated trait's alias must not be"
     );
 }
 

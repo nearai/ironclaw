@@ -25,19 +25,21 @@ mod ratchet_support;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ratchet_support::strip_comments_and_strings;
+use ratchet_support::{strip_comments_and_strings, workspace_root};
 
 /// The single crate permitted to implement `CapabilityAuthorizer` (the kernel
 /// authorizer that owns `authorize()`).
 const KERNEL_CRATE_DIR: &str = "ironclaw_capabilities";
 
-fn workspace_crates_dir() -> PathBuf {
-    // CARGO_MANIFEST_DIR = crates/ironclaw_architecture; go up to crates/.
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/ dir")
-        .to_path_buf()
-}
+/// Sanity floor for the production walk. Far below the real count (~1300) — it
+/// is not a ratchet and is never expected to bind. It exists because this gate
+/// used to resolve its scan root as `CARGO_MANIFEST_DIR.parent()`, i.e. one
+/// level up, which under a family move lands on `crates/<family>` — a directory
+/// that *exists*. The walk then quietly covered one family instead of the
+/// workspace and the gate still passed: measured at 45 files instead of 1309 on
+/// a partially-moved tree, with no error. A security gate that can pass having
+/// scanned a fraction of the tree is the defect (CHECKLIST WS0, #6963).
+const MIN_SCANNED_FILES: usize = 500;
 
 fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
@@ -47,8 +49,14 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
         let path = entry.path();
         if path.is_dir() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            // Skip test/example/bench trees (test doubles live there) and build output.
-            if matches!(name, "tests" | "examples" | "benches" | "target") {
+            // Skip test/example/bench trees (test doubles live there), build
+            // output, and vendored frontend packages (`crates/ironclaw_webui/
+            // frontend/node_modules` after a pnpm install — never workspace
+            // source, and it is not policed by this seal).
+            if matches!(
+                name,
+                "tests" | "examples" | "benches" | "target" | "node_modules"
+            ) {
                 continue;
             }
             collect_rs_files(&path, out);
@@ -58,11 +66,37 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Production Rust sources under `crates/`, refusing to return a set too small
+/// to be the workspace. Returning the count keeps "did it measure anything?"
+/// answerable by the caller rather than implied.
+fn scanned_production_files(crates_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    if !crates_dir.is_dir() {
+        return Err(format!(
+            "no crates/ directory at {} — the scan root is wrong, so this seal \
+             would police nothing",
+            crates_dir.display()
+        ));
+    }
+    let mut files = Vec::new();
+    collect_rs_files(crates_dir, &mut files);
+    if files.len() < MIN_SCANNED_FILES {
+        return Err(format!(
+            "production walk under {} found only {} file(s) (floor {}). The walk is \
+             broken, not the workspace — this seal is the only barrier to forging an \
+             `Authorized`, and it must never pass having scanned a fraction of the tree.",
+            crates_dir.display(),
+            files.len(),
+            MIN_SCANNED_FILES
+        ));
+    }
+    Ok(files)
+}
+
 #[test]
 fn capability_authorizer_is_implemented_only_by_the_kernel() {
-    let crates_dir = workspace_crates_dir();
-    let mut files = Vec::new();
-    collect_rs_files(&crates_dir, &mut files);
+    let crates_dir = workspace_root().join("crates");
+    let files =
+        scanned_production_files(&crates_dir).expect("production walk must measure the workspace");
 
     let mut offenders = Vec::new();
     for file in files {
@@ -96,6 +130,88 @@ fn capability_authorizer_is_implemented_only_by_the_kernel() {
          legitimate minter of `AuthorizationGrant`/`Authorized` (arch-simplification §5.3.2). A \
          production impl elsewhere can forge an authorized invocation. Move test doubles under \
          `tests/`. Offending impls: {offenders:?}"
+    );
+}
+
+/// The walk must refuse a scan root that cannot be the workspace. Both shapes
+/// the family move produces are covered: a root with no `crates/` at all, and a
+/// `crates/` holding one family's worth of files (the shape that used to pass).
+#[test]
+fn production_walk_refuses_a_scan_root_that_is_not_the_workspace() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let error = scanned_production_files(&temp.path().join("crates"))
+        .expect_err("a missing crates/ directory must refuse");
+    assert!(
+        error.contains("no crates/ directory"),
+        "expected a scan-root refusal, got: {error}"
+    );
+
+    // One family's worth of source: real files, real directory, far too few.
+    let family = temp
+        .path()
+        .join("crates/substrates/ironclaw_capabilities/src");
+    fs::create_dir_all(&family).expect("family tree");
+    for index in 0..10 {
+        fs::write(family.join(format!("m{index}.rs")), "pub fn f() {}\n").expect("source");
+    }
+    let error = scanned_production_files(&temp.path().join("crates"))
+        .expect_err("a partial tree must refuse");
+    assert!(
+        error.contains("found only 10 file(s)"),
+        "expected a measurement refusal naming the count, got: {error}"
+    );
+}
+
+/// The real workspace clears the floor with room to spare — the floor is a
+/// sanity check, not a ratchet that will bind on ordinary growth or deletion.
+#[test]
+fn production_walk_measures_the_whole_workspace() {
+    let files = scanned_production_files(&workspace_root().join("crates"))
+        .expect("the real workspace must clear the floor");
+    assert!(
+        files.len() > MIN_SCANNED_FILES * 2,
+        "the floor is meant to sit far below reality; scanned {} with floor {}",
+        files.len(),
+        MIN_SCANNED_FILES
+    );
+    assert!(
+        files
+            .iter()
+            .any(|path| path.components().any(|c| c.as_os_str() == KERNEL_CRATE_DIR)),
+        "the walk must reach the kernel crate it polices"
+    );
+}
+
+/// The retired one-level root landed on `crates/<family>` under a family move —
+/// an existing directory — so the walk silently narrowed instead of failing.
+#[test]
+fn workspace_root_search_survives_a_family_move() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("workspace manifest");
+    let nested = root.join("crates/substrates/ironclaw_architecture");
+    fs::create_dir_all(&nested).expect("nested crate");
+
+    let found = ratchet_support::find_workspace_root(&nested).expect("root found");
+    assert_eq!(
+        found.canonicalize().ok(),
+        root.canonicalize().ok(),
+        "the search must find the workspace root from a family-nested crate"
+    );
+
+    // The retired rule: one level up from the nested crate is `crates/substrates`,
+    // which exists — so the old walk covered one family and reported success.
+    let retired = nested.parent().map(Path::to_path_buf);
+    assert_eq!(retired, Some(root.join("crates/substrates")));
+    assert!(
+        retired.expect("retired root").is_dir(),
+        "the retired scan root existed, which is exactly why the narrowing was silent"
+    );
+
+    assert!(
+        ratchet_support::find_workspace_root(Path::new("/")).is_err(),
+        "a path with no workspace ancestor must refuse, not guess"
     );
 }
 

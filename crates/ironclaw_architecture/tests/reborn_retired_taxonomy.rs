@@ -9,24 +9,18 @@
 //! of it can be reintroduced silently.
 //!
 //! Sanctioned exceptions are path-scoped, not term-scoped:
-//! - the two one-time forward data migrations legitimately name the retired
-//!   identities they fold forward
-//!   (`extension_host/extension_installation_store.rs`,
-//!   `product_auth/durable/`);
+//! - the one-time forward data migration under `product_auth/durable/`
+//!   legitimately names the retired identities it folds forward;
 //! - this test names every term on purpose.
 //!
-//! v1 (`src/`, root `tests/*.rs`) is out of scope: it is being strangled
-//! wholesale, not policed term-by-term.
+//! The list is shrink-only and pinned to reality — see `SANCTIONED_PATHS`.
 
-use std::path::{Path, PathBuf};
+#[allow(dead_code)]
+mod ratchet_support;
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("architecture crate under crates")
-        .to_path_buf()
-}
+use std::path::Path;
+
+use ratchet_support::workspace_root;
 
 /// Retired vocabulary. Every term here was deleted by the NEA-25 stack; a hit
 /// outside the sanctioned paths is a regression, not a style issue.
@@ -84,18 +78,27 @@ const RETIRED_IDENTITY_FORMS: &[&str] = &[
 ];
 
 /// Path fragments allowed to reference retired vocabulary.
+///
+/// Shrink-only, and pinned to reality: `sanctioned_paths_all_match_real_files`
+/// fails when a fragment matches no scanned file, so an exemption cannot outlive
+/// the code it exempts. Two entries had already rotted when that check was added
+/// — `crates/ironclaw_gateway/` (crate deleted) and
+/// `extension_host/extension_installation_store.rs` (deleted by #6430) — and
+/// neither was visible, because a fragment that matches nothing simply never
+/// sanctions anything.
 const SANCTIONED_PATHS: &[&str] = &[
-    // v1 → Reborn converter reads v1 domain names by design.
-    // The v1 gateway is a legacy enclave being strangled wholesale — its
-    // static JS still serves the v1 `kind` wire and is not policed
-    // term-by-term (same footing as `src/`).
-    "crates/ironclaw_gateway/",
     // One-time forward data migrations name what they fold forward.
-    "extension_host/extension_installation_store.rs",
     "product_auth/durable/",
     // This gate names every term on purpose.
     "reborn_retired_taxonomy.rs",
 ];
+
+/// Sanity floor for the scan. Far below the real count (~1500) and never
+/// expected to bind. It exists because the walk swallows `read_dir` failures:
+/// with a wrong root every directory read fails, the hit list comes back empty,
+/// and "no retired taxonomy found" is indistinguishable from "nothing was
+/// looked at" (CHECKLIST WS0, #6963).
+const MIN_SCANNED_FILES: usize = 500;
 
 fn is_sanctioned(path: &str) -> bool {
     SANCTIONED_PATHS
@@ -103,7 +106,7 @@ fn is_sanctioned(path: &str) -> bool {
         .any(|fragment| path.contains(fragment))
 }
 
-fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) {
+fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>, scanned: &mut Vec<String>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -115,7 +118,7 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) {
             if name == "target" || name == "node_modules" || name == ".git" {
                 continue;
             }
-            scan_dir(root, &path, hits);
+            scan_dir(root, &path, hits, scanned);
             continue;
         }
         let is_rust = name.ends_with(".rs");
@@ -133,6 +136,7 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) {
             .unwrap_or(&path)
             .to_string_lossy()
             .replace('\\', "/");
+        scanned.push(relative.clone());
         if is_sanctioned(&relative) {
             continue;
         }
@@ -152,14 +156,78 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) {
     }
 }
 
+/// Every scanned path, plus the hits — so callers can ask whether the scan
+/// measured anything instead of reading an empty hit list as a clean bill.
+fn scan_workspace(root: &Path) -> (Vec<String>, Vec<String>) {
+    let mut hits = Vec::new();
+    let mut scanned = Vec::new();
+    scan_dir(root, &root.join("crates"), &mut hits, &mut scanned);
+    scan_dir(
+        root,
+        &root.join("tests/integration"),
+        &mut hits,
+        &mut scanned,
+    );
+    hits.sort();
+    hits.dedup();
+    (hits, scanned)
+}
+
+/// The failure this gate could not previously report: a root with no `crates/`
+/// yields an empty hit list, which without the floor reads exactly like a clean
+/// scan. Pins that the scan really does come back empty there, so the floor —
+/// not luck — is what turns it into a failure.
+#[test]
+fn a_wrong_root_scans_nothing_and_the_floor_catches_it() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (hits, scanned) = scan_workspace(temp.path());
+
+    assert!(
+        scanned.is_empty(),
+        "expected an empty scan, got {scanned:?}"
+    );
+    assert!(
+        hits.is_empty(),
+        "an empty scan also yields an empty hit list — that is the whole problem"
+    );
+    assert!(
+        scanned.len() < MIN_SCANNED_FILES,
+        "the floor must reject this scan"
+    );
+}
+
+/// An exemption that matches nothing exempts nothing — it is dead text that
+/// reads as policy. Both entries this check retired had outlived their code.
+#[test]
+fn sanctioned_paths_all_match_real_files() {
+    let (_, scanned) = scan_workspace(&workspace_root());
+    let stale: Vec<&str> = SANCTIONED_PATHS
+        .iter()
+        .copied()
+        .filter(|fragment| !scanned.iter().any(|path| path.contains(fragment)))
+        .collect();
+
+    assert!(
+        stale.is_empty(),
+        "SANCTIONED_PATHS entries match no scanned file — delete them; this list is \
+         shrink-only and an entry that sanctions nothing is dead text that reads as \
+         policy: {stale:?}"
+    );
+}
+
 #[test]
 fn reborn_code_never_references_retired_taxonomy() {
     let root = workspace_root();
-    let mut hits = Vec::new();
-    scan_dir(&root, &root.join("crates"), &mut hits);
-    scan_dir(&root, &root.join("tests/integration"), &mut hits);
-    hits.sort();
-    hits.dedup();
+    let (hits, scanned) = scan_workspace(&root);
+    assert!(
+        scanned.len() >= MIN_SCANNED_FILES,
+        "the taxonomy scan visited only {} file(s) under {} (floor {}). The walk is \
+         broken, not the workspace — `scan_dir` swallows read_dir failures, so an \
+         empty hit list from an unvisited tree is indistinguishable from a clean one.",
+        scanned.len(),
+        root.display(),
+        MIN_SCANNED_FILES
+    );
     assert!(
         hits.is_empty(),
         "retired NEA-25 taxonomy reintroduced (extension = the product object; \
