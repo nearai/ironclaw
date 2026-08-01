@@ -2500,13 +2500,31 @@ fn convert_messages(
     Ok(coalesce_system_messages_at_start(converted))
 }
 
+/// Coalesce the LEADING run of system messages into one system block and keep
+/// every later system message at its position as a `<system-reminder>`-framed
+/// user message.
+///
+/// Only the leading run may fold into the system block: that block is the
+/// provider-cached prompt prefix, and hoisting a mid- or tail-positioned
+/// system message (a loop-control nudge rendered on iteration N, the per-run
+/// runtime clock, a compaction summary) into it would rewrite the prefix and
+/// invalidate the provider prompt cache on every change (#6985). The framing
+/// keeps host authority explicit — the content is host guidance, not user
+/// speech — without granting transcript-positioned text the system block's
+/// standing.
 fn coalesce_system_messages_at_start(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     let mut system_content = Vec::new();
     let mut transcript = Vec::with_capacity(messages.len());
+    let mut in_leading_run = true;
     for message in messages {
         if message.role == Role::System {
-            system_content.push(message.content);
+            if in_leading_run {
+                system_content.push(message.content);
+            } else {
+                transcript.push(ChatMessage::user(system_reminder_message(&message.content)));
+            }
         } else {
+            in_leading_run = false;
             transcript.push(message);
         }
     }
@@ -2518,6 +2536,12 @@ fn coalesce_system_messages_at_start(messages: Vec<ChatMessage>) -> Vec<ChatMess
     normalized.push(ChatMessage::system(system_content.join("\n\n")));
     normalized.extend(transcript);
     normalized
+}
+
+/// Frame transcript-positioned host guidance so the model treats it as
+/// host-authored context rather than user speech.
+fn system_reminder_message(content: &str) -> String {
+    format!("<system-reminder>\n{content}\n</system-reminder>")
 }
 
 fn tool_summary_message(summary: String) -> String {

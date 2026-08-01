@@ -500,6 +500,47 @@ impl RebornIntegrationHarness {
         Ok(())
     }
 
+    /// Assert every captured model request carried a byte-identical system
+    /// prompt — the cache-prefix stability invariant (#6985): loop-control
+    /// nudges, the runtime clock, and other per-call context must ride the
+    /// conversation tail, never rewrite the cached prefix. Requires at least
+    /// two captured requests so the assertion cannot pass vacuously.
+    pub async fn assert_system_prompts_identical(&self) -> HarnessResult<()> {
+        let prompts = self.captured_system_prompts();
+        if prompts.len() < 2 {
+            return Err(format!(
+                "need at least two captured system prompts to prove stability; saw {}",
+                prompts.len()
+            )
+            .into());
+        }
+        let first = &prompts[0];
+        for (index, prompt) in prompts.iter().enumerate().skip(1) {
+            if prompt != first {
+                let diff_at = first
+                    .char_indices()
+                    .zip(prompt.chars())
+                    .find(|((_, a), b)| a != b)
+                    .map(|((byte, _), _)| byte)
+                    .unwrap_or_else(|| first.len().min(prompt.len()));
+                let context_start = diff_at.saturating_sub(80);
+                let excerpt = |s: &str| -> String {
+                    s.get(context_start..(diff_at + 120).min(s.len()))
+                        .unwrap_or("[non-boundary]")
+                        .to_string()
+                };
+                return Err(format!(
+                    "system prompt of request {index} diverged from request 0 at byte {diff_at}:\n\
+                     request 0: ...{:?}...\nrequest {index}: ...{:?}...",
+                    excerpt(first),
+                    excerpt(prompt),
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
     /// Assert that some model request this thread sent to the scripted provider
     /// contains `needle` anywhere in its serialized messages — the caller-tier
     /// proof that host-injected context (e.g. activated-skill instructions)

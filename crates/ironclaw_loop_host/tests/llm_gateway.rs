@@ -363,7 +363,13 @@ async fn gateway_stream_model_with_progress_uses_provider_streaming_and_sanitize
 }
 
 #[tokio::test]
-async fn gateway_coalesces_late_system_messages_before_provider_call() {
+async fn gateway_keeps_late_system_messages_in_place_as_system_reminders() {
+    // A system message positioned after the first non-system message must NOT
+    // be hoisted into the leading system block: that block is the
+    // provider-cached prompt prefix, and folding per-call content into it
+    // would invalidate the prompt cache on every change (#6985). The content
+    // stays at its transcript position as a `<system-reminder>`-framed
+    // user-role message instead.
     let provider = Arc::new(RecordingLlmProvider::reply("assistant response"));
     let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
@@ -385,14 +391,16 @@ async fn gateway_coalesces_late_system_messages_before_provider_call() {
 
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].messages.len(), 2);
+    assert_eq!(requests[0].messages.len(), 3);
     assert_eq!(requests[0].messages[0].role, Role::System);
-    assert_eq!(
-        requests[0].messages[0].content,
-        "system instructions\n\nhost summary after user"
-    );
+    assert_eq!(requests[0].messages[0].content, "system instructions");
     assert_eq!(requests[0].messages[1].role, Role::User);
     assert_eq!(requests[0].messages[1].content, "hello model");
+    assert_eq!(requests[0].messages[2].role, Role::User);
+    assert_eq!(
+        requests[0].messages[2].content,
+        "<system-reminder>\nhost summary after user\n</system-reminder>"
+    );
 }
 
 #[tokio::test]
@@ -2648,12 +2656,24 @@ async fn production_loop_model_gateway_accepts_inline_prompt_messages() {
     assert_eq!(response.chunks[0].safe_text_delta, "inline response");
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
+    // Inline loop-control messages ride the conversation tail as
+    // `<system-reminder>`-framed user messages — never the cached system
+    // prefix (#6985).
     assert!(
-        requests[0]
+        requests[0].messages.iter().any(|message| {
+            message.role == Role::User
+                && message.content.contains(inline_text)
+                && message.content.contains("<system-reminder>")
+        }),
+        "provider messages did not include tail-positioned inline control text: {:?}",
+        requests[0].messages
+    );
+    assert!(
+        !requests[0]
             .messages
             .iter()
             .any(|message| message.role == Role::System && message.content.contains(inline_text)),
-        "provider messages did not include inline control text: {:?}",
+        "inline control text must not be folded into the cached system prefix: {:?}",
         requests[0].messages
     );
 }

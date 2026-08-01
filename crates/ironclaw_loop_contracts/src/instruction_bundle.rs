@@ -239,20 +239,6 @@ impl InstructionBundleBuilder {
                 .as_bytes(),
         );
 
-        if !request.inline_messages.is_empty() {
-            requires_materialization_store = true;
-        }
-        for (ordinal, message) in request.inline_messages.into_iter().enumerate() {
-            push_inline_message(
-                &mut messages,
-                &mut materialized_messages,
-                &mut fingerprint,
-                ordinal,
-                message,
-                &mut synthetic_refs,
-            )?;
-        }
-
         if !request.context_bundle.identity_messages.is_empty() {
             requires_materialization_store = true;
         }
@@ -273,17 +259,6 @@ impl InstructionBundleBuilder {
                 },
                 &mut synthetic_refs,
                 message,
-            )?;
-        }
-
-        if let Some(runtime_context) = request.runtime_context {
-            requires_materialization_store = true;
-            push_runtime_context(
-                &mut messages,
-                &mut materialized_messages,
-                &mut fingerprint,
-                runtime_context,
-                &mut synthetic_refs,
             )?;
         }
 
@@ -397,6 +372,39 @@ impl InstructionBundleBuilder {
                 },
                 &mut synthetic_refs,
                 message,
+            )?;
+        }
+
+        // Per-call context rides the conversation tail, after the thread
+        // messages, so the leading system-role run — the provider-cached
+        // prompt prefix — stays byte-stable while the loop runs (#6985).
+        // Runtime context (the clock, channel state) re-renders every run;
+        // inline loop-control messages (repeated-call warnings, admission
+        // rejections, model-error observations) appear on individual
+        // iterations. Both would invalidate the whole cached prefix if they
+        // sat ahead of the identity/instruction sections.
+        if let Some(runtime_context) = request.runtime_context {
+            requires_materialization_store = true;
+            push_runtime_context(
+                &mut messages,
+                &mut materialized_messages,
+                &mut fingerprint,
+                runtime_context,
+                &mut synthetic_refs,
+            )?;
+        }
+
+        if !request.inline_messages.is_empty() {
+            requires_materialization_store = true;
+        }
+        for (ordinal, message) in request.inline_messages.into_iter().enumerate() {
+            push_inline_message(
+                &mut messages,
+                &mut materialized_messages,
+                &mut fingerprint,
+                ordinal,
+                message,
+                &mut synthetic_refs,
             )?;
         }
 
