@@ -354,6 +354,77 @@ fn apply_breakpoints_skips_empty_text_tail_and_empty_transcript() {
     assert!(empty.messages.is_empty());
 }
 
+/// Branch coverage: a text block at the tail of a multimodal message gets the
+/// marker (the `Text` arm of `set_cache_control`), and an empty block list is
+/// a no-op.
+#[test]
+fn apply_breakpoints_marks_text_block_tail_and_skips_empty_blocks() {
+    let mut request = request_with_messages(vec![AnthropicMessage {
+        role: "user".to_string(),
+        content: AnthropicContent::Blocks(vec![
+            AnthropicContentBlock::Image {
+                source: AnthropicImageSource {
+                    source_type: "base64",
+                    media_type: "image/png".to_string(),
+                    data: "aGk=".to_string(),
+                },
+                cache_control: None,
+            },
+            AnthropicContentBlock::Text {
+                text: "caption".to_string(),
+                cache_control: None,
+            },
+        ]),
+    }]);
+    apply_cache_breakpoints(&mut request, CacheRetention::Short);
+
+    let AnthropicContent::Blocks(blocks) = &request.messages[0].content else {
+        panic!("blocks expected");
+    };
+    let AnthropicContentBlock::Image { cache_control, .. } = &blocks[0] else {
+        panic!("image expected");
+    };
+    assert!(cache_control.is_none(), "only the tail block is marked");
+    let AnthropicContentBlock::Text { cache_control, .. } = &blocks[1] else {
+        panic!("text expected");
+    };
+    assert!(cache_control.is_some());
+
+    let mut empty_blocks = request_with_messages(vec![AnthropicMessage {
+        role: "user".to_string(),
+        content: AnthropicContent::Blocks(Vec::new()),
+    }]);
+    apply_cache_breakpoints(&mut empty_blocks, CacheRetention::Short);
+    assert!(matches!(
+        &empty_blocks.messages[0].content,
+        AnthropicContent::Blocks(blocks) if blocks.is_empty()
+    ));
+}
+
+/// Branch coverage: a system value already in block form is restored
+/// untouched — never dropped by the take-and-rebuild — pinning the
+/// restore-on-non-Text arm.
+#[test]
+fn apply_breakpoints_preserves_prebuilt_system_blocks() {
+    let mut request = request_with_messages(vec![AnthropicMessage {
+        role: "user".to_string(),
+        content: AnthropicContent::Text("question".to_string()),
+    }]);
+    request.system = Some(AnthropicSystem::Blocks(vec![AnthropicSystemBlock {
+        block_type: "text",
+        text: "prebuilt".to_string(),
+        cache_control: None,
+    }]));
+    apply_cache_breakpoints(&mut request, CacheRetention::Short);
+
+    let Some(AnthropicSystem::Blocks(blocks)) = &request.system else {
+        panic!("prebuilt system blocks must survive apply_cache_breakpoints");
+    };
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].text, "prebuilt");
+    assert!(blocks[0].cache_control.is_none(), "restored untouched");
+}
+
 /// Wire-level pin: retention `None` keeps the legacy wire shape — system
 /// as a plain string, and no cache_control anywhere.
 #[tokio::test]

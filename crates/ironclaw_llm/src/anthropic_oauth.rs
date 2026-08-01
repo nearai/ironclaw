@@ -698,13 +698,18 @@ fn apply_cache_breakpoints(
         return;
     };
 
-    if let Some(AnthropicSystem::Text(text)) = request.system.take() {
-        request.system = Some(AnthropicSystem::Blocks(vec![AnthropicSystemBlock {
-            block_type: "text",
-            text,
-            cache_control: Some(marker.clone()),
-        }]));
-    }
+    // convert_messages only ever produces the string form, but restore any
+    // other value untouched rather than dropping it on the floor.
+    request.system = match request.system.take() {
+        Some(AnthropicSystem::Text(text)) => {
+            Some(AnthropicSystem::Blocks(vec![AnthropicSystemBlock {
+                block_type: "text",
+                text,
+                cache_control: Some(marker.clone()),
+            }]))
+        }
+        other => other,
+    };
 
     if let Some(tools) = request.tools.as_mut()
         && let Some(last) = tools.last_mut()
