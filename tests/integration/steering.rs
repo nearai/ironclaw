@@ -118,3 +118,90 @@ async fn queued_steering_message_reaches_the_model_mid_run() {
         "the Submitted row keeps its binding to run A"
     );
 }
+
+/// The durable steering guarantee across a restart (review: High): a message
+/// queued behind a run parked on a durable approval gate survives a full
+/// planned-runtime restart over the same LibSQL store — the resumed run drains
+/// the persisted input, the row flips `Queued` → `Submitted`, and the steering
+/// text reaches the post-restart model request.
+#[tokio::test]
+async fn queued_steering_survives_runtime_restart() {
+    use reborn_support::builder::StorageMode;
+    use reborn_support::group::RebornIntegrationGroup;
+
+    let group = RebornIntegrationGroup::builder()
+        .storage(StorageMode::LibSql)
+        .live_approvals()
+        .await
+        .expect("durable live-approvals group builds");
+    let before_restart = group
+        .thread("steering-restart")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.write_file",
+                serde_json::json!({
+                    "path": "/workspace/steering-restart.txt",
+                    "content": "written across restart"
+                }),
+            ),
+            RebornScriptedReply::text("unreachable on the old runtime"),
+        ])
+        .build()
+        .await
+        .expect("pre-restart thread builds");
+    let (run_id, gate_ref) = before_restart
+        .submit_turn_until_blocked("start gated work")
+        .await
+        .expect("run parks on the durable approval gate");
+
+    // Busy submit while parked: accepted, stored Queued, durably enqueued.
+    let ack = before_restart
+        .submit_turn_ack("steer the gated work toward blue")
+        .await
+        .expect("busy submit does not error");
+    assert!(
+        matches!(ack, ProductInboundAck::DeferredBusy { .. }),
+        "expected DeferredBusy while parked on the gate, got {ack:?}"
+    );
+    let queued = before_restart
+        .user_message_record("steer the gated work toward blue")
+        .await
+        .expect("queued row persisted");
+    assert_eq!(queued.status, MessageStatus::Queued);
+
+    // Restart the whole planned runtime over the same durable store.
+    drop(before_restart);
+    let restarted_group = group
+        .restart_planned_runtime()
+        .await
+        .expect("planned runtime restarts over durable state");
+    let after_restart = restarted_group
+        .thread("steering-restart")
+        .script([RebornScriptedReply::text("steered reply after restart")])
+        .build()
+        .await
+        .expect("post-restart thread rebuilds the scope gateway");
+
+    after_restart
+        .approve_gate(run_id, &gate_ref)
+        .await
+        .expect("approval resolves after restart");
+    after_restart
+        .wait_for_status(run_id, TurnStatus::Completed)
+        .await
+        .expect("resumed run completes after draining the persisted steering input");
+
+    after_restart
+        .assert_model_saw_user_message("steer the gated work toward blue")
+        .await
+        .expect("the persisted steering text must reach a post-restart model request");
+    let consumed = after_restart
+        .user_message_record("steer the gated work toward blue")
+        .await
+        .expect("steering row still in transcript");
+    assert_eq!(
+        consumed.status,
+        MessageStatus::Submitted,
+        "the resumed run must flip the persisted row Queued → Submitted"
+    );
+}

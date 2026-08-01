@@ -1112,12 +1112,24 @@ impl RebornIntegrationGroupBuilder {
         }
 
         // --- steering/follow-up input queue (production-parity) ----------------
-        // Production always wires a host input queue (InMemory at minimum) so a
-        // message hitting a busy thread is queued as steering input for the
-        // active run instead of rejected. The harness mirrors that shape: the
-        // SAME queue instance is both the loop's drain reader
-        // (`parts.input_queue`) and every thread's inbound enqueue port.
-        let host_input_queue = Arc::new(ironclaw_loop_host::InMemoryHostInputQueue::new(
+        // Production always wires the durable `FilesystemHostInputQueue` over
+        // the composed filesystem, so a message hitting a busy thread is
+        // queued as steering input for the active run instead of rejected —
+        // and the queue survives a planned-runtime restart over the same
+        // durable store (`restart_planned_runtime` with `StorageMode::LibSql`).
+        // The harness mirrors that shape over the group's composite: the SAME
+        // queue instance is both the loop's drain reader (`parts.input_queue`)
+        // and every thread's inbound enqueue port.
+        let host_input_queue = Arc::new(ironclaw_loop_host::FilesystemHostInputQueue::new(
+            Arc::clone(&processes_scoped_fs),
+            ironclaw_turns::TurnScope::new_with_owner(
+                base.canonical_binding.tenant_id.clone(),
+                base.canonical_binding.agent_id.clone(),
+                base.canonical_binding.project_id.clone(),
+                base.canonical_binding.thread_id.clone(),
+                base.canonical_binding.subject_user_id.clone(),
+            )
+            .to_resource_scope(),
             Arc::clone(&runtime_thread_service),
         ));
         let host_input_queue_for_cancel_reconcile: Arc<dyn ironclaw_loop_host::HostInputQueue> =

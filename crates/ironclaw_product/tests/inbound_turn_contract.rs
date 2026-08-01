@@ -65,6 +65,12 @@ use ironclaw_turns::{
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
+/// Canonical run-start cursor (Copilot review: single source of truth instead
+/// of re-hardcoding the origin literal).
+fn origin_cursor() -> LoopInputCursorToken {
+    LoopInputCursorToken::origin()
+}
+
 fn sample_user_message_envelope(event_suffix: &str) -> ProductInboundEnvelope {
     sample_user_message_envelope_with_install_and_text(event_suffix, "install_alpha", "hello world")
 }
@@ -1265,11 +1271,7 @@ async fn busy_thread_with_input_queue_defers_second_message_until_queue_ack() {
     );
 
     let batch = input_queue
-        .next_after(
-            active_run_id,
-            LoopInputCursorToken::new("input-cursor:origin".to_string()).expect("origin cursor"),
-            8,
-        )
+        .next_after(active_run_id, origin_cursor(), 8)
         .await
         .expect("queued input batch");
     assert_eq!(batch.inputs.len(), 1);
@@ -1416,11 +1418,7 @@ async fn ack_consumed_is_non_fatal_when_queued_status_flip_fails() {
     // ...and the token must be recorded as consumed so the input is not
     // redelivered (which would loop the model on the same steering input).
     let batch = queue
-        .next_after(
-            run_id,
-            LoopInputCursorToken::new("input-cursor:origin".to_string()).unwrap(),
-            8,
-        )
+        .next_after(run_id, origin_cursor(), 8)
         .await
         .expect("next_after");
     assert!(
@@ -1471,11 +1469,7 @@ async fn ack_rejects_unknown_token_instead_of_poisoning_state() {
 
     // The live entry is untouched and still deliverable.
     let batch = queue
-        .next_after(
-            run_id,
-            LoopInputCursorToken::new("input-cursor:origin".to_string()).unwrap(),
-            8,
-        )
+        .next_after(run_id, origin_cursor(), 8)
         .await
         .expect("next_after");
     assert_eq!(
@@ -1647,11 +1641,7 @@ async fn busy_submit_rejects_when_active_run_profile_disallows_steering() {
 
     // Nothing was enqueued for the active run.
     let batch = input_queue
-        .next_after(
-            active_run_id,
-            LoopInputCursorToken::new("input-cursor:origin".to_string()).expect("origin cursor"),
-            8,
-        )
+        .next_after(active_run_id, origin_cursor(), 8)
         .await
         .expect("queue poll");
     assert!(
@@ -2043,5 +2033,192 @@ async fn rejected_busy_replay_is_re_rejected_not_resubmitted() {
         history.messages[0].status,
         MessageStatus::RejectedBusy,
         "original message must remain RejectedBusy, not Submitted"
+    );
+}
+
+/// Enqueue port that acknowledges but stores nothing — the observable shape of
+/// a crash between the `Queued` status write and the (durable) enqueue.
+struct VanishingInputEnqueue;
+
+#[async_trait::async_trait]
+impl HostInputEnqueuePort for VanishingInputEnqueue {
+    async fn enqueue_queued_message(
+        &self,
+        request: ironclaw_loop_host::EnqueueQueuedMessageRequest,
+    ) -> Result<ironclaw_loop_host::HostInputEnvelope, ironclaw_loop_host::HostInputQueueError>
+    {
+        Ok(ironclaw_loop_host::HostInputEnvelope {
+            input: request.input,
+            cursor: LoopInputCursorToken::new("input-cursor:1".to_string()).expect("cursor"),
+            ack_token: ironclaw_loop_contracts::LoopInputAckToken::new("input-ack:1".to_string())
+                .expect("ack token"),
+        })
+    }
+}
+
+/// Crash-orphan recovery (queued replay): a `Queued` row whose queue entry was
+/// lost (crash between status write and enqueue) must be idempotently
+/// RE-ENQUEUED on replay — treating `Queued` as proof of enqueue left the
+/// message undeliverable forever.
+#[tokio::test]
+async fn queued_replay_re_enqueues_crash_orphaned_message() {
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let store = Arc::new(in_memory_agent_turn_runtime());
+    let coordinator: Arc<dyn TurnCoordinator> = Arc::new(DefaultTurnCoordinator::new(store));
+    // Phase 1 — the "crashed" process: enqueue vanishes, so the row is Queued
+    // with no backing queue entry.
+    let crashed = DefaultInboundTurnService::new(
+        binding_service.clone(),
+        thread_service.clone(),
+        Arc::clone(&coordinator),
+    )
+    .with_input_enqueue(Arc::new(VanishingInputEnqueue));
+
+    let first = sample_user_message_envelope("orphan1");
+    crashed.accept_user_message(&first).await.expect("first");
+    let second = sample_user_message_envelope_with_text("orphan2", "orphaned steering");
+    let outcome = crashed
+        .accept_user_message(&second)
+        .await
+        .expect("second deferred");
+    let InboundTurnOutcome::DeferredBusy { active_run_id, .. } = outcome else {
+        panic!("expected DeferredBusy, got {outcome:?}");
+    };
+
+    // Phase 2 — the restarted process with the REAL queue: the replay of the
+    // same envelope must re-enqueue before replaying DeferredBusy.
+    let real_queue = Arc::new(InMemoryHostInputQueue::new(
+        Arc::new(thread_service.clone()) as Arc<dyn SessionThreadService>,
+    ));
+    assert!(
+        real_queue
+            .next_after(active_run_id, origin_cursor(), 8)
+            .await
+            .expect("empty poll")
+            .inputs
+            .is_empty(),
+        "precondition: the orphaned message has no queue entry"
+    );
+    let restarted = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        Arc::clone(&coordinator),
+    )
+    .with_input_enqueue(real_queue.clone() as Arc<dyn HostInputEnqueuePort>);
+    let replayed = restarted
+        .accept_user_message(&second)
+        .await
+        .expect("replay succeeds");
+    assert!(
+        matches!(replayed, InboundTurnOutcome::DeferredBusy { .. }),
+        "replay stays DeferredBusy, got {replayed:?}"
+    );
+    let batch = real_queue
+        .next_after(active_run_id, origin_cursor(), 8)
+        .await
+        .expect("poll after replay");
+    assert_eq!(
+        batch.inputs.len(),
+        1,
+        "the queued replay must re-enqueue the orphaned steering input"
+    );
+    assert!(matches!(batch.inputs[0].input, LoopInput::Steering { .. }));
+}
+
+/// Queued replay against a run that is already terminal settles the orphaned
+/// row as `RejectedBusy` (resend affordance) instead of replaying a
+/// `DeferredBusy` no run will ever honor.
+#[tokio::test]
+async fn queued_replay_settles_rejected_when_active_run_is_terminal() {
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let store = Arc::new(in_memory_agent_turn_runtime());
+    let coordinator: Arc<dyn TurnCoordinator> = Arc::new(DefaultTurnCoordinator::new(store));
+    let crashed = DefaultInboundTurnService::new(
+        binding_service.clone(),
+        thread_service.clone(),
+        Arc::clone(&coordinator),
+    )
+    .with_input_enqueue(Arc::new(VanishingInputEnqueue));
+
+    let first = sample_user_message_envelope("orphan-term1");
+    let submitted = crashed.accept_user_message(&first).await.expect("first");
+    let InboundTurnOutcome::Submitted {
+        submitted_run_id,
+        binding,
+        ..
+    } = submitted
+    else {
+        panic!("expected Submitted, got {submitted:?}");
+    };
+    let second = sample_user_message_envelope_with_text("orphan-term2", "steer a dead run");
+    let outcome = crashed
+        .accept_user_message(&second)
+        .await
+        .expect("second deferred");
+    assert!(matches!(outcome, InboundTurnOutcome::DeferredBusy { .. }));
+
+    // Run A reaches a terminal state before the replay.
+    let scope = ironclaw_turns::TurnScope::new_with_owner(
+        binding.tenant_id.clone(),
+        binding.agent_id.clone(),
+        binding.project_id.clone(),
+        binding.thread_id.clone(),
+        binding.subject_user_id.clone(),
+    );
+    coordinator
+        .cancel_run(ironclaw_turns::CancelRunRequest {
+            scope,
+            actor: ironclaw_turns::TurnActor::new(binding.actor_user_id.clone()),
+            run_id: submitted_run_id,
+            reason: ironclaw_turns::SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new("orphan-term-cancel").expect("key"),
+        })
+        .await
+        .expect("cancel run A");
+
+    let real_queue = Arc::new(InMemoryHostInputQueue::new(
+        Arc::new(thread_service.clone()) as Arc<dyn SessionThreadService>,
+    ));
+    let restarted = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        Arc::clone(&coordinator),
+    )
+    .with_input_enqueue(real_queue.clone() as Arc<dyn HostInputEnqueuePort>);
+    let replayed = restarted
+        .accept_user_message(&second)
+        .await
+        .expect("replay succeeds");
+    let InboundTurnOutcome::RejectedBusy { binding, .. } = replayed else {
+        panic!("expected RejectedBusy for a terminal run, got {replayed:?}");
+    };
+    let scope = ThreadScope {
+        tenant_id: binding.tenant_id.clone(),
+        agent_id: binding.agent_id.clone().expect("agent id"),
+        project_id: binding.project_id.clone(),
+        owner_user_id: binding.subject_user_id.clone(),
+        mission_id: None,
+    };
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(
+        history.messages[1].status,
+        MessageStatus::RejectedBusy,
+        "the orphaned row settles as RejectedBusy"
+    );
+    let batch = real_queue
+        .next_after(submitted_run_id, origin_cursor(), 8)
+        .await
+        .expect("poll");
+    assert!(
+        batch.inputs.is_empty(),
+        "nothing may be enqueued for a terminal run"
     );
 }

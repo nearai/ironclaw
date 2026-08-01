@@ -16670,3 +16670,100 @@ async fn execute_user_audience_commands_succeed_without_admin_directory_but_admi
     assert_eq!(admin_audience_error.status_code, 503);
     assert!(admin_audience_error.retryable);
 }
+
+// ---------------------------------------------------------------------------
+// Queued-replay crash-orphan recovery (WebUI path): a Queued row whose queue
+// entry was lost (crash between the status write and the enqueue) must be
+// idempotently re-enqueued on replay instead of treating Queued as proof.
+// ---------------------------------------------------------------------------
+
+struct VanishingWebUiEnqueue;
+
+#[async_trait]
+impl ironclaw_loop_host::HostInputEnqueuePort for VanishingWebUiEnqueue {
+    async fn enqueue_queued_message(
+        &self,
+        request: ironclaw_loop_host::EnqueueQueuedMessageRequest,
+    ) -> Result<ironclaw_loop_host::HostInputEnvelope, ironclaw_loop_host::HostInputQueueError>
+    {
+        Ok(ironclaw_loop_host::HostInputEnvelope {
+            input: request.input,
+            cursor: ironclaw_loop_contracts::LoopInputCursorToken::new(
+                "input-cursor:1".to_string(),
+            )
+            .expect("cursor"),
+            ack_token: ironclaw_loop_contracts::LoopInputAckToken::new("input-ack:1".to_string())
+                .expect("ack token"),
+        })
+    }
+}
+
+#[tokio::test]
+async fn webui_queued_replay_re_enqueues_crash_orphaned_message() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let active_run_id = TurnRunId::new();
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id,
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(3),
+        }),
+    ));
+    // Phase 1 — the "crashed" process: the enqueue vanishes, leaving the row
+    // Queued with no backing queue entry.
+    let crashed = RebornServices::new(
+        thread_service.clone() as Arc<dyn SessionThreadService>,
+        coordinator.clone(),
+    )
+    .with_input_enqueue(Arc::new(VanishingWebUiEnqueue));
+    setup_owned_thread(&crashed, caller(), "thread-orphan-webui").await;
+    let request = || {
+        serde_json::from_value::<ProductSubmitTurnRequest>(json!({
+            "client_action_id": "send-orphan-webui",
+            "thread_id": "thread-orphan-webui",
+            "content": "orphaned webui steering"
+        }))
+        .expect("request")
+    };
+    let response = crashed
+        .submit_turn(caller(), request())
+        .await
+        .expect("busy submit succeeds");
+    assert!(
+        matches!(response, RebornSubmitTurnResponse::DeferredBusy { .. }),
+        "expected DeferredBusy, got {response:?}"
+    );
+
+    // Phase 2 — the restarted process with the REAL queue: the same
+    // client_action_id triggers the WebUI replay, which must re-enqueue.
+    let real_queue = Arc::new(ironclaw_loop_host::InMemoryHostInputQueue::new(
+        thread_service.clone() as Arc<dyn SessionThreadService>,
+    ));
+    let restarted = RebornServices::new(
+        thread_service.clone() as Arc<dyn SessionThreadService>,
+        coordinator,
+    )
+    .with_input_enqueue(real_queue.clone() as Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>);
+    let replayed = restarted
+        .submit_turn(caller(), request())
+        .await
+        .expect("replay succeeds");
+    assert!(
+        matches!(replayed, RebornSubmitTurnResponse::DeferredBusy { .. }),
+        "replay stays DeferredBusy, got {replayed:?}"
+    );
+    use ironclaw_loop_host::HostInputQueue as _;
+    let batch = real_queue
+        .next_after(
+            active_run_id,
+            ironclaw_loop_contracts::LoopInputCursorToken::origin(),
+            8,
+        )
+        .await
+        .expect("poll after replay");
+    assert_eq!(
+        batch.inputs.len(),
+        1,
+        "the WebUI queued replay must re-enqueue the orphaned steering input"
+    );
+}

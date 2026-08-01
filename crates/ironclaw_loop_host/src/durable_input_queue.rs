@@ -33,7 +33,6 @@
 //! trait change. `run_id` uniqueness makes that unnecessary for correctness or
 //! isolation, so it is intentionally left out here.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -58,14 +57,57 @@ use crate::input_queue::{
 const MAX_CAS_RETRIES: usize = 8;
 
 /// Durable per-run queue document persisted as JSON at the run's queue path.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct DurableRunQueue {
+    /// Next sequence to issue. Starts at 1 so the origin cursor (sequence 0)
+    /// stays the unique run-start position and every real input is strictly
+    /// after it.
+    #[serde(default = "first_sequence")]
     next_sequence: u64,
     entries: Vec<DurableEntry>,
-    /// Sequences whose inputs have been consumed and acked. Retained (even
-    /// after the entry payload is pruned) so a duplicate/redelivered ack is
-    /// skipped idempotently.
-    acked: Vec<u64>,
+    /// Compact ack state: every sequence `<= acked_watermark` is acked, plus
+    /// the sparse out-of-order set above it. Keeps duplicate/redelivered acks
+    /// idempotent without a tombstone per input, so the document does not grow
+    /// (and get reparsed/rewritten) without bound over a long-lived run.
+    #[serde(default)]
+    acked_watermark: u64,
+    #[serde(default)]
+    acked_above: Vec<u64>,
+}
+
+fn first_sequence() -> u64 {
+    1
+}
+
+impl Default for DurableRunQueue {
+    fn default() -> Self {
+        Self {
+            next_sequence: first_sequence(),
+            entries: Vec::new(),
+            acked_watermark: 0,
+            acked_above: Vec::new(),
+        }
+    }
+}
+
+impl DurableRunQueue {
+    fn is_acked(&self, sequence: u64) -> bool {
+        sequence <= self.acked_watermark || self.acked_above.contains(&sequence)
+    }
+
+    fn record_ack(&mut self, sequence: u64) {
+        if sequence <= self.acked_watermark {
+            return;
+        }
+        if !self.acked_above.contains(&sequence) {
+            self.acked_above.push(sequence);
+        }
+        self.acked_above.sort_unstable();
+        while self.acked_above.first() == Some(&(self.acked_watermark + 1)) {
+            self.acked_above.remove(0);
+            self.acked_watermark += 1;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,34 +292,43 @@ where
                 next_cursor: after,
             });
         }
-        if after_sequence > queue.next_sequence {
+        // `next_sequence` is the next-to-issue value, so the max issued cursor
+        // is `next_sequence - 1`; anything at or past `next_sequence` is an
+        // unissued FUTURE cursor and is rejected instead of read as empty.
+        if after_sequence >= queue.next_sequence {
             return Err(HostInputQueueError::InvalidCursor {
                 reason: "input cursor is ahead of the run input queue".to_string(),
             });
         }
-        let acked: HashSet<u64> = queue.acked.iter().copied().collect();
+        // Strictly-after semantics: an entry's own cursor is its sequence, so
+        // polling from that cursor never returns the entry again.
         let mut inputs = Vec::new();
-        let mut next_sequence = after_sequence;
+        let mut cursor_sequence_out = after_sequence;
         let mut ordered: Vec<&DurableEntry> = queue
             .entries
             .iter()
-            .filter(|entry| entry.sequence >= after_sequence)
+            .filter(|entry| entry.sequence > after_sequence)
             .collect();
         ordered.sort_by_key(|entry| entry.sequence);
         for entry in ordered {
-            next_sequence = entry.sequence.saturating_add(1);
-            if acked.contains(&entry.sequence) {
+            if queue.is_acked(entry.sequence) {
+                cursor_sequence_out = entry.sequence;
                 continue;
             }
             if inputs.len() >= limit {
-                next_sequence = entry.sequence;
                 break;
             }
             inputs.push(envelope_for(entry.sequence, entry.input.clone())?);
+            cursor_sequence_out = entry.sequence;
         }
+        let next_cursor = if cursor_sequence_out == 0 {
+            LoopInputCursorToken::origin()
+        } else {
+            cursor_token(cursor_sequence_out)?
+        };
         Ok(HostInputBatch {
             inputs,
-            next_cursor: cursor_token(next_sequence)?,
+            next_cursor,
         })
     }
 
@@ -297,12 +348,11 @@ where
                 // No durable queue for this run: nothing to ack.
                 return Ok(());
             };
-            let already: HashSet<u64> = queue.acked.iter().copied().collect();
             let mut newly_acked = Vec::new();
             status_updates.clear();
             for token in &tokens {
                 let sequence = ack_sequence(token)?;
-                if already.contains(&sequence) {
+                if queue.is_acked(sequence) {
                     continue;
                 }
                 // Fail loud on a token for a sequence that is neither live nor
@@ -325,14 +375,16 @@ where
             if newly_acked.is_empty() {
                 return Ok(());
             }
-            queue.acked.extend(newly_acked);
+            for sequence in &newly_acked {
+                queue.record_ack(*sequence);
+            }
             // Prune consumed entry payloads to bound the document size; the
-            // sequence stays in `acked` for idempotency, and `next_sequence`
-            // is the high-water mark so a stale cursor never looks "ahead".
-            let acked_now: HashSet<u64> = queue.acked.iter().copied().collect();
+            // compact watermark/sparse-set ack state keeps duplicate acks
+            // idempotent, and `next_sequence` is the high-water mark so a
+            // stale cursor never looks "ahead".
             queue
                 .entries
-                .retain(|entry| !acked_now.contains(&entry.sequence));
+                .retain(|entry| !newly_acked.contains(&entry.sequence));
             match self.store(run_id, &queue, Some(version)).await {
                 Ok(()) => {
                     committed = true;
@@ -380,46 +432,45 @@ where
         &self,
         run_id: TurnRunId,
     ) -> Result<Vec<ThreadMessageId>, HostInputQueueError> {
-        // Phase 1: durably claim every live entry (CAS retry) — mark acked and
-        // prune — so a still-running loop that races this call can no longer
-        // drain them. Mirrors `ack_consumed`'s two-phase shape.
+        // Phase 1: durably claim every live entry by DELETING the run's queue
+        // document under its CAS version — the run is terminal, so nothing may
+        // enqueue for it again, a racing drain can no longer load the claimed
+        // entries, and a late duplicate ack finds no document (a no-op). This
+        // is also the durable lifetime bound: terminal queues do not
+        // accumulate documents (or ack state) forever.
         let mut status_updates = Vec::new();
         let mut committed = false;
         for _ in 0..MAX_CAS_RETRIES {
-            let (mut queue, version) = self.load(run_id).await?;
+            let (queue, version) = self.load(run_id).await?;
             let Some(version) = version else {
                 // No durable queue for this run: nothing to reconcile.
                 return Ok(Vec::new());
             };
-            let already: HashSet<u64> = queue.acked.iter().copied().collect();
-            status_updates.clear();
-            let mut newly_acked = Vec::new();
-            for entry in &queue.entries {
-                if already.contains(&entry.sequence) {
-                    continue;
-                }
-                status_updates.push(entry.status.clone());
-                newly_acked.push(entry.sequence);
-            }
-            if newly_acked.is_empty() {
-                return Ok(Vec::new());
-            }
-            queue.acked.extend(newly_acked);
-            let acked_now: HashSet<u64> = queue.acked.iter().copied().collect();
-            queue
+            status_updates = queue
                 .entries
-                .retain(|entry| !acked_now.contains(&entry.sequence));
-            match self.store(run_id, &queue, Some(version)).await {
+                .iter()
+                .filter(|entry| !queue.is_acked(entry.sequence))
+                .map(|entry| entry.status.clone())
+                .collect();
+            let path = queue_path(run_id)?;
+            match self
+                .filesystem
+                .delete_if_version(&self.owner_scope, &path, version)
+                .await
+            {
                 Ok(()) => {
                     committed = true;
                     break;
                 }
-                Err(StorePutError::Conflict) => continue,
-                Err(StorePutError::Fatal(error)) => return Err(error),
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => return Err(fs_error(error)),
             }
         }
         if !committed {
             return Err(cas_exhausted("reject_unconsumed"));
+        }
+        if status_updates.is_empty() {
+            return Ok(Vec::new());
         }
 
         // Phase 2: best-effort transcript flip `Queued` → `RejectedBusy`. The
@@ -848,6 +899,178 @@ mod tests {
         assert!(after.inputs.is_empty());
         let again = queue.reject_unconsumed(run_id).await.expect("idempotent");
         assert!(again.is_empty());
+    }
+
+    /// The origin cursor is the unique run-start position: the first enqueued
+    /// input's cursor is sequence 1, strictly after origin (sequence 0), and a
+    /// cursor at or past the next-to-issue sequence is rejected as unissued
+    /// instead of read as an empty position.
+    #[tokio::test]
+    async fn origin_cursor_is_unique_and_future_cursors_are_rejected() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let thread_service: Arc<dyn SessionThreadService> =
+            Arc::new(InMemorySessionThreadService::default());
+        let queue = FilesystemHostInputQueue::new(make_fs(backend), owner_scope(), thread_service);
+        let run_id = TurnRunId::new();
+        let envelope = queue
+            .enqueue_queued_message(EnqueueQueuedMessageRequest {
+                run_id,
+                turn_id: TurnId::new(),
+                scope: ghost_scope(),
+                thread_id: ThreadId::new("thread-origin").unwrap(),
+                message_id: ThreadMessageId::new(),
+                input: steering("msg:origin-unique"),
+            })
+            .await
+            .expect("enqueue");
+        assert_ne!(
+            envelope.cursor,
+            origin(),
+            "the first input's cursor must be strictly after the origin cursor"
+        );
+
+        let batch = queue.next_after(run_id, origin(), 8).await.expect("poll");
+        assert_eq!(batch.inputs.len(), 1);
+        // Polling from the entry's own cursor returns nothing (strict-after).
+        let after = queue
+            .next_after(run_id, batch.inputs[0].cursor.clone(), 8)
+            .await
+            .expect("poll strictly after");
+        assert!(after.inputs.is_empty());
+        // A cursor for a sequence that was never issued is rejected.
+        let future = queue
+            .next_after(
+                run_id,
+                LoopInputCursorToken::new("input-cursor:2".to_string()).expect("token"),
+                8,
+            )
+            .await;
+        assert!(
+            matches!(future, Err(HostInputQueueError::InvalidCursor { .. })),
+            "unissued future cursor must be rejected, got {future:?}"
+        );
+    }
+
+    /// Regression: a corrupt persisted queue document surfaces as
+    /// `Unavailable` from BOTH `next_after` and `enqueue_queued_message`, and
+    /// the corrupt bytes are preserved for diagnosis — never silently
+    /// overwritten with a fresh document.
+    #[tokio::test]
+    async fn corrupt_durable_document_surfaces_unavailable_and_is_preserved() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let filesystem = make_fs(Arc::clone(&backend));
+        let thread_service: Arc<dyn SessionThreadService> =
+            Arc::new(InMemorySessionThreadService::default());
+        let queue =
+            FilesystemHostInputQueue::new(Arc::clone(&filesystem), owner_scope(), thread_service);
+        let run_id = TurnRunId::new();
+        let path = queue_path(run_id).expect("path");
+        let corrupt = b"{not json".to_vec();
+        filesystem
+            .put(
+                &owner_scope(),
+                &path,
+                Entry::bytes(corrupt.clone()).with_content_type(ContentType::json()),
+                CasExpectation::Absent,
+            )
+            .await
+            .expect("seed corrupt document");
+
+        let poll = queue.next_after(run_id, origin(), 8).await;
+        assert!(
+            matches!(poll, Err(HostInputQueueError::Unavailable { .. })),
+            "corrupt document must surface Unavailable from next_after, got {poll:?}"
+        );
+        let enqueue = queue
+            .enqueue_queued_message(EnqueueQueuedMessageRequest {
+                run_id,
+                turn_id: TurnId::new(),
+                scope: ghost_scope(),
+                thread_id: ThreadId::new("thread-corrupt").unwrap(),
+                message_id: ThreadMessageId::new(),
+                input: steering("msg:corrupt"),
+            })
+            .await;
+        assert!(
+            matches!(enqueue, Err(HostInputQueueError::Unavailable { .. })),
+            "corrupt document must surface Unavailable from enqueue, got {enqueue:?}"
+        );
+        let preserved = filesystem
+            .get(&owner_scope(), &path)
+            .await
+            .expect("read back")
+            .expect("document still present");
+        assert_eq!(
+            preserved.entry.body, corrupt,
+            "the corrupt document must be preserved, not overwritten"
+        );
+    }
+
+    /// CAS retry under real contention: concurrent enqueues (producer side)
+    /// against the same run document must each land exactly once — a lost
+    /// update would drop a queued message; a resurrected ack would redeliver.
+    #[tokio::test]
+    async fn concurrent_enqueues_and_acks_survive_cas_contention() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let filesystem = make_fs(backend);
+        let thread_service: Arc<dyn SessionThreadService> =
+            Arc::new(InMemorySessionThreadService::default());
+        let queue = Arc::new(FilesystemHostInputQueue::new(
+            filesystem,
+            owner_scope(),
+            thread_service,
+        ));
+        let run_id = TurnRunId::new();
+
+        let mut joins = Vec::new();
+        for index in 0..8 {
+            let queue = Arc::clone(&queue);
+            joins.push(tokio::spawn(async move {
+                queue
+                    .enqueue_queued_message(EnqueueQueuedMessageRequest {
+                        run_id,
+                        turn_id: TurnId::new(),
+                        scope: ghost_scope(),
+                        thread_id: ThreadId::new("thread-contention").unwrap(),
+                        message_id: ThreadMessageId::new(),
+                        input: steering(&format!("msg:contended-{index}")),
+                    })
+                    .await
+            }));
+        }
+        for join in joins {
+            join.await.expect("task").expect("enqueue under contention");
+        }
+
+        let batch = queue.next_after(run_id, origin(), 16).await.expect("poll");
+        assert_eq!(
+            batch.inputs.len(),
+            8,
+            "every contended enqueue must land exactly once"
+        );
+
+        // Concurrent acks of disjoint halves: every input acked exactly once,
+        // nothing redelivered afterward.
+        let (first_half, second_half) = batch.inputs.split_at(4);
+        let tokens_a: Vec<_> = first_half.iter().map(|e| e.ack_token.clone()).collect();
+        let tokens_b: Vec<_> = second_half.iter().map(|e| e.ack_token.clone()).collect();
+        let queue_a = Arc::clone(&queue);
+        let queue_b = Arc::clone(&queue);
+        let (result_a, result_b) = tokio::join!(
+            queue_a.ack_consumed(run_id, tokens_a),
+            queue_b.ack_consumed(run_id, tokens_b)
+        );
+        result_a.expect("ack half A under contention");
+        result_b.expect("ack half B under contention");
+        let after = queue
+            .next_after(run_id, origin(), 16)
+            .await
+            .expect("poll after acks");
+        assert!(
+            after.inputs.is_empty(),
+            "no input may be redelivered after concurrent acks, got {}",
+            after.inputs.len()
+        );
     }
 
     #[tokio::test]

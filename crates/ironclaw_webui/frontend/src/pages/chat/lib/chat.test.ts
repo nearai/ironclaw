@@ -6,7 +6,6 @@ import vm from "node:vm";
 import { channelConnectionDisplayName } from "../../../lib/channel-connection-events";
 import { componentSourceForTest } from "../../../lib/vm-component-harness";
 import "../../../test/vm-tsx-setup";
-import { enrichApprovalGateWithActivityArguments } from "./gate-arguments";
 import { channelConnectionFromGate } from "./gates";
 import { messageBelongsToActiveRun } from "./message-types";
 
@@ -112,7 +111,6 @@ function renderChat({
     NEW_DRAFT_KEY: "new",
     THREAD_STATE: { NEEDS_ATTENTION: "needs_attention", RUNNING: "running" },
     buildRuntimeContext: () => ({}),
-    enrichApprovalGateWithActivityArguments,
     buildScopedLogsPath: ({ threadId }) => `/logs?thread_id=${threadId}`,
     clearThreadState: (threadId) =>
       threadStateUpdates.push({ threadId, state: null }),

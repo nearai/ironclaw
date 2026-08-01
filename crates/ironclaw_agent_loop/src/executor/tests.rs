@@ -297,6 +297,22 @@ async fn reply_only_drains_steering_arriving_at_exit_boundary() {
         host.acked_input_tokens(),
         vec![LoopInputAckToken::new("input-ack:after-late-steering").expect("valid")]
     );
+    // Ordering, not just occurrence: the forced extra iteration must build its
+    // prompt AFTER the drain's durable cursor checkpoint and ack — the ack is
+    // what makes the queued row model-visible, so an iteration forced with the
+    // ack still pending would feed the model a prompt without the message.
+    assert_eq!(
+        host.events(),
+        vec![
+            "build_prompt_bundle".to_string(),
+            "checkpoint:before_model".to_string(),
+            "checkpoint:before_model".to_string(),
+            "ack_inputs".to_string(),
+            "build_prompt_bundle".to_string(),
+            "checkpoint:before_model".to_string(),
+            "checkpoint:final".to_string(),
+        ]
+    );
     assert_eq!(final_staged_state(&host).stop_state.turns_completed, 2);
 }
 

@@ -1,6 +1,6 @@
 //! Host-owned input queue contract for Reborn loop input ports.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -86,6 +86,13 @@ pub enum HostInputQueueError {
     Unavailable { reason: String },
     #[error("cursor invalid for run: {reason}")]
     InvalidCursor { reason: String },
+    /// Steering is deliberately not wired for this runtime (the
+    /// [`RejectingInputEnqueue`] null port). Distinct from [`Self::Unavailable`]
+    /// so callers can fall back to the rejected-busy outcome ONLY for the
+    /// disabled mode, while genuine durable-I/O failures surface as retryable
+    /// errors instead of masquerading as successful rejections.
+    #[error("input queue is not wired for this runtime")]
+    Disabled,
     #[error("input queue internal error")]
     Internal,
 }
@@ -96,9 +103,12 @@ pub trait HostInputEnqueuePort: Send + Sync {
     ///
     /// The request carries the originating thread message identity so the queue
     /// can transition that message to `submitted` once the input is consumed.
-    /// There is deliberately no metadata-free variant: every enqueued input is
-    /// backed by a thread message, so the status transition can never be
-    /// silently dropped.
+    /// That transition is BEST-EFFORT transcript bookkeeping: input
+    /// consumption/ack is never rolled back when the status write fails (a
+    /// stale `Queued` badge is reconcilable; a dead run is not), and the
+    /// failure is logged at debug level. There is deliberately no
+    /// metadata-free variant: every enqueued input is backed by a thread
+    /// message, so the transition can never be silently *omitted*.
     async fn enqueue_queued_message(
         &self,
         request: EnqueueQueuedMessageRequest,
@@ -106,8 +116,9 @@ pub trait HostInputEnqueuePort: Send + Sync {
 }
 
 /// Null-object enqueue port used as the default when a host has not wired a
-/// real input queue. Every enqueue fails closed with `Unavailable` rather than
-/// silently dropping the message. Production runtimes always replace this with
+/// real input queue. Every enqueue fails closed with the distinct
+/// [`HostInputQueueError::Disabled`] rather than silently dropping the
+/// message (or conflating "steering off" with an operational failure). Production runtimes always replace this with
 /// the host-owned queue; it exists so callers can hold a non-optional
 /// `Arc<dyn HostInputEnqueuePort>` instead of an `Option` that production never
 /// leaves unset.
@@ -120,9 +131,7 @@ impl HostInputEnqueuePort for RejectingInputEnqueue {
         &self,
         _request: EnqueueQueuedMessageRequest,
     ) -> Result<HostInputEnvelope, HostInputQueueError> {
-        Err(HostInputQueueError::Unavailable {
-            reason: "input queue is not wired for this runtime".to_string(),
-        })
+        Err(HostInputQueueError::Disabled)
     }
 }
 
@@ -134,6 +143,17 @@ pub struct EnqueueQueuedMessageRequest {
     pub thread_id: ThreadId,
     pub message_id: ThreadMessageId,
     pub input: LoopInput,
+}
+
+fn poisoned_lock(operation: &'static str) -> HostInputQueueError {
+    // Carry the diagnosis to the log before collapsing to the sanitized
+    // variant (`.claude/rules/error-handling.md`: never a bare `map_err(|_|)`).
+    tracing::debug!(
+        component = "host_input_queue",
+        operation,
+        "input queue state lock poisoned"
+    );
+    HostInputQueueError::Internal
 }
 
 #[derive(Clone)]
@@ -171,11 +191,44 @@ impl std::fmt::Debug for InMemoryHostInputQueueState {
     }
 }
 
-#[derive(Default)]
 struct InMemoryRunInputQueue {
     entries: Vec<InMemoryInputEntry>,
-    acked: HashSet<LoopInputAckToken>,
+    /// Compact ack state: every sequence `<= acked_watermark` is acked, plus
+    /// the sparse out-of-order set above it. Bounded by in-flight inputs, not
+    /// by queue lifetime — the tombstone-per-ack shape grew without bound.
+    acked_watermark: u64,
+    acked_above: std::collections::BTreeSet<u64>,
+    /// Next sequence to issue. Starts at 1 so the origin cursor (sequence 0)
+    /// stays the unique run-start position and every real input is strictly
+    /// after it.
     next_sequence: u64,
+}
+
+impl Default for InMemoryRunInputQueue {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            acked_watermark: 0,
+            acked_above: std::collections::BTreeSet::new(),
+            next_sequence: 1,
+        }
+    }
+}
+
+impl InMemoryRunInputQueue {
+    fn is_acked(&self, sequence: u64) -> bool {
+        sequence <= self.acked_watermark || self.acked_above.contains(&sequence)
+    }
+
+    fn record_ack(&mut self, sequence: u64) {
+        if sequence <= self.acked_watermark {
+            return;
+        }
+        self.acked_above.insert(sequence);
+        while self.acked_above.remove(&(self.acked_watermark + 1)) {
+            self.acked_watermark += 1;
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -268,41 +321,48 @@ impl HostInputQueue for InMemoryHostInputQueue {
         limit: usize,
     ) -> Result<HostInputBatch, HostInputQueueError> {
         let after_sequence = cursor_sequence(&after)?;
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| HostInputQueueError::Internal)?;
+        let state = self.state.lock().map_err(|_| poisoned_lock("next_after"))?;
         let Some(queue) = state.runs.get(&run_id) else {
             return Ok(HostInputBatch {
                 inputs: Vec::new(),
                 next_cursor: after,
             });
         };
-        if after_sequence > queue.next_sequence {
+        // `next_sequence` is the next-to-issue value, so the max issued cursor
+        // is `next_sequence - 1`; anything at or past `next_sequence` is an
+        // unissued FUTURE cursor and is rejected instead of read as empty.
+        if after_sequence >= queue.next_sequence {
             return Err(HostInputQueueError::InvalidCursor {
                 reason: "input cursor is ahead of the run input queue".to_string(),
             });
         }
+        // Strictly-after semantics: an entry's own cursor is its sequence, so
+        // polling from that cursor never returns the entry again.
         let mut inputs = Vec::new();
-        let mut next_sequence = after_sequence;
+        let mut cursor_sequence_out = after_sequence;
         for entry in queue
             .entries
             .iter()
-            .filter(|entry| entry.sequence >= after_sequence)
+            .filter(|entry| entry.sequence > after_sequence)
         {
-            next_sequence = entry.sequence.saturating_add(1);
-            if queue.acked.contains(&entry.envelope.ack_token) {
+            if queue.is_acked(entry.sequence) {
+                cursor_sequence_out = entry.sequence;
                 continue;
             }
             if inputs.len() >= limit {
-                next_sequence = entry.sequence;
                 break;
             }
             inputs.push(entry.envelope.clone());
+            cursor_sequence_out = entry.sequence;
         }
+        let next_cursor = if cursor_sequence_out == 0 {
+            LoopInputCursorToken::origin()
+        } else {
+            cursor_token(cursor_sequence_out)?
+        };
         Ok(HostInputBatch {
             inputs,
-            next_cursor: cursor_token(next_sequence)?,
+            next_cursor,
         })
     }
 
@@ -311,26 +371,31 @@ impl HostInputQueue for InMemoryHostInputQueue {
         run_id: TurnRunId,
         tokens: Vec<LoopInputAckToken>,
     ) -> Result<(), HostInputQueueError> {
-        let (tokens_to_ack, updates) = {
-            let state = self
+        // Record acks and prune consumed entries UNDER the lock, before any
+        // await: a concurrent `next_after` must never observe a consumed input
+        // as unacked and redeliver it while the (async) transcript flip below
+        // is still in flight.
+        let updates = {
+            let mut state = self
                 .state
                 .lock()
-                .map_err(|_| HostInputQueueError::Internal)?;
-            let Some(queue) = state.runs.get(&run_id) else {
+                .map_err(|_| poisoned_lock("ack_consumed"))?;
+            let Some(queue) = state.runs.get_mut(&run_id) else {
                 return Ok(());
             };
-            let mut tokens_to_ack = Vec::new();
             let mut updates = Vec::new();
+            let mut sequences_to_ack = Vec::new();
             for token in tokens {
-                if queue.acked.contains(&token) {
+                let sequence = ack_sequence(&token)?;
+                if queue.is_acked(sequence) {
                     continue;
                 }
                 // Fail loud on a token that matches no live entry and is not
-                // already acked. Committing an unknown token into `acked` would
-                // poison state: a later entry minted for that same sequence
-                // would be skipped forever by `next_after`. A redelivered ack
-                // lands in `queue.acked` above; anything else is a genuine
-                // fault (stale/forged token), not a no-op.
+                // already acked. Committing an unknown sequence would poison
+                // state: a later entry minted for that sequence would be
+                // skipped forever by `next_after`. A redelivered ack lands in
+                // `is_acked` above; anything else is a genuine fault
+                // (stale/forged token), not a no-op.
                 let Some(entry) = queue
                     .entries
                     .iter()
@@ -345,19 +410,30 @@ impl HostInputQueue for InMemoryHostInputQueue {
                 if let Some(update) = &entry.queued_message {
                     updates.push(update.clone());
                 }
-                tokens_to_ack.push(token);
+                sequences_to_ack.push(sequence);
             }
-            (tokens_to_ack, updates)
+            for sequence in &sequences_to_ack {
+                queue.record_ack(*sequence);
+            }
+            // Drop the consumed entries' payloads (`LoopInput` + `ThreadScope`
+            // binding) to bound per-run memory over a long-lived run; the
+            // compact watermark/sparse-set ack state keeps duplicate acks
+            // idempotent without a tombstone per input.
+            queue
+                .entries
+                .retain(|entry| !sequences_to_ack.contains(&entry.sequence));
+            updates
         };
-        // The queued-message status flip (`Queued` → `Submitted`) is best-effort
-        // bookkeeping for the transcript badge, NOT part of consuming the input.
-        // The input has already been drained and delivered to the model by the
+        // The queued-message status flip (`Queued` → `Submitted`) is
+        // BEST-EFFORT bookkeeping for the transcript badge, NOT part of
+        // consuming the input (see the `HostInputEnqueuePort` contract). The
+        // input has already been drained and delivered to the model by the
         // time we ack; failing the ack here would map to a terminal
         // `HostUnavailable` and kill the whole run for a cosmetic status write
         // (see `.claude/rules/agent-loop-capabilities.md`, Invariant 1). So a
-        // status-update failure is logged with its cause and swallowed — the ack
-        // still advances so the input is never redelivered. A stale "queued"
-        // badge is reconcilable; a dead run is not.
+        // status-update failure is logged with its cause and swallowed — the
+        // ack has already advanced so the input is never redelivered. A stale
+        // "queued" badge is reconcilable; a dead run is not.
         for update in updates {
             if let Err(source) = self
                 .thread_service
@@ -370,34 +446,18 @@ impl HostInputQueue for InMemoryHostInputQueue {
                 )
                 .await
             {
-                tracing::warn!(
+                tracing::debug!(
                     component = "host_input_queue",
                     operation = "mark_message_submitted",
                     %run_id,
+                    thread_id = %update.thread_id,
+                    message_id = %update.message_id,
                     error = %source,
                     "queued-message status flip failed after the input was consumed; \
-                     acking anyway so the run continues (transcript badge may lag)"
+                     already acked so the run continues (transcript badge may lag)"
                 );
             }
         }
-        let acked_now: HashSet<LoopInputAckToken> = tokens_to_ack.iter().cloned().collect();
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| HostInputQueueError::Internal)?;
-        let queue = state.runs.entry(run_id).or_default();
-        for token in tokens_to_ack {
-            queue.acked.insert(token);
-        }
-        // Drop the consumed entries' payloads (`LoopInput` + `ThreadScope`
-        // binding) to bound per-run memory over a long-lived run. The ack token
-        // stays in `acked` so a duplicate/redelivered ack is still skipped
-        // idempotently by the guard above; `next_sequence` is a separate
-        // high-water mark, so removing entries never lets a stale cursor look
-        // "ahead of the queue".
-        queue
-            .entries
-            .retain(|entry| !acked_now.contains(&entry.envelope.ack_token));
         Ok(())
     }
 
@@ -414,29 +474,21 @@ impl HostInputQueue for InMemoryHostInputQueue {
             let mut state = self
                 .state
                 .lock()
-                .map_err(|_| HostInputQueueError::Internal)?;
-            let Some(queue) = state.runs.get_mut(&run_id) else {
+                .map_err(|_| poisoned_lock("reject_unconsumed"))?;
+            // The run is terminal: remove its whole queue entry. A late
+            // duplicate ack for a claimed input finds no queue and is a no-op;
+            // nothing else may enqueue for a terminal run. This is also the
+            // in-memory lifetime bound — completed queues do not accumulate
+            // for the daemon's lifetime.
+            let Some(queue) = state.runs.remove(&run_id) else {
                 return Ok(Vec::new());
             };
-            let mut updates = Vec::new();
-            for entry in &queue.entries {
-                if queue.acked.contains(&entry.envelope.ack_token) {
-                    continue;
-                }
-                if let Some(update) = &entry.queued_message {
-                    updates.push(update.clone());
-                }
-            }
-            let tokens: Vec<LoopInputAckToken> = queue
+            queue
                 .entries
                 .iter()
-                .map(|entry| entry.envelope.ack_token.clone())
-                .collect();
-            for token in tokens {
-                queue.acked.insert(token);
-            }
-            queue.entries.clear();
-            updates
+                .filter(|entry| !queue.is_acked(entry.sequence))
+                .filter_map(|entry| entry.queued_message.clone())
+                .collect::<Vec<_>>()
         };
         let mut rejected = Vec::new();
         for update in updates {

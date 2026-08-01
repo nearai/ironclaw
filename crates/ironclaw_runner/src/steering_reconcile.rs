@@ -88,6 +88,10 @@ impl TurnCoordinator for CancelReconcilingTurnCoordinator {
             }
             Ok(_) => {}
             Err(error) => {
+                // silent-ok: post-terminal best-effort reconciliation; the
+                // cancel outcome is already settled and must not be failed or
+                // delayed by transcript bookkeeping — the row stays visibly
+                // Queued and remains reconcilable.
                 debug!(
                     %run_id,
                     error = %error,

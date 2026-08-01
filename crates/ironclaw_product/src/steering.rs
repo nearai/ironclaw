@@ -19,18 +19,27 @@ use ironclaw_turns::{
 /// Each variant maps to a distinct caller-facing error so neither the inbound
 /// path nor the WebUI facade collapses an enqueue failure into a generic,
 /// cause-less error.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum SteeringEnqueueError {
     /// The accepted message ref could not be re-expressed as a loop message ref.
+    #[error("invalid steering message ref: {0}")]
     InvalidMessageRef(String),
     /// Reading the active run state failed.
-    RunState(TurnError),
+    #[error("active run state read failed: {0}")]
+    RunState(#[source] TurnError),
+    /// The named active run no longer exists in scope or is already terminal —
+    /// nothing will ever drain the queue, so callers fall back to the
+    /// `RejectedBusy` outcome instead of stranding the message `Queued`.
+    #[error("active run is terminal or gone; steering input has no consumer")]
+    ActiveRunGone,
     /// The active run's resolved profile forbids mid-run steering
     /// (`SteeringPolicy::allow_steering = false`); callers fall back to the
     /// `RejectedBusy` outcome exactly like the no-queue mode.
+    #[error("steering is disallowed for the active run's profile")]
     SteeringDisallowed,
     /// The host input queue rejected the enqueue.
-    Enqueue(HostInputQueueError),
+    #[error("steering enqueue failed: {0}")]
+    Enqueue(#[source] HostInputQueueError),
 }
 
 /// Enqueue `accepted_message_ref` as steering input for the busy `active_run_id`.
@@ -56,13 +65,22 @@ pub(crate) async fn enqueue_busy_steering<C>(
 where
     C: TurnCoordinator + ?Sized,
 {
-    let active_run = turn_coordinator
+    let active_run = match turn_coordinator
         .get_run_state(GetRunStateRequest {
             scope: turn_scope,
             run_id: active_run_id,
         })
         .await
-        .map_err(SteeringEnqueueError::RunState)?;
+    {
+        Ok(state) => state,
+        // The run named by the busy rejection (or the queued replay row) is
+        // gone from this scope: nothing can drain the queue for it.
+        Err(TurnError::ScopeNotFound) => return Err(SteeringEnqueueError::ActiveRunGone),
+        Err(error) => return Err(SteeringEnqueueError::RunState(error)),
+    };
+    if active_run.status.is_terminal() {
+        return Err(SteeringEnqueueError::ActiveRunGone);
+    }
     if !active_run.allow_steering {
         return Err(SteeringEnqueueError::SteeringDisallowed);
     }

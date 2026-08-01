@@ -26,7 +26,6 @@ import { channelConnectionDisplayName } from "../../lib/channel-connection-event
 import { channelConnectionFromGate } from "./lib/gates";
 import { NEW_DRAFT_KEY } from "./lib/draft-store";
 import { buildRuntimeContext } from "./lib/runtime-context";
-import { enrichApprovalGateWithActivityArguments } from "./lib/gate-arguments";
 import { buildScopedLogsPath } from "../logs/lib/logs-data";
 import { useInterfacePreferences } from "../../lib/interface-preferences";
 
@@ -193,12 +192,6 @@ export function Chat({
       activeThreadIsProcessing &&
       !activeThreadHasGate &&
       !activeThreadHasOnboarding
-  );
-  // Surface the gated tool's staged arguments on the approval card by joining
-  // the pending gate to its tool-activity row by invocationId (strict join).
-  const pendingGateForDisplay = React.useMemo(
-    () => enrichApprovalGateWithActivityArguments(pendingGate, messages),
-    [pendingGate, messages]
   );
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [], displayContent } = {}) => {
@@ -457,7 +450,7 @@ export function Chat({
                 ))
               : (
               <ApprovalCard
-                gate={pendingGateForDisplay}
+                gate={pendingGate}
                 globalAutoApproveEnabled={globalAutoApproveEnabled}
                 onApprove={() =>
                   approve(pendingGate.requestId, "approve", pendingGate.kind)}
