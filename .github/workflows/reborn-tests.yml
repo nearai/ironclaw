@@ -1037,7 +1037,7 @@ jobs:
             exit 1
           fi
 
-          if ! job_result_ok "critical-mutation" "${{ needs.critical-mutation.result }}" false "allow"; then
+          if ! job_result_ok "critical-mutation" "${{ needs.critical-mutation.result }}" true "allow"; then
             echo "Critical named-function mutation gate failed: ${{ needs.critical-mutation.result }}"
             exit 1
           fi

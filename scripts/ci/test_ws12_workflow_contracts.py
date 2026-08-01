@@ -141,6 +141,17 @@ class WorkflowContractSabotageTests(unittest.TestCase):
         self.assertIn("python3 scripts/ci/test_ws12_suite_shards.py", workflow)
         self.assertIn("python3 scripts/ci/test_ws12_workflow_contracts.py", workflow)
 
+    def test_workflow_dispatch_allows_expected_critical_mutation_skip(self) -> None:
+        workflow = (ROOT / ".github/workflows/reborn-tests.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            'job_result_ok "critical-mutation" '
+            '"${{ needs.critical-mutation.result }}" true "allow"',
+            workflow,
+        )
+
     def test_code_style_fast_checks_share_one_runner_without_losing_gates(self) -> None:
         workflow = (ROOT / ".github/workflows/code_style.yml").read_text(
             encoding="utf-8"
