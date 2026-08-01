@@ -287,6 +287,10 @@ name = "reborn_integration_cancel"
 path = "tests/integration/cancel.rs"
 
 [[test]]
+name = "reborn_integration_steering"
+path = "tests/integration/steering.rs"
+
+[[test]]
 name = "reborn_integration_model_recovery"
 path = "tests/integration/model_recovery.rs"
 

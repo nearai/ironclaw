@@ -554,6 +554,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     let channel_config = configured_channel_config().await;
     let deps = GenericChannelHostDeps {
         inbound_attachments: Arc::new(InertAttachmentLander),
+        input_enqueue: Arc::new(ironclaw_loop_host::RejectingInputEnqueue),
         watch: host.snapshot_watch(),
         deployment_channels: Arc::new(ironclaw_extension_host::DeploymentChannelRegistry::default()),
         registry: Arc::clone(&ingress.registry),

@@ -66,7 +66,7 @@ const EXPECTED_PRODUCTION_SHAPE: DefaultPlannedRuntimePartsShape =
         attachment_read_port: true, // :3372-3376 local_runtime.map(ProjectScopedAttachmentReader)
         reply_attachment_intent_port: true, // shared production outbound-state store
         gate_record_store: true, // local_runtime.map(gate_record_store) — always Some when local_runtime present
-        input_queue: false,      // hardcoded None
+        input_queue: true, // steering/follow-up host input queue — always wired (InMemory or Filesystem)
         memory_context_service: true, // :3481-3494 local_runtime + native MemoryServiceResolver
         after_turn_memory_writer: true, // :3500-3509 local_runtime + native MemoryServiceResolver
         model_policy_guard: false, // hardcoded None

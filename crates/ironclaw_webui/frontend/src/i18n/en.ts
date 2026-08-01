@@ -122,6 +122,7 @@ registerPack("en", {
   "chat.identityUser": "You",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "Jump to latest",
+  "chat.queued": "Queued",
   "shortcuts.title": "Keyboard shortcuts",
   "shortcuts.send": "Send message",
   "shortcuts.newline": "New line",
@@ -195,6 +196,14 @@ registerPack("en", {
   "tool.riskWrite": "writes files",
   "tool.riskExec": "runs commands",
   "tool.riskNetwork": "network",
+  "tool.errorBackend": "The tool backend failed.",
+  "tool.errorSecurity": "The tool response was blocked by a security check.",
+  "tool.errorCancelled": "The tool call was cancelled.",
+  "tool.errorTimeout": "The tool call timed out.",
+  "tool.errorInvalidRequest": "The tool request was invalid.",
+  "tool.errorAuth": "The tool needs authentication.",
+  "tool.errorPermission": "The tool call was not allowed.",
+  "tool.errorGateDeclined": "The tool call was declined.",
   "authGate.title": "Authentication required",
   "authGate.tokenLabel": "Access token",
   "authGate.tokenPlaceholder": "Paste access token",
@@ -243,6 +252,8 @@ registerPack("en", {
   "settings.traceCommons": "Trace Commons",
   "settings.users": "Users",
   "settings.language": "Language",
+
+  // Settings — usage tab
 
   // Settings — Trace Commons credits (read-only)
   "traceCommons.title": "Trace Commons credits",

@@ -604,6 +604,7 @@ pub struct RebornRuntime {
     pub(crate) _process_gate_query_source: Arc<dyn ProcessGateQuerySource<Error = TurnError>>,
     turn_tree_store: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
     thread_service: Arc<dyn SessionThreadService>,
+    input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
     thread_scope: ThreadScope,
     turn_scheduler: RuntimeTurnScheduler,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
@@ -1059,6 +1060,7 @@ impl RebornRuntime {
             crate::extension_host_assembly::ChannelHostAssemblyWiring {
                 thread_service,
                 turn_coordinator,
+                input_enqueue: self.webui_input_enqueue(),
                 approval_interaction: None,
                 auth_interaction: None,
                 identity,
@@ -1574,6 +1576,10 @@ impl RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub fn product_turn_coordinator_for_test(&self) -> Arc<dyn TurnCoordinator> {
         self.product_turn_coordinator()
+    }
+
+    pub(crate) fn webui_input_enqueue(&self) -> Arc<dyn ironclaw_loop_host::HostInputEnqueuePort> {
+        Arc::clone(&self.input_enqueue)
     }
 
     /// The generic post-OAuth channel-identity binding config for this
@@ -3507,6 +3513,31 @@ pub(crate) async fn build_runtime_with_resource_governor(
         .map_err(|error| RebornRuntimeError::MalformedConfig {
             reason: format!("await-edge resolver result writer bind failed: {error}"),
         })?;
+    // Steering/followup input queue: a message queued while a run is busy is
+    // persisted per-run through the composed scoped filesystem
+    // (`FilesystemHostInputQueue`), so it survives a daemon restart — the
+    // scheduler re-claims the run from its checkpoint and drains the persisted
+    // input. The same instance serves as the loop's drain reader
+    // (`parts.input_queue`) and every inbound surface's enqueue port.
+    let host_input_queue = {
+        let owner_scope = ResourceScope {
+            tenant_id: thread_scope.tenant_id.clone(),
+            user_id: actor_user_id.clone(),
+            agent_id: Some(thread_scope.agent_id.clone()),
+            project_id: thread_scope.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        Arc::new(ironclaw_loop_host::FilesystemHostInputQueue::new(
+            Arc::clone(&services.scoped_filesystem),
+            owner_scope,
+            Arc::clone(&thread_service),
+        ))
+    };
+    let host_input_queue_reader: Arc<dyn ironclaw_loop_host::HostInputQueue> =
+        host_input_queue.clone();
+    let host_input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort> = host_input_queue;
 
     #[cfg(feature = "test-support")]
     let runtime_skill_context_source = skill_context_source.clone();
@@ -3582,7 +3613,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         model_route_resolver: None,
         cancellation_factory: None,
         skill_context_source,
-        input_queue: None,
+        input_queue: Some(host_input_queue_reader),
         identity_context_source: match (
             services.standalone_storage_root.clone(),
             services.default_system_prompt_path.clone(),
@@ -3755,6 +3786,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         crate::extension_host_assembly::RuntimeExtensionHostAssemblyWiring {
             thread_service: Arc::clone(&thread_service),
             turn_coordinator: Arc::clone(&planned_turn_coordinator),
+            input_enqueue: Arc::clone(&host_input_enqueue),
             approval_interaction: Arc::clone(&approval_interaction_service),
             auth_interaction: Arc::clone(&auth_interaction_service),
             thread_scope: &thread_scope,
@@ -4074,6 +4106,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         _process_gate_query_source: process_gate_query_source,
         turn_tree_store: turn_projection,
         thread_service,
+        input_enqueue: host_input_enqueue,
         thread_scope,
         turn_scheduler: RuntimeTurnScheduler::new(composition.scheduler_handle, scheduler_notifier),
         trigger_poller_handle,

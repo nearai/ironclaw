@@ -63,6 +63,7 @@ pub mod projection;
 mod reborn_services;
 mod run_delivery;
 mod scoped_fs;
+mod steering;
 mod workflow;
 
 pub use product_auth_prompt::{blocked_auth_flow_canceller, product_auth_challenge_provider};

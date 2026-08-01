@@ -58,6 +58,14 @@ pub(crate) fn product_ack_from_reborn_submit(
             accepted_message_ref,
             active_run_id,
         },
+        RebornSubmitTurnResponse::DeferredBusy {
+            accepted_message_ref,
+            active_run_id,
+            ..
+        } => ProductInboundAck::DeferredBusy {
+            accepted_message_ref,
+            active_run_id,
+        },
     }
 }
 

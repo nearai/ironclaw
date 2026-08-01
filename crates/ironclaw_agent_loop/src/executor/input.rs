@@ -73,6 +73,22 @@ impl ExecutorStage<DrainInput> for InputStage {
                     Some(checked.checkpoint_id),
                 )?));
             }
+            if drained.drained {
+                // A user-facing input (steering/follow-up) was consumed. Ack it
+                // NOW — after a durable checkpoint of the advanced input cursor,
+                // preserving the ack-after-durable-cursor invariant — instead of
+                // deferring to `ack_pending_input_before_model`. The ack is what
+                // flips the queued transcript row to `Submitted` (model-visible);
+                // deferring it past the prompt stage would build this iteration's
+                // prompt while the message is still invisible, so the model
+                // would only see the steering input one full iteration late —
+                // or never, when this is the run's final iteration.
+                state = CheckpointStage
+                    .write(ctx, state, CheckpointKind::BeforeModel)
+                    .await?
+                    .state;
+                pending_input_ack.ack(ctx.host).await?;
+            }
             state = match CheckpointStage
                 .cancel_if_requested_after_pending_input_ack(ctx, state, &mut pending_input_ack)
                 .await?
@@ -217,10 +233,17 @@ fn user_facing_input_matches_drain_mode(input: &LoopInput, mode: UserFacingInput
                 LoopInput::UserMessage { .. } | LoopInput::Steering { .. }
             )
         }
+        // Steering inputs are drainable at the reply-only exit boundary too: a
+        // steering message that arrives during the run's FINAL model call is
+        // never seen by the steering drain (which runs at iteration start), so
+        // the follow-up drain must consume it and force one more iteration —
+        // otherwise the input strands unconsumed while the run completes.
         UserFacingInputDrainMode::FollowUp => {
             matches!(
                 input,
-                LoopInput::FollowUp { .. } | LoopInput::UserMessage { .. }
+                LoopInput::FollowUp { .. }
+                    | LoopInput::UserMessage { .. }
+                    | LoopInput::Steering { .. }
             )
         }
     }

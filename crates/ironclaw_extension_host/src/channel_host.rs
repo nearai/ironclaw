@@ -348,6 +348,10 @@ pub struct GenericChannelHostDeps {
     /// Lands inbound attachment bytes into the project filesystem before the
     /// turn starts, so the turn itself begins byte-free with workspace refs.
     pub inbound_attachments: Arc<dyn InboundAttachmentLander>,
+    /// Enqueues a message arriving on a busy thread as steering input for the
+    /// active run instead of rejecting it. Compositions without a host input
+    /// queue pass `RejectingInputEnqueue` to keep the reject-busy behavior.
+    pub input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
     pub approval_interaction: Option<Arc<dyn ApprovalInteractionService>>,
     pub auth_interaction: Option<Arc<dyn AuthInteractionService>>,
     pub identity: ChannelHostIdentity,
@@ -762,7 +766,8 @@ impl GenericChannelHostAssembly {
                 Arc::clone(&self.deps.thread_service),
                 Arc::clone(&self.deps.turn_coordinator),
             )
-            .with_inbound_attachments(Arc::clone(&self.deps.inbound_attachments)),
+            .with_inbound_attachments(Arc::clone(&self.deps.inbound_attachments))
+            .with_input_enqueue(Arc::clone(&self.deps.input_enqueue)),
         );
         let mut workflow = DefaultProductSurface::new(
             inbound,

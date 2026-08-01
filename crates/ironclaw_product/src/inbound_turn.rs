@@ -6,6 +6,7 @@
 //! submit/deferred handling behind that seam prevents adapter-specific binding
 //! code from owning the whole inbound turn pipeline.
 
+// arch-exempt: large_file, busy-branch steering enqueue lands in the owning inbound-turn path, plan #5981
 use std::time::Duration;
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -19,6 +20,7 @@ use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
 #[cfg(test)]
 use ironclaw_host_api::ids::UserId;
 use ironclaw_host_api::{attachment::InboundAttachment, tool_adapter::RestrictedEgress};
+use ironclaw_loop_host::{HostInputEnqueuePort, HostInputQueueError, RejectingInputEnqueue};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest,
     ListThreadsForScopeRequest, MessageContent, MessageStatus, ReplayAcceptedInboundMessageRequest,
@@ -92,6 +94,11 @@ pub enum InboundTurnOutcome {
         active_run_id: Option<TurnRunId>,
         binding: ResolvedBinding,
     },
+    DeferredBusy {
+        accepted_message_ref: AcceptedMessageRef,
+        active_run_id: TurnRunId,
+        binding: ResolvedBinding,
+    },
 }
 
 impl InboundTurnOutcome {
@@ -111,6 +118,14 @@ impl InboundTurnOutcome {
                 active_run_id,
                 ..
             } => ProductInboundAck::RejectedBusy {
+                accepted_message_ref: accepted_message_ref.clone(),
+                active_run_id: *active_run_id,
+            },
+            Self::DeferredBusy {
+                accepted_message_ref,
+                active_run_id,
+                ..
+            } => ProductInboundAck::DeferredBusy {
                 accepted_message_ref: accepted_message_ref.clone(),
                 active_run_id: *active_run_id,
             },
@@ -226,6 +241,7 @@ pub struct DefaultInboundTurnService<B, T, C> {
     thread_service: T,
     turn_coordinator: C,
     inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
+    input_enqueue: Arc<dyn HostInputEnqueuePort>,
 }
 
 impl<B, T, C> DefaultInboundTurnService<B, T, C>
@@ -240,6 +256,7 @@ where
             thread_service,
             turn_coordinator,
             inbound_attachments: None,
+            input_enqueue: Arc::new(RejectingInputEnqueue),
         }
     }
 
@@ -251,6 +268,11 @@ where
         inbound_attachments: Arc<dyn InboundAttachmentLander>,
     ) -> Self {
         self.inbound_attachments = Some(inbound_attachments);
+        self
+    }
+
+    pub fn with_input_enqueue(mut self, input_enqueue: Arc<dyn HostInputEnqueuePort>) -> Self {
+        self.input_enqueue = input_enqueue;
         self
     }
 
@@ -659,6 +681,7 @@ where
         submit_or_replay_accepted_message(
             &self.thread_service,
             &self.turn_coordinator,
+            self.input_enqueue.as_ref(),
             replay,
             prepared.submit_idempotency_key.clone(),
             envelope.received_at(),
@@ -776,7 +799,11 @@ where
                 surface_type: prepared.surface_type,
                 requested_model: payload.requested_model.clone(),
             }))
-            .submit_or_replay(&self.thread_service, &self.turn_coordinator)
+            .submit_or_replay(
+                &self.thread_service,
+                &self.turn_coordinator,
+                self.input_enqueue.as_ref(),
+            )
             .await?;
         if cleanup_needed {
             self.reconcile_stale_attachment_batches(&cleanup_scope)
@@ -862,6 +889,7 @@ fn permanent_attachment_failure(reason: impl Into<String>) -> ProductSurfaceFail
 async fn submit_or_replay_accepted_message<T, C>(
     thread_service: &T,
     turn_coordinator: &C,
+    input_enqueue: &dyn HostInputEnqueuePort,
     replay: AcceptedInboundMessageReplay,
     submit_idempotency_key: String,
     received_at: DateTime<Utc>,
@@ -877,7 +905,7 @@ where
         received_at,
         prepared,
     )?
-    .submit_or_replay(thread_service, turn_coordinator)
+    .submit_or_replay(thread_service, turn_coordinator, input_enqueue)
     .await
 }
 
@@ -891,6 +919,11 @@ enum ProductInboundTurnHandoff {
         accepted_message_ref: AcceptedMessageRef,
         binding: ResolvedBinding,
         active_run_id: Option<TurnRunId>,
+    },
+    AlreadyDeferred {
+        accepted_message_ref: AcceptedMessageRef,
+        binding: ResolvedBinding,
+        active_run_id: TurnRunId,
     },
     NeedsSubmission(Box<AcceptedProductInboundTurn>),
 }
@@ -997,6 +1030,24 @@ impl ProductInboundTurnHandoff {
             });
         }
 
+        if replay.status == MessageStatus::Queued {
+            let Some(turn_run_id) = replay.turn_run_id.as_deref() else {
+                return Err(ProductSurfaceFailure::TurnSubmissionRejected {
+                    reason: "queued replay missing turn_run_id".into(),
+                });
+            };
+            let active_run_id = Uuid::parse_str(turn_run_id)
+                .map(TurnRunId::from_uuid)
+                .map_err(|e| ProductSurfaceFailure::TurnSubmissionRejected {
+                    reason: format!("invalid queued turn_run_id: {e}"),
+                })?;
+            return Ok(Self::AlreadyDeferred {
+                accepted_message_ref,
+                binding,
+                active_run_id,
+            });
+        }
+
         if !matches!(
             replay.status,
             MessageStatus::Accepted | MessageStatus::DeferredBusy
@@ -1044,6 +1095,7 @@ impl ProductInboundTurnHandoff {
         self,
         thread_service: &T,
         turn_coordinator: &C,
+        input_enqueue: &dyn HostInputEnqueuePort,
     ) -> Result<InboundTurnOutcome, ProductSurfaceFailure>
     where
         T: SessionThreadService,
@@ -1068,8 +1120,19 @@ impl ProductInboundTurnHandoff {
                 active_run_id,
                 binding,
             }),
+            Self::AlreadyDeferred {
+                accepted_message_ref,
+                binding,
+                active_run_id,
+            } => Ok(InboundTurnOutcome::DeferredBusy {
+                accepted_message_ref,
+                active_run_id,
+                binding,
+            }),
             Self::NeedsSubmission(submission) => {
-                submission.submit(thread_service, turn_coordinator).await
+                submission
+                    .submit(thread_service, turn_coordinator, input_enqueue)
+                    .await
             }
         }
     }
@@ -1094,6 +1157,7 @@ impl AcceptedProductInboundTurn {
         self,
         thread_service: &T,
         turn_coordinator: &C,
+        input_enqueue: &dyn HostInputEnqueuePort,
     ) -> Result<InboundTurnOutcome, ProductSurfaceFailure>
     where
         T: SessionThreadService,
@@ -1164,7 +1228,7 @@ impl AcceptedProductInboundTurn {
             turn_scope.product_owner(&actor),
         );
         let request = SubmitTurnRequest {
-            scope: turn_scope,
+            scope: turn_scope.clone(),
             actor,
             accepted_message_ref: accepted_message_ref.clone(),
             source_binding_ref,
@@ -1203,19 +1267,152 @@ impl AcceptedProductInboundTurn {
                 })
             }
             Err(TurnError::ThreadBusy(busy)) => {
-                thread_service
-                    .mark_message_rejected_busy(&thread_scope, &binding.thread_id, message_id)
-                    .await
-                    .map_err(|e| ProductSurfaceFailure::Transient {
-                        reason: format!("failed to mark message rejected: {e}"),
-                    })?;
-                Ok(InboundTurnOutcome::RejectedBusy {
-                    accepted_message_ref,
-                    active_run_id: Some(busy.active_run_id),
-                    binding,
-                })
+                // Mark the message `Queued` BEFORE the steering input becomes
+                // drainable so the loop's consumer always observes a `Queued`
+                // row (deterministic `Queued` → `Submitted`), instead of racing
+                // a post-enqueue status write. If the enqueue then fails, roll
+                // the row back to `RejectedBusy`. (`mark_message_queued_or_consumed`
+                // is lenient — a fast loop that consumed the input first leaves
+                // the row `Submitted`, which it accepts.)
+                mark_message_queued_or_consumed(
+                    thread_service,
+                    &thread_scope,
+                    &binding.thread_id,
+                    message_id,
+                    busy.active_run_id,
+                )
+                .await?;
+                match crate::steering::enqueue_busy_steering(
+                    turn_coordinator,
+                    input_enqueue,
+                    turn_scope,
+                    thread_scope.clone(),
+                    binding.thread_id.clone(),
+                    message_id,
+                    &accepted_message_ref,
+                    busy.active_run_id,
+                )
+                .await
+                {
+                    Ok(()) => Ok(InboundTurnOutcome::DeferredBusy {
+                        accepted_message_ref,
+                        active_run_id: busy.active_run_id,
+                        binding,
+                    }),
+                    // No input queue wired for this runtime: queueing is
+                    // disabled, so reject the message as busy instead of
+                    // deferring it. Single mapped fallback for the "no steering"
+                    // mode (see RejectingInputEnqueue). This also rolls the
+                    // `Queued` row written above back to `RejectedBusy`.
+                    Err(crate::steering::SteeringEnqueueError::Enqueue(
+                        HostInputQueueError::Unavailable { .. },
+                    )) => {
+                        thread_service
+                            .mark_message_rejected_busy(
+                                &thread_scope,
+                                &binding.thread_id,
+                                message_id,
+                            )
+                            .await
+                            .map_err(|e| ProductSurfaceFailure::Transient {
+                                reason: format!("failed to mark message rejected: {e}"),
+                            })?;
+                        Ok(InboundTurnOutcome::RejectedBusy {
+                            accepted_message_ref,
+                            active_run_id: Some(busy.active_run_id),
+                            binding,
+                        })
+                    }
+                    // Any other enqueue failure leaves the `Queued` row with no
+                    // drainable input. Best-effort roll it back to `RejectedBusy`
+                    // (preserving the original error) before surfacing it.
+                    Err(other) => {
+                        if let Err(rollback) = thread_service
+                            .mark_message_rejected_busy(
+                                &thread_scope,
+                                &binding.thread_id,
+                                message_id,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                %rollback,
+                                "failed to roll back queued message to rejected-busy after steering enqueue failure"
+                            );
+                        }
+                        match other {
+                            crate::steering::SteeringEnqueueError::InvalidMessageRef(reason) => {
+                                Err(ProductSurfaceFailure::TurnSubmissionRejected {
+                                    reason: format!("invalid steering message ref: {reason}"),
+                                })
+                            }
+                            crate::steering::SteeringEnqueueError::RunState(error) => {
+                                Err(ProductSurfaceFailure::TurnSubmissionFailed { error })
+                            }
+                            crate::steering::SteeringEnqueueError::Enqueue(error) => {
+                                Err(ProductSurfaceFailure::Transient {
+                                    reason: format!("failed to enqueue steering input: {error}"),
+                                })
+                            }
+                        }
+                    }
+                }
             }
             Err(error) => Err(ProductSurfaceFailure::TurnSubmissionFailed { error }),
+        }
+    }
+}
+
+async fn mark_message_queued_or_consumed<T>(
+    thread_service: &T,
+    thread_scope: &ThreadScope,
+    thread_id: &ironclaw_host_api::ids::ThreadId,
+    message_id: ThreadMessageId,
+    run_id: TurnRunId,
+) -> Result<(), ProductSurfaceFailure>
+where
+    T: SessionThreadService + ?Sized,
+{
+    let run_id_string = run_id.to_string();
+    match thread_service
+        .mark_message_queued(thread_scope, thread_id, message_id, run_id_string.clone())
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(original_error) => {
+            let history = match thread_service
+                .list_thread_history(ThreadHistoryRequest {
+                    scope: thread_scope.clone(),
+                    thread_id: thread_id.clone(),
+                })
+                .await
+            {
+                Ok(history) => history,
+                Err(error) => {
+                    tracing::debug!(
+                        %original_error,
+                        %error,
+                        "queued steering input accepted before transcript queued-status reconciliation failed"
+                    );
+                    return Ok(());
+                }
+            };
+            let already_consumed = history.messages.iter().any(|message| {
+                message.message_id == message_id
+                    && message.turn_run_id.as_deref() == Some(run_id_string.as_str())
+                    && matches!(
+                        message.status,
+                        MessageStatus::Queued | MessageStatus::Submitted
+                    )
+            });
+            if already_consumed {
+                return Ok(());
+            }
+            tracing::debug!(
+                %original_error,
+                "queued steering input accepted before transcript queued-status update failed"
+            );
+            Ok(())
         }
     }
 }

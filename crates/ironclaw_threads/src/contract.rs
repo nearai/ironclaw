@@ -159,6 +159,9 @@ pub enum MessageKind {
 #[serde(rename_all = "snake_case")]
 pub enum MessageStatus {
     Accepted,
+    /// Message is accepted and queued for an active run to consume at the next
+    /// steering/input boundary.
+    Queued,
     Submitted,
     /// Message arrived while the thread was busy; it will NOT be auto-resubmitted.
     /// The user must resend the message once the current task finishes.

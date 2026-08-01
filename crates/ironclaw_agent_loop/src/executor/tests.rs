@@ -235,13 +235,67 @@ async fn reply_only_drains_follow_up_before_stop_strategy_completes() {
         host.acked_input_tokens(),
         vec![LoopInputAckToken::new("input-ack:after-follow-up").expect("valid")]
     );
+    // Three before-model checkpoints: one per iteration from the spine, plus
+    // the follow-up drain's own cursor checkpoint (written so the drained
+    // input can be acked — and become model-visible — before the next prompt
+    // is built).
     assert_eq!(
         host.checkpoint_kinds(),
         vec![
             LoopCheckpointKind::BeforeModel,
             LoopCheckpointKind::BeforeModel,
+            LoopCheckpointKind::BeforeModel,
             LoopCheckpointKind::Final,
         ]
+    );
+    assert_eq!(final_staged_state(&host).stop_state.turns_completed, 2);
+}
+
+#[tokio::test]
+async fn reply_only_drains_steering_arriving_at_exit_boundary() {
+    // Regression: a `Steering` input that arrives while the run's FINAL model
+    // call is in flight is only observable at the reply-only exit boundary —
+    // the steering drain at iteration start has already run. The follow-up
+    // drain must consume it and force one more iteration (so the model sees
+    // the message), rather than completing the run and stranding the input
+    // unconsumed at the queue head.
+    let host = MockHost::new(vec![reply_response(), reply_response()]);
+    let run_context = host.run_context().clone();
+    let host = host.with_input_batches(vec![
+        LoopInputBatch {
+            inputs: Vec::new(),
+            input_acks: Vec::new(),
+            next_cursor: input_cursor(&run_context, "input-cursor:no-input"),
+        },
+        LoopInputBatch {
+            inputs: vec![LoopInput::Steering {
+                message_ref: message_ref("msg:late-steering"),
+            }],
+            input_acks: vec![input_ack(
+                &run_context,
+                "input-cursor:after-late-steering",
+                "input-ack:after-late-steering",
+            )],
+            next_cursor: input_cursor(&run_context, "input-cursor:after-late-steering"),
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(
+        host.model_requests().len(),
+        2,
+        "the late steering input must force one more model iteration"
+    );
+    assert_eq!(
+        host.acked_input_tokens(),
+        vec![LoopInputAckToken::new("input-ack:after-late-steering").expect("valid")]
     );
     assert_eq!(final_staged_state(&host).stop_state.turns_completed, 2);
 }
@@ -1703,7 +1757,7 @@ async fn model_shrink_context_call_scope_returns_planner_contract() {
 }
 
 #[tokio::test]
-async fn input_stage_steering_drain_carries_pending_ack() {
+async fn input_stage_steering_drain_acks_eagerly_after_cursor_checkpoint() {
     let host = MockHost::new(Vec::new());
     let run_context = host.run_context().clone();
     let host = host.with_input_batches(vec![LoopInputBatch {
@@ -1739,7 +1793,7 @@ async fn input_stage_steering_drain_carries_pending_ack() {
     match step {
         InputStep::Continue {
             state,
-            mut pending_input_ack,
+            pending_input_ack,
             drained,
         } => {
             assert!(drained);
@@ -1747,11 +1801,21 @@ async fn input_stage_steering_drain_carries_pending_ack() {
                 state.input_cursor,
                 input_cursor(&run_context, "input-cursor:after-user")
             );
-            assert!(host.acked_input_tokens().is_empty());
-            pending_input_ack.ack(&host).await.expect("ack inputs");
+            // The drain stage acks the consumed input itself — after writing a
+            // durable checkpoint of the advanced cursor — so the queued
+            // transcript row is model-visible before this iteration's prompt
+            // is built. Nothing is left pending for the later ack stages.
+            assert!(pending_input_ack.is_empty());
             assert_eq!(
                 host.acked_input_tokens(),
                 vec![LoopInputAckToken::new("input-ack:after-user").expect("valid")]
+            );
+            assert_eq!(
+                host.events(),
+                vec![
+                    "checkpoint:before_model".to_string(),
+                    "ack_inputs".to_string(),
+                ]
             );
         }
         InputStep::Exit(exit) => panic!("expected continue, got {exit:?}"),

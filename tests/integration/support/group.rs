@@ -223,6 +223,11 @@ pub(crate) struct GroupSharedStorage {
     /// `Arc`-wrapped inner state) and slices `[baseline_*..]` so assertions
     /// only see that thread's own deltas (R2).
     pub(crate) capability_recorder: HarnessCapabilityRecorder,
+    /// The steering/follow-up input queue wired into the group's ONE planned
+    /// runtime (`parts.input_queue`). Every thread's `DefaultInboundTurnService`
+    /// enqueues busy-thread messages through this SAME instance, mirroring
+    /// production composition.
+    pub(crate) input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
     /// The exact `HostUserProfileSource` wired into the group's ONE planned
     /// runtime (E-PROFILE seam). Kept so a profile-round-trip test reads from
     /// the SAME instance the running loop uses, not a re-derived equivalent —
@@ -1106,6 +1111,16 @@ impl RebornIntegrationGroupBuilder {
             );
         }
 
+        // --- steering/follow-up input queue (production-parity) ----------------
+        // Production always wires a host input queue (InMemory at minimum) so a
+        // message hitting a busy thread is queued as steering input for the
+        // active run instead of rejected. The harness mirrors that shape: the
+        // SAME queue instance is both the loop's drain reader
+        // (`parts.input_queue`) and every thread's inbound enqueue port.
+        let host_input_queue = Arc::new(ironclaw_loop_host::InMemoryHostInputQueue::new(
+            Arc::clone(&runtime_thread_service),
+        ));
+
         // --- C-BUDGET: production budget accountant (wiring-liveness only) -----
         // Build the SAME `GovernorBackedAccountant` production composes, via the
         // shared `build_default_budget_accountant` helper, over in-memory leaf
@@ -1228,7 +1243,9 @@ impl RebornIntegrationGroupBuilder {
             // so all existing group tests are behavior-identical (production wires
             // this in `build_reborn_runtime`, runtime.rs ~2875).
             skill_context_source: capability_recorder.skill_context_source(),
-            input_queue: None,
+            input_queue: Some(
+                host_input_queue.clone() as Arc<dyn ironclaw_loop_host::HostInputQueue>
+            ),
             identity_context_source: Arc::new(EmptyIdentityContextSource),
             // E-PROFILE / E-MEMORY: the ONE effective profile source (also
             // stashed on `GroupSharedStorage`, so
@@ -1293,6 +1310,7 @@ impl RebornIntegrationGroupBuilder {
                 turn_runtime,
                 canonical_binding: base.canonical_binding,
                 capability_recorder,
+                input_enqueue: host_input_queue,
                 user_profile_source: effective_user_profile_source,
                 turn_event_sink: self.turn_event_sink,
                 security_audit_sink,
@@ -1627,7 +1645,8 @@ impl<'g> RebornThreadBuilder<'g> {
             Arc::clone(&binding_service),
             thread_harness.service_instance()?,
             Arc::clone(&shared.coordinator),
-        );
+        )
+        .with_input_enqueue(Arc::clone(&shared.input_enqueue));
         // C-ATTACH: wire the real lander when the backend has one (`attachment_tools()`)
         // so `submit_inbound_with_attachments` lands through it instead of
         // failing closed. `None` for every other group (unchanged behavior).
