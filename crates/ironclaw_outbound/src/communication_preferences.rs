@@ -1,9 +1,9 @@
 use async_trait::async_trait;
+use ironclaw_host_api::turn::ReplyTargetBindingRef;
 use ironclaw_host_api::{
     Timestamp,
     ids::{AgentId, ProjectId, TenantId, UserId},
 };
-use ironclaw_turns::ReplyTargetBindingRef;
 use serde::{Deserialize, Serialize};
 
 use crate::{CommunicationModality, OutboundError};

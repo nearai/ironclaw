@@ -12,6 +12,9 @@ use ironclaw_host_api::{
     resource::ResourceScope,
     scope::Principal,
 };
+use ironclaw_loop_contracts::{
+    LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
+};
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse,
@@ -27,9 +30,6 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, local_runtime_build_input_with_options,
-};
-use ironclaw_turns::run_profile::{
-    LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
 };
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey, ResumeTurnRequest,

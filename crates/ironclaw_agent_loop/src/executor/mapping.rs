@@ -1,13 +1,12 @@
+use ironclaw_host_api::turn::SanitizedFailure;
 use ironclaw_host_api::{
     resolution::{Resolution, ToolVerdict},
     result_meta::FailureKind,
 };
-use ironclaw_turns::{
-    LoopBlockedKind, SanitizedFailure,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, LoopCheckpointKind,
-        LoopGateKind, LoopRecoveryClass, LoopSafeSummary, sanitize_model_visible_text,
-    },
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, LoopBlockedKind,
+    LoopCheckpointKind, LoopGateKind, LoopRecoveryClass, LoopSafeSummary,
+    sanitize_model_visible_text,
 };
 
 use crate::{
@@ -81,7 +80,7 @@ pub(super) fn capability_batch_counts(resolutions: &[Resolution]) -> (u32, u32, 
 
 pub(super) fn model_preference_to_host(
     preference: ModelPreference,
-) -> Result<(Option<ironclaw_turns::ModelProfileId>, u32), AgentLoopExecutorError> {
+) -> Result<(Option<ironclaw_loop_contracts::ModelProfileId>, u32), AgentLoopExecutorError> {
     match preference {
         ModelPreference::Primary => Ok((None, 0)),
         ModelPreference::Fallback { index } if index > 0 => Ok((None, index)),
@@ -418,7 +417,7 @@ mod tests {
     #[test]
     fn invalid_capability_input_is_model_error_not_protocol_failure() {
         use crate::strategies::capability_error_to_failure_kind;
-        use ironclaw_turns::LoopFailureKind;
+        use ironclaw_loop_contracts::LoopFailureKind;
 
         assert_eq!(
             capability_error_to_failure_kind(FailureKind::InputEncode),
@@ -446,7 +445,7 @@ mod tests {
     #[test]
     fn protocol_and_policy_failure_kinds_remain_distinct() {
         use crate::strategies::capability_error_to_failure_kind;
-        use ironclaw_turns::LoopFailureKind;
+        use ironclaw_loop_contracts::LoopFailureKind;
 
         assert_eq!(
             capability_error_to_failure_kind(FailureKind::OutputDecode),

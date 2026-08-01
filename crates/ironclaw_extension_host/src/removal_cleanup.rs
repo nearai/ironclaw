@@ -7,10 +7,9 @@ pub use ironclaw_extensions::{
     ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
     ExtensionRemovalCleanupRequirement,
 };
-use ironclaw_host_api::{
-    ids::UserId, product_surface::ProductSurfaceError, resource::ResourceScope,
-};
+use ironclaw_host_api::{ids::UserId, resource::ResourceScope};
 use ironclaw_product::ProductSurfaceFailure;
+use ironclaw_product_contracts::surface::ProductSurfaceError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionRemovalCleanupContext {
@@ -114,10 +113,10 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_host_api::{
         ids::{AgentId, InvocationId, ProjectId, TenantId, UserId},
-        product_surface::ProductSurfaceError,
         resource::ResourceScope,
     };
     use ironclaw_product::ProductSurfaceFailure;
+    use ironclaw_product_contracts::surface::ProductSurfaceError;
 
     use super::*;
 

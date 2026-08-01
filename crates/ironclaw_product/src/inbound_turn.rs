@@ -10,15 +10,17 @@ use std::time::Duration;
 use std::{collections::BTreeSet, sync::Arc};
 
 use crate::{
-    ChannelAdapter, ChannelAttachmentRef, ChannelError, ProductAdapterId, ProductInboundAck,
+    ChannelAttachmentRef, ChannelError, ProductAdapterId, ProductInboundAck,
     ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductSourceChannel,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
+use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
+use ironclaw_host_api::attachment::InboundAttachment;
 #[cfg(test)]
 use ironclaw_host_api::ids::UserId;
-use ironclaw_host_api::{attachment::InboundAttachment, tool_adapter::RestrictedEgress};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest,
     ListThreadsForScopeRequest, MessageContent, MessageStatus, ReplayAcceptedInboundMessageRequest,

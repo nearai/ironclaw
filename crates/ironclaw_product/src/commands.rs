@@ -5,6 +5,7 @@
 //! the product surface that produced the command.
 
 use crate::{InboundCommandPayload, ProductRejection, ProductRejectionKind};
+use ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest;
 use ironclaw_host_api::error::HostApiError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -323,6 +324,9 @@ fn parse_lifecycle_command_payload(
     payload: &InboundCommandPayload,
 ) -> ProductCommandParseResult {
     Ok(match kind {
+        LifecycleCommandKind::ExtensionRegisterHostedMcp => {
+            parse_register_hosted_mcp_command(payload)?
+        }
         LifecycleCommandKind::ExtensionSearch => ProductCommand::Lifecycle {
             action: LifecycleProductAction::ExtensionSearch {
                 query: payload.arguments.trim().to_string(),
@@ -357,6 +361,23 @@ fn parse_lifecycle_command_payload(
         },
         LifecycleCommandKind::SkillInstall => parse_skill_install_command(payload)?,
         LifecycleCommandKind::SkillRemove => parse_skill_remove_command(payload)?,
+    })
+}
+
+fn parse_register_hosted_mcp_command(payload: &InboundCommandPayload) -> ProductCommandParseResult {
+    let request = serde_json::from_str::<RegisterHostedMcpRequest>(payload.arguments.trim())
+        .map_err(|error| {
+            tracing::debug!(
+                error = %error,
+                "hosted MCP registration payload failed to parse"
+            );
+            ProductRejection::permanent(
+                ProductRejectionKind::InvalidRequest,
+                "extension_register_hosted_mcp expects a registration JSON payload",
+            )
+        })?;
+    Ok(ProductCommand::Lifecycle {
+        action: LifecycleProductAction::ExtensionRegisterHostedMcp { request },
     })
 }
 
@@ -504,6 +525,11 @@ fn lifecycle_command_metadata(
     kind: LifecycleCommandKind,
 ) -> (&'static str, &'static str, &'static str) {
     match kind {
+        LifecycleCommandKind::ExtensionRegisterHostedMcp => (
+            "Register hosted MCP",
+            "Register a hosted MCP endpoint",
+            "/extension_register_hosted_mcp <json>",
+        ),
         LifecycleCommandKind::ExtensionSearch => (
             "Search extensions",
             "Search the extension registry",

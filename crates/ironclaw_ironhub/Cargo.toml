@@ -20,11 +20,13 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 ed25519-dalek = "2.2.0"
 hex = "0.4.3"
 hmac = "0.13"
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts" }
 ironclaw_extension_host = { path = "../ironclaw_extension_host" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_product = { path = "../ironclaw_product" }
+ironclaw_product_contracts = { path = "../ironclaw_product_contracts" }
 ironclaw_skills = { path = "../ironclaw_skills" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

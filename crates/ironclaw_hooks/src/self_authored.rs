@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use crate::identity::HookId;
 use crate::points::BeforeCapabilityHookContext;
 use crate::predicate::CapabilityPredicate;
-use ironclaw_turns::{TurnId, TurnRunId};
+use ironclaw_host_api::turn::{TurnId, TurnRunId};
 
 /// Closed vocabulary of static labels the agent may use as a reason when
 /// authoring a hook. Free-text reasons are intentionally not allowed — the

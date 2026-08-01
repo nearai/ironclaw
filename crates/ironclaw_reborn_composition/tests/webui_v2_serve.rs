@@ -18,16 +18,13 @@ use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
+use ironclaw_extension_contracts::state::LifecyclePublicState;
 use ironclaw_host_api::{
     action::NetworkMethod,
     ids::{ActivityId, AgentId, ProjectId, ResultRef, TenantId, ThreadId, UserId},
-    product_surface::{
-        ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    },
     resolution::{Outcome, OutcomeRefs, Resolution, ResultPreviewMeta, ToolVerdict},
     result_meta::{ResultProgress, TerminateHint},
     safe_summary::SafeSummary,
-    state::LifecyclePublicState,
 };
 use ironclaw_host_ingress::{ProtectedRouteMount, PublicRouteMount};
 use ironclaw_product::{
@@ -39,6 +36,9 @@ use ironclaw_product::{
     RebornListThreadsResponse, RebornSetupExtensionResponse, RebornSubmitTurnResponse,
     RebornTimelineResponse, RebornTraceCreditsResponse, RebornViewQuery,
     THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_CREDITS_VIEW,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
 use ironclaw_reborn_composition::{
     IRONHUB_REGISTER_PATH, IronhubRegisterRouteState, ironhub_register_route_mount,
@@ -456,13 +456,13 @@ mod openai_compat_mount_tests {
     }
 
     #[async_trait]
-    impl ironclaw_host_api::product_surface::ProductSurface for GatewayOpenAiSurface {
+    impl ironclaw_product_contracts::surface::ProductSurface for GatewayOpenAiSurface {
         async fn invoke(
             &self,
             caller: ProductSurfaceCaller,
-            request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
+            request: ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest,
         ) -> Result<
-            ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse,
+            ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
             ProductSurfaceError,
         > {
             let output = match request.operation_id.as_str() {
@@ -509,14 +509,14 @@ mod openai_compat_mount_tests {
                 }
                 _ => return Err(ProductSurfaceError::service_unavailable(false)),
             };
-            Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
+            Ok(ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output })
         }
 
         async fn query(
             &self,
             _caller: ProductSurfaceCaller,
-            _request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
-        ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+            _request: ironclaw_product_contracts::surface::ProductSurfaceQueryRequest,
+        ) -> Result<ironclaw_product_contracts::surface::ProductSurfaceQueryPage, ProductSurfaceError>
         {
             Err(ProductSurfaceError::service_unavailable(false))
         }
@@ -524,9 +524,9 @@ mod openai_compat_mount_tests {
         async fn stream_events(
             &self,
             _caller: ProductSurfaceCaller,
-            _request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
+            _request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
         ) -> Result<
-            ironclaw_host_api::product_surface::ProductSurfaceStreamResponse,
+            ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
             ProductSurfaceError,
         > {
             Err(ProductSurfaceError::service_unavailable(false))
@@ -544,13 +544,13 @@ mod openai_compat_mount_tests {
     }
 
     #[async_trait]
-    impl ironclaw_host_api::product_surface::ProductSurface for AdmissionProductSurface {
+    impl ironclaw_product_contracts::surface::ProductSurface for AdmissionProductSurface {
         async fn invoke(
             &self,
             caller: ProductSurfaceCaller,
-            request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
+            request: ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest,
         ) -> Result<
-            ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse,
+            ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
             ProductSurfaceError,
         > {
             let output = match request.operation_id.as_str() {
@@ -651,14 +651,14 @@ mod openai_compat_mount_tests {
                 }
                 _ => return Err(ProductSurfaceError::service_unavailable(false)),
             };
-            Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
+            Ok(ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output })
         }
 
         async fn query(
             &self,
             _caller: ProductSurfaceCaller,
-            _request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
-        ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+            _request: ironclaw_product_contracts::surface::ProductSurfaceQueryRequest,
+        ) -> Result<ironclaw_product_contracts::surface::ProductSurfaceQueryPage, ProductSurfaceError>
         {
             Err(ProductSurfaceError::service_unavailable(false))
         }
@@ -666,9 +666,9 @@ mod openai_compat_mount_tests {
         async fn stream_events(
             &self,
             _caller: ProductSurfaceCaller,
-            _request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
+            _request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
         ) -> Result<
-            ironclaw_host_api::product_surface::ProductSurfaceStreamResponse,
+            ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
             ProductSurfaceError,
         > {
             Err(ProductSurfaceError::service_unavailable(false))
@@ -868,13 +868,15 @@ struct StubServices {
 }
 
 #[async_trait]
-impl ironclaw_host_api::product_surface::ProductSurface for StubServices {
+impl ironclaw_product_contracts::surface::ProductSurface for StubServices {
     async fn invoke(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse, ProductSurfaceError>
-    {
+        request: ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
+        ProductSurfaceError,
+    > {
         let output = match request.operation_id.as_str() {
             "thread.create" => {
                 self.create_thread_calls.lock().expect("lock").push(caller);
@@ -969,14 +971,14 @@ impl ironclaw_host_api::product_surface::ProductSurface for StubServices {
                 });
             }
         };
-        Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
+        Ok(ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output })
     }
 
     async fn query(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+        request: ironclaw_product_contracts::surface::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_product_contracts::surface::ProductSurfaceQueryPage, ProductSurfaceError>
     {
         let query = RebornViewQuery {
             view_id: request.view_id,
@@ -1050,7 +1052,7 @@ impl ironclaw_host_api::product_surface::ProductSurface for StubServices {
             }
         };
         Ok(
-            ironclaw_host_api::product_surface::ProductSurfaceQueryPage {
+            ironclaw_product_contracts::surface::ProductSurfaceQueryPage {
                 items: vec![payload],
                 next_cursor: None,
             },
@@ -1060,13 +1062,15 @@ impl ironclaw_host_api::product_surface::ProductSurface for StubServices {
     async fn stream_events(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceStreamResponse, ProductSurfaceError>
-    {
+        request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
+        ProductSurfaceError,
+    > {
         let _ = request;
         self.stream_events_calls.lock().expect("lock").push(caller);
         Ok(
-            ironclaw_host_api::product_surface::ProductSurfaceStreamResponse {
+            ironclaw_product_contracts::surface::ProductSurfaceStreamResponse {
                 events: Vec::new(),
                 next_cursor: None,
                 subscription: None,

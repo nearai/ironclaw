@@ -2,7 +2,7 @@ use std::{collections::HashMap, error::Error, fmt};
 
 use serde::{Deserialize, Serialize};
 
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     LoopModelRouteSnapshot, ModelProfileId, validate_model_route_component_value,
 };
 

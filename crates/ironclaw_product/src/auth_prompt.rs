@@ -13,14 +13,13 @@ use async_trait::async_trait;
 use ironclaw_auth::{
     AuthProductError, AuthProviderId, CredentialAccountLabel, OAuthAuthorizationUrl,
 };
+use ironclaw_extension_contracts::auth_prompt::PairingPromptView;
 use ironclaw_host_api::{
     capability::RuntimeCredentialAccountSetup,
     decision::RuntimeCredentialAuthRequirement,
     ids::{InvocationId, UserId},
 };
-use ironclaw_host_api::{
-    package_lifecycle::ChannelConnectionRequirement, product_adapter::PairingPromptView,
-};
+use ironclaw_product_contracts::package_lifecycle::ChannelConnectionRequirement;
 use ironclaw_turns::{TurnRunId, TurnScope};
 
 /// Map a manifest display string onto the projection's optional field: a blank
@@ -278,10 +277,8 @@ fn auth_prompt_from_credential_requirement(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{
-        capability::RuntimeCredentialAccountSetup, ids::VendorId,
-        package_lifecycle::ChannelConnectStrategy,
-    };
+    use ironclaw_host_api::{capability::RuntimeCredentialAccountSetup, ids::VendorId};
+    use ironclaw_product_contracts::package_lifecycle::ChannelConnectStrategy;
 
     fn requirement(setup: RuntimeCredentialAccountSetup) -> RuntimeCredentialAuthRequirement {
         RuntimeCredentialAuthRequirement {

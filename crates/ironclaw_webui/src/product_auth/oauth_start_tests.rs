@@ -13,13 +13,13 @@ mod tests {
         CredentialOwnership, EngineCallbackBase, NewCredentialAccount, ProviderScope,
         ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
     };
-    use ironclaw_host_api::product_surface::ProductSurfaceCaller;
+    use ironclaw_extension_contracts::recipe::VendorAuthRecipe;
     use ironclaw_host_api::{
         http::{RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse},
         ids::{MissionId, SecretHandle, TenantId, ThreadId, UserId},
-        recipe::VendorAuthRecipe,
         resource::ResourceScope,
     };
+    use ironclaw_product_contracts::surface::ProductSurfaceCaller;
     use ironclaw_secrets::SecretStore;
     use serde_json::json;
     use std::sync::Arc;
@@ -93,7 +93,7 @@ mod tests {
         async fn resolve(
             &self,
             vendor: &str,
-            _credentials: &ironclaw_host_api::recipe::RecipeClientCredentials,
+            _credentials: &ironclaw_extension_contracts::recipe::RecipeClientCredentials,
         ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, AuthProductError> {
             Ok(ironclaw_auth::EngineOAuthClientMaterial {
                 client_id: ironclaw_auth::OAuthClientId::new(format!("{vendor}-client-id"))?,
@@ -117,6 +117,7 @@ mod tests {
             vendor: vendor.to_string(),
             recipe,
             token_exchange_resource: None,
+            protected_resource_metadata_url: None,
         }
     }
 

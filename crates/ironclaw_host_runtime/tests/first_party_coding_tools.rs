@@ -31,10 +31,10 @@ use ironclaw_host_runtime::{
     TenantSandboxProcessPort, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_package,
 };
+use ironclaw_loop_contracts::LoopSafeSummary;
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_triggers::InMemoryTriggerRepository;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
-use ironclaw_turns::run_profile::LoopSafeSummary;
 use serde_json::{Value, json};
 
 #[tokio::test]

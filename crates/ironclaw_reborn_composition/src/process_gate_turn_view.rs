@@ -1,13 +1,13 @@
+use ironclaw_host_api::turn::{TurnGateRef, TurnRunId, TurnScope};
 use ironclaw_host_api::{
     ids::ProcessId,
     resource::{ResourceScope, SYSTEM_RESERVED_ID},
 };
 use ironclaw_processes::ProcessGateRecord;
-use ironclaw_turns::{GateRef, TurnRunId, TurnScope};
 
 pub(crate) fn current_turn_gate_runs(
     records: impl IntoIterator<Item = ProcessGateRecord>,
-) -> Vec<(TurnRunId, GateRef)> {
+) -> Vec<(TurnRunId, TurnGateRef)> {
     let mut runs = records
         .into_iter()
         .filter_map(|record| {

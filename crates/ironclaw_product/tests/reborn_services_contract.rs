@@ -25,15 +25,15 @@ use ironclaw_auth::{
     AuthAccountLastError, AuthAccountState, CredentialAccountId, CredentialAccountProjection,
     CredentialAccountStatus,
 };
-use ironclaw_host_api::{
-    attachment::InboundAttachment,
-    product_surface::{
-        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-        ProductSurfaceErrorKind, ProductSurfaceInvokeRequest, ProductSurfaceStreamRequest,
-        ProductSurfaceValidationCode,
-    },
+use ironclaw_extension_contracts::{
     state::{InstallationState, LifecyclePublicState},
     surface::CapabilitySurfaceKind,
+};
+use ironclaw_host_api::attachment::InboundAttachment;
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
+    SanitizedFailure, SourceBindingRef, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope,
+    TurnStatus,
 };
 use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
@@ -47,6 +47,7 @@ use ironclaw_host_api::{
     safe_summary::SafeSummary,
     scope::Principal,
 };
+use ironclaw_loop_contracts::{LoopModelRouteSnapshot, LoopModelUsage};
 use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_DELETE_SECRET_CAPABILITY_ID,
     ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
@@ -58,7 +59,7 @@ use ironclaw_product::{
     AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, AUTOMATIONS_VIEW,
     ActiveModelReader, ApprovalInteractionActionView, ApprovalInteractionDecision,
     ApprovalInteractionScope, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionService, AutomationListRequest, AutomationName, AutomationProductService,
+    AuthInteractionService, AutomationListRequest, AutomationProductService,
     ChannelAuthAccountState, ChannelConfigProductService, ChannelConnectionRequirement,
     ChannelConnectionService, CodexLoginStart, CommandResultView, EXTENSION_IMPORT_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
@@ -144,7 +145,7 @@ use ironclaw_product::{
 use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, ProductAdapterError, ProductAdapterId,
     ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
-    ProductSurfaceRejectionKind, ProjectionCursor, ProjectionStream, ProjectionStreamSubscription,
+    ProductSurfaceRejectionKind, ProjectionCursor, ProjectionStreamSubscription,
     ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_product::{
@@ -161,6 +162,12 @@ use ironclaw_product::{
     IRONHUB_DELIVER_INSTALL_COMMAND_ID, IronhubInstallDeliveryRequest,
     IronhubInstallDeliveryResult, IronhubLinkError, IronhubLinkService, IronhubRegisterRequest,
 };
+use ironclaw_product_contracts::projection::ProjectionStream;
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ProductSurfaceInvokeRequest, ProductSurfaceStreamRequest,
+    ProductSurfaceValidationCode,
+};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
@@ -174,16 +181,13 @@ use ironclaw_threads::{
     ThreadMessageRange, ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
     UpdateToolResultReferenceRequest,
 };
-use ironclaw_turns::run_profile::{LoopModelRouteSnapshot, LoopModelUsage};
+use ironclaw_triggers::AutomationName;
 use ironclaw_turns::test_support::in_memory_agent_turn_runtime;
 use ironclaw_turns::{
-    AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
-    CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef, GetRunStateRequest,
-    ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, ResumeTurnResponse,
-    RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion, SanitizedFailure,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCapacityResource,
-    TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState, TurnScope,
-    TurnStatus,
+    AdmissionRejection, AdmissionRejectionReason, CancelRunRequest, CancelRunResponse,
+    DefaultTurnCoordinator, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
+    ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, SubmitTurnRequest, SubmitTurnResponse,
+    TurnCapacityResource, TurnCoordinator, TurnError, TurnOriginKind, TurnRunState,
 };
 use secrecy::SecretString;
 use serde::Serialize;
@@ -370,7 +374,7 @@ struct FakeTurnCoordinator {
     run_state_error: Mutex<Option<TurnError>>,
     run_state_actor: Mutex<Option<TurnActor>>,
     explicit_run_status: Mutex<Option<TurnStatus>>,
-    parked_gate_ref: Mutex<Option<GateRef>>,
+    parked_gate_ref: Mutex<Option<TurnGateRef>>,
     parked_auth_gate: Mutex<bool>,
     parked_approval_gate: Mutex<bool>,
     run_state_failure: Mutex<Option<SanitizedFailure>>,
@@ -428,19 +432,19 @@ impl FakeTurnCoordinator {
     /// parked gate. Needed by tests that exercise `resolve_gate` denied/
     /// cancelled paths now that `RebornServices` verifies the run is parked
     /// on the supplied gate before issuing cancellation.
-    fn set_parked_gate(&self, gate_ref: GateRef) {
+    fn set_parked_gate(&self, gate_ref: TurnGateRef) {
         *self.parked_gate_ref.lock().expect("lock") = Some(gate_ref);
         *self.parked_auth_gate.lock().expect("lock") = false;
         *self.parked_approval_gate.lock().expect("lock") = false;
     }
 
-    fn set_parked_auth_gate(&self, gate_ref: GateRef) {
+    fn set_parked_auth_gate(&self, gate_ref: TurnGateRef) {
         *self.parked_gate_ref.lock().expect("lock") = Some(gate_ref);
         *self.parked_auth_gate.lock().expect("lock") = true;
         *self.parked_approval_gate.lock().expect("lock") = false;
     }
 
-    fn set_parked_approval_gate(&self, gate_ref: GateRef) {
+    fn set_parked_approval_gate(&self, gate_ref: TurnGateRef) {
         *self.parked_gate_ref.lock().expect("lock") = Some(gate_ref);
         *self.parked_auth_gate.lock().expect("lock") = false;
         *self.parked_approval_gate.lock().expect("lock") = true;
@@ -2552,7 +2556,7 @@ async fn trace_hold_authorize_capability_decodes_typed_product_input() {
     let response = ProductSurface::invoke(
         &services,
         caller(),
-        ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
             operation_id: operation_id.clone(),
             input: serde_json::to_value(RebornTraceHoldAuthorizeProductRequest {
                 submission_id: uuid::Uuid::new_v4().to_string(),
@@ -2570,7 +2574,7 @@ async fn trace_hold_authorize_capability_decodes_typed_product_input() {
     let error = ProductSurface::invoke(
         &services,
         caller(),
-        ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
             operation_id,
             input: serde_json::to_value(RebornTraceHoldAuthorizeProductRequest {
                 submission_id: "not-a-submission-id".to_string(),
@@ -3755,7 +3759,7 @@ async fn submit_turn_returns_internal_when_skill_activation_recorder_fails() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(threads, coordinator.clone())
         .with_skill_activation_recorder(|_, _, _| {
-            Err(ironclaw_host_api::product_surface::ProductSurfaceError {
+            Err(ironclaw_product_contracts::surface::ProductSurfaceError {
                 code: ProductSurfaceErrorCode::Internal,
                 kind: ProductSurfaceErrorKind::Internal,
                 status_code: 500,
@@ -5377,7 +5381,7 @@ async fn resolve_gate_rejects_missing_run_state_actor() {
         coordinator.clone(),
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
+    coordinator.set_parked_gate(TurnGateRef::new("gate-alpha").expect("gate"));
     coordinator.set_run_state_actor(None);
 
     let err = services
@@ -5409,7 +5413,7 @@ async fn resolve_gate_rejects_mismatched_run_state_actor() {
         coordinator.clone(),
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
+    coordinator.set_parked_gate(TurnGateRef::new("gate-alpha").expect("gate"));
     coordinator.set_run_state_actor(Some(turn_actor_for_user("user-beta")));
 
     let err = services
@@ -5441,7 +5445,7 @@ async fn generic_gate_resolution_rejects_blocked_auth_run() {
         coordinator.clone(),
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_auth_gate(GateRef::new("custom-auth-gate").expect("gate"));
+    coordinator.set_parked_auth_gate(TurnGateRef::new("custom-auth-gate").expect("gate"));
 
     let err = services
         .resolve_gate(
@@ -5473,7 +5477,7 @@ async fn blocked_auth_run_routes_non_prefixed_gate_to_auth_interaction_service()
     )
     .with_auth_interactions(auth_interactions.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_auth_gate(GateRef::new("custom-auth-gate").expect("gate"));
+    coordinator.set_parked_auth_gate(TurnGateRef::new("custom-auth-gate").expect("gate"));
 
     let response = services
         .resolve_gate(
@@ -5508,7 +5512,7 @@ async fn blocked_auth_run_with_stale_gate_ref_returns_conflict() {
     )
     .with_auth_interactions(auth_interactions.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_auth_gate(GateRef::new("gate-current").expect("gate"));
+    coordinator.set_parked_auth_gate(TurnGateRef::new("gate-current").expect("gate"));
 
     let err = services
         .resolve_gate(
@@ -5543,7 +5547,7 @@ async fn blocked_approval_run_routes_non_prefixed_gate_to_approval_interaction_s
     )
     .with_approval_interactions(approval_interactions.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_approval_gate(GateRef::new("custom-approval-gate").expect("gate"));
+    coordinator.set_parked_approval_gate(TurnGateRef::new("custom-approval-gate").expect("gate"));
 
     let response = services
         .resolve_gate(
@@ -5581,7 +5585,7 @@ async fn blocked_approval_run_with_stale_gate_ref_returns_conflict() {
     )
     .with_approval_interactions(approval_interactions.clone());
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_approval_gate(GateRef::new("gate-current").expect("gate"));
+    coordinator.set_parked_approval_gate(TurnGateRef::new("gate-current").expect("gate"));
 
     let err = services
         .resolve_gate(
@@ -5945,7 +5949,7 @@ async fn denied_gate_resolution_cancels_run() {
         coordinator.clone(),
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
-    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
+    coordinator.set_parked_gate(TurnGateRef::new("gate-alpha").expect("gate"));
 
     let response = services
         .resolve_gate(
@@ -6059,7 +6063,7 @@ async fn resolve_gate_rejects_cross_user_access() {
     );
     let alice = caller();
     create_thread_for(&services, alice.clone(), "thread-alice").await;
-    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
+    coordinator.set_parked_gate(TurnGateRef::new("gate-alpha").expect("gate"));
 
     let bob = ProductSurfaceCaller::new(
         TenantId::new("tenant-alpha").expect("tenant"),
@@ -6189,7 +6193,7 @@ async fn denied_gate_resolution_with_stale_gate_ref_returns_conflict() {
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
     // The run is parked on `gate-current`, but the browser supplies `gate-stale`.
-    coordinator.set_parked_gate(GateRef::new("gate-current").expect("gate"));
+    coordinator.set_parked_gate(TurnGateRef::new("gate-current").expect("gate"));
 
     let err = services
         .resolve_gate(
@@ -11286,7 +11290,7 @@ async fn query_product_surface_page<S: ProductSurface + ?Sized>(
     let page = services
         .query(
             caller,
-            ironclaw_host_api::product_surface::ProductSurfaceQueryRequest {
+            ironclaw_product_contracts::surface::ProductSurfaceQueryRequest {
                 view_id: query.view_id,
                 input: query.params,
                 cursor: query.cursor,
@@ -11363,7 +11367,7 @@ where
     let response = services
         .invoke(
             caller,
-            ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+            ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
                 operation_id: CapabilityId::new(capability_id).expect("capability id"),
                 input: serde_json::to_value(input).expect("capability input"),
                 activity_id: ActivityId::new(),
@@ -11436,7 +11440,7 @@ async fn invoke_extension_setup_submit<S: ProductSurface + ?Sized>(
     let response = services
         .invoke(
             caller,
-            ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+            ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
                 operation_id: CapabilityId::new(EXTENSION_SETUP_SUBMIT_CAPABILITY_ID)
                     .expect("capability id"),
                 input,
@@ -16328,7 +16332,7 @@ async fn execute_status_on_foreign_thread_is_indistinguishable_from_unknown() {
 // `extension_list` exercises the list-family shaping: a `Count` field plus
 // one readable row per installed extension (id, name, version, and its
 // public `LifecyclePublicState`, never the raw internal `InstallationState`
-// checkpoint — see `ironclaw_host_api::state`'s "must never expose those
+// checkpoint — see `ironclaw_extension_contracts::state`'s "must never expose those
 // checkpoints" contract).
 #[tokio::test]
 async fn admin_execute_lifecycle_command_executes_and_renders_installed_extensions() {
@@ -16710,7 +16714,7 @@ async fn ironhub_delivery_command_forwards_authenticated_product_surface_caller(
     let response = ProductSurface::invoke(
         &services,
         authenticated_caller.clone(),
-        ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
             operation_id: CapabilityId::new(IRONHUB_DELIVER_INSTALL_COMMAND_ID)
                 .expect("operation id"),
             input: serde_json::json!({
@@ -16751,7 +16755,7 @@ async fn ironhub_delivery_command_fails_closed_when_link_service_is_unwired() {
     let error = ProductSurface::invoke(
         &services,
         caller(),
-        ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
             operation_id: CapabilityId::new(IRONHUB_DELIVER_INSTALL_COMMAND_ID)
                 .expect("operation id"),
             input: serde_json::json!({

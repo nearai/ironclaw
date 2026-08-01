@@ -6,24 +6,23 @@
 //! the owning interaction.
 
 use async_trait::async_trait;
-use ironclaw_host_api::{
-    ids::{AgentId, ProjectId, TenantId, UserId},
-    product_surface::{ProductSurfaceError, ProductSurfaceErrorCode},
-    state::InstallationState,
-};
+use ironclaw_extension_contracts::state::InstallationState;
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_product_contracts::surface::{ProductSurfaceError, ProductSurfaceErrorCode};
 use serde::Serialize;
 
 use crate::ProductCommandContext;
 
-pub use ironclaw_host_api::package_lifecycle::{
-    ChannelConnectionRequirement, LifecycleBlockerRef, LifecycleChannelDirections,
-    LifecycleCommandKind, LifecycleExtensionCredentialRequirement,
-    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstallScope,
-    LifecycleInstalledExtensionSummary, LifecyclePackageId, LifecyclePackageKind,
-    LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, LifecycleSkillSource,
-    LifecycleSkillSummary, project_public_lifecycle_states, public_lifecycle_response_json,
+pub use ironclaw_extension_contracts::lifecycle_id::{LifecycleBlockerRef, LifecyclePackageId};
+pub use ironclaw_product_contracts::package_lifecycle::{
+    ChannelConnectionRequirement, LifecycleChannelDirections, LifecycleCommandKind,
+    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
+    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
+    LifecycleExtensionSummary, LifecycleInstallScope, LifecycleInstalledExtensionSummary,
+    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload,
+    LifecycleProductResponse, LifecycleReadinessBlocker, LifecycleSearchExtensionSummary,
+    LifecycleSkillSource, LifecycleSkillSummary, project_public_lifecycle_states,
+    public_lifecycle_response_json,
 };
 
 const LIFECYCLE_REF_MAX_BYTES: usize = 512;

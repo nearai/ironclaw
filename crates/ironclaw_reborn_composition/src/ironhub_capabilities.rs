@@ -38,7 +38,13 @@ pub(crate) fn extend_builtin_first_party_package(
     mut package: ExtensionPackage,
 ) -> Result<ExtensionPackage, ExtensionError> {
     package.manifest.capabilities.extend(manifests()?);
-    ExtensionPackage::from_manifest(package.manifest, package.root)
+    let root = package
+        .materialized_root()
+        .map_err(|error| ExtensionError::InvalidManifest {
+            reason: format!("IronHub built-in package must have a materialized root: {error}"),
+        })?
+        .clone();
+    ExtensionPackage::from_manifest(package.manifest, root)
 }
 
 pub(crate) fn insert_handlers(

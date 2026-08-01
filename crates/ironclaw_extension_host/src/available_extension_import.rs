@@ -1,15 +1,14 @@
 use std::sync::Arc;
 
+use ironclaw_extension_contracts::recipe::VendorAuthRecipe;
 use ironclaw_extensions::{
     ExtensionAssetPath, ExtensionManifestRecord, ExtensionPackage, ExtensionRuntimeV2,
     ManifestSource,
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
-use ironclaw_host_api::{
-    ids::ExtensionId, package_lifecycle::LifecycleExtensionOnboarding, path::VirtualPath,
-    recipe::VendorAuthRecipe, runtime::RuntimeKind,
-};
+use ironclaw_host_api::{ids::ExtensionId, path::VirtualPath, runtime::RuntimeKind};
 use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef, ProductSurfaceFailure};
+use ironclaw_product_contracts::package_lifecycle::LifecycleExtensionOnboarding;
 
 use crate::product_extension_host_api_contract_registry;
 
@@ -199,13 +198,13 @@ pub fn parse_imported_manifest(
     })?;
     // Uploaded and registry packages are both untrusted host inputs. Only
     // binary-compiled packages may claim the HostBundled trust/runtime tier.
-    ExtensionManifestRecord::from_toml(
+    ExtensionManifestRecord::from_toml_with_root_binding(
         manifest_toml.to_string(),
         source,
         &host_ports,
         None,
         &contracts,
-        None,
+        ironclaw_extensions::PackageRootBinding::FabricateOnLoad,
     )
     .map_err(map_binding_error)
 }
@@ -244,7 +243,8 @@ fn extension_package_from_files(
     // the TOML (REC-2: `from_resolved` rebuilds from the already-validated
     // contract).
     let mut resolved_with_root = record.resolved().clone();
-    resolved_with_root.root = Some(root.clone());
+    resolved_with_root.root_binding =
+        ironclaw_extensions::PackageRootBinding::Materialized(root.clone());
     let record = ExtensionManifestRecord::from_resolved(
         record.raw_toml(),
         source,
@@ -819,8 +819,10 @@ setup_url = "{expected_url}"
         // then rebuild via `from_resolved` with the id-derived root) must
         // survive onto the resolved contract, not just `package.package.root`.
         assert_eq!(
-            package.resolved_manifest.root,
-            Some(VirtualPath::new("/system/extensions/uploaded-tool").unwrap())
+            package.resolved_manifest.root_binding,
+            ironclaw_extensions::PackageRootBinding::Materialized(
+                VirtualPath::new("/system/extensions/uploaded-tool").unwrap()
+            )
         );
     }
 

@@ -19,16 +19,29 @@ use crate::{
 const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
 
 pub async fn restore_extension_lifecycle_state(
-    catalog: &AvailableExtensionCatalog,
+    catalog: &mut AvailableExtensionCatalog,
     filesystem: &Arc<dyn RootFilesystem>,
     installation_store: &Arc<dyn ExtensionInstallationStorePort>,
     lifecycle_service: &Arc<Mutex<ExtensionLifecycleService>>,
     active_extensions: &ActiveExtensionPublisher,
     legacy_tenant_owner: &UserId,
 ) -> Result<(), ProductSurfaceFailure> {
+    let mut catalog_registered_user_extension_ids: BTreeSet<String> = BTreeSet::new();
     for installation in
         canonicalize_persisted_installation_rows(installation_store, legacy_tenant_owner).await?
     {
+        let stored_manifest = installation_store
+            .get_manifest(installation.extension_id())
+            .await
+            .map_err(map_extension_installation_error)?;
+        if let Some(manifest) = stored_manifest.as_ref()
+            && manifest.manifest().source == ManifestSource::UserRegistered
+        {
+            let available = crate::hosted_mcp_manifest::available_package(manifest)?;
+            catalog.extend(AvailableExtensionCatalog::from_packages(vec![available]));
+            catalog_registered_user_extension_ids
+                .insert(installation.extension_id().as_str().to_string());
+        }
         if remove_retired_internal_installation(installation_store, &installation).await? {
             continue;
         }
@@ -57,19 +70,91 @@ pub async fn restore_extension_lifecycle_state(
             )
             .await?;
         }
-        materialize_available_extension(filesystem.as_ref(), &available).await?;
+        if available.source != ManifestSource::UserRegistered {
+            materialize_available_extension(filesystem.as_ref(), &available).await?;
+        }
+        // Derived from the package itself, not a separate persisted flag: a
+        // registration whose package does not yet publish any model-visible
+        // capability or channel/hook surface has nothing to serve. Enabling
+        // it now would mark it durably active before its setup — whatever
+        // form that setup takes for this registration kind — has produced
+        // anything to activate. Once a later restore or live preparation
+        // pass rebuilds the package with a real surface, this same check
+        // passes and the installation enables normally.
+        let has_visible_capabilities =
+            !package_visible_capability_ids(&available.package).is_empty();
+        let has_activatable_surface = has_visible_capabilities
+            || available.resolved_manifest.channel.is_some()
+            || !available.resolved_manifest.hooks.is_empty();
         {
             let mut lifecycle = lifecycle_service.lock().await;
             lifecycle
                 .install(available.package.clone())
                 .await
                 .map_err(map_extension_error)?;
+            if !has_activatable_surface {
+                tracing::debug!(
+                    extension_id = installation.extension_id().as_str(),
+                    "registered extension installation has no activatable capability or \
+                     channel surface yet during offline restore; not enabling"
+                );
+                continue;
+            }
             lifecycle
                 .enable(&available.package.id)
                 .await
                 .map_err(map_extension_error)?;
         }
         active_extensions.publish(&available.package)?;
+    }
+    restore_registered_only_definitions(
+        catalog,
+        installation_store,
+        &catalog_registered_user_extension_ids,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Repopulate the catalog with hosted MCP definitions that were registered
+/// but never installed, or whose last installation was later removed. The
+/// durable `registered-definitions/{id}.json` row survives that removal (see
+/// `installations.rs`'s `registered_definition_survives_its_final_installation_removal`),
+/// but no installation row exists to drive it through the loop above — so
+/// without this sweep the definition silently disappears from the registry
+/// after a restart. This only extends the in-memory catalog: it must not
+/// install into the lifecycle service, enable, or publish, since a
+/// registered-but-uninstalled definition confers no invocation and no active
+/// surface.
+async fn restore_registered_only_definitions(
+    catalog: &mut AvailableExtensionCatalog,
+    installation_store: &Arc<dyn ExtensionInstallationStorePort>,
+    already_contributed: &BTreeSet<String>,
+) -> Result<(), ProductSurfaceFailure> {
+    let registered_definitions = installation_store
+        .list_registered_package_definitions()
+        .await
+        .map_err(map_extension_installation_error)?;
+    for manifest in &registered_definitions {
+        if manifest.manifest().source != ManifestSource::UserRegistered {
+            continue;
+        }
+        if already_contributed.contains(manifest.extension_id().as_str()) {
+            continue;
+        }
+        match crate::hosted_mcp_manifest::available_package(manifest) {
+            Ok(available) => {
+                catalog.extend(AvailableExtensionCatalog::from_packages(vec![available]));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    extension_id = manifest.extension_id().as_str(),
+                    %error,
+                    "skipping registered hosted MCP definition restore: definition is not \
+                     convertible into an available package"
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -158,6 +243,7 @@ pub struct ExtensionInstallPlan {
 pub fn prepare_install(
     available: &AvailableExtensionPackage,
     owner: InstallationOwner,
+    retained_definition: Option<ExtensionManifestRecord>,
 ) -> Result<ExtensionInstallPlan, ProductSurfaceFailure> {
     let manifest_hash = available_manifest_hash(available)?;
     let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
@@ -170,16 +256,37 @@ pub fn prepare_install(
             reason: format!("host API contract registry rejected extension install: {error}"),
         }
     })?;
-    let manifest_record = ExtensionManifestRecord::from_toml(
-        &available.manifest_toml,
-        available.source,
+    let catalog_record = manifest_record_for_available(
+        available,
         &host_ports,
-        Some(manifest_hash.clone()),
         &contracts,
-        Some(available.package.root.clone()),
-    )
-    .map_err(map_extension_installation_error)?
+        Some(manifest_hash.clone()),
+    )?
+    // Install records no readiness verdict. "Nothing model-visible yet" is
+    // read from the package itself
+    // (`ResolvedExtensionManifest::has_model_visible_capabilities`), so a
+    // package whose capabilities arrive from a later runtime step needs no
+    // stored flag — and, more importantly, a package that never has such a
+    // step is never asked the question.
     .with_removal_cleanup_requirements(available.cleanup_requirements.clone());
+    let manifest_record = match retained_definition {
+        Some(retained)
+            if retained.raw_toml() == catalog_record.raw_toml()
+                && retained.resolved() == catalog_record.resolved()
+                && retained.manifest_hash() == catalog_record.manifest_hash() =>
+        {
+            retained
+        }
+        Some(_) => {
+            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                reason: format!(
+                    "extension {} has a conflicting registered definition",
+                    available.package.id.as_str()
+                ),
+            });
+        }
+        None => catalog_record,
+    };
     let installation_id = ExtensionInstallationId::new(available.package.id.as_str().to_string())
         .map_err(map_extension_installation_error)?;
     let installation = ExtensionInstallation::new(
@@ -197,6 +304,24 @@ pub fn prepare_install(
     })
 }
 
+fn manifest_record_for_available(
+    available: &AvailableExtensionPackage,
+    host_ports: &ironclaw_host_api::host_port::HostPortCatalog,
+    contracts: &ironclaw_extensions::HostApiContractRegistry,
+    manifest_hash: Option<ironclaw_extensions::ManifestHash>,
+) -> Result<ExtensionManifestRecord, ProductSurfaceFailure> {
+    let _ = (host_ports, contracts);
+    let mut resolved = available.resolved_manifest.as_ref().clone();
+    resolved.root_binding = available.package.root_binding.clone();
+    ExtensionManifestRecord::from_resolved(
+        &available.manifest_toml,
+        available.source,
+        resolved,
+        manifest_hash,
+    )
+    .map_err(map_extension_installation_error)
+}
+
 fn prepare_manifest_migration(
     available: &AvailableExtensionPackage,
     existing: &ExtensionInstallation,
@@ -212,15 +337,12 @@ fn prepare_manifest_migration(
             reason: format!("host API contract registry rejected manifest migration: {error}"),
         }
     })?;
-    let manifest_record = ExtensionManifestRecord::from_toml(
-        &available.manifest_toml,
-        available.source,
+    let manifest_record = manifest_record_for_available(
+        available,
         &host_ports,
-        Some(manifest_hash.clone()),
         &contracts,
-        Some(available.package.root.clone()),
-    )
-    .map_err(map_extension_installation_error)?
+        Some(manifest_hash.clone()),
+    )?
     .with_removal_cleanup_requirements(available.cleanup_requirements.clone());
     let installation = ExtensionInstallation::new(
         existing.installation_id().clone(),

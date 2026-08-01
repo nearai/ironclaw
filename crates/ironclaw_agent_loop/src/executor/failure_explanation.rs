@@ -1,12 +1,10 @@
 use std::time::Duration;
 
-use ironclaw_turns::{
-    LoopFailureKind, LoopMessageRef,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, FinalizeAssistantMessage, LoopInlineMessage,
-        LoopInlineMessageBody, LoopInlineMessageRole, LoopModelCapabilityView, LoopModelRequest,
-        LoopModelResponse, LoopPromptBundleRequest, ParentLoopOutput, PromptMode,
-    },
+use ironclaw_host_api::turn::LoopMessageRef;
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, FinalizeAssistantMessage, LoopFailureKind,
+    LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole, LoopModelCapabilityView,
+    LoopModelRequest, LoopModelResponse, LoopPromptBundleRequest, ParentLoopOutput, PromptMode,
 };
 
 use crate::state::LoopExecutionState;

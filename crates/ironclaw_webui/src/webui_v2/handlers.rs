@@ -10,7 +10,7 @@
 //! 3. Maps every error through [`WebUiV2HttpError`] so the wire shape stays
 //!    redacted and stable.
 //!
-//! [`ProductSurface`]: ironclaw_host_api::product_surface::ProductSurface
+//! [`ProductSurface`]: ironclaw_product_contracts::surface::ProductSurface
 
 // arch-exempt: large_file, ProductSurface service-collapse routes stay in the existing WebUI handler table until the WebUI route split lands, plan #5985
 
@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::body::Body;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -37,13 +38,13 @@ use ironclaw_product::{
     ADMIN_USERS_VIEW, ATTACHMENT_READ_COMMAND, AUTOMATION_DELETE_COMMAND, AUTOMATION_PAUSE_COMMAND,
     AUTOMATION_RENAME_COMMAND, AUTOMATION_RESUME_COMMAND, AUTOMATIONS_VIEW, CANCEL_RUN_COMMAND,
     CREATE_THREAD_COMMAND, CodexLoginStart, EXTENSION_IMPORT_CAPABILITY,
-    EXTENSION_INSTALL_CAPABILITY, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY,
-    EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
-    EmptyProductCommandInput, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_READ_COMMAND, FS_STAT_VIEW, FsMount,
-    GLOBAL_AUTO_APPROVE_VIEW, IRONHUB_DELIVER_INSTALL_COMMAND, IronhubInstallDeliveryRequest,
-    IronhubInstallDeliveryResult, LLM_ACTIVE_SET_CAPABILITY, LLM_CODEX_LOGIN_COMMAND,
-    LLM_CONFIG_VIEW, LLM_LIST_MODELS_COMMAND, LLM_NEARAI_LOGIN_COMMAND,
-    LLM_NEARAI_WALLET_LOGIN_COMMAND, LLM_PROVIDER_DELETE_CAPABILITY,
+    EXTENSION_INSTALL_CAPABILITY, EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY,
+    EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY, EXTENSION_SETUP_SUBMIT_CAPABILITY,
+    EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, EmptyProductCommandInput, FS_LIST_VIEW, FS_MOUNTS_VIEW,
+    FS_READ_COMMAND, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW,
+    IRONHUB_DELIVER_INSTALL_COMMAND, IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult,
+    LLM_ACTIVE_SET_CAPABILITY, LLM_CODEX_LOGIN_COMMAND, LLM_CONFIG_VIEW, LLM_LIST_MODELS_COMMAND,
+    LLM_NEARAI_LOGIN_COMMAND, LLM_NEARAI_WALLET_LOGIN_COMMAND, LLM_PROVIDER_DELETE_CAPABILITY,
     LLM_PROVIDER_UPSERT_CAPABILITY, LLM_TEST_CONNECTION_COMMAND, LOGS_VIEW, LifecyclePackageKind,
     LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult, LlmProbeResult, NearAiLoginStart,
     NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
@@ -105,16 +106,20 @@ use secrecy::ExposeSecret;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use ironclaw_extension_contracts::hosted_mcp::{
+    HostedMcpAuthSelection, HostedMcpEndpoint, RegisterHostedMcpRequest, hosted_mcp_extension_id,
+};
+use ironclaw_extension_contracts::lifecycle_id::LifecyclePackageId;
+use ironclaw_extension_contracts::state::LifecyclePublicState;
 use ironclaw_host_api::turn::IdempotencyKey;
 use ironclaw_host_api::{
     ids::{ActivityId, SecretHandle, ThreadId, UserId},
-    product_surface::{
-        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-        ProductSurfaceErrorKind, ProductSurfaceValidationCode,
-    },
     resolution::{Blocked, Resolution},
     result_meta::FailureKind,
-    state::LifecyclePublicState,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ProductSurfaceValidationCode,
 };
 use uuid::Uuid;
 
@@ -304,7 +309,7 @@ async fn read_admin_user_secret(
     user_id: UserId,
     handle: String,
 ) -> Result<ironclaw_product::AdminUserSecretMeta, WebUiV2HttpError> {
-    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
         std::sync::Arc::clone(services),
         caller,
     );
@@ -1030,7 +1035,7 @@ async fn read_project_member(
     project_id: String,
     user_id: String,
 ) -> Result<RebornProjectMemberInfo, WebUiV2HttpError> {
-    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
         std::sync::Arc::clone(services),
         caller,
     );
@@ -1173,7 +1178,7 @@ fn sse_poll_interval_for_idle_polls(idle_polls: u32) -> Duration {
 /// documented on [`ProductSurface::stream_events`].
 ///
 /// [`WebChatV2EventFrame`]: crate::webui_v2::schema::WebChatV2EventFrame
-/// [`ProductSurface::stream_events`]: ironclaw_host_api::product_surface::ProductSurface::stream_events
+/// [`ProductSurface::stream_events`]: ironclaw_product_contracts::surface::ProductSurface::stream_events
 /// [`SSE_MAX_LIFETIME`]: crate::webui_v2::sse_capacity::SSE_MAX_LIFETIME
 pub async fn stream_events(
     State(state): State<WebUiV2State>,
@@ -1339,7 +1344,7 @@ fn build_sse_stream(
         let mut slot_guard = slot;
         let started_at = tokio::time::Instant::now();
         let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
-        let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(services, caller);
+        let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(services, caller);
 
         let mut idle_polls = 0_u32;
         loop {
@@ -1357,7 +1362,7 @@ fn build_sse_stream(
                 _ = slot_guard.cancelled() => return,
                 result = tokio::time::timeout(
                     remaining,
-                    surface.stream_events(ironclaw_host_api::product_surface::ProductSurfaceStreamRequest {
+                    surface.stream_events(ironclaw_product_contracts::surface::ProductSurfaceStreamRequest {
                         stream_id: Some(thread_id.clone()),
                         after_cursor: after_cursor
                             .as_ref()
@@ -2320,6 +2325,46 @@ pub async fn install_extension(
     Ok(Json(response))
 }
 
+/// `POST /api/webchat/v2/extensions/register-hosted-mcp`
+///
+/// Accepts only admission inputs. Caller identity, package source, manifests,
+/// discovered tools, and credentials remain owned by the product lifecycle.
+pub async fn register_hosted_mcp_extension(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    body: Result<Json<RegisterHostedMcpBody>, JsonRejection>,
+) -> Result<Json<RegisterHostedMcpResponse>, WebUiV2HttpError> {
+    let Json(body) = body.map_err(|_| {
+        ProductSurfaceError::validation("request", ProductSurfaceValidationCode::InvalidValue)
+    })?;
+    let desired_name = bounded_hosted_mcp_name(body.desired_name)?;
+    let package_ref = extension_package_ref_for_request(
+        hosted_mcp_extension_id(&body.desired_id).and_then(|extension_id| {
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id.as_str())
+        }),
+        "desired_id",
+    )?;
+    let request = RegisterHostedMcpRequest {
+        desired_id: body.desired_id,
+        desired_name,
+        endpoint: body.endpoint,
+        auth_selection: body.auth_selection,
+    };
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller,
+        EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY,
+        request,
+    )
+    .await?;
+    extension_lifecycle_mutation_succeeded(resolution)?;
+    Ok(Json(RegisterHostedMcpResponse {
+        success: true,
+        message: "Custom MCP registered.".to_string(),
+        package_ref,
+    }))
+}
+
 /// `POST /api/webchat/v2/extensions/import` — admin-only: upload a standalone
 /// tool bundle (a zip with manifest.toml + wasm/ + schemas/ + prompts/). The
 /// bundle is unpacked, validated, written under `/system/extensions/<id>/`, and
@@ -2791,7 +2836,7 @@ async fn invoke_product_capability_with_activity_id<T>(
 where
     T: Serialize,
 {
-    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
         std::sync::Arc::clone(services),
         caller,
     );
@@ -2810,7 +2855,7 @@ where
 {
     let input_value = serde_json::to_value(&input).map_err(ProductSurfaceError::internal_from)?;
     let activity_id = product_surface_activity_id(&caller, command.id, &input_value)?;
-    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
         std::sync::Arc::clone(services),
         caller,
     );
@@ -2965,13 +3010,13 @@ async fn query_product_page(
     caller: ProductSurfaceCaller,
     query: RebornViewQuery,
 ) -> Result<RebornViewPage, ProductSurfaceError> {
-    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
         std::sync::Arc::clone(services),
         caller,
     );
     let page = surface
         .query(
-            ironclaw_host_api::product_surface::ProductSurfaceQueryRequest {
+            ironclaw_product_contracts::surface::ProductSurfaceQueryRequest {
                 view_id: query.view_id,
                 input: query.params,
                 cursor: query.cursor,
@@ -3868,6 +3913,35 @@ pub struct InstallExtensionBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterHostedMcpBody {
+    pub desired_id: LifecyclePackageId,
+    pub desired_name: String,
+    pub endpoint: HostedMcpEndpoint,
+    #[serde(default)]
+    pub auth_selection: Option<HostedMcpAuthSelection>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegisterHostedMcpResponse {
+    pub success: bool,
+    pub message: String,
+    pub package_ref: LifecyclePackageRef,
+}
+
+fn bounded_hosted_mcp_name(name: String) -> Result<String, ProductSurfaceError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 256 || trimmed.chars().any(char::is_control)
+    {
+        return Err(ProductSurfaceError::validation(
+            "desired_name",
+            ProductSurfaceValidationCode::InvalidValue,
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+#[derive(Debug, Deserialize)]
 pub struct RemoveExtensionBody {
     /// Client gesture id (#6520): one distinct remove gesture = one stable
     /// ActivityId; a response-lost retry replays the same gesture. Required —
@@ -3984,7 +4058,7 @@ async fn ws_drain_loop(
     let mut slot_guard = slot;
     let started_at = tokio::time::Instant::now();
     let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
-    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(services, caller);
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(services, caller);
 
     let mut idle_polls = 0_u32;
     loop {
@@ -3995,7 +4069,7 @@ async fn ws_drain_loop(
             return;
         }
         let service_call = surface.stream_events(
-            ironclaw_host_api::product_surface::ProductSurfaceStreamRequest {
+            ironclaw_product_contracts::surface::ProductSurfaceStreamRequest {
                 stream_id: Some(thread_id.clone()),
                 after_cursor: after_cursor
                     .as_ref()

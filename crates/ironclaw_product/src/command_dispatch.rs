@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::action::{ActionFingerprintKey, ProductActionId};
 use crate::commands::ProductCommand;
-use ironclaw_host_api::product_surface::{ProductSurfaceError, ProductSurfaceErrorCode};
+use ironclaw_product_contracts::surface::{ProductSurfaceError, ProductSurfaceErrorCode};
 
 /// Authority-bearing command dispatch context built by the workflow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

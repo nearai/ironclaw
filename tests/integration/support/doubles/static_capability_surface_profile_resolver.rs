@@ -1,8 +1,8 @@
 use async_trait::async_trait;
+use ironclaw_loop_contracts::LoopRunContext;
 use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
 };
-use ironclaw_turns::run_profile::LoopRunContext;
 
 pub(crate) struct StaticCapabilitySurfaceProfileResolver {
     pub(crate) allow_set: CapabilityAllowSet,

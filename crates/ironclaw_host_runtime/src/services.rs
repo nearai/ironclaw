@@ -38,6 +38,7 @@ use ironclaw_host_api::{
         ProcessBackendKind, RuntimeProfile, SecretMode,
     },
 };
+use ironclaw_loop_contracts::RunProfileResolver;
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{
@@ -56,8 +57,7 @@ use ironclaw_secrets::{
 };
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
 use ironclaw_turns::{
-    AgentTurnRuntimePort, DefaultTurnCoordinator, NoopTurnRunWakeNotifier, RunProfileResolver,
-    TurnRunWakeNotifier,
+    AgentTurnRuntimePort, DefaultTurnCoordinator, NoopTurnRunWakeNotifier, TurnRunWakeNotifier,
 };
 use ironclaw_wasm::{
     DenyWasmHostHttp, EmptyWasmRuntimeCredentials, PreparedWitTool, WasmError,
@@ -554,7 +554,7 @@ where
 
     /// The binder the extension host's loaders use to prebind WASM / hosted
     /// MCP / first-party-registry packages to their runtime lanes as
-    /// [`ironclaw_host_api::tool_adapter::ToolAdapter`]s. The lanes stay host-private.
+    /// [`ironclaw_extension_contracts::tool_adapter::ToolAdapter`]s. The lanes stay host-private.
     pub fn extension_lane_tool_binder(&self) -> ExtensionLaneToolBinder {
         ExtensionLaneToolBinder::new(Arc::new(ServiceLanePackageBinder {
             executor: self.runtime_lane_executor(),

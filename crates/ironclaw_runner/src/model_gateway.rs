@@ -26,6 +26,15 @@ use ironclaw_llm::{
     ToolCompletionResponse, ToolDefinition, clean_response, contains_codex_text_tool_call_syntax,
     recover_codex_text_tool_calls_from_tool_names, vision_models::is_vision_model,
 };
+use ironclaw_loop_contracts::LoopModelUsage;
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, EphemeralInstructionMaterializationStore,
+    InMemoryLoopHostMilestoneSink, InstructionMaterializationStore, InstructionSafetyContext,
+    LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort,
+    LoopModelProgressSink, LoopModelRequest, LoopModelResponse, LoopPromptBundleRequest,
+    LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelProfileId, PromptMode, ProviderToolCall,
+    ProviderToolDefinition, RegisterProviderToolCallRequest, sanitize_model_visible_text,
+};
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
@@ -38,19 +47,8 @@ use ironclaw_safety::{
     is_provider_arguments_too_large_summary, provider_arguments_exceed_max_bytes,
 };
 use ironclaw_threads::{ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope};
-use ironclaw_turns::run_profile::LoopModelUsage;
-use ironclaw_turns::{
-    ModelInvalidOutputDetailReason as InvalidOutputReason, TurnId, TurnRunId,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, EphemeralInstructionMaterializationStore,
-        HostManagedLoopPromptPort, InMemoryLoopHostMilestoneSink, InstructionMaterializationStore,
-        InstructionSafetyContext, LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest,
-        LoopModelPort, LoopModelProgressSink, LoopModelRequest, LoopModelResponse,
-        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelProfileId,
-        PromptMode, ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
-        sanitize_model_visible_text,
-    },
-};
+use ironclaw_turns::HostManagedLoopPromptPort;
+use ironclaw_turns::{ModelInvalidOutputDetailReason as InvalidOutputReason, TurnId, TurnRunId};
 use tracing::debug;
 
 mod prompt_cache_activity;
@@ -177,7 +175,7 @@ struct LlmModelProfileRoute {
 /// Production Reborn model gateway backed by durable session-thread context.
 ///
 /// This is the concrete adapter intended to sit behind
-/// [`HostManagedLoopModelPort`](ironclaw_turns::run_profile::HostManagedLoopModelPort):
+/// [`HostManagedLoopModelPort`](ironclaw_turns::HostManagedLoopModelPort):
 /// it resolves loop message refs from the durable thread service, then delegates
 /// provider routing and sanitization to the host-managed model gateway.
 #[derive(Clone)]
@@ -490,7 +488,7 @@ where
     async fn stream_model_with_capabilities(
         &self,
         request: HostManagedModelRequest,
-        capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+        capabilities: Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         let route = self
             .policy
@@ -542,7 +540,7 @@ where
     async fn stream_model_with_capabilities_and_progress(
         &self,
         request: HostManagedModelRequest,
-        capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+        capabilities: Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
         sink: Arc<dyn HostManagedModelStreamSink>,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         let route = self
@@ -811,7 +809,7 @@ where
     async fn stream_model_with_capabilities(
         &self,
         request: HostManagedModelRequest,
-        capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+        capabilities: Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         let slot = slot_for_model_profile(&request.model_profile_id)?;
         let request_snapshot = request
@@ -856,7 +854,7 @@ where
     async fn stream_model_with_capabilities_and_progress(
         &self,
         request: HostManagedModelRequest,
-        capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+        capabilities: Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
         sink: Arc<dyn HostManagedModelStreamSink>,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         let slot = slot_for_model_profile(&request.model_profile_id)?;
@@ -1311,7 +1309,7 @@ impl CompletionStreamSink for ProviderStreamSink {
 async fn complete_model_request<P>(
     provider: &P,
     completion: CompletionRequest,
-    capabilities: Option<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>>,
+    capabilities: Option<Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>>,
     provider_turn_scope: Option<String>,
     stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
     request_context: ProviderRequestContext,
@@ -1662,7 +1660,7 @@ fn estimate_tool_schema_tokens(definitions: &[ProviderToolDefinition]) -> u32 {
 )]
 async fn tool_response_to_host(
     response: ToolCompletionResponse,
-    capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    capabilities: Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
     provider_turn_scope: &str,
     replay_identity: &ProviderReplayIdentity,
     unavailable_capability_guard: Option<&UnavailableCapabilityGuard>,
@@ -1842,7 +1840,7 @@ async fn tool_response_to_host(
 
 fn provider_calls_are_advertised_or_resolvable(
     advertised_tool_names: &HashSet<ProviderToolName>,
-    capabilities: &dyn ironclaw_turns::run_profile::LoopCapabilityPort,
+    capabilities: &dyn ironclaw_loop_contracts::LoopCapabilityPort,
     provider_calls: &[ProviderToolCall],
 ) -> bool {
     for provider_call in provider_calls {

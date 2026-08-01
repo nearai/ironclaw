@@ -14,6 +14,19 @@ use ironclaw_llm::{
     CompletionRequest, CompletionResponse, CompletionStreamSink, FailoverProvider, FinishReason,
     LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
 };
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
+    CapabilitySurfaceVersion, EphemeralInstructionMaterializationStore,
+    InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, InstructionMaterializationStore,
+    InstructionSafetyContext, LoopCapabilityPort, LoopContextPort, LoopContextRequest,
+    LoopContextSnippet, LoopHostMilestoneKind, LoopInlineMessage, LoopInlineMessageBody,
+    LoopInlineMessageRole, LoopModelGateway, LoopModelGatewayRequest, LoopModelMessage,
+    LoopModelPort, LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+    LoopRuntimeContext, MemoryPromptContextRequest, MemoryPromptContextService, ModelProfileId,
+    ParentLoopOutput, PromptMode, ProviderToolCall, ProviderToolCallReplay, ProviderToolDefinition,
+    RunProfileResolutionRequest, RunProfileResolver, VisibleCapabilityRequest,
+    VisibleCapabilitySurface,
+};
 use ironclaw_loop_host::{
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelRouteSnapshot,
@@ -31,23 +44,8 @@ use ironclaw_threads::{
     ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope,
     ToolResultReferenceEnvelope, ToolResultSafeSummary,
 };
-use ironclaw_turns::{
-    LoopMessageRef, RunProfileResolutionRequest, RunProfileResolver, TurnActor, TurnId, TurnRunId,
-    TurnScope,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
-        CapabilitySurfaceVersion, EphemeralInstructionMaterializationStore,
-        HostManagedLoopModelPort, HostManagedLoopPromptPort, InMemoryLoopHostMilestoneSink,
-        InMemoryRunProfileResolver, InstructionMaterializationStore, InstructionSafetyContext,
-        LoopCapabilityPort, LoopContextPort, LoopContextRequest, LoopContextSnippet,
-        LoopHostMilestoneKind, LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole,
-        LoopModelGateway, LoopModelGatewayRequest, LoopModelMessage, LoopModelPort,
-        LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopRuntimeContext, MemoryPromptContextRequest, MemoryPromptContextService, ModelProfileId,
-        ParentLoopOutput, PromptMode, ProviderToolCall, ProviderToolCallReplay,
-        ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
-    },
-};
+use ironclaw_turns::{HostManagedLoopModelPort, HostManagedLoopPromptPort};
+use ironclaw_turns::{LoopMessageRef, TurnActor, TurnId, TurnRunId, TurnScope};
 use rust_decimal::Decimal;
 use tokio::sync::Barrier;
 use tracing_test::traced_test;
@@ -912,7 +910,7 @@ async fn gateway_does_not_recover_truncated_textual_tool_syntax_as_a_capability_
     assert_eq!(error.kind, HostManagedModelErrorKind::OutputTruncated);
     assert_eq!(
         error.usage,
-        Some(ironclaw_turns::run_profile::LoopModelUsage {
+        Some(ironclaw_loop_contracts::LoopModelUsage {
             input_tokens: 1,
             output_tokens: 1,
             ..Default::default()
@@ -2411,7 +2409,7 @@ async fn gateway_rejects_truncated_provider_responses() {
     assert_eq!(error.kind, HostManagedModelErrorKind::OutputTruncated);
     assert_eq!(
         error.usage,
-        Some(ironclaw_turns::run_profile::LoopModelUsage {
+        Some(ironclaw_loop_contracts::LoopModelUsage {
             input_tokens: 1,
             output_tokens: 1,
             ..Default::default()
@@ -4820,7 +4818,7 @@ impl GatewayCapabilityPort {
 impl LoopCapabilityPort for GatewayCapabilityPort {
     fn tool_definitions(
         &self,
-    ) -> Result<Vec<ProviderToolDefinition>, ironclaw_turns::run_profile::AgentLoopHostError> {
+    ) -> Result<Vec<ProviderToolDefinition>, ironclaw_loop_contracts::AgentLoopHostError> {
         Ok(self.definitions.clone())
     }
 
@@ -4828,17 +4826,17 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
         &self,
         tool_call: &ProviderToolCall,
     ) -> Result<
-        ironclaw_turns::run_profile::ProviderToolCallCapabilityIds,
-        ironclaw_turns::run_profile::AgentLoopHostError,
+        ironclaw_loop_contracts::ProviderToolCallCapabilityIds,
+        ironclaw_loop_contracts::AgentLoopHostError,
     > {
         let Some(definition) = self.definition_for(tool_call.name.as_str()) else {
-            return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
+            return Err(ironclaw_loop_contracts::AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "provider tool call is outside the visible capability surface",
             ));
         };
         Ok(
-            ironclaw_turns::run_profile::ProviderToolCallCapabilityIds::single(
+            ironclaw_loop_contracts::ProviderToolCallCapabilityIds::single(
                 definition.capability_id,
             ),
         )
@@ -4847,7 +4845,7 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
     fn validate_provider_tool_call(
         &self,
         tool_call: &ProviderToolCall,
-    ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
+    ) -> Result<(), ironclaw_loop_contracts::AgentLoopHostError> {
         // Payload-sensitive for the same reason as the registration stage
         // below: an unconditional rejection would prove that an injected error
         // maps correctly, while saying nothing about the malformed input the
@@ -4856,20 +4854,20 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
             .validation_error
             .filter(|_| tool_call.arguments.get("mission").is_none())
         {
-            return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
+            return Err(ironclaw_loop_contracts::AgentLoopHostError::new(
                 kind,
                 "provider tool output was structurally invalid",
             ));
         }
         if !self.contains_resolvable_definition(tool_call.name.as_str()) {
-            return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
+            return Err(ironclaw_loop_contracts::AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "provider tool call is outside the visible capability surface",
             ));
         }
         let arguments_len = serde_json::to_vec(&tool_call.arguments)
             .map_err(|error| {
-                ironclaw_turns::run_profile::AgentLoopHostError::new(
+                ironclaw_loop_contracts::AgentLoopHostError::new(
                     AgentLoopHostErrorKind::InvalidInvocation,
                     error.to_string(),
                 )
@@ -4878,7 +4876,7 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
         if arguments_len > ironclaw_safety::PROVIDER_ARGUMENTS_MAX_BYTES {
             // Mirror the production summary exactly so the gateway recognizes this
             // as a repairable oversized-args error (is_provider_arguments_too_large_summary).
-            return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
+            return Err(ironclaw_loop_contracts::AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 format!(
                     "provider tool arguments exceed {} bytes",
@@ -4891,10 +4889,10 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
 
     async fn register_provider_tool_call(
         &self,
-        request: ironclaw_turns::run_profile::RegisterProviderToolCallRequest,
+        request: ironclaw_loop_contracts::RegisterProviderToolCallRequest,
     ) -> Result<
-        ironclaw_turns::run_profile::CapabilityCallCandidate,
-        ironclaw_turns::run_profile::AgentLoopHostError,
+        ironclaw_loop_contracts::CapabilityCallCandidate,
+        ironclaw_loop_contracts::AgentLoopHostError,
     > {
         let tool_call = request.tool_call;
         // Reject at registration only when the payload is actually malformed —
@@ -4905,7 +4903,7 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
             .registration_error
             .filter(|_| tool_call.arguments.get("mission").is_none())
         {
-            return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
+            return Err(ironclaw_loop_contracts::AgentLoopHostError::new(
                 kind,
                 "invalid spawn_subagent input: missing field mission",
             ));
@@ -4915,10 +4913,10 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
             .definition_for(tool_call.name.as_str())
             .expect("validated provider tool definition");
         let input_ref =
-            ironclaw_turns::run_profile::CapabilityInputRef::new(format!("input:{}", tool_call.id))
+            ironclaw_loop_contracts::CapabilityInputRef::new(format!("input:{}", tool_call.id))
                 .unwrap();
         self.registered.lock().unwrap().push(tool_call.clone());
-        Ok(ironclaw_turns::run_profile::CapabilityCallCandidate {
+        Ok(ironclaw_loop_contracts::CapabilityCallCandidate {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
             capability_id: definition.capability_id.clone(),
@@ -4943,7 +4941,7 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
     async fn visible_capabilities(
         &self,
         _request: VisibleCapabilityRequest,
-    ) -> Result<VisibleCapabilitySurface, ironclaw_turns::run_profile::AgentLoopHostError> {
+    ) -> Result<VisibleCapabilitySurface, ironclaw_loop_contracts::AgentLoopHostError> {
         Ok(VisibleCapabilitySurface {
             callable_capability_ids: None,
             version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
@@ -4953,20 +4951,20 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
 
     async fn invoke_capability(
         &self,
-        _request: ironclaw_turns::run_profile::LoopRequest,
+        _request: ironclaw_loop_contracts::LoopRequest,
     ) -> Result<
         ironclaw_host_api::resolution::Resolution,
-        ironclaw_turns::run_profile::AgentLoopHostError,
+        ironclaw_loop_contracts::AgentLoopHostError,
     > {
         panic!("gateway tests do not invoke capabilities")
     }
 
     async fn invoke_capability_batch(
         &self,
-        _request: ironclaw_turns::run_profile::LoopRequestBatch,
+        _request: ironclaw_loop_contracts::LoopRequestBatch,
     ) -> Result<
         ironclaw_host_api::resolution::ResolutionBatch,
-        ironclaw_turns::run_profile::AgentLoopHostError,
+        ironclaw_loop_contracts::AgentLoopHostError,
     > {
         panic!("gateway tests do not invoke capability batches")
     }

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_host_api::product_surface::{
+use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
     ProductSurfaceValidationCode,
 };
@@ -118,7 +118,7 @@ pub(super) fn map_ironhub_link_error(error: IronhubLinkError) -> ProductSurfaceE
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::product_surface::{ProductSurfaceErrorCode, ProductSurfaceErrorKind};
+    use ironclaw_product_contracts::surface::{ProductSurfaceErrorCode, ProductSurfaceErrorKind};
 
     use super::*;
 

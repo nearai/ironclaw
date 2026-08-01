@@ -14,6 +14,7 @@ use ironclaw_events::{
     RuntimeEvent, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND, sanitize_error_kind,
     sanitize_recovery_label,
 };
+use ironclaw_host_api::turn::EventCursor as TurnEventCursor;
 use ironclaw_host_api::{
     Timestamp,
     audit::{AuditEnvelope, AuditStage},
@@ -25,7 +26,6 @@ use ironclaw_host_api::{
     resource::ResourceScope,
     runtime::RuntimeKind,
 };
-use ironclaw_turns::EventCursor as TurnEventCursor;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

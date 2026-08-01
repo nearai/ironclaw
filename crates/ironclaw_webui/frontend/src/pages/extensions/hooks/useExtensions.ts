@@ -17,6 +17,7 @@ import {
   fetchExtensions,
   fetchExtensionRegistry,
   installExtension,
+  registerCustomMcp,
   removeExtension,
   fetchExtensionSetup,
   submitExtensionSetup,
@@ -176,6 +177,29 @@ export function useExtensions() {
     },
   });
 
+  const registerCustomMcpMutation = useMutation({
+    mutationFn: ({ desiredId, desiredName, endpoint, authSelection }) =>
+      registerCustomMcp({ desiredId, desiredName, endpoint, authSelection }),
+    onSuccess: async (
+      res,
+      { desiredName, onRegistered, onRegistrationError },
+    ) => {
+      if (!res.success) {
+        const message = res.message || t("extensions.customMcpRegisterFailed");
+        setActionResult({ type: "error", message });
+        if (typeof onRegistrationError === "function") onRegistrationError(message);
+        return;
+      }
+      await registryQuery.refetch();
+      setActionResult({ type: "success", message: res.message || t("extensions.customMcpRegistered", { name: desiredName }) });
+      if (typeof onRegistered === "function") onRegistered();
+    },
+    onError: (err, { onRegistrationError }) => {
+      setActionResult({ type: "error", message: err.message });
+      if (typeof onRegistrationError === "function") onRegistrationError(err.message);
+    },
+  });
+
   const removeMutation = useMutation({
     mutationFn: ({ packageRef, clientActionId: actionId }) =>
       removeExtension(packageRef, { clientActionId: actionId }),
@@ -258,7 +282,7 @@ export function useExtensions() {
   });
 
   const isLoading = extensionsQuery.isLoading || registryQuery.isLoading;
-  const isBusy = installMutation.isPending || removeMutation.isPending || importMutation.isPending;
+  const isBusy = installMutation.isPending || registerCustomMcpMutation.isPending || removeMutation.isPending || importMutation.isPending;
 
   return {
     status,
@@ -282,6 +306,9 @@ export function useExtensions() {
     clearResult,
     install: (payload, options = undefined) =>
       installMutation.mutate(withClientActionId(payload), options),
+    registerCustomMcp: (payload, options = undefined) =>
+      registerCustomMcpMutation.mutate(payload, options),
+    isRegisteringCustomMcp: registerCustomMcpMutation.isPending,
     remove: (payload, options = undefined) =>
       removeMutation.mutate(withClientActionId(payload), options),
     isRemoving: removeMutation.isPending,

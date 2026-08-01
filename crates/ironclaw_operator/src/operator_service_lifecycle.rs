@@ -20,15 +20,13 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{
-    ids::{TenantId, UserId},
-    product_surface::{
-        ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    },
-};
+use ironclaw_host_api::ids::{TenantId, UserId};
 use ironclaw_product::{
     OperatorServiceLifecycleService, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
     RebornServiceLifecycleResponse, RebornServiceLifecycleState,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
 
 const LAUNCHD_LABEL: &str = "com.ironclaw.reborn";

@@ -5,6 +5,10 @@ use std::sync::Mutex;
 
 use chrono::Utc;
 use ironclaw_host_api::ids::{CapabilityId, ProviderToolName, ThreadId, UserId};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
+    SourceBindingRef, TurnActor, TurnId, TurnRunId, TurnScope,
+};
 use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, ProductAdapterError, ProductAdapterId,
     ProductOutboundTarget, ProjectionCursor,
@@ -20,9 +24,8 @@ use ironclaw_threads::{
     InMemorySessionThreadService, MessageContent, ToolResultSafeSummary,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, EventCursor, ExternalToolCatalog, InMemoryExternalToolCatalog,
-    PendingExternalCall, ReplyTargetBindingRef, ResumeTurnResponse, RunProfileId,
-    RunProfileVersion, SourceBindingRef, TurnActor, TurnId, TurnRunId, TurnRunState, TurnScope,
+    ExternalToolCatalog, InMemoryExternalToolCatalog, PendingExternalCall, ResumeTurnResponse,
+    TurnRunState,
 };
 
 #[tokio::test]
@@ -535,11 +538,12 @@ fn openai_compat_resume_scope_preserves_actor_owner_boundary() {
 
 #[test]
 fn external_tool_resume_idempotency_key_is_stable_and_gate_scoped() {
-    let gate_ref = ironclaw_turns::GateRef::new("gate:external_tool-call-a").expect("gate ref");
+    let gate_ref =
+        ironclaw_host_api::turn::TurnGateRef::new("gate:external_tool-call-a").expect("gate ref");
     let same_gate_ref =
-        ironclaw_turns::GateRef::new("gate:external_tool-call-a").expect("gate ref");
+        ironclaw_host_api::turn::TurnGateRef::new("gate:external_tool-call-a").expect("gate ref");
     let other_gate_ref =
-        ironclaw_turns::GateRef::new("gate:external_tool-call-b").expect("gate ref");
+        ironclaw_host_api::turn::TurnGateRef::new("gate:external_tool-call-b").expect("gate ref");
 
     let first =
         openai_compat_external_tool_resume_idempotency_key(&gate_ref).expect("idempotency key");
@@ -653,8 +657,10 @@ impl ResponseReaderFixture {
             public_id: OpenAiResponseId::new("resp_test").expect("response id"),
             actor_scope: self.actor_scope.clone(),
             accepted_ack: Some(ProductInboundAck::Accepted {
-                accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("accepted:test")
-                    .expect("accepted ref"),
+                accepted_message_ref: ironclaw_host_api::turn::AcceptedMessageRef::new(
+                    "accepted:test",
+                )
+                .expect("accepted ref"),
                 submitted_run_id: run_id,
             }),
             requested_model: "reborn-test".to_string(),

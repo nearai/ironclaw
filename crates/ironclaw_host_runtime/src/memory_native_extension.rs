@@ -23,11 +23,12 @@
 //! lane (see `first_party_tools::resolve_native_memory_input_schema_ref`), so
 //! no asset materialization is required.
 
+use ironclaw_extension_contracts::memory::MemoryDescriptor;
 use ironclaw_extensions::{
     ExtensionError, ExtensionInstallationError, ExtensionManifestRecord, ExtensionManifestV2,
     ExtensionPackage, ManifestSource,
 };
-use ironclaw_host_api::{memory::MemoryDescriptor, path::VirtualPath};
+use ironclaw_host_api::path::VirtualPath;
 
 use crate::extension_contracts::{default_host_api_contract_registry, default_host_port_catalog};
 
@@ -278,7 +279,7 @@ service = "acme_memoryless_provider"
 
     #[test]
     fn native_provider_bundle_declares_the_full_lifecycle() {
-        use ironclaw_host_api::memory::MemoryLifecycleHook;
+        use ironclaw_extension_contracts::memory::MemoryLifecycleHook;
         let bundle = native_memory_provider_bundle().expect("native bundle builds");
         assert_eq!(
             bundle.package.manifest.id.as_str(),
@@ -294,7 +295,7 @@ service = "acme_memoryless_provider"
 
     #[test]
     fn mem0_provider_bundle_builds_with_its_honest_lifecycle_and_tools() {
-        use ironclaw_host_api::memory::MemoryLifecycleHook;
+        use ironclaw_extension_contracts::memory::MemoryLifecycleHook;
         let bundle = mem0_memory_provider_bundle().expect("mem0 bundle builds");
         assert_eq!(
             bundle.package.manifest.id.as_str(),
@@ -374,7 +375,7 @@ service = "acme_memoryless_provider"
         // long-term retrieval lane and profile reads, has no thread
         // partitioning (no short-term lane), and does not record
         // interactions — undeclared hooks are never called by the host.
-        use ironclaw_host_api::memory::MemoryLifecycleHook;
+        use ironclaw_extension_contracts::memory::MemoryLifecycleHook;
         assert!(memory.declares(MemoryLifecycleHook::ReadLongTerm));
         assert!(memory.declares(MemoryLifecycleHook::ProfileRead));
         assert!(!memory.declares(MemoryLifecycleHook::ReadShortTerm));

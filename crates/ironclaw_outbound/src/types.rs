@@ -1,9 +1,9 @@
 use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
+use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use ironclaw_host_api::{
     Timestamp,
     ids::{AgentId, ProjectId, TenantId, ThreadId},
 };
-use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
 
 use crate::delivery_resolution::{

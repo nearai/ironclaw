@@ -185,7 +185,7 @@ is_shared_test_path() {
     .github/workflows/reborn-tests.yml|.github/workflows/reborn-e2e.yml|.github/workflows/nightly-deep-ci.yml)
       return 0
       ;;
-    crates/ironclaw_common/*|crates/ironclaw_host_api/*|crates/ironclaw_host_runtime/*|crates/ironclaw_loop_host/*|crates/ironclaw_processes/*)
+    crates/ironclaw_common/*|crates/ironclaw_extension_contracts/*|crates/ironclaw_host_api/*|crates/ironclaw_host_runtime/*|crates/ironclaw_loop_contracts/*|crates/ironclaw_loop_host/*|crates/ironclaw_processes/*|crates/ironclaw_product_contracts/*)
       return 0
       ;;
     crates/ironclaw_filesystem/*|crates/ironclaw_memory/*|crates/ironclaw_events/*|crates/ironclaw_event_projections/*|crates/ironclaw_event_streams/*)

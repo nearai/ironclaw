@@ -3,13 +3,15 @@ use crate::{ProductOutboundEnvelope, ProjectionCursor};
 use chrono::{DateTime, Utc};
 use ironclaw_auth::{AuthAccountLastError, AuthAccountState};
 use ironclaw_common::llm_costs::RunCost;
-use ironclaw_host_api::{ids::ThreadId, state::LifecyclePublicState};
-use ironclaw_threads::{SessionThreadRecord, SummaryArtifact, ThreadMessageRecord};
-use ironclaw_turns::run_profile::LoopModelUsage;
-use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunResponse, EventCursor, GateRef, ResumeTurnResponse,
-    RetryTurnResponse, SanitizedFailure, TurnCheckpointId, TurnRunId, TurnRunState, TurnStatus,
+use ironclaw_extension_contracts::state::LifecyclePublicState;
+use ironclaw_host_api::ids::ThreadId;
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, SanitizedFailure, TurnCheckpointId, TurnGateRef, TurnRunId,
+    TurnStatus,
 };
+use ironclaw_loop_contracts::LoopModelUsage;
+use ironclaw_threads::{SessionThreadRecord, SummaryArtifact, ThreadMessageRecord};
+use ironclaw_turns::{CancelRunResponse, ResumeTurnResponse, RetryTurnResponse, TurnRunState};
 use secrecy::SecretString;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, de};
@@ -479,7 +481,7 @@ pub struct RebornGetRunStateResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_id: Option<TurnCheckpointId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gate_ref: Option<GateRef>,
+    pub gate_ref: Option<TurnGateRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<SanitizedFailure>,
     /// Cumulative token usage for the run, once the model has reported it.

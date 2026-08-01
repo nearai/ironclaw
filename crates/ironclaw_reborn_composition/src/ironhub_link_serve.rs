@@ -136,7 +136,7 @@ mod tests {
 
         async fn deliver_install(
             &self,
-            _caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
+            _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
             _request: ironclaw_product::IronhubInstallDeliveryRequest,
         ) -> Result<ironclaw_product::IronhubInstallDeliveryResult, IronhubLinkError> {
             unreachable!("register route never delivers installs")

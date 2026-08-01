@@ -7,18 +7,12 @@ use thiserror::Error;
 use ironclaw_host_api::{Timestamp, decision::RuntimeCredentialAuthRequirement, ids::UserId};
 
 use crate::{
-    CapabilityActivityId, GateKind, GateRef, TurnError, TurnRunId, TurnRunState, TurnScope,
-    TurnStatus,
+    CapabilityActivityId, EventCursor, GateKind, TurnError, TurnGateRef, TurnRunId, TurnRunState,
+    TurnScope, TurnStatus,
 };
 
 const MAX_IN_MEMORY_EVENTS: usize = 10_000;
 pub const MAX_TURN_EVENT_PROJECTION_LIMIT: usize = 1_000;
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
-)]
-#[serde(transparent)]
-pub struct EventCursor(pub u64);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TurnEventKind {
@@ -64,7 +58,7 @@ impl TurnBlockedGateKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnBlockedGateMetadata {
-    pub gate_ref: GateRef,
+    pub gate_ref: TurnGateRef,
     pub gate_kind: TurnBlockedGateKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_id: Option<CapabilityActivityId>,
@@ -560,9 +554,9 @@ mod tests {
     };
 
     use crate::{
-        AcceptedMessageRef, CapabilityActivityId, GateRef, ReplyTargetBindingRef, RunProfileId,
-        RunProfileVersion, SourceBindingRef, TurnActor, TurnError, TurnId, TurnRunId, TurnRunState,
-        TurnScope, TurnStatus,
+        AcceptedMessageRef, CapabilityActivityId, ReplyTargetBindingRef, RunProfileId,
+        RunProfileVersion, SourceBindingRef, TurnActor, TurnError, TurnGateRef, TurnId, TurnRunId,
+        TurnRunState, TurnScope, TurnStatus,
         events::{
             EventCursor, TurnBlockedGateKind, TurnBlockedGateMetadata, TurnEventKind,
             TurnEventPage, TurnEventProjectionService, TurnEventProjectionSource,
@@ -589,7 +583,7 @@ mod tests {
             status: TurnStatus::BlockedApproval,
             kind: TurnEventKind::Blocked,
             blocked_gate: Some(TurnBlockedGateMetadata {
-                gate_ref: GateRef::new("gate:approval-a").expect("gate ref"),
+                gate_ref: TurnGateRef::new("gate:approval-a").expect("gate ref"),
                 gate_kind: TurnBlockedGateKind::Approval,
                 activity_id: None,
                 credential_requirements: vec![RuntimeCredentialAuthRequirement {
@@ -722,7 +716,7 @@ mod tests {
             model_usage: None,
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
-            gate_ref: Some(GateRef::new("gate:auth-a").expect("gate ref")),
+            gate_ref: Some(TurnGateRef::new("gate:auth-a").expect("gate ref")),
             blocked_activity_id: Some(activity_id),
             credential_requirements: Vec::new(),
             failure: None,
@@ -931,7 +925,7 @@ mod tests {
             .expect("reducer service snapshot keeps gate metadata");
         assert_eq!(
             gate.gate_ref,
-            GateRef::new("gate:approval-a").expect("gate ref")
+            TurnGateRef::new("gate:approval-a").expect("gate ref")
         );
         assert_eq!(gate.gate_kind, TurnBlockedGateKind::Approval);
         assert_eq!(

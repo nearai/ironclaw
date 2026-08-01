@@ -112,32 +112,29 @@ fn trace_host_factory_latency_error<E: ?Sized>(
     );
 }
 
-use ironclaw_turns::{
-    AgentTurnRuntimePort, LoopCheckpointStateRef, LoopCheckpointStore, RunProfileId,
-    TurnCheckpointId, TurnError, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
-    TurnStatus,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
-        CommunicationContextProvider, EphemeralInstructionMaterializationStore,
-        FinalizeAssistantMessage, HookMilestoneSink, HostManagedLoopModelPort,
-        HostManagedLoopPromptPort, InstructionBundleMaterializedMessage,
-        InstructionMaterializationStore, InstructionSafetyContext, LoadCheckpointPayloadRequest,
-        LoadedCheckpointPayload, LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort,
-        LoopCheckpointPort, LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome,
-        LoopCompactionPort, LoopCompactionRequest, LoopContextBundle, LoopContextPort,
-        LoopContextRequest, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
-        LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
-        LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse,
-        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
-        LoopPromptBundleRequest, LoopPromptPort, LoopRequest, LoopRequestBatch, LoopRunContext,
-        LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort, MemoryPromptContextService,
-        NoOpBudgetAccountant, NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition,
-        RegisterProviderToolCallRequest, RunScopedHookMilestoneSink, StageCheckpointPayloadRequest,
-        SystemInferencePort, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
-    },
-    runner::ClaimedTurnRun,
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
+    CommunicationContextProvider, EphemeralInstructionMaterializationStore,
+    FinalizeAssistantMessage, HookMilestoneSink, InstructionBundleMaterializedMessage,
+    InstructionMaterializationStore, InstructionSafetyContext, LoadCheckpointPayloadRequest,
+    LoadedCheckpointPayload, LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort,
+    LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError,
+    LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest, LoopContextBundle,
+    LoopContextPort, LoopContextRequest, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
+    LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
+    LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
+    LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRequest,
+    LoopPromptPort, LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort,
+    LoopRuntimeContext, LoopTranscriptPort, MemoryPromptContextService, NoOpBudgetAccountant,
+    NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
+    RunScopedHookMilestoneSink, StageCheckpointPayloadRequest, SystemInferencePort,
+    UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
+use ironclaw_turns::{
+    AgentTurnRuntimePort, LoopCheckpointStore, RunProfileId, TurnCheckpointId, TurnError,
+    TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnStatus, runner::ClaimedTurnRun,
+};
+use ironclaw_turns::{HostManagedLoopModelPort, HostManagedLoopPromptPort};
 use tokio::task::JoinHandle;
 
 struct ProfiledCapabilityHostRuntime {
@@ -291,8 +288,7 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
     fn provider_tool_call_capability_ids(
         &self,
         tool_call: &ProviderToolCall,
-    ) -> Result<ironclaw_turns::run_profile::ProviderToolCallCapabilityIds, AgentLoopHostError>
-    {
+    ) -> Result<ironclaw_loop_contracts::ProviderToolCallCapabilityIds, AgentLoopHostError> {
         // MUST delegate to inner. The LoopCapabilityPort default resolves a call by
         // searching `self.tool_definitions()` (the disclosed/advertised surface),
         // which rejects every deferred tool with "outside the visible capability
@@ -312,7 +308,7 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
     async fn register_provider_tool_call(
         &self,
         request: RegisterProviderToolCallRequest,
-    ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
+    ) -> Result<ironclaw_loop_contracts::CapabilityCallCandidate, AgentLoopHostError> {
         self.inner.register_provider_tool_call(request).await
     }
 
@@ -421,7 +417,7 @@ impl HookCapabilityInputResolverAdapter {
 impl HookCapabilityInputResolver for HookCapabilityInputResolverAdapter {
     async fn resolve(
         &self,
-        invocation: &ironclaw_turns::run_profile::LoopRequest,
+        invocation: &ironclaw_loop_contracts::LoopRequest,
     ) -> Option<serde_json::Value> {
         let value = match self
             .inner
@@ -964,7 +960,7 @@ async fn emit_subscription_terminated_note(
     run_context: &LoopRunContext,
     safe_summary: &str,
 ) {
-    let summary = match ironclaw_turns::run_profile::LoopSafeSummary::new(safe_summary) {
+    let summary = match ironclaw_loop_contracts::LoopSafeSummary::new(safe_summary) {
         Ok(s) => s,
         Err(_) => {
             // Should never happen for our static strings, but if a future
@@ -978,14 +974,14 @@ async fn emit_subscription_terminated_note(
             return;
         }
     };
-    let milestone = ironclaw_turns::run_profile::LoopHostMilestone {
+    let milestone = ironclaw_loop_contracts::LoopHostMilestone {
         scope: run_context.scope.clone(),
         actor: run_context.actor.clone(),
         turn_id: run_context.turn_id,
         run_id: run_context.run_id,
         loop_driver_id: run_context.loop_driver_id.clone(),
-        kind: ironclaw_turns::run_profile::LoopHostMilestoneKind::DriverNote {
-            kind: ironclaw_turns::run_profile::LoopDriverNoteKind::EventSubscriptionTerminated,
+        kind: ironclaw_loop_contracts::LoopHostMilestoneKind::DriverNote {
+            kind: ironclaw_loop_contracts::LoopDriverNoteKind::EventSubscriptionTerminated,
             safe_summary: summary,
         },
     };
@@ -1257,8 +1253,8 @@ where
     ///
     /// **Hook telemetry**: to surface hook dispatch in the host's milestone
     /// stream, the closure itself should attach a
-    /// [`ironclaw_turns::run_profile::HookMilestoneSink`] (typically a
-    /// [`ironclaw_turns::run_profile::RunScopedHookMilestoneSink`] wrapping
+    /// [`ironclaw_loop_contracts::HookMilestoneSink`] (typically a
+    /// [`ironclaw_loop_contracts::RunScopedHookMilestoneSink`] wrapping
     /// the factory's `LoopHostMilestoneSink`) before returning the
     /// dispatcher. The wrapping happens inside the closure so each run gets a
     /// dispatcher already configured for telemetry. Hook activity is
@@ -2199,7 +2195,7 @@ impl LoopCapabilityPort for RebornLoopDriverHost {
     async fn register_provider_tool_call(
         &self,
         request: RegisterProviderToolCallRequest,
-    ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
+    ) -> Result<ironclaw_loop_contracts::CapabilityCallCandidate, AgentLoopHostError> {
         self.capabilities.register_provider_tool_call(request).await
     }
 
@@ -2390,7 +2386,7 @@ where
         &self,
         claimed: &ClaimedTurnRun,
     ) -> Result<
-        Box<dyn ironclaw_turns::run_profile::AgentLoopDriverHost + Send + Sync>,
+        Box<dyn ironclaw_loop_contracts::AgentLoopDriverHost + Send + Sync>,
         crate::turn_runner::HostFactoryError,
     > {
         let mut loop_run_context = LoopRunContext::new(
@@ -2433,7 +2429,7 @@ where
         host_result
             .map(|host| {
                 Box::new(host)
-                    as Box<dyn ironclaw_turns::run_profile::AgentLoopDriverHost + Send + Sync>
+                    as Box<dyn ironclaw_loop_contracts::AgentLoopDriverHost + Send + Sync>
             })
             .map_err(|error| crate::turn_runner::HostFactoryError::new(error.to_string()))
     }
@@ -2715,14 +2711,14 @@ mod hook_resolver_adapter_tests {
 
     use super::*;
     use ironclaw_host_api::ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId};
-    use ironclaw_turns::run_profile::{
+    use ironclaw_loop_contracts::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, CapabilitySurfaceVersion,
         LoopRequest,
     };
-    use ironclaw_turns::{
-        InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver, TurnId,
-        TurnRunId, TurnScope,
+    use ironclaw_loop_contracts::{
+        InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver,
     };
+    use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
     use std::sync::Mutex;
 
     fn tenant() -> TenantId {
@@ -2868,15 +2864,15 @@ mod tests {
     use super::*;
 
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_loop_contracts::{
+        AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
+        InMemoryRunProfileResolver, LoadCheckpointPayloadRequest, LoopCheckpointKind,
+        LoopCheckpointRequest, LoopRunContext, RunProfileResolutionRequest, RunProfileResolver,
+        StageCheckpointPayloadRequest,
+    };
     use ironclaw_turns::test_support::in_memory_loop_checkpoint_store;
     use ironclaw_turns::{
-        InMemoryRunProfileResolver, ProcessLoopCheckpointStore, RunProfileResolver, TurnActor,
-        TurnCheckpointId, TurnId, TurnRunId, TurnScope,
-        run_profile::{
-            AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
-            LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopCheckpointRequest,
-            LoopRunContext, RunProfileResolutionRequest, StageCheckpointPayloadRequest,
-        },
+        ProcessLoopCheckpointStore, TurnActor, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
     };
 
     async fn test_run_context() -> LoopRunContext {
@@ -3464,7 +3460,7 @@ mod event_subscription_scope_tests {
     /// never dispatches.
     #[tokio::test]
     async fn event_triggered_head_cursor_failure_emits_terminated_milestone() {
-        use ironclaw_turns::run_profile::{
+        use ironclaw_loop_contracts::{
             InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopDriverNoteKind,
             LoopHostMilestoneKind, LoopRunContext, RunProfileResolutionRequest, RunProfileResolver,
         };

@@ -368,7 +368,7 @@ fn reply_without_text_summary(reply: &ironclaw_reborn_composition::AssistantRepl
     match reply.status {
         ironclaw_reborn_composition::TurnStatus::Failed
         | ironclaw_reborn_composition::TurnStatus::RecoveryRequired => {
-            ironclaw_reborn_composition::reborn_failure_summary_for_category(
+            ironclaw_host_api::failure::summary::reborn_failure_summary_for_category(
                 reply.failure_category.as_deref(),
             )
         }

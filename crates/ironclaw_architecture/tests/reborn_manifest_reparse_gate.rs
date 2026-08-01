@@ -47,42 +47,6 @@ const ALLOWLIST: &[(&str, usize, ReparseCategory, &str)] = &[
         "the canonical manifest-file loader/parser in the manifest-owning crate (load_package_entry)",
     ),
     (
-        "crates/ironclaw_extensions/src/installations.rs",
-        1,
-        ReparseCategory::Compiler,
-        "one-time CAS migration compiles pre-resolved filesystem rows before the store opens",
-    ),
-    (
-        "crates/ironclaw_product/src/adapter_registry.rs",
-        1,
-        ReparseCategory::Compiler,
-        "parse_product_adapter_manifest_record — the registry manifest compiler entry",
-    ),
-    (
-        "crates/ironclaw_extension_host/src/available_extensions.rs",
-        3,
-        ReparseCategory::BundledAsset,
-        "bundled first-party package + filesystem-root catalog compile",
-    ),
-    (
-        "crates/ironclaw_extension_host/src/available_extension_import.rs",
-        1,
-        ReparseCategory::Compiler,
-        "install-time compile of an imported (zip-uploaded) manifest into its resolved record",
-    ),
-    (
-        "crates/ironclaw_extension_host/src/lifecycle_restore.rs",
-        2,
-        ReparseCategory::Compiler,
-        "install/restore-time compile of the installed manifest into its resolved record",
-    ),
-    (
-        "crates/ironclaw_extension_host/src/product_lifecycle.rs",
-        1,
-        ReparseCategory::Compiler,
-        "activation-time compile of the installed manifest into its resolved record",
-    ),
-    (
         "crates/ironclaw_host_runtime/src/memory_native_extension.rs",
         1,
         ReparseCategory::BundledAsset,

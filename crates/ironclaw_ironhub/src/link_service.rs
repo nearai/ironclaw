@@ -6,13 +6,13 @@ use ironclaw_filesystem::{CasExpectation, Entry, FilesystemError, RootFilesystem
 use ironclaw_host_api::{
     ids::{CapabilityId, InvocationId},
     path::VirtualPath,
-    product_surface::ProductSurfaceCaller,
     resource::ResourceScope,
 };
 use ironclaw_product::{
     IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult, IronhubLinkError,
     IronhubLinkService, IronhubRegisterRequest,
 };
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_skills::ScopedSkillManagementPort;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

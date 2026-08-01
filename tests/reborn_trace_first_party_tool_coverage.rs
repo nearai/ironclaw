@@ -24,8 +24,9 @@ use ironclaw_host_runtime::{
     TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
     WRITE_FILE_CAPABILITY_ID, builtin_first_party_package, native_memory_first_party_package,
 };
+use ironclaw_loop_contracts::LoopHostMilestoneKind;
 use ironclaw_loop_host::{HostManagedModelMessageRole, HostManagedModelResponse};
-use ironclaw_turns::{TurnStatus, run_profile::LoopHostMilestoneKind};
+use ironclaw_turns::TurnStatus;
 use parity_qa_support::{
     binary_e2e::{HarnessWaitConfig, RebornBinaryE2EHarness, assert_milestone_order},
     model_replay::{

@@ -14,13 +14,13 @@ use ironclaw_host_api::{
     },
     ids::{CapabilityId, ExtensionId, UserId},
     path::VirtualPath,
-    product_surface::ProductSurfaceCaller,
     resource::ResourceScope,
     runtime::RuntimeKind,
 };
 use ironclaw_product::{
     IronhubInstallDeliveryRequest, IronhubLinkError, IronhubLinkService, IronhubRegisterRequest,
 };
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_skills::ManagedSkillSource;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};

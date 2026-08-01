@@ -17,7 +17,8 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{ids::CapabilityId, tool_adapter::RestrictedEgress};
+use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
+use ironclaw_host_api::ids::CapabilityId;
 use tokio::sync::Mutex;
 
 use crate::active::{
@@ -25,8 +26,8 @@ use crate::active::{
 };
 use crate::entrypoint::{BindError, check_binding};
 use crate::loaders::{ExtensionLoader, LoadContext};
-use crate::state::InstallationState;
 use crate::store::{InstallationRecord, InstallationRecordStore, StoreError};
+use ironclaw_extension_contracts::state::InstallationState;
 
 /// Drains in-flight work for an extension before its snapshot generation is
 /// dropped. Injected by composition.
@@ -54,7 +55,7 @@ pub trait EgressFactory: Send + Sync {
         &self,
         extension_id: &str,
         installation_id: &str,
-        declared: &[ironclaw_host_api::channel::ChannelEgressDescriptor],
+        declared: &[ironclaw_extension_contracts::channel::ChannelEgressDescriptor],
     ) -> Arc<dyn RestrictedEgress>;
 }
 

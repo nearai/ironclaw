@@ -33,12 +33,12 @@ use crate::delivery_coordinator::{
     DeliveryIntent,
 };
 use crate::{ProductOutboundTargetResolver, ProductSurfaceFailure};
+use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec;
 
-// The codec contract lives in `ironclaw_product` (the vendor half
-// is implemented by channel extension crates, which never depend on this
-// crate); re-exported here so the triggered-delivery consumers keep one
-// import surface.
-pub use crate::PreferenceTargetCodec;
+// The codec contract lives in `ironclaw_extension_contracts` — the vendor
+// half is implemented by the channel packages, which must never depend on
+// this crate. Consumers import it from there; this module deliberately keeps
+// no second import path for it (PROPOSAL §11.2.4).
 
 /// One trigger-submitted run to watch and deliver, in generic vocabulary.
 /// The composition's post-submit hook translates its trigger-fire type into

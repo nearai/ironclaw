@@ -75,7 +75,7 @@ Rules — kept short on purpose:
   caller-level test. Ticks with that caller-level test.
 - [x] MAN-8 `trigger`/`file` remain reserved kinds with no runtime binding. —
   `CapabilitySurfaceKind::{Trigger,File}` are reserved enum variants
-  (`crates/ironclaw_host_api/src/surface.rs`, doc "no manifest section projects
+  (`crates/ironclaw_extension_contracts/src/surface.rs`, doc "no manifest section projects
   this kind yet"), wire-pinned by
   `surface_kind_wire_shape_is_snake_case_and_matches_as_str`; nothing binds them
   at runtime by construction — the binding rule (LIFE-1) binds only
@@ -766,7 +766,7 @@ Rules — kept short on purpose:
   deleted. — no concrete channel branch remains in `ironclaw_llm`, and the
   manifest's `[channel.presentation]` (`supports_markdown`,
   `max_message_chars`) now feeds prompt construction per channel. The resolved
-  `ChannelPresentation` (`ironclaw_host_api::channel`) flows manifest →
+  `ChannelPresentation` (`ironclaw_extension_contracts::channel`) flows manifest →
   `LifecycleExtensionSummary.channel_presentation`
   (`available_extensions.rs::summary` / `channel_presentation_from_manifest_record`)
   → the communication provider → `ConnectedChannelSummary.presentation` →

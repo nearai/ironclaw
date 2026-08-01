@@ -13,6 +13,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::preference_target::{
+    PreferenceTargetCodec, PreferenceTargetEncodeRequest,
+};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
+    SourceBindingRef, TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
+};
 use ironclaw_host_api::{
     attachment::WorkspaceFile,
     ids::{AgentId, TenantId, ThreadId, UserId},
@@ -25,19 +33,19 @@ use ironclaw_outbound::{
     TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryStore,
 };
 use ironclaw_product::{
-    AdapterInstallationId, AuthPromptView, AuthRequirement, ChannelAdapter, ChannelError,
-    DeliveryReport, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-    InboundCommandPayload, InboundOutcome, OutboundEnvelope, OutboundPart, ParsedProductInbound,
-    PartDeliveryOutcome, ProductAdapterError, ProductAdapterId, ProductCommandResultPayload,
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
-    ProductRejectionKind, ProductTriggerReason, ProtocolAuthEvidence, TrustedInboundContext,
-    UserMessagePayload, VerifiedInbound,
+    AdapterInstallationId, AuthPromptView, AuthRequirement, ChannelError, DeliveryReport,
+    ExternalActorRef, ExternalConversationRef, ExternalEventId, InboundCommandPayload,
+    InboundOutcome, OutboundEnvelope, OutboundPart, ParsedProductInbound, PartDeliveryOutcome,
+    ProductAdapterError, ProductAdapterId, ProductCommandResultPayload, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductRejectionKind,
+    ProductTriggerReason, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
+    VerifiedInbound,
 };
 use ironclaw_product::{
     BlockedAuthPromptRequest, BlockedAuthPromptSource, ChannelConnectionNoticePolicy,
     ChannelDeliveryResolver, DeliveryCoordinator, DeliveryReplyContextSource, DeliveryRetryPolicy,
-    PreferenceTargetCodec, ResolvedChannelDelivery, RunDeliveryObserver, RunDeliveryServices,
-    RunDeliverySettings, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
+    ResolvedChannelDelivery, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
+    TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
 };
 use ironclaw_product::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsStat,
@@ -47,11 +55,9 @@ use ironclaw_threads::{
     InMemorySessionThreadService, MessageContent, SessionThreadService, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
-    GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
-    RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError, TurnId, TurnRunId,
-    TurnRunState, TurnScope, TurnStatus,
+    CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
+    RetryTurnRequest, RetryTurnResponse, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator,
+    TurnError, TurnRunState,
 };
 
 // ── Scripted fakes ─────────────────────────────────────────────────────────
@@ -59,13 +65,13 @@ use ironclaw_turns::{
 #[derive(Clone)]
 struct ScriptedRunState {
     status: TurnStatus,
-    gate_ref: Option<GateRef>,
+    gate_ref: Option<TurnGateRef>,
 }
 
 fn scripted_state(status: TurnStatus, gate_ref: Option<&str>) -> ScriptedRunState {
     ScriptedRunState {
         status,
-        gate_ref: gate_ref.map(|s| GateRef::new(s).expect("gate ref")),
+        gate_ref: gate_ref.map(|s| TurnGateRef::new(s).expect("gate ref")),
     }
 }
 
@@ -249,7 +255,7 @@ impl ChannelAdapter for RecordingChannelAdapter {
     async fn deliver(
         &self,
         envelope: OutboundEnvelope,
-        _egress: &dyn ironclaw_host_api::tool_adapter::RestrictedEgress,
+        _egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError> {
         self.envelopes
             .lock()
@@ -284,15 +290,15 @@ impl ChannelAdapter for RecordingChannelAdapter {
 struct DenyAllEgress;
 
 #[async_trait]
-impl ironclaw_host_api::tool_adapter::RestrictedEgress for DenyAllEgress {
+impl ironclaw_extension_contracts::tool_adapter::RestrictedEgress for DenyAllEgress {
     async fn send(
         &self,
-        _request: ironclaw_host_api::tool_adapter::RestrictedEgressRequest,
+        _request: ironclaw_extension_contracts::tool_adapter::RestrictedEgressRequest,
     ) -> Result<
-        ironclaw_host_api::tool_adapter::RestrictedEgressResponse,
-        ironclaw_host_api::tool_adapter::RestrictedEgressError,
+        ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse,
+        ironclaw_extension_contracts::tool_adapter::RestrictedEgressError,
     > {
-        Err(ironclaw_host_api::tool_adapter::RestrictedEgressError::PolicyDenied)
+        Err(ironclaw_extension_contracts::tool_adapter::RestrictedEgressError::PolicyDenied)
     }
 }
 
@@ -474,14 +480,14 @@ impl PreferenceTargetCodec for StaticCodec {
 
     fn encode_shared_conversation_target(
         &self,
-        _request: ironclaw_product::PreferenceTargetEncodeRequest<'_>,
+        _request: PreferenceTargetEncodeRequest<'_>,
     ) -> Option<ReplyTargetBindingRef> {
         None
     }
 
     fn encode_personal_direct_message_target(
         &self,
-        _request: ironclaw_product::PreferenceTargetEncodeRequest<'_>,
+        _request: PreferenceTargetEncodeRequest<'_>,
         _external_actor_id: &str,
     ) -> Option<ReplyTargetBindingRef> {
         None

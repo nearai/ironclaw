@@ -1,10 +1,10 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use ironclaw_extension_contracts::extension::ExtensionHostAssemblyConfig;
 use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_filesystem::{CompositeRootFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    extension::ExtensionHostAssemblyConfig,
     ids::{CapabilityId, UserId},
     resource::ResourceScope,
 };

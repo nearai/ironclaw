@@ -7,16 +7,8 @@ use chrono::Utc;
 use async_trait::async_trait;
 #[cfg(test)]
 use ironclaw_extensions::SharedExtensionRegistry;
-use ironclaw_host_api::{
-    ids::InvocationId,
-    product_surface::{
-        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-        ProductSurfaceErrorKind,
-    },
-    resource::ResourceScope,
-};
+use ironclaw_host_api::{ids::InvocationId, resource::ResourceScope};
 use ironclaw_operator::OperatorServiceLifecycle;
-use ironclaw_product::ProjectionStream;
 use ironclaw_product::{
     ChannelConnectionService, OperatorStatusService, ProjectScopedAttachmentLander,
     ProjectScopedAttachmentReader, ProjectScopedFilesystemReader, RebornAutomationProductService,
@@ -24,6 +16,11 @@ use ironclaw_product::{
     RebornOperatorStatusState, RebornServices as ProductRebornServices, RebornSkillContentResponse,
     RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, SkillsProductService,
+};
+use ironclaw_product_contracts::projection::ProjectionStream;
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind,
 };
 
 use ironclaw_triggers::TriggerRepository;
@@ -201,10 +198,6 @@ pub(crate) fn build_product_surface_with_channel_connection(
             lifecycle_service.with_extension_management(runtime.extension_management.clone());
         lifecycle_service =
             lifecycle_service.with_channel_config(runtime.channel_config_service.clone());
-        if let Some(runtime_http_egress) = &runtime.runtime_http_egress {
-            lifecycle_service =
-                lifecycle_service.with_runtime_http_egress(runtime_http_egress.clone());
-        }
         lifecycle_service = lifecycle_service.with_runtime_credential_accounts(
             runtime
                 .product_auth

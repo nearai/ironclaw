@@ -17,11 +17,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_loop_contracts::{CommunicationContextProvider, InstructionSafetyContext};
 use ironclaw_loop_host::CapabilityAllowSet;
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_turns::InMemoryTurnEventSink;
-use ironclaw_turns::run_profile::{CommunicationContextProvider, InstructionSafetyContext};
 
 use super::super::builder::StorageMode;
 use super::RebornIntegrationGroupBuilder;
@@ -54,7 +54,7 @@ impl RebornIntegrationGroupBuilder {
     pub fn with_bound_memory_provider(
         mut self,
         provider: std::sync::Arc<dyn ironclaw_memory::MemoryService>,
-        lifecycle: ironclaw_host_api::memory::MemoryDescriptor,
+        lifecycle: ironclaw_extension_contracts::memory::MemoryDescriptor,
     ) -> Self {
         self.bound_memory = Some((provider, lifecycle));
         self

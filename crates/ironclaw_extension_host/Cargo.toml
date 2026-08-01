@@ -30,7 +30,7 @@ composition-substrate-tests = []
 
 [dependencies]
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 hmac = "0.13"
 hex = "0.4.3"
@@ -38,9 +38,12 @@ ironclaw_auth = { path = "../ironclaw_auth" }
 ironclaw_approvals = { path = "../ironclaw_approvals" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
+ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version = "0.1.0" }
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_host_ingress = { path = "../ironclaw_host_ingress" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions", optional = true }
@@ -51,7 +54,7 @@ ironclaw_mcp = { path = "../ironclaw_mcp" }
 ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
-ironclaw_product = { path = "../ironclaw_product", features = ["host-auth-mint"] }
+ironclaw_product = { path = "../ironclaw_product" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_safety = { path = "../ironclaw_safety" }
@@ -60,6 +63,7 @@ ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_trust = { path = "../ironclaw_trust" }
+ironclaw_loop_contracts = { path = "../ironclaw_loop_contracts", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 axum = { version = "0.8" }
 fs4 = "1.1"
@@ -115,3 +119,6 @@ name = "admin_configuration_store_contract"
 
 [[test]]
 name = "admin_configuration_service_contract"
+
+[[test]]
+name = "lifecycle_restore_contract"

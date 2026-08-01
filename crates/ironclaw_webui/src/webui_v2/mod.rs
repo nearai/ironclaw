@@ -1,7 +1,7 @@
 //! Reborn WebChat v2 HTTP route surface.
 //!
 //! This crate ships the minimal native WebUI v2 route set on top of the
-//! [`ironclaw_host_api::product_surface::ProductSurface`] service. It is compiled into
+//! [`ironclaw_product_contracts::surface::ProductSurface`] service. It is compiled into
 //! every build.
 //!
 //! ## Boundaries
@@ -34,9 +34,9 @@
 //! maximum lifetime so leaked guards or stuck pollers cannot wedge a
 //! caller's slot indefinitely.
 //!
-//! [`ProductSurface`]: ironclaw_host_api::product_surface::ProductSurface
+//! [`ProductSurface`]: ironclaw_product_contracts::surface::ProductSurface
 //! [`WebChatV2EventFrame`]: crate::WebChatV2EventFrame
-//! [`ProductSurfaceCaller`]: ironclaw_host_api::product_surface::ProductSurfaceCaller
+//! [`ProductSurfaceCaller`]: ironclaw_product_contracts::surface::ProductSurfaceCaller
 //! [`IngressRouteDescriptor`]: ironclaw_host_api::ingress::IngressRouteDescriptor
 
 mod descriptors;
@@ -79,7 +79,8 @@ pub use descriptors::{
     WEBUI_V2_ROUTE_OPERATOR_RUN_SETUP, WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE,
     WEBUI_V2_ROUTE_OPERATOR_SET_CONFIG_KEY, WEBUI_V2_ROUTE_OPERATOR_STATUS,
     WEBUI_V2_ROUTE_OPERATOR_VALIDATE_CONFIG, WEBUI_V2_ROUTE_PAUSE_AUTOMATION,
-    WEBUI_V2_ROUTE_READ_FS_FILE, WEBUI_V2_ROUTE_READ_PROJECT_FILE, WEBUI_V2_ROUTE_REMOVE_EXTENSION,
+    WEBUI_V2_ROUTE_READ_FS_FILE, WEBUI_V2_ROUTE_READ_PROJECT_FILE,
+    WEBUI_V2_ROUTE_REGISTER_HOSTED_MCP_EXTENSION, WEBUI_V2_ROUTE_REMOVE_EXTENSION,
     WEBUI_V2_ROUTE_REMOVE_PROJECT_MEMBER, WEBUI_V2_ROUTE_REMOVE_SKILL,
     WEBUI_V2_ROUTE_RENAME_AUTOMATION, WEBUI_V2_ROUTE_RESOLVE_GATE,
     WEBUI_V2_ROUTE_RESUME_AUTOMATION, WEBUI_V2_ROUTE_RETRY_RUN, WEBUI_V2_ROUTE_SEARCH_SKILLS,
@@ -107,9 +108,9 @@ pub use handlers::{
     list_automations, list_commands, list_extension_admin_configuration, list_extension_registry,
     list_extensions, list_fs_mounts, list_llm_models, list_operator_config,
     list_outbound_delivery_targets, list_settings_tools, list_skills, list_threads,
-    pause_automation, query_logs, query_operator_logs, read_fs_file, remove_extension,
-    remove_skill, rename_automation, replace_extension_admin_configuration, resolve_gate,
-    resume_automation, retry_run, run_operator_service_lifecycle, run_operator_setup,
+    pause_automation, query_logs, query_operator_logs, read_fs_file, register_hosted_mcp_extension,
+    remove_extension, remove_skill, rename_automation, replace_extension_admin_configuration,
+    resolve_gate, resume_automation, retry_run, run_operator_service_lifecycle, run_operator_setup,
     search_skills, send_message, set_active_llm, set_auto_activate_learned,
     set_operator_config_key, set_outbound_preferences, set_settings_tool_permission,
     set_settings_tools_auto_approve, set_skill_auto_activate, setup_extension, start_codex_login,

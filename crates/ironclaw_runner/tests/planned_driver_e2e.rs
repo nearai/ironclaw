@@ -11,29 +11,27 @@ use ironclaw_agent_loop::{
         test_run_context,
     },
 };
+use ironclaw_loop_contracts::{
+    AgentLoopDriver, AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest,
+    AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
+    FinalizeAssistantMessage, LoadCheckpointPayloadRequest, LoadedCheckpointPayload,
+    LoopCancelReasonKind, LoopCancellationPort, LoopCancellationSignal, LoopCancelledReasonKind,
+    LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef,
+    LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest,
+    LoopContextBundle, LoopContextPort, LoopContextRequest, LoopExit, LoopInput, LoopInputAckToken,
+    LoopInputBatch, LoopInputCursor, LoopInputPort, LoopModelPort, LoopModelRequest,
+    LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
+    LoopPromptBundleRequest, LoopPromptPort, LoopRequest, LoopRequestBatch, LoopRunContext,
+    LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, RunProfileResolver,
+    StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
+    VisibleCapabilitySurface,
+};
 use ironclaw_runner::app_loop_family::build_loop_family_registry;
 use ironclaw_runner::planned_driver::PlannedDriver;
 use ironclaw_runner::planned_driver_factory::{
     PLANNED_DEFAULT_PROFILE_ID, PLANNED_DRIVER_DEFAULT_ID, default_planned_run_profile_resolver,
 };
-use ironclaw_turns::{
-    AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopCancelledReasonKind, LoopExit,
-    LoopMessageRef, TurnCheckpointId,
-    run_profile::{
-        AgentLoopDriver, AgentLoopDriverError, AgentLoopHostError, AgentLoopHostErrorKind,
-        AppendCapabilityResultRef, BeginAssistantDraft, FinalizeAssistantMessage,
-        LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCancelReasonKind,
-        LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome,
-        LoopCompactionPort, LoopCompactionRequest, LoopContextBundle, LoopContextPort,
-        LoopContextRequest, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
-        LoopInputPort, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
-        LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort, LoopRequest,
-        LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
-        RunProfileResolver, StageCheckpointPayloadRequest, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
-    },
-};
+use ironclaw_turns::{LoopMessageRef, TurnCheckpointId};
 
 fn run_request(
     driver: &PlannedDriver,
@@ -143,7 +141,9 @@ async fn planned_driver_cancellation_short_circuits_through_adapter() {
 async fn planned_driver_live_default_smoke() {
     let resolver = default_planned_run_profile_resolver().expect("resolver should build");
     let resolved = resolver
-        .resolve_run_profile(ironclaw_turns::RunProfileResolutionRequest::interactive_default())
+        .resolve_run_profile(
+            ironclaw_loop_contracts::RunProfileResolutionRequest::interactive_default(),
+        )
         .await
         .expect("implicit profile should resolve");
     assert_eq!(resolved.profile_id.as_str(), PLANNED_DEFAULT_PROFILE_ID);

@@ -8,20 +8,17 @@ use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId},
     resolution::{Resolution, ResolutionBatch},
 };
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityFailureDetail,
+    CapabilityInputRef, CapabilityProgress, CapabilitySurfaceVersion, LoopCapabilityPort,
+    LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
+    ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+};
 use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResultWrite, DurablePersistence, LoopCapabilityResultWriter,
 };
-use ironclaw_turns::{
-    CapabilityActivityId, TurnId,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
-        CapabilityFailureDetail, CapabilityInputRef, CapabilityProgress, CapabilitySurfaceVersion,
-        LoopCapabilityPort, LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall,
-        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
-        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
-        resolution,
-    },
-};
+use ironclaw_turns::{CapabilityActivityId, TurnId};
 use serde_json::{Value, json};
 use tracing::debug;
 
@@ -1380,14 +1377,12 @@ mod tests {
         resolution::ToolVerdict,
         result_meta::FailureKind,
     };
-    use ironclaw_loop_host::CapabilityWriteResult;
-    use ironclaw_turns::{
-        InMemoryRunProfileResolver, LoopResultRef, RunProfileResolver, TurnRunId, TurnScope,
-        run_profile::{
-            CapabilityDescriptorView, ConcurrencyHint, ResolvedRunProfile,
-            RunProfileResolutionRequest,
-        },
+    use ironclaw_loop_contracts::{
+        CapabilityDescriptorView, ConcurrencyHint, InMemoryRunProfileResolver, ResolvedRunProfile,
+        RunProfileResolutionRequest, RunProfileResolver,
     };
+    use ironclaw_loop_host::CapabilityWriteResult;
+    use ironclaw_turns::{LoopResultRef, TurnRunId, TurnScope};
 
     struct SpyPort {
         definitions: Vec<ProviderToolDefinition>,

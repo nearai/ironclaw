@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use ironclaw_extensions::ResolvedExtensionManifest;
 use tokio::sync::Mutex;
 
-use crate::state::InstallationState;
+use ironclaw_extension_contracts::state::InstallationState;
 
 /// One persisted installation record.
 #[derive(Clone)]

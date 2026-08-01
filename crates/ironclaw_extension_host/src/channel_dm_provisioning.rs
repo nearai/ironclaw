@@ -16,9 +16,10 @@
 
 use std::{sync::Arc, time::Duration};
 
-use ironclaw_host_api::{
-    channel_identity::{ChannelIdentityPostBind, ChannelIdentityPostBindFactory},
-    ids::UserId,
+use ironclaw_host_api::ids::UserId;
+
+use ironclaw_extension_contracts::channel_identity::{
+    ChannelIdentityPostBind, ChannelIdentityPostBindFactory,
 };
 use ironclaw_product::ChannelDeliveryResolver;
 use ironclaw_product::TargetQuery;
@@ -213,18 +214,16 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{
-        ids::TenantId,
-        tool_adapter::{
-            RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest,
-            RestrictedEgressResponse,
-        },
+    use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+    use ironclaw_extension_contracts::tool_adapter::{
+        RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
     };
+    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_host_api::ids::TenantId;
     use ironclaw_product::ResolvedChannelDelivery;
     use ironclaw_product::{
-        ChannelAdapter, ChannelError, DeliveryReport, ExternalConversationRef, InboundOutcome,
-        OutboundEnvelope, TargetCandidate, VerifiedInbound,
+        ChannelError, DeliveryReport, ExternalConversationRef, InboundOutcome, OutboundEnvelope,
+        TargetCandidate, VerifiedInbound,
     };
 
     use super::*;

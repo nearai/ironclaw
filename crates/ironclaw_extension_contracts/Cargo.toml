@@ -1,0 +1,36 @@
+[package]
+name = "ironclaw_extension_contracts"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "The extension-tier contract for IronClaw Reborn: what an installable extension declares and exposes — manifest surfaces, auth recipes, lifecycle states, and the vendor-implemented preference-target port"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "contracts"
+
+[features]
+# Dev-only seam (rule: cargo-features.md bar #4 — the sanctioned `test-support`
+# name). Compiles the exported channel-adapter conformance suite and the
+# in-memory egress/delivery fakes so adapter crates stop hand-rolling them.
+# Never enabled by a shipped artifact.
+test-support = []
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+serde_json = "1"
+# The channel/recipe manifest-surface suites parse the documented `[channel]`
+# TOML the same way manifest ingestion does.
+toml = "1.1"

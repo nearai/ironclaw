@@ -23,13 +23,15 @@ use ironclaw_host_api::{
     ids::{ActivityId, ExtensionId, TenantId, UserId},
     mount::{MountGrant, MountPermissions, MountView},
     path::{HostPath, MountAlias, VirtualPath},
-    product_surface::{ProductSurface, ProductSurfaceCaller, ProductSurfaceError},
     resolution::{Blocked, Resolution},
     result_meta::FailureKind,
 };
 use ironclaw_product::{
     EXTENSION_INSTALL_CAPABILITY, EXTENSION_REMOVE_CAPABILITY, OPERATOR_SERVICE_LIFECYCLE_COMMAND,
     ProductCapabilityDescriptor, RebornOperatorToolCatalog, RebornOperatorToolInfo,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
 };
 use std::time::Duration;
 
@@ -167,19 +169,28 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
             .expect("trust policy"),
     );
     let port = Arc::new(RebornLocalExtensionManagementPort::new(
-        Arc::new(DiskFilesystem::new()),
-        AvailableExtensionCatalog::from_packages(Vec::new()),
-        installation_store,
-        Arc::new(Mutex::new(ExtensionLifecycleService::new(
-            ExtensionRegistry::new(),
-        ))),
-        ironclaw_extension_host::ActiveExtensionPublisher::new(
-            Arc::clone(&registry),
-            trust_policy,
-            Arc::new(ironclaw_trust::InvalidationBus::new()),
-        ),
-        None,
-        UserId::new("operator").expect("operator user id"),
+        ironclaw_extension_host::ExtensionLifecycleManagerDependencies {
+            filesystem: Arc::new(DiskFilesystem::new()),
+            catalog: AvailableExtensionCatalog::from_packages(Vec::new()),
+            installation_store,
+            lifecycle_service: Arc::new(Mutex::new(ExtensionLifecycleService::new(
+                ExtensionRegistry::new(),
+            ))),
+            active_extensions: ironclaw_extension_host::ActiveExtensionPublisher::new(
+                Arc::clone(&registry),
+                trust_policy,
+                Arc::new(ironclaw_trust::InvalidationBus::new()),
+            ),
+            credential_cleanup: None,
+            tenant_operator_user_id: UserId::new("operator").expect("operator user id"),
+            hosted_mcp_dependencies: ironclaw_extension_host::HostedMcpPreparationDependencies {
+                runtime_ports: None,
+                catalog_safety: ironclaw_extension_host::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
+        },
     ));
 
     let catalog = ActiveRegistryOperatorToolCatalog::new(registry, Vec::new(), Some(port));
@@ -384,8 +395,10 @@ async fn runtime_product_surface_wires_lifecycle_owner_identity() {
         .product_surface(None)
         .expect("product surface build");
 
-    let surface =
-        ironclaw_host_api::product_surface::BoundProductSurface::new(bundle.clone(), caller("bob"));
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
+        bundle.clone(),
+        caller("bob"),
+    );
     let error = OPERATOR_SERVICE_LIFECYCLE_COMMAND
         .invoke_on(
             &surface,
@@ -754,7 +767,7 @@ async fn invoke_lifecycle_product_capability(
     input: serde_json::Value,
 ) -> Result<Resolution, ProductSurfaceError> {
     let surface =
-        ironclaw_host_api::product_surface::BoundProductSurface::new(Arc::clone(bundle), caller);
+        ironclaw_product_contracts::surface::BoundProductSurface::new(Arc::clone(bundle), caller);
     capability
         .invoke_on(&surface, input, ActivityId::new())
         .await
@@ -913,7 +926,7 @@ async fn product_surface_channel_extension_remove_deletes_the_durable_membership
     let installer_view: ironclaw_product::RebornExtensionListResponse =
         ironclaw_product::EXTENSIONS_VIEW
             .query_on(
-                &ironclaw_host_api::product_surface::BoundProductSurface::new(
+                &ironclaw_product_contracts::surface::BoundProductSurface::new(
                     Arc::clone(&bundle),
                     caller.clone(),
                 ),
