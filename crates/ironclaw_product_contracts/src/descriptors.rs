@@ -238,11 +238,22 @@ mod tests {
     #[test]
     fn a_view_descriptor_round_trips_its_id_paging_and_query_encoding() {
         const VIEW: ProductView<Params, Params> = ProductView::paginated("product.things.list");
+        const ONE_SHOT: ProductView<Params, Params> = ProductView::unpaginated("product.thing.get");
+        // Both directions: a constructor that ignored its flag, or one that
+        // hard-coded it, would pass a single-sided assertion. The flag is what
+        // tells a caller whether to expect a cursor at all.
         assert_eq!(
             VIEW.descriptor(),
             RebornViewDescriptor {
                 id: "product.things.list",
                 paginated: true,
+            }
+        );
+        assert_eq!(
+            ONE_SHOT.descriptor(),
+            RebornViewDescriptor {
+                id: "product.thing.get",
+                paginated: false,
             }
         );
         let query = VIEW

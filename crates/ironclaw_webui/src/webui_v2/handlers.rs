@@ -91,20 +91,21 @@ use ironclaw_product_contracts::package_lifecycle::{
 use ironclaw_product_contracts::product_wire::{
     RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAttachmentRequest,
     RebornAutomationMutationResponse, RebornAutomationRequest, RebornCancelRunResponse,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionRegistryResponse, RebornGlobalAutoApproveRequest, RebornListAutomationsResponse,
-    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
-    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
-    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupResponse,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExecuteProductCommandRequest,
+    RebornExtensionActionResponse, RebornExtensionRegistryResponse, RebornGlobalAutoApproveRequest,
+    RebornListAutomationsResponse, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
+    RebornOperatorConfigListResponse, RebornOperatorConfigSetProductRequest,
+    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupResponse,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornRenameAutomationProductRequest, RebornResolveGateResponse, RebornRetryRunResponse,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeProductRequest, RebornTraceHoldAuthorizeResponse,
-    SettingsToolPermissionState,
+    RebornProductCommandListResponse, RebornRenameAutomationProductRequest,
+    RebornResolveGateResponse, RebornRetryRunResponse, RebornSetOutboundPreferencesRequest,
+    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
+    RebornTraceHoldAuthorizeResponse, SettingsToolPermissionState,
 };
 use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewPage, RebornViewQuery};
 use ironclaw_product_contracts::workspace_views::{
@@ -1632,10 +1633,7 @@ pub struct ListThreadsQuery {
 pub async fn list_commands(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
-) -> Result<
-    Json<ironclaw_product_contracts::product_wire::RebornProductCommandListResponse>,
-    WebUiV2HttpError,
-> {
+) -> Result<Json<RebornProductCommandListResponse>, WebUiV2HttpError> {
     let response = invoke_product_command(
         state.services(),
         caller,
@@ -1662,7 +1660,7 @@ pub async fn execute_command(
         state.services(),
         caller,
         PRODUCT_COMMAND_EXECUTE_COMMAND,
-        ironclaw_product_contracts::product_wire::RebornExecuteProductCommandRequest {
+        RebornExecuteProductCommandRequest {
             thread_id,
             text: body.text,
         },

@@ -436,3 +436,114 @@ pub struct RebornFsReadRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<ProjectId>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ProjectFsFile` hand-writes `Debug` for one reason: it crosses the
+    /// product-surface command envelope carrying whole user files, and a
+    /// derived `Debug` would put those bytes into any diagnostic that formats
+    /// a command. Adding `#[derive(Debug)]` back compiles fine and silently
+    /// re-opens that leak, so the redaction is pinned here.
+    #[test]
+    fn project_fs_file_debug_reports_the_length_and_never_the_bytes() {
+        let file = ProjectFsFile {
+            path: "/workspace/report.txt".to_string(),
+            filename: Some("report.txt".to_string()),
+            mime_type: "text/plain".to_string(),
+            size_bytes: 6,
+            bytes: b"SECRET".to_vec(),
+        };
+
+        let rendered = format!("{file:?}");
+        assert!(
+            !rendered.contains("SECRET"),
+            "file contents must never reach a diagnostic: {rendered}"
+        );
+        assert!(
+            !rendered.contains(" bytes:"),
+            "the `bytes` field itself must be absent; only `size_bytes` may \
+             appear: {rendered}"
+        );
+        assert!(
+            rendered.contains("size_bytes: 6"),
+            "length kept: {rendered}"
+        );
+        assert!(
+            rendered.contains("/workspace/report.txt") && rendered.contains("text/plain"),
+            "the diagnostic must stay useful: {rendered}"
+        );
+    }
+
+    /// `FsMount::ALL` drives the WebUI mount picker and is a hand-maintained
+    /// const slice, so the compiler cannot tell us when a new variant is added
+    /// without one. A missing entry makes a real mount invisible in the file
+    /// explorer with no error anywhere.
+    #[test]
+    fn every_mount_is_listed_once_in_all_and_carries_a_distinct_label() {
+        for mount in [FsMount::Memory, FsMount::Workspace, FsMount::Skills] {
+            assert!(
+                FsMount::ALL.contains(&mount),
+                "{mount:?} is missing from FsMount::ALL"
+            );
+        }
+        assert_eq!(FsMount::ALL.len(), 3, "ALL must not carry duplicates");
+
+        let labels: Vec<&str> = FsMount::ALL.iter().map(|mount| mount.label()).collect();
+        let mut unique = labels.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), labels.len(), "labels collide: {labels:?}");
+        assert!(
+            labels.iter().all(|label| !label.is_empty()),
+            "a blank label renders an unselectable row: {labels:?}"
+        );
+    }
+
+    /// These discriminants are the browser's wire vocabulary; a rename is a
+    /// silent break for every deployed client, so the encodings are pinned
+    /// where they are defined rather than only where they are produced.
+    #[test]
+    fn mount_role_state_and_entry_kind_keep_their_wire_forms() {
+        assert_eq!(
+            serde_json::to_value(FsMount::Workspace).expect("serialize"),
+            serde_json::json!("workspace")
+        );
+        assert_eq!(
+            serde_json::to_value(RebornProjectRole::Owner).expect("serialize"),
+            serde_json::json!("owner")
+        );
+        assert_eq!(
+            serde_json::to_value(RebornProjectState::Active).expect("serialize"),
+            serde_json::json!("active")
+        );
+        assert_eq!(
+            serde_json::to_value(RebornProjectMemberStatus::Active).expect("serialize"),
+            serde_json::json!("active")
+        );
+        assert_eq!(
+            serde_json::to_value(ProjectFsEntryKind::Directory).expect("serialize"),
+            serde_json::json!("directory")
+        );
+    }
+
+    /// The error taxonomy is the whole contract an out-of-crate implementor
+    /// has: it must describe a failure without leaking a host path or a
+    /// backend string, and `TooLarge` must keep the two numbers a caller needs
+    /// to explain the refusal.
+    #[test]
+    fn project_fs_errors_render_coarse_reasons_and_keep_the_size_ceiling() {
+        assert_eq!(ProjectFsError::NotFound.to_string(), "path not found");
+        assert_eq!(ProjectFsError::Denied.to_string(), "path is not permitted");
+        let too_large = ProjectFsError::TooLarge { size: 42, max: 16 };
+        assert_eq!(
+            too_large.to_string(),
+            "file exceeds the maximum readable size"
+        );
+        assert!(
+            matches!(too_large, ProjectFsError::TooLarge { size: 42, max: 16 }),
+            "the ceiling and the actual size must both survive the boundary"
+        );
+    }
+}

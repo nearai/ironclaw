@@ -249,6 +249,40 @@ pub enum ProductGateResolution {
 mod tests {
     use super::*;
 
+    /// The list-request builders are the only way a caller narrows a read, and
+    /// each setter is the difference between a bounded page and a full-table
+    /// scan. They are consumed through `?limit=`/`?cursor=` query decoding, so
+    /// a setter writing the wrong field is invisible until a page misbehaves.
+    #[test]
+    fn list_request_builders_set_exactly_the_field_they_name() {
+        let threads = ProductListThreadsRequest::default()
+            .set_limit(25)
+            .set_cursor("cursor-9")
+            .set_candidate_thread_id("thread-1")
+            .set_needs_approval(true);
+        assert_eq!(threads.limit, Some(25));
+        assert_eq!(threads.cursor.as_deref(), Some("cursor-9"));
+        assert_eq!(threads.candidate_thread_id.as_deref(), Some("thread-1"));
+        assert!(threads.needs_approval);
+
+        let automations = ProductListAutomationsRequest::default()
+            .set_limit(10)
+            .set_run_limit(3)
+            .set_include_completed(true);
+        assert_eq!(automations.limit, Some(10));
+        assert_eq!(automations.run_limit, Some(3));
+        assert!(automations.include_completed);
+
+        // The defaults are the contract for a caller that sets nothing: an
+        // unset limit means "service default", and completed automations are
+        // excluded unless asked for.
+        let untouched = ProductListAutomationsRequest::default();
+        assert_eq!(untouched.limit, None);
+        assert_eq!(untouched.run_limit, None);
+        assert!(!untouched.include_completed);
+        assert!(!ProductListThreadsRequest::default().needs_approval);
+    }
+
     /// The wire tag set is the browser contract; a renamed variant silently
     /// breaks every deployed client, so the encoding is pinned here rather than
     /// only where the value is produced.

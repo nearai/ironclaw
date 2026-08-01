@@ -1764,6 +1764,143 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The outbound-delivery display newtypes are the only fence between an
+    /// operator-supplied target label and the browser that renders it, and the
+    /// validator behind them moved into this crate with the DTOs — it has no
+    /// caller-side test anywhere else in the workspace. Each rejection below is
+    /// a distinct attack or corruption shape, driven through the public
+    /// constructor rather than the private validator.
+    #[test]
+    fn outbound_delivery_display_newtypes_reject_every_unsafe_shape() {
+        assert!(RebornOutboundDeliveryTargetDisplayName::new("Ops room").is_ok());
+
+        for (label, candidate) in [
+            ("blank", "   ".to_string()),
+            ("leading whitespace", " Ops".to_string()),
+            ("trailing whitespace", "Ops ".to_string()),
+            ("control character", "Ops\u{0007}".to_string()),
+            // Bidi override: renders the label backwards in the picker and can
+            // disguise which target a message is about to go to.
+            ("bidi override", "Ops\u{202E}room".to_string()),
+            // Zero-width joiner: two distinct targets render identically.
+            ("zero-width joiner", "Ops\u{200D}room".to_string()),
+            ("line separator", "Ops\u{2028}room".to_string()),
+            ("paragraph separator", "Ops\u{2029}room".to_string()),
+            ("over the byte cap", "x".repeat(257)),
+        ] {
+            let rejected = RebornOutboundDeliveryTargetDisplayName::new(candidate.clone());
+            assert!(
+                rejected.is_err(),
+                "{label} must be rejected, got {rejected:?}"
+            );
+            // The same fence guards the deserialization path a browser body
+            // takes, not only the constructor a service calls.
+            assert!(
+                RebornOutboundDeliveryTargetDisplayName::try_from(candidate).is_err(),
+                "{label} must be rejected through TryFrom as well"
+            );
+        }
+
+        // The caps differ per field; a copy-paste of the wrong constant would
+        // silently widen one of them.
+        assert!(RebornOutboundDeliveryTargetChannel::new("c".repeat(128)).is_ok());
+        assert!(RebornOutboundDeliveryTargetChannel::new("c".repeat(129)).is_err());
+        assert!(RebornOutboundDeliveryTargetId::new("i".repeat(512)).is_ok());
+        assert!(RebornOutboundDeliveryTargetId::new("i".repeat(513)).is_err());
+        assert!(RebornOutboundDeliveryTargetDescription::new("d".repeat(1024)).is_ok());
+        assert!(RebornOutboundDeliveryTargetDescription::new("d".repeat(1025)).is_err());
+        // Description is the one optional field: empty is a legitimate value.
+        assert!(RebornOutboundDeliveryTargetDescription::new("").is_ok());
+    }
+
+    /// `RebornOutboundPreferencesResponse` deserializes through a wire shadow
+    /// so a payload written before `final_reply_target_status` existed still
+    /// reports the right state. Getting this backwards makes a configured
+    /// target render as "none configured" — the exact silent-regression shape
+    /// #6616 produced for extension cards.
+    #[test]
+    fn outbound_preferences_infer_the_status_missing_from_an_older_payload() {
+        let with_target: RebornOutboundPreferencesResponse =
+            serde_json::from_value(serde_json::json!({
+                "final_reply_target": {
+                    "target_id": "t-1",
+                    "channel": "slack",
+                    "display_name": "Ops room",
+                }
+            }))
+            .expect("legacy payload with a target");
+        assert_eq!(
+            with_target.final_reply_target_status,
+            RebornOutboundDeliveryTargetStatus::Available,
+            "a stored target with no status field means the target is usable"
+        );
+
+        let without_target: RebornOutboundPreferencesResponse =
+            serde_json::from_value(serde_json::json!({})).expect("legacy empty payload");
+        assert_eq!(
+            without_target.final_reply_target_status,
+            RebornOutboundDeliveryTargetStatus::NoneConfigured
+        );
+        assert_eq!(
+            without_target.default_modality,
+            RebornOutboundDeliveryModality::Text
+        );
+
+        // An explicit status always wins over the inference.
+        let explicit: RebornOutboundPreferencesResponse =
+            serde_json::from_value(serde_json::json!({
+                "final_reply_target": {
+                    "target_id": "t-1",
+                    "channel": "slack",
+                    "display_name": "Ops room",
+                },
+                "final_reply_target_status": "unavailable"
+            }))
+            .expect("payload with an explicit status");
+        assert_eq!(
+            explicit.final_reply_target_status,
+            RebornOutboundDeliveryTargetStatus::Unavailable
+        );
+        assert_eq!(
+            RebornOutboundPreferencesResponse::default().final_reply_target_status,
+            RebornOutboundDeliveryTargetStatus::NoneConfigured
+        );
+    }
+
+    /// `RebornAutomationState` hand-writes `Deserialize` so an unrecognized
+    /// state degrades to `Unknown` instead of failing the whole response. A
+    /// derived impl would reject the payload, and one newer state on the server
+    /// would blank the browser's entire automations list rather than one row.
+    #[test]
+    fn automation_state_degrades_an_unknown_wire_value_instead_of_failing_the_page() {
+        for (wire, expected) in [
+            ("active", RebornAutomationState::Active),
+            ("scheduled", RebornAutomationState::Scheduled),
+            ("paused", RebornAutomationState::Paused),
+            ("disabled", RebornAutomationState::Disabled),
+            ("inactive", RebornAutomationState::Inactive),
+            ("completed", RebornAutomationState::Completed),
+            ("unknown", RebornAutomationState::Unknown),
+        ] {
+            let parsed: RebornAutomationState =
+                serde_json::from_value(serde_json::json!(wire)).expect("known state parses");
+            assert_eq!(parsed, expected, "{wire} round-trips");
+            assert_eq!(
+                serde_json::to_value(expected).expect("serialize"),
+                serde_json::json!(wire),
+                "{wire} must serialize back to the same token"
+            );
+        }
+
+        let future_state: RebornAutomationState =
+            serde_json::from_value(serde_json::json!("some_state_from_a_newer_server"))
+                .expect("an unknown state must not fail the page");
+        assert_eq!(future_state, RebornAutomationState::Unknown);
+
+        serde_json::from_value::<RebornAutomationState>(serde_json::json!(7))
+            .expect_err("a non-string is a malformed payload, not a future state");
+    }
+
     #[test]
     fn operator_config_entry_masks_redacted_value_when_serialized() {
         let entry = RebornOperatorConfigEntry {

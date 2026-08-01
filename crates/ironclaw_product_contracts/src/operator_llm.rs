@@ -321,3 +321,58 @@ pub struct LlmModelsResult {
     pub models: Vec<String>,
     pub message: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `as_str` and `Display` are written twice for each of these states, and
+    /// the CLI renders one while the JSON surface serializes the other. Any
+    /// pair that drifts reports two different values for the same state.
+    #[test]
+    fn state_vocabulary_agrees_across_as_str_display_and_serde() {
+        let (state, wire) = (RebornV1State::NotUsed, "not-used");
+        assert_eq!(state.as_str(), wire);
+        assert_eq!(state.to_string(), wire);
+        assert_eq!(
+            serde_json::to_value(state).expect("serialize"),
+            serde_json::json!(wire)
+        );
+
+        for (state, wire) in [
+            (RebornModelRoutesState::Configured, "configured"),
+            (RebornModelRoutesState::NotConfigured, "not-configured"),
+        ] {
+            assert_eq!(state.as_str(), wire);
+            assert_eq!(state.to_string(), wire);
+            assert_eq!(
+                serde_json::to_value(state).expect("serialize"),
+                serde_json::json!(wire)
+            );
+        }
+    }
+
+    /// `as_path` is spliced into the NEAR AI auth URL (`/v1/auth/<segment>`).
+    /// A wrong or URL-unsafe segment does not fail here — it fails as a broken
+    /// SSO redirect at login time, so the segments are pinned literally.
+    #[test]
+    fn near_ai_auth_provider_path_segments_are_url_safe_and_match_the_wire_form() {
+        for (provider, segment) in [
+            (NearAiAuthProvider::Github, "github"),
+            (NearAiAuthProvider::Google, "google"),
+        ] {
+            assert_eq!(provider.as_path(), segment);
+            assert_eq!(
+                serde_json::to_value(provider).expect("serialize"),
+                serde_json::json!(segment),
+                "the request body discriminant and the URL segment must not drift"
+            );
+            assert!(
+                segment
+                    .chars()
+                    .all(|ch| ch.is_ascii_lowercase() || ch == '-'),
+                "{segment} is not safe to splice into a path unescaped"
+            );
+        }
+    }
+}
