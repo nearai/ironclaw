@@ -47,6 +47,20 @@ pub trait HostInputQueue: Send + Sync {
         run_id: TurnRunId,
         tokens: Vec<LoopInputAckToken>,
     ) -> Result<(), HostInputQueueError>;
+
+    /// Terminal reconciliation: consume every input still queued for `run_id`
+    /// and flip each bound transcript row `Queued` → `RejectedBusy` (resend
+    /// affordance) — never auto-resubmitting. Called after the run reaches a
+    /// terminal state with the queue undrained (e.g. a cancel before the loop's
+    /// next drain). Consumed entries are marked acked first, so a still-running
+    /// loop that races this call can no longer drain them; a row the loop
+    /// already consumed (`Submitted`) is left untouched. Idempotent.
+    ///
+    /// Returns the message ids whose rows were flipped.
+    async fn reject_unconsumed(
+        &self,
+        run_id: TurnRunId,
+    ) -> Result<Vec<ThreadMessageId>, HostInputQueueError>;
 }
 
 /// Raw queue batch returned by a host queue implementation.
@@ -385,6 +399,69 @@ impl HostInputQueue for InMemoryHostInputQueue {
             .entries
             .retain(|entry| !acked_now.contains(&entry.envelope.ack_token));
         Ok(())
+    }
+
+    async fn reject_unconsumed(
+        &self,
+        run_id: TurnRunId,
+    ) -> Result<Vec<ThreadMessageId>, HostInputQueueError> {
+        // Claim every live entry under the lock FIRST (mark acked + prune), so
+        // a racing drain can no longer deliver them; then flip the transcript
+        // rows outside the lock. Whoever claims an entry first wins — a row the
+        // loop already consumed rejects the `RejectedBusy` transition and is
+        // skipped best-effort.
+        let updates = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| HostInputQueueError::Internal)?;
+            let Some(queue) = state.runs.get_mut(&run_id) else {
+                return Ok(Vec::new());
+            };
+            let mut updates = Vec::new();
+            for entry in &queue.entries {
+                if queue.acked.contains(&entry.envelope.ack_token) {
+                    continue;
+                }
+                if let Some(update) = &entry.queued_message {
+                    updates.push(update.clone());
+                }
+            }
+            let tokens: Vec<LoopInputAckToken> = queue
+                .entries
+                .iter()
+                .map(|entry| entry.envelope.ack_token.clone())
+                .collect();
+            for token in tokens {
+                queue.acked.insert(token);
+            }
+            queue.entries.clear();
+            updates
+        };
+        let mut rejected = Vec::new();
+        for update in updates {
+            match self
+                .thread_service
+                .mark_message_rejected_busy(&update.scope, &update.thread_id, update.message_id)
+                .await
+            {
+                Ok(_) => rejected.push(update.message_id),
+                Err(source) => {
+                    // Best-effort: the run is already terminal; a row the loop
+                    // consumed first (`Submitted`) legitimately rejects this
+                    // transition, and any other failure must not fail the
+                    // caller's terminal transition.
+                    tracing::debug!(
+                        component = "host_input_queue",
+                        operation = "reject_unconsumed",
+                        %run_id,
+                        error = %source,
+                        "queued-message reject skipped during terminal reconciliation"
+                    );
+                }
+            }
+        }
+        Ok(rejected)
     }
 }
 

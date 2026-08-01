@@ -637,6 +637,7 @@ mod tests {
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-auth").unwrap(),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
+            allow_steering: true,
             resolved_model_route: None,
             model_usage: None,
             received_at: Utc::now(),

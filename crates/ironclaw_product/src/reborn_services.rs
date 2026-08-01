@@ -3882,9 +3882,12 @@ where
                     // "no steering" mode (see RejectingInputEnqueue). The
                     // rejected-busy mark also rolls the `Queued` row written
                     // above back to its terminal `RejectedBusy` state.
-                    Err(crate::steering::SteeringEnqueueError::Enqueue(
-                        HostInputQueueError::Unavailable { .. },
-                    )) => {
+                    Err(
+                        crate::steering::SteeringEnqueueError::Enqueue(
+                            HostInputQueueError::Unavailable { .. },
+                        )
+                        | crate::steering::SteeringEnqueueError::SteeringDisallowed,
+                    ) => {
                         mark_message_rejected_busy_or_replay(
                             &*self.thread_service,
                             &thread_scope,
@@ -3936,6 +3939,11 @@ where
                                     "failed to enqueue steering input for busy run"
                                 );
                                 Err(ProductSurfaceError::service_unavailable(false))
+                            }
+                            // Consumed by the rejected-busy fallback arm above;
+                            // kept for exhaustiveness.
+                            crate::steering::SteeringEnqueueError::SteeringDisallowed => {
+                                Err(ProductSurfaceError::internal_invariant())
                             }
                         }
                     }

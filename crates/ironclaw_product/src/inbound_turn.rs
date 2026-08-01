@@ -1304,9 +1304,12 @@ impl AcceptedProductInboundTurn {
                     // deferring it. Single mapped fallback for the "no steering"
                     // mode (see RejectingInputEnqueue). This also rolls the
                     // `Queued` row written above back to `RejectedBusy`.
-                    Err(crate::steering::SteeringEnqueueError::Enqueue(
-                        HostInputQueueError::Unavailable { .. },
-                    )) => {
+                    Err(
+                        crate::steering::SteeringEnqueueError::Enqueue(
+                            HostInputQueueError::Unavailable { .. },
+                        )
+                        | crate::steering::SteeringEnqueueError::SteeringDisallowed,
+                    ) => {
                         thread_service
                             .mark_message_rejected_busy(
                                 &thread_scope,
@@ -1352,6 +1355,13 @@ impl AcceptedProductInboundTurn {
                             crate::steering::SteeringEnqueueError::Enqueue(error) => {
                                 Err(ProductSurfaceFailure::Transient {
                                     reason: format!("failed to enqueue steering input: {error}"),
+                                })
+                            }
+                            // Consumed by the rejected-busy fallback arm above;
+                            // kept for exhaustiveness.
+                            crate::steering::SteeringEnqueueError::SteeringDisallowed => {
+                                Err(ProductSurfaceFailure::TurnSubmissionRejected {
+                                    reason: "steering is disallowed for the active run".into(),
                                 })
                             }
                         }

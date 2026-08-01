@@ -3537,6 +3537,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
     };
     let host_input_queue_reader: Arc<dyn ironclaw_loop_host::HostInputQueue> =
         host_input_queue.clone();
+    let host_input_queue_for_cancel_reconcile: Arc<dyn ironclaw_loop_host::HostInputQueue> =
+        host_input_queue.clone();
     let host_input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort> = host_input_queue;
 
     #[cfg(feature = "test-support")]
@@ -3733,7 +3735,16 @@ pub(crate) async fn build_runtime_with_resource_governor(
             ),
         )) as Arc<dyn ironclaw_loop_contracts::SystemInferencePort>
     });
-    let planned_turn_coordinator: Arc<dyn TurnCoordinator> = composition.coordinator.clone();
+    // Terminal reconciliation of stranded steering inputs: every cancel caller
+    // goes through this ONE decorated coordinator, so a run cancelled before
+    // its next drain flips its queued messages to `RejectedBusy` (resend
+    // affordance) instead of leaving them `Queued` forever.
+    let planned_turn_coordinator: Arc<dyn TurnCoordinator> = Arc::new(
+        ironclaw_runner::steering_reconcile::CancelReconcilingTurnCoordinator::new(
+            composition.coordinator.clone(),
+            host_input_queue_for_cancel_reconcile,
+        ),
+    );
     let approval_interaction_service: Arc<dyn ApprovalInteractionService> =
         if let (Some(local_runtime), Some(builtin_capability_policy)) =
             (local_runtime, builtin_capability_policy.as_ref())

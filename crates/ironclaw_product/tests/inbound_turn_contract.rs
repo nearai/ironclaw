@@ -211,6 +211,7 @@ impl TurnCoordinator for ScriptedTurnCoordinator {
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply:scripted").expect("valid"),
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
+            allow_steering: true,
             resolved_model_route: None,
             received_at: Utc::now(),
             checkpoint_id: None,
@@ -331,6 +332,13 @@ impl HostInputQueue for EmptyInputQueue {
         _tokens: Vec<LoopInputAckToken>,
     ) -> Result<(), HostInputQueueError> {
         Ok(())
+    }
+
+    async fn reject_unconsumed(
+        &self,
+        _run_id: TurnRunId,
+    ) -> Result<Vec<ironclaw_threads::ThreadMessageId>, HostInputQueueError> {
+        Ok(Vec::new())
     }
 }
 
@@ -1552,6 +1560,103 @@ async fn busy_submit_marks_message_queued_before_input_is_drainable() {
         *observed.lock().unwrap(),
         Some(MessageStatus::Queued),
         "message must be Queued before the steering input becomes drainable"
+    );
+}
+
+#[tokio::test]
+async fn busy_submit_rejects_when_active_run_profile_disallows_steering() {
+    // SteeringPolicy enforcement, full chain: the first submit resolves a
+    // profile with `allow_steering: false`, which is persisted into the run's
+    // process metadata; the second message's busy admission reads it back
+    // through `get_run_state` in the enqueue gateway and falls back to the
+    // `RejectedBusy` outcome even though a real input queue is wired.
+    use ironclaw_loop_contracts::{
+        AgentLoopDriverDescriptor, CapabilitySurfaceProfileId, CheckpointSchemaId,
+        InMemoryRunProfileRegistry, InMemoryRunProfileResolver, LoopDriverId, RunProfileDefinition,
+        SteeringPolicy,
+    };
+
+    let checkpoint_schema_id = CheckpointSchemaId::from_trusted_static("interactive_checkpoint_v1");
+    let no_steering = RunProfileDefinition::interactive_like(
+        RunProfileId::new("no_steering").expect("profile id"),
+        AgentLoopDriverDescriptor {
+            id: LoopDriverId::from_trusted_static("lightweight_loop"),
+            version: RunProfileVersion::new(1),
+            checkpoint_schema_id: Some(checkpoint_schema_id.clone()),
+            checkpoint_schema_version: Some(RunProfileVersion::new(1)),
+        },
+        checkpoint_schema_id,
+        RunProfileVersion::new(1),
+        CapabilitySurfaceProfileId::from_trusted_static("interactive_tools"),
+    )
+    .with_steering_policy(SteeringPolicy {
+        allow_steering: false,
+        allow_interrupt: false,
+        allow_driver_specific_nudges: true,
+    });
+    let mut registry = InMemoryRunProfileRegistry::with_builtin_profiles();
+    registry.register(no_steering).expect("register profile");
+    let resolver = Arc::new(InMemoryRunProfileResolver::new_with_implicit_default(
+        registry,
+        RunProfileId::new("no_steering").expect("profile id"),
+    ));
+
+    let binding_service = FakeConversationBindingService::new();
+    let thread_service = InMemorySessionThreadService::default();
+    let store = Arc::new(in_memory_agent_turn_runtime());
+    let coordinator = DefaultTurnCoordinator::new(store).with_run_profile_resolver(resolver);
+    let input_queue = Arc::new(InMemoryHostInputQueue::new(
+        Arc::new(thread_service.clone()) as Arc<dyn SessionThreadService>,
+    ));
+    let input_enqueue: Arc<dyn HostInputEnqueuePort> = input_queue.clone();
+    let service =
+        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator)
+            .with_input_enqueue(input_enqueue);
+
+    let first = sample_user_message_envelope("no-steer1");
+    service.accept_user_message(&first).await.expect("first");
+    let second = sample_user_message_envelope_with_text("no-steer2", "steering forbidden");
+    let outcome = service
+        .accept_user_message(&second)
+        .await
+        .expect("second rejected busy");
+
+    let (binding, active_run_id) = match outcome {
+        InboundTurnOutcome::RejectedBusy {
+            binding,
+            active_run_id,
+            ..
+        } => (binding, active_run_id.expect("active run id")),
+        other => panic!("expected RejectedBusy when steering is disallowed, got {other:?}"),
+    };
+    let scope = ThreadScope {
+        tenant_id: binding.tenant_id.clone(),
+        agent_id: binding.agent_id.clone().expect("agent id"),
+        project_id: binding.project_id.clone(),
+        owner_user_id: binding.subject_user_id.clone(),
+        mission_id: None,
+    };
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: binding.thread_id.clone(),
+        })
+        .await
+        .expect("history");
+    assert_eq!(history.messages[1].status, MessageStatus::RejectedBusy);
+
+    // Nothing was enqueued for the active run.
+    let batch = input_queue
+        .next_after(
+            active_run_id,
+            LoopInputCursorToken::new("input-cursor:origin".to_string()).expect("origin cursor"),
+            8,
+        )
+        .await
+        .expect("queue poll");
+    assert!(
+        batch.inputs.is_empty(),
+        "no steering input may be enqueued when the profile disallows it"
     );
 }
 

@@ -1120,6 +1120,8 @@ impl RebornIntegrationGroupBuilder {
         let host_input_queue = Arc::new(ironclaw_loop_host::InMemoryHostInputQueue::new(
             Arc::clone(&runtime_thread_service),
         ));
+        let host_input_queue_for_cancel_reconcile: Arc<dyn ironclaw_loop_host::HostInputQueue> =
+            host_input_queue.clone();
 
         // --- C-BUDGET: production budget accountant (wiring-liveness only) -----
         // Build the SAME `GovernorBackedAccountant` production composes, via the
@@ -1303,7 +1305,15 @@ impl RebornIntegrationGroupBuilder {
                 turn_root: base.turn_root,
                 product_harness: base.product_harness,
                 capability,
-                coordinator: composition.coordinator,
+                // Production parity: the composed coordinator is decorated with
+                // the cancel-time steering-queue reconciler, exactly like
+                // `build_reborn_runtime` wires it.
+                coordinator: Arc::new(
+                    ironclaw_runner::steering_reconcile::CancelReconcilingTurnCoordinator::new(
+                        composition.coordinator,
+                        host_input_queue_for_cancel_reconcile,
+                    ),
+                ),
                 scheduler_handle: composition.scheduler_handle,
                 scope_gateway,
                 process_system,

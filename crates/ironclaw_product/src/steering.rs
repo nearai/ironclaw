@@ -25,6 +25,10 @@ pub(crate) enum SteeringEnqueueError {
     InvalidMessageRef(String),
     /// Reading the active run state failed.
     RunState(TurnError),
+    /// The active run's resolved profile forbids mid-run steering
+    /// (`SteeringPolicy::allow_steering = false`); callers fall back to the
+    /// `RejectedBusy` outcome exactly like the no-queue mode.
+    SteeringDisallowed,
     /// The host input queue rejected the enqueue.
     Enqueue(HostInputQueueError),
 }
@@ -59,6 +63,9 @@ where
         })
         .await
         .map_err(SteeringEnqueueError::RunState)?;
+    if !active_run.allow_steering {
+        return Err(SteeringEnqueueError::SteeringDisallowed);
+    }
     let message_ref = LoopMessageRef::new(accepted_message_ref.as_str().to_string())
         .map_err(|e| SteeringEnqueueError::InvalidMessageRef(e.to_string()))?;
     input_enqueue

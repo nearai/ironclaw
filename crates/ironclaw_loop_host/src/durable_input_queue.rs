@@ -375,6 +375,79 @@ where
         }
         Ok(())
     }
+
+    async fn reject_unconsumed(
+        &self,
+        run_id: TurnRunId,
+    ) -> Result<Vec<ThreadMessageId>, HostInputQueueError> {
+        // Phase 1: durably claim every live entry (CAS retry) — mark acked and
+        // prune — so a still-running loop that races this call can no longer
+        // drain them. Mirrors `ack_consumed`'s two-phase shape.
+        let mut status_updates = Vec::new();
+        let mut committed = false;
+        for _ in 0..MAX_CAS_RETRIES {
+            let (mut queue, version) = self.load(run_id).await?;
+            let Some(version) = version else {
+                // No durable queue for this run: nothing to reconcile.
+                return Ok(Vec::new());
+            };
+            let already: HashSet<u64> = queue.acked.iter().copied().collect();
+            status_updates.clear();
+            let mut newly_acked = Vec::new();
+            for entry in &queue.entries {
+                if already.contains(&entry.sequence) {
+                    continue;
+                }
+                status_updates.push(entry.status.clone());
+                newly_acked.push(entry.sequence);
+            }
+            if newly_acked.is_empty() {
+                return Ok(Vec::new());
+            }
+            queue.acked.extend(newly_acked);
+            let acked_now: HashSet<u64> = queue.acked.iter().copied().collect();
+            queue
+                .entries
+                .retain(|entry| !acked_now.contains(&entry.sequence));
+            match self.store(run_id, &queue, Some(version)).await {
+                Ok(()) => {
+                    committed = true;
+                    break;
+                }
+                Err(StorePutError::Conflict) => continue,
+                Err(StorePutError::Fatal(error)) => return Err(error),
+            }
+        }
+        if !committed {
+            return Err(cas_exhausted("reject_unconsumed"));
+        }
+
+        // Phase 2: best-effort transcript flip `Queued` → `RejectedBusy`. The
+        // entries are already durably claimed; a row the loop consumed first
+        // (`Submitted`) legitimately rejects this transition and is skipped,
+        // and any other failure must not fail the caller's terminal
+        // transition.
+        let mut rejected = Vec::new();
+        for update in status_updates {
+            match self
+                .thread_service
+                .mark_message_rejected_busy(&update.scope, &update.thread_id, update.message_id)
+                .await
+            {
+                Ok(_) => rejected.push(update.message_id),
+                Err(error) => {
+                    tracing::debug!(
+                        component = "host_input_queue",
+                        operation = "reject_unconsumed",
+                        %run_id,
+                        error = %error,
+                        "queued-message reject skipped during terminal reconciliation"
+                    );
+                }
+            }
+        }
+        Ok(rejected)
+    }
 }
 
 fn envelope_for(sequence: u64, input: LoopInput) -> Result<HostInputEnvelope, HostInputQueueError> {
@@ -588,6 +661,193 @@ mod tests {
             .await
             .expect("poll after ack");
         assert!(after.inputs.is_empty());
+    }
+
+    /// Terminal reconciliation (both backends: the durable queue here, the
+    /// in-memory queue below shares the helpers): `reject_unconsumed` claims
+    /// every undrained entry — flipping its row `Queued` → `RejectedBusy` and
+    /// stopping redelivery — while an entry the loop already consumed keeps
+    /// its `Submitted` row. Idempotent: a second call reconciles nothing.
+    #[tokio::test]
+    async fn reject_unconsumed_flips_stranded_rows_and_stops_redelivery() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let scope = ghost_scope();
+        let thread = thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: None,
+                created_by_actor_id: "actor-iq".into(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        let run_id = TurnRunId::new();
+        let mut message_ids = Vec::new();
+        for text in ["consumed before cancel", "stranded by cancel"] {
+            let accepted = thread_service
+                .accept_inbound_message(AcceptInboundMessageRequest {
+                    scope: scope.clone(),
+                    thread_id: thread.thread_id.clone(),
+                    actor_id: "actor-iq".into(),
+                    source_binding_id: None,
+                    reply_target_binding_id: None,
+                    external_event_id: None,
+                    content: MessageContent::text(text),
+                })
+                .await
+                .unwrap();
+            thread_service
+                .mark_message_queued(
+                    &scope,
+                    &thread.thread_id,
+                    accepted.message_id,
+                    run_id.to_string(),
+                )
+                .await
+                .unwrap();
+            message_ids.push(accepted.message_id);
+        }
+
+        let queue = FilesystemHostInputQueue::new(
+            make_fs(backend),
+            owner_scope(),
+            Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
+        );
+        for message_id in &message_ids {
+            queue
+                .enqueue_queued_message(EnqueueQueuedMessageRequest {
+                    run_id,
+                    turn_id: TurnId::new(),
+                    scope: scope.clone(),
+                    thread_id: thread.thread_id.clone(),
+                    message_id: *message_id,
+                    input: steering(&format!("msg:{message_id}")),
+                })
+                .await
+                .expect("enqueue");
+        }
+
+        // The loop consumes the FIRST input, then the run is cancelled.
+        let batch = queue.next_after(run_id, origin(), 1).await.expect("poll");
+        assert_eq!(batch.inputs.len(), 1);
+        queue
+            .ack_consumed(run_id, vec![batch.inputs[0].ack_token.clone()])
+            .await
+            .expect("ack first");
+
+        let rejected = queue.reject_unconsumed(run_id).await.expect("reconcile");
+        assert_eq!(rejected, vec![message_ids[1]]);
+
+        let history = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+            })
+            .await
+            .unwrap();
+        let status_of = |message_id| {
+            history
+                .messages
+                .iter()
+                .find(|message| message.message_id == message_id)
+                .expect("row in history")
+                .status
+        };
+        assert_eq!(
+            status_of(message_ids[0]),
+            MessageStatus::Submitted,
+            "the consumed row keeps its Submitted status"
+        );
+        assert_eq!(
+            status_of(message_ids[1]),
+            MessageStatus::RejectedBusy,
+            "the stranded row flips to the resend affordance"
+        );
+
+        // The claimed entry is never redelivered, and reconciling again is a
+        // no-op.
+        let after = queue
+            .next_after(run_id, origin(), 8)
+            .await
+            .expect("poll after reconcile");
+        assert!(after.inputs.is_empty());
+        let again = queue.reject_unconsumed(run_id).await.expect("idempotent");
+        assert!(again.is_empty());
+    }
+
+    /// In-memory sibling of the durable reconciliation test above — same
+    /// claim-then-flip semantics on the process-local queue.
+    #[tokio::test]
+    async fn in_memory_reject_unconsumed_flips_stranded_rows_and_stops_redelivery() {
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let scope = ghost_scope();
+        let thread = thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: None,
+                created_by_actor_id: "actor-iq".into(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        let run_id = TurnRunId::new();
+        let accepted = thread_service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-iq".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: None,
+                content: MessageContent::text("stranded by cancel"),
+            })
+            .await
+            .unwrap();
+        thread_service
+            .mark_message_queued(
+                &scope,
+                &thread.thread_id,
+                accepted.message_id,
+                run_id.to_string(),
+            )
+            .await
+            .unwrap();
+
+        let queue = crate::InMemoryHostInputQueue::new(
+            Arc::clone(&thread_service) as Arc<dyn SessionThreadService>
+        );
+        queue
+            .enqueue_queued_message(EnqueueQueuedMessageRequest {
+                run_id,
+                turn_id: TurnId::new(),
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                message_id: accepted.message_id,
+                input: steering(&format!("msg:{}", accepted.message_id)),
+            })
+            .await
+            .expect("enqueue");
+
+        let rejected = queue.reject_unconsumed(run_id).await.expect("reconcile");
+        assert_eq!(rejected, vec![accepted.message_id]);
+        let history = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope,
+                thread_id: thread.thread_id,
+            })
+            .await
+            .unwrap();
+        assert_eq!(history.messages[0].status, MessageStatus::RejectedBusy);
+        let after = queue
+            .next_after(run_id, origin(), 8)
+            .await
+            .expect("poll after reconcile");
+        assert!(after.inputs.is_empty());
+        let again = queue.reject_unconsumed(run_id).await.expect("idempotent");
+        assert!(again.is_empty());
     }
 
     #[tokio::test]

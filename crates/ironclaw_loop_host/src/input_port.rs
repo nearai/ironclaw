@@ -627,6 +627,13 @@ mod tests {
             }
             Ok(())
         }
+
+        async fn reject_unconsumed(
+            &self,
+            _run_id: TurnRunId,
+        ) -> Result<Vec<ironclaw_threads::ThreadMessageId>, HostInputQueueError> {
+            Ok(Vec::new())
+        }
     }
 
     struct FailingInputQueue;
@@ -650,6 +657,13 @@ mod tests {
             _tokens: Vec<LoopInputAckToken>,
         ) -> Result<(), HostInputQueueError> {
             Ok(())
+        }
+
+        async fn reject_unconsumed(
+            &self,
+            _run_id: TurnRunId,
+        ) -> Result<Vec<ironclaw_threads::ThreadMessageId>, HostInputQueueError> {
+            Ok(Vec::new())
         }
     }
 

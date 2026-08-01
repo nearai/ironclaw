@@ -6473,9 +6473,9 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
 ///      Queued and holds the active-lock.
 ///  B – submitted via the WebUI path; thread is busy → stored as `Queued`,
 ///      bound to run A; response is `DeferredBusy` with a non-empty `notice`.
-///  Cancel A → B stays `Queued` (no auto-resubmission as a separate run; the
-///      queued input is never drained because run A never ran — terminal
-///      reconciliation of stranded queued inputs is a tracked follow-up).
+///  Cancel A → B flips `Queued` → `RejectedBusy` (the cancel-time steering
+///      reconciler claims the undrained input; resend affordance, never an
+///      auto-resubmission as a separate run).
 ///  C – submitted after A is cancelled; thread is free → `Submitted`.
 ///
 /// arch-note: lives in runtime.rs (adds ~200 lines to an already >3000-line file) because
@@ -6666,8 +6666,8 @@ async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
     );
     assert_eq!(
         msg_b_after_cancel[0].status,
-        MessageStatus::Queued,
-        "message B must still be Queued after run A is cancelled — no auto-resubmission"
+        MessageStatus::RejectedBusy,
+        "message B must flip to RejectedBusy after run A is cancelled — resend affordance, no auto-resubmission"
     );
     // Guard: no additional Submitted row must have been created for message B's message_id.
     let submitted_for_b: Vec<_> = history_after_cancel
