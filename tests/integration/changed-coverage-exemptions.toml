@@ -174,7 +174,7 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_reborn_composition/src/runtime.rs"
-lines = [4070, 4071, 4072, 4073, 4074, 4075, 4084, 4085]
+lines = [4068, 4069, 4070, 4071, 4072, 4073, 4082, 4083]
 owner = "@serrrfirat"
 reason = "The runtime integration test executes shared-key wiring with mediated egress; normal assembly always supplies that egress, and the fixed host capability identifier is compile-time-valid, leaving only defensive impossible error mappings."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
