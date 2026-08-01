@@ -712,6 +712,59 @@ mod tests {
     };
     use ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContext;
 
+    /// This crate's projection must answer exactly what the contract's own
+    /// projection answers — the status table lives there and this wrapper adds
+    /// only the transient log. Drift here means the WebUI reports one status
+    /// through product's lifecycle service and a different one through the
+    /// extension host's, for the identical failure.
+    ///
+    /// The `Transient` case also drives the logging branch, which is the only
+    /// line in this function that is not a delegation.
+    #[test]
+    fn lifecycle_surface_error_matches_the_contract_projection_for_every_variant() {
+        for failure in [
+            ProductOperationFailure::BindingResolutionFailed {
+                reason: "no tenant".into(),
+            },
+            ProductOperationFailure::BindingAccessDenied,
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "bad ref".into(),
+            },
+            ProductOperationFailure::ProviderInstanceNotConfigured {
+                reason: "ironclaw config set google.client_id <id>".into(),
+            },
+            ProductOperationFailure::UnsupportedActionKind {
+                kind: "teleport".into(),
+            },
+            ProductOperationFailure::Transient {
+                reason: "db timeout".into(),
+            },
+        ] {
+            let projected = lifecycle_surface_error(failure.clone());
+            let expected: ProductSurfaceError = failure.clone().into();
+            assert_eq!(projected, expected, "projection drifted for {failure:?}");
+        }
+    }
+
+    /// The two statuses a caller acts on differently: a transient failure is
+    /// retryable and a rejected request is not. Pinned separately from the
+    /// table above so a change that made everything retryable would fail here
+    /// with an obvious message rather than as an equality mismatch.
+    #[test]
+    fn transient_lifecycle_failures_are_retryable_and_invalid_requests_are_not() {
+        let transient = lifecycle_surface_error(ProductOperationFailure::Transient {
+            reason: "db timeout".into(),
+        });
+        assert_eq!(transient.status_code, 503);
+        assert!(transient.retryable);
+
+        let invalid = lifecycle_surface_error(ProductOperationFailure::InvalidBindingRequest {
+            reason: "bad ref".into(),
+        });
+        assert_eq!(invalid.status_code, 400);
+        assert!(!invalid.retryable);
+    }
+
     #[tokio::test]
     async fn skill_lifecycle_service_installs_lists_and_removes_via_skill_management() {
         let (_dir, storage_root, service) = lifecycle_fixture();

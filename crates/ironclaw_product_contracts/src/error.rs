@@ -207,6 +207,59 @@ mod tests {
         assert_eq!(projected.kind, ProductSurfaceErrorKind::Validation);
     }
 
+    /// `Display` is not decoration here: the LLM tool path forwards the
+    /// rendered failure onto the diagnostic-detail channel, so a variant that
+    /// swallowed its `reason` would silently drop the remediation text a user
+    /// needs (the exact `config set` commands). Every variant is rendered, and
+    /// every one that carries text is asserted to include it.
+    #[test]
+    fn display_renders_every_variant_and_keeps_the_text_the_tool_path_forwards() {
+        let cases = [
+            (
+                ProductOperationFailure::BindingResolutionFailed {
+                    reason: "no tenant".into(),
+                },
+                Some("no tenant"),
+            ),
+            (ProductOperationFailure::BindingAccessDenied, None),
+            (
+                ProductOperationFailure::InvalidBindingRequest {
+                    reason: "bad ref".into(),
+                },
+                Some("bad ref"),
+            ),
+            (
+                ProductOperationFailure::ProviderInstanceNotConfigured {
+                    reason: "ironclaw config set google.client_id <id>".into(),
+                },
+                Some("ironclaw config set google.client_id <id>"),
+            ),
+            (
+                ProductOperationFailure::UnsupportedActionKind {
+                    kind: "teleport".into(),
+                },
+                Some("teleport"),
+            ),
+            (
+                ProductOperationFailure::Transient {
+                    reason: "db timeout".into(),
+                },
+                Some("db timeout"),
+            ),
+        ];
+
+        for (failure, expected_fragment) in cases {
+            let rendered = failure.to_string();
+            assert!(!rendered.is_empty(), "every variant renders: {failure:?}");
+            if let Some(fragment) = expected_fragment {
+                assert!(
+                    rendered.contains(fragment),
+                    "{failure:?} rendered as {rendered:?}, dropping {fragment:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn host_api_errors_become_invalid_requests_not_transient_failures() {
         let failure: ProductOperationFailure = HostApiError::InvalidId {
