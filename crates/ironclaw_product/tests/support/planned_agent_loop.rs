@@ -1036,12 +1036,6 @@ impl HostInputQueue for EmptyInputQueue {
         Ok(())
     }
 
-    async fn reject_unconsumed(
-        &self,
-        _run_id: TurnRunId,
-    ) -> Result<Vec<ironclaw_threads::ThreadMessageId>, HostInputQueueError> {
-        Ok(Vec::new())
-    }
 }
 
 struct EmptyIdentityContextSource;

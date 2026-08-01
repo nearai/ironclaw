@@ -22,7 +22,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_loop_host::HostInputQueue;
+use ironclaw_loop_host::HostInputQueueReconcile;
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
     RetryTurnRequest, RetryTurnResponse, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator,
@@ -34,11 +34,11 @@ use tracing::debug;
 /// queue after a successful `cancel_run`. Every other method forwards.
 pub struct CancelReconcilingTurnCoordinator {
     inner: Arc<dyn TurnCoordinator>,
-    input_queue: Arc<dyn HostInputQueue>,
+    input_queue: Arc<dyn HostInputQueueReconcile>,
 }
 
 impl CancelReconcilingTurnCoordinator {
-    pub fn new(inner: Arc<dyn TurnCoordinator>, input_queue: Arc<dyn HostInputQueue>) -> Self {
+    pub fn new(inner: Arc<dyn TurnCoordinator>, input_queue: Arc<dyn HostInputQueueReconcile>) -> Self {
         Self { inner, input_queue }
     }
 }
@@ -179,27 +179,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl HostInputQueue for RecordingQueue {
-        async fn next_after(
-            &self,
-            _run_id: TurnRunId,
-            after: LoopInputCursorToken,
-            _limit: usize,
-        ) -> Result<HostInputBatch, HostInputQueueError> {
-            Ok(HostInputBatch {
-                inputs: Vec::new(),
-                next_cursor: after,
-            })
-        }
-
-        async fn ack_consumed(
-            &self,
-            _run_id: TurnRunId,
-            _tokens: Vec<LoopInputAckToken>,
-        ) -> Result<(), HostInputQueueError> {
-            Ok(())
-        }
-
+    impl HostInputQueueReconcile for RecordingQueue {
         async fn reject_unconsumed(
             &self,
             run_id: TurnRunId,

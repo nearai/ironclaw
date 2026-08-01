@@ -96,7 +96,8 @@ pub use identity_context::{
 pub use input_port::HostQueueLoopInputPort;
 pub use input_queue::{
     EnqueueQueuedMessageRequest, HostInputBatch, HostInputEnqueuePort, HostInputEnvelope,
-    HostInputQueue, HostInputQueueError, InMemoryHostInputQueue, RejectingInputEnqueue,
+    HostInputQueue, HostInputQueueError, HostInputQueueReconcile, InMemoryHostInputQueue,
+    RejectingInputEnqueue,
 };
 pub use ironclaw_loop_contracts::PromptContextTokenBudget;
 pub use model_visible_scrub::scrub_model_visible_detail;

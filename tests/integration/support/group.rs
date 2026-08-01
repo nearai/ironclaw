@@ -1132,8 +1132,9 @@ impl RebornIntegrationGroupBuilder {
             .to_resource_scope(),
             Arc::clone(&runtime_thread_service),
         ));
-        let host_input_queue_for_cancel_reconcile: Arc<dyn ironclaw_loop_host::HostInputQueue> =
-            host_input_queue.clone();
+        let host_input_queue_for_cancel_reconcile: Arc<
+            dyn ironclaw_loop_host::HostInputQueueReconcile,
+        > = host_input_queue.clone();
 
         // --- C-BUDGET: production budget accountant (wiring-liveness only) -----
         // Build the SAME `GovernorBackedAccountant` production composes, via the

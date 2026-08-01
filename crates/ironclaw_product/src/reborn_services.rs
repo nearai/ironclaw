@@ -5669,37 +5669,6 @@ async fn mark_message_submitted_or_replay(
     }
 }
 
-async fn mark_message_rejected_busy_or_replay(
-    thread_service: &dyn SessionThreadService,
-    thread_scope: &ThreadScope,
-    handoff: &AcceptedWebUiMessage,
-    client_action_id: &IdempotencyKey,
-) -> Result<(), ProductSurfaceError> {
-    match thread_service
-        .mark_message_rejected_busy(thread_scope, &handoff.thread_id, handoff.message_id)
-        .await
-    {
-        Ok(_) => Ok(()),
-        Err(error) => {
-            // Only RejectedBusy is the terminal settled state here.
-            // DeferredBusy is non-terminal legacy — a later replay may
-            // resubmit it, so claiming it settled would violate the
-            // no-resubmit guarantee. Let a DeferredBusy replay fall
-            // through to the `_` arm so the original mark failure
-            // surfaces honestly instead of being masked as settled.
-            reconcile_terminal_duplicate(
-                thread_service,
-                thread_scope,
-                handoff,
-                client_action_id,
-                |replay| matches!(replay.status, MessageStatus::RejectedBusy),
-                error,
-            )
-            .await
-        }
-    }
-}
-
 async fn reconcile_terminal_duplicate(
     thread_service: &dyn SessionThreadService,
     thread_scope: &ThreadScope,
