@@ -23,9 +23,17 @@ def _message_text(message: dict) -> str:
     return content
 
 
+def _is_host_reminder(message: dict) -> bool:
+    # Tail-positioned host context (runtime clock, loop-control nudges) is
+    # delivered as `<system-reminder>`-framed user messages so the cached
+    # system prefix stays byte-stable (#6985). It is host guidance, not the
+    # user's ask — trace matching must anchor on the real user message.
+    return _message_text(message).lstrip().startswith("<system-reminder>")
+
+
 def _last_user_content(messages: list[dict]) -> str:
     for message in reversed(messages):
-        if message.get("role") == "user":
+        if message.get("role") == "user" and not _is_host_reminder(message):
             return _message_text(message)
     return ""
 
@@ -51,7 +59,9 @@ def _find_tool_results(
     last_user_index = -1
     if after_latest_user:
         for index in range(len(messages) - 1, -1, -1):
-            if messages[index].get("role") == "user":
+            if messages[index].get("role") == "user" and not _is_host_reminder(
+                messages[index]
+            ):
                 last_user_index = index
                 break
 

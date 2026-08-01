@@ -124,12 +124,16 @@ async fn profile_set_write_is_readable_through_the_wired_profile_source() {
         .submit_turn("what's my setup")
         .await
         .expect("turn completes");
+    // Profile facts render inside the runtime-context section, which rides
+    // the conversation tail as a <system-reminder> user message so the cached
+    // system prefix stays byte-stable (#6985) — assert on the whole model
+    // request, not the system role.
     prompt_thread
-        .assert_system_prompt_contains("locale=en-US")
+        .assert_model_request_contains("locale=en-US")
         .await
-        .expect("profile_set locale must reach the model-visible system prompt");
+        .expect("profile_set locale must reach the model-visible request");
     prompt_thread
-        .assert_system_prompt_contains("America/Los_Angeles")
+        .assert_model_request_contains("America/Los_Angeles")
         .await
-        .expect("profile_set timezone must reach the model-visible system prompt");
+        .expect("profile_set timezone must reach the model-visible request");
 }
