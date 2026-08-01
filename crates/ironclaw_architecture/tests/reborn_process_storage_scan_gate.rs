@@ -8,9 +8,12 @@ use ratchet_support::workspace_root;
 #[test]
 fn process_and_thread_request_storage_paths_do_not_enumerate_collections() {
     let root = workspace_root();
-    let process_store = read(&root.join("crates/ironclaw_processes/src/journal_store.rs"));
-    let thread_index =
-        read(&root.join("crates/ironclaw_threads/src/filesystem_service/thread_index.rs"));
+    let process_store = scannable(&read(
+        &root.join("crates/ironclaw_processes/src/journal_store.rs"),
+    ));
+    let thread_index = scannable(&read(
+        &root.join("crates/ironclaw_threads/src/filesystem_service/thread_index.rs"),
+    ));
     // The transcript rebuild moved out of `thread_index` into its own module;
     // the enumeration it performs is still migration-only and is gated below.
     let transcript_migration =
@@ -55,6 +58,15 @@ fn process_and_thread_request_storage_paths_do_not_enumerate_collections() {
     );
 }
 
+/// Scan a source with comments and string literals removed.
+///
+/// The gate matches call text, so prose that names `.query(` — a doc comment
+/// explaining why enumeration is confined, for instance — would otherwise read
+/// as a violation, and a call hidden inside a string would read as compliant.
+fn scannable(source: &str) -> String {
+    ratchet_support::strip_comments_and_strings(source)
+}
+
 fn assert_calls_are_confined_to(source: &str, call: &str, start: &str, end: &str) {
     let start_offset = source
         .find(start)
@@ -87,4 +99,55 @@ fn line_number(source: &str, offset: usize) -> usize {
 fn read(path: &Path) -> String {
     std::fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+}
+
+/// Guardrails are code: the confinement scan needs its own coverage, or a
+/// change to it can silently stop catching the thing it exists for.
+#[cfg(test)]
+mod self_tests {
+    use super::*;
+
+    const MIGRATION: &str = "pub async fn migrate_x() {\n    self.fs.query();\n}\n";
+    const BOUNDARY: &str = "async fn after_migration() {}\n";
+
+    #[test]
+    fn a_call_inside_the_migration_range_is_allowed() {
+        let source = scannable(&format!("{MIGRATION}{BOUNDARY}"));
+        assert_calls_are_confined_to(
+            &source,
+            ".query(",
+            "pub async fn migrate_x",
+            "async fn after_migration",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "may only appear in the explicit offline migration")]
+    fn a_call_outside_the_migration_range_is_rejected() {
+        let source = scannable(&format!(
+            "async fn request_path() {{\n    self.fs.query();\n}}\n{MIGRATION}{BOUNDARY}"
+        ));
+        assert_calls_are_confined_to(
+            &source,
+            ".query(",
+            "pub async fn migrate_x",
+            "async fn after_migration",
+        );
+    }
+
+    #[test]
+    fn prose_naming_the_call_is_not_a_call_site() {
+        // The doc comment and the string both name `.query(` without calling
+        // it; only stripping them keeps this from reading as a violation.
+        let source = scannable(&format!(
+            "/// Enumeration via .query( belongs to the migration.\n\
+             async fn request_path() {{\n    let _ = \".query(\";\n}}\n{MIGRATION}{BOUNDARY}"
+        ));
+        assert_calls_are_confined_to(
+            &source,
+            ".query(",
+            "pub async fn migrate_x",
+            "async fn after_migration",
+        );
+    }
 }
