@@ -322,7 +322,7 @@ where
                 match store.replay_durable_observer_once(&observer, None).await {
                     Ok(()) => break,
                     Err(error) => {
-                        tracing::warn!(
+                        tracing::debug!(
                             observer_id = %observer.id,
                             %error,
                             "durable process observer delivery will retry"
@@ -369,7 +369,7 @@ where
         let store = self.clone();
         runtime.spawn(async move {
             if let Err(error) = store.replay_durable_observer_once(&registered, None).await {
-                tracing::warn!(
+                tracing::debug!(
                     observer_id = %registered.id,
                     %error,
                     "initial durable process observer replay failed"

@@ -222,7 +222,9 @@ where
     let observers = store.registered_observers();
     futures::future::join_all(observers.into_iter().map(|observer| async move {
         if let Err(error) = store.deliver_committed_batch(&observer, committed).await {
-            tracing::warn!(
+            // debug!, not warn!: this is a background-task diagnostic, and
+            // warn-level output is rendered by the REPL/TUI.
+            tracing::debug!(
                 observer_id = %observer.id,
                 cursor = committed.last.0,
                 %error,
@@ -542,7 +544,7 @@ fn release_committed_batch<F>(
     let cursor = committed.last.0;
     let batch = DeliveryBatch { committed, waiters };
     if let Err(undeliverable) = deliveries.send(batch) {
-        tracing::warn!(
+        tracing::debug!(
             cursor,
             "process journal delivery task is gone; committed batch will not be delivered"
         );

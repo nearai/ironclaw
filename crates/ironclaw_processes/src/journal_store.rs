@@ -135,7 +135,7 @@ enum StoredCommandOutcome {
     Heartbeat(JournaledProcessSnapshot),
     Recovered(RecoverExpiredProcessLeasesResponse),
     Transitioned(JournaledProcessSnapshot),
-    Controlled(ProcessControlResult, Option<ProcessJournalKind>),
+    Controlled(ProcessControlResult),
     TreeReserved(ProcessTreeReservation),
     TreeReleased,
     TreePruned,
@@ -958,14 +958,15 @@ where
         &self,
         mutation: ProcessControlMutation,
     ) -> Result<ProcessControlResult, ProcessJournalStoreError> {
-        let (result, _committed_kind) = match self
+        match self
             .execute(StoredProcessCommand::Control(mutation))
             .await?
         {
-            StoredCommandOutcome::Controlled(result, kind) => (result, kind),
-            outcome => return Err(unexpected_outcome("control", outcome)),
-        };
-        Ok(result)
+            // Observer delivery derives kinds from the committed journal
+            // entries, so the control outcome carries only its result.
+            StoredCommandOutcome::Controlled(result) => Ok(result),
+            outcome => Err(unexpected_outcome("control", outcome)),
+        }
     }
 
     async fn leased_transition(

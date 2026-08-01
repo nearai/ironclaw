@@ -1702,6 +1702,91 @@ async fn observer_registration_replays_commits_durably_after_restart() {
 /// The newer position is written directly here so the stale-cache window is
 /// deterministic — the contiguity check hides it whenever the other instance's
 /// entries also land in this instance's journal view.
+/// Observer callbacks legitimately re-enter the store: the sub-agent
+/// await-edge resolver settles dependencies and resumes the parent from inside
+/// `observe_process_commit`. The task-local marker is the only thing stopping
+/// such a nested command from waiting on the very delivery it is running
+/// inside, and nothing else in the suite invokes the store from a callback —
+/// so removing or mis-scoping the marker would restore the documented
+/// self-deadlock silently.
+#[tokio::test]
+async fn observer_callback_can_reenter_store_without_deadlock() {
+    struct ReenteringObserver {
+        store: Mutex<Option<Arc<ProcessJournalStore<InMemoryBackend>>>>,
+        scope: ResourceScope,
+        nested: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ProcessJournalCommitObserver for ReenteringObserver {
+        fn process_observer_id(&self) -> &'static str {
+            "reentering-process-observer"
+        }
+
+        async fn observe_process_commit(
+            &self,
+            _commit: ProcessJournalCommit,
+        ) -> Result<(), String> {
+            // Only the first delivery re-enters; the nested command's own
+            // delivery must not recurse forever.
+            if self.nested.fetch_add(1, Ordering::SeqCst) > 0 {
+                return Ok(());
+            }
+            let store = self
+                .store
+                .lock()
+                .map_err(|_| "observer store mutex poisoned".to_string())?
+                .clone()
+                .ok_or_else(|| "observer store not wired".to_string())?;
+            store
+                .submit_process(SubmitProcessRequest {
+                    process_id: ProcessId::new(),
+                    process_kind: ProcessKind::Internal,
+                    scope: self.scope.clone(),
+                    exclusive_within_scope: false,
+                    operation_id: None,
+                    owner_user_id: None,
+                    concurrency_class: None,
+                    parent_process_id: None,
+                    root_process_id: None,
+                    spawn_tree_descendant_cap: None,
+                    dependency: None,
+                    checkpoint_ref: None,
+                    input: None,
+                    created_at: Utc::now(),
+                    metadata: serde_json::Value::Null,
+                })
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }
+    }
+
+    let filesystem = in_memory_backed_processes_filesystem();
+    let store = Arc::new(ProcessJournalStore::new(filesystem));
+    let resource_scope = scope();
+    let observer = Arc::new(ReenteringObserver {
+        store: Mutex::new(Some(Arc::clone(&store))),
+        scope: resource_scope.clone(),
+        nested: Arc::new(AtomicUsize::new(0)),
+    });
+    store
+        .subscribe_process_observer(observer.clone())
+        .expect("subscribe re-entering observer");
+
+    // Both the outer command and the one its delivery issues must complete.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        submit_internal_process(&store, &resource_scope, ProcessId::new()),
+    )
+    .await
+    .expect("a command whose delivery re-enters the store must not deadlock");
+    assert!(
+        observer.nested.load(Ordering::SeqCst) >= 1,
+        "the observer callback must actually have re-entered the store"
+    );
+}
+
 #[tokio::test]
 async fn observer_cursor_never_rewinds_from_a_stale_cache() {
     let filesystem = in_memory_backed_processes_filesystem();

@@ -1365,6 +1365,69 @@ mod tests {
         );
     }
 
+    /// The ascending and descending ordered-query loops carry separate subtree
+    /// guards. Only ascending is exercised by the ancestor-declaration
+    /// contract, so a missing descending guard would leak sibling-subtree rows
+    /// without failing anything.
+    #[tokio::test]
+    async fn descending_query_from_an_ancestor_declared_index_excludes_siblings() {
+        let backend = InMemoryBackend::new();
+        let rank = IndexKey::new("rank").unwrap();
+        let id = IndexKey::new("id").unwrap();
+        backend
+            .ensure_index(
+                &VirtualPath::new("/engine/scoped").unwrap(),
+                &IndexSpec::new(
+                    IndexName::new("scoped_items_v1").unwrap(),
+                    vec![rank.clone(), id.clone()],
+                    IndexKind::Exact,
+                ),
+            )
+            .await
+            .unwrap();
+        for (path, leaf) in [
+            ("/engine/scoped/alpha/a-1", "a-1"),
+            ("/engine/scoped/beta/b-1", "b-1"),
+        ] {
+            backend
+                .put(
+                    &VirtualPath::new(path).unwrap(),
+                    Entry::record(RecordKind::new("scoped").unwrap(), &serde_json::json!({}))
+                        .unwrap()
+                        .with_indexed(rank.clone(), IndexValue::Text(leaf.to_string()))
+                        .with_indexed(id.clone(), IndexValue::Text(leaf.to_string())),
+                    CasExpectation::Absent,
+                )
+                .await
+                .unwrap();
+        }
+
+        let rows = backend
+            .query_ordered(
+                &VirtualPath::new("/engine/scoped/alpha").unwrap(),
+                &Filter::All,
+                &crate::OrderedPage::new(
+                    IndexName::new("scoped_items_v1").unwrap(),
+                    rank.clone(),
+                    id.clone(),
+                    crate::SortDirection::Descending,
+                    16,
+                ),
+            )
+            .await
+            .unwrap();
+        let paths = rows
+            .iter()
+            .map(|row| row.path.as_str().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec!["/engine/scoped/alpha/a-1".to_string()],
+            "a descending child query resolved from an ancestor spec must not \
+             return a sibling subtree"
+        );
+    }
+
     #[tokio::test]
     async fn ordered_index_declaration_never_backfills_existing_rows() {
         let fs = InMemoryBackend::new();

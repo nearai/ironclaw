@@ -3,8 +3,8 @@ use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_filesystem::{
     AtomicSubtreeEntry, Capability, CasExpectation, Entry, FileType, FilesystemError,
-    FilesystemOperation, Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue,
-    LibSqlRootFilesystem, Page, RecordKind, SeqNo, SortDirection,
+    FilesystemOperation, Filter, InMemoryBackend, IndexKey, IndexKind, IndexName, IndexSpec,
+    IndexValue, LibSqlRootFilesystem, OrderedPage, Page, RecordKind, SeqNo, SortDirection,
 };
 use ironclaw_host_api::path::VirtualPath;
 
@@ -1105,6 +1105,91 @@ async fn libsql_scopes_ordered_index_names_by_prefix() {
         )
         .await
         .expect("same index name with a different prefix is independent");
+}
+
+/// The projection's UPDATE and DELETE branches were replaced wholesale
+/// with the static trigger set, but the ordered-index contracts only insert and
+/// query. A stale row left behind after an indexed key changes, or after the
+/// source row is deleted, would go unnoticed.
+async fn static_projection_update_and_delete_contract<F: RootFilesystem>(
+    filesystem: &F,
+    base: &str,
+) {
+    let rank = IndexKey::new("rank").unwrap();
+    let item_id = IndexKey::new("item_id").unwrap();
+    let spec = IndexSpec::new(
+        IndexName::new("mutating_items_v1").unwrap(),
+        vec![rank.clone(), item_id.clone()],
+        IndexKind::Exact,
+    );
+    filesystem
+        .ensure_index(&VirtualPath::new(base.to_string()).unwrap(), &spec)
+        .await
+        .unwrap();
+    let path = VirtualPath::new(format!("{base}/item")).unwrap();
+    let write = async |rank_value: &str, expectation: CasExpectation| {
+        filesystem
+            .put(
+                &path,
+                Entry::record(
+                    RecordKind::new("mutating_item").unwrap(),
+                    &serde_json::json!({}),
+                )
+                .unwrap()
+                .with_indexed(rank.clone(), IndexValue::Text(rank_value.to_string()))
+                .with_indexed(item_id.clone(), IndexValue::Text("item".to_string())),
+                expectation,
+            )
+            .await
+            .unwrap()
+    };
+    let query = async || {
+        filesystem
+            .query_ordered(
+                &VirtualPath::new(base.to_string()).unwrap(),
+                &Filter::All,
+                &OrderedPage::new(
+                    IndexName::new("mutating_items_v1").unwrap(),
+                    rank.clone(),
+                    item_id.clone(),
+                    SortDirection::Ascending,
+                    16,
+                ),
+            )
+            .await
+            .unwrap()
+            .len()
+    };
+
+    let version = write("a", CasExpectation::Absent).await;
+    assert_eq!(query().await, 1, "the insert projects one row");
+
+    // Replacing the indexed key must leave exactly one row, not two.
+    write("b", CasExpectation::Version(version)).await;
+    assert_eq!(
+        query().await,
+        1,
+        "an indexed-key update must replace the projection row, not add one"
+    );
+
+    filesystem.delete(&path).await.unwrap();
+    assert_eq!(
+        query().await,
+        0,
+        "deleting the source row must remove its projection row"
+    );
+}
+
+#[tokio::test]
+async fn libsql_static_projection_update_and_delete_remove_stale_rows() {
+    let filesystem = libsql_root().await;
+    static_projection_update_and_delete_contract(&*filesystem, "/engine/mutating").await;
+}
+
+#[tokio::test]
+async fn in_memory_static_projection_update_and_delete_remove_stale_rows() {
+    let filesystem = InMemoryBackend::new();
+    static_projection_update_and_delete_contract(&filesystem, "/engine/mutating").await;
 }
 
 #[tokio::test]
@@ -3044,6 +3129,54 @@ mod postgres_tests {
             .await
             .expect("same index name with a different prefix is independent");
         }
+    }
+
+    /// libSQL pins the legacy-trigger sweep, PostgreSQL did not. Its
+    /// discovery, identifier validation, and drop path are distinct code, so a
+    /// sweep that silently misses would leave the per-declaration trigger
+    /// growth in place on every upgraded database while all other projection
+    /// tests still pass.
+    #[tokio::test]
+    async fn postgres_static_projection_sweeps_legacy_triggers() {
+        let Some((filesystem, prefix)) = postgres_root().await else {
+            return;
+        };
+        // Seed a survivor shaped like the per-declaration generation.
+        filesystem
+            .execute_raw_for_test(
+                "CREATE OR REPLACE FUNCTION idx_rfs_legacy_probe_fn() RETURNS trigger                  LANGUAGE plpgsql AS $legacy$ BEGIN                    DELETE FROM root_filesystem_ordered_index_rows WHERE path = NEW.path;                    RETURN NEW; END; $legacy$;                  DROP TRIGGER IF EXISTS idx_rfs_legacy_probe ON root_filesystem_entries;                  CREATE TRIGGER idx_rfs_legacy_probe AFTER INSERT ON root_filesystem_entries                    FOR EACH ROW EXECUTE FUNCTION idx_rfs_legacy_probe_fn();",
+            )
+            .await
+            .expect("seed legacy trigger");
+
+        filesystem
+            .ensure_index(
+                &vpath(&prefix, "sweep"),
+                &IndexSpec::new(
+                    IndexName::new("sweep_probe_v1").unwrap(),
+                    vec![IndexKey::new("rank").unwrap()],
+                    IndexKind::Exact,
+                ),
+            )
+            .await
+            .expect("declaration installs the static set and sweeps legacy triggers");
+
+        let remaining = filesystem
+            .query_raw_names_for_test(
+                "SELECT t.tgname FROM pg_trigger t                  JOIN pg_class c ON c.oid = t.tgrelid                  WHERE c.relname = 'root_filesystem_entries' AND NOT t.tgisinternal                  ORDER BY t.tgname",
+            )
+            .await
+            .expect("list triggers");
+        assert!(
+            !remaining.iter().any(|name| name.starts_with("idx_rfs_")),
+            "legacy per-declaration triggers must be swept, saw {remaining:?}"
+        );
+        assert!(
+            remaining
+                .iter()
+                .any(|name| name == "rfs_ordered_projection_v3_ai"),
+            "the static set must be installed, saw {remaining:?}"
+        );
     }
 
     #[tokio::test]

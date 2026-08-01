@@ -2568,9 +2568,26 @@ async fn ensure_libsql_static_ordered_projection(
     // half-open band `(prefix || '/', prefix || '0')` is the range form of
     // `LIKE prefix || '/%'` without wildcard-injection from stored prefixes;
     // '/' needs its own arm because '//' breaks the band trick.
-    let containment = "(s.prefix = '/' \
-         OR new.path = s.prefix \
-         OR (new.path >= s.prefix || '/' AND new.path < s.prefix || '0'))";
+    // Ancestors of the written path, walked by string surgery: rtrim with the
+    // path's own non-slash characters strips the trailing segment, leaving
+    // ".../" to trim. Joining the catalog by equality on these turns the
+    // projection into an index seek on the `(prefix, name)` key. Comparing
+    // every catalog row against the path instead — which is what a
+    // containment predicate does — scans every declaration ever made, and an
+    // upgraded database keeps its per-thread declaration rows forever.
+    let ancestors = "WITH RECURSIVE rfs_ancestors(prefix) AS ( \
+           SELECT new.path \
+           UNION ALL \
+           SELECT CASE \
+             WHEN length(rtrim(prefix, replace(prefix, '/', ''))) <= 1 THEN '/' \
+             ELSE substr( \
+               rtrim(prefix, replace(prefix, '/', '')), \
+               1, \
+               length(rtrim(prefix, replace(prefix, '/', ''))) - 1 \
+             ) \
+           END \
+           FROM rfs_ancestors WHERE prefix <> '/' \
+         )";
     let mut key_values = Vec::new();
     let mut key_presence = Vec::new();
     for i in 0..crate::index::MAX_ORDERED_INDEX_KEYS {
@@ -2589,10 +2606,11 @@ async fn ensure_libsql_static_ordered_projection(
         "INSERT OR REPLACE INTO root_filesystem_ordered_index_rows(\
            index_name, path, k0, k1, k2, k3, k4, k5, k6, k7\
          ) \
+         {ancestors} \
          SELECT s.name, new.path, {key_values} \
-         FROM root_filesystem_index_specs s \
+         FROM rfs_ancestors a \
+         JOIN root_filesystem_index_specs s ON s.prefix = a.prefix \
          WHERE s.kind IN ('exact', 'prefix') \
-           AND {containment} \
            AND new.is_dir = 0 \
            AND new.indexed IS NOT NULL \
            AND {key_presence} \

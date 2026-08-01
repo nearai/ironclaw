@@ -134,6 +134,30 @@ impl PostgresRootFilesystem {
         }
     }
 
+    /// Run raw SQL against the backend. Test-only: the projection's trigger
+    /// sweep is only observable through the catalog it manipulates, and a
+    /// contract test cannot seed a legacy trigger any other way.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn execute_raw_for_test(&self, sql: &str) -> Result<(), FilesystemError> {
+        let client = self.client().await?;
+        client.batch_execute(sql).await.map_err(|error| {
+            crate::db::infrastructure_error(FilesystemOperation::EnsureIndex, error.to_string())
+        })
+    }
+
+    /// Collect the first text column of `sql`. Test-only, same rationale.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn query_raw_names_for_test(
+        &self,
+        sql: &str,
+    ) -> Result<Vec<String>, FilesystemError> {
+        let client = self.client().await?;
+        let rows = client.query(sql, &[]).await.map_err(|error| {
+            crate::db::infrastructure_error(FilesystemOperation::Query, error.to_string())
+        })?;
+        Ok(rows.iter().map(|row| row.get::<_, String>(0)).collect())
+    }
+
     async fn client(&self) -> Result<deadpool_postgres::Object, FilesystemError> {
         self.pool.get().await.map_err(|error| {
             let reason = format!(
@@ -2232,9 +2256,19 @@ async fn ensure_postgres_static_ordered_projection(
     // half-open band `(prefix || '/', prefix || '0')` matches
     // descendant_path_range; '/' needs its own arm because '//' breaks the
     // band trick.
-    let containment = "(s.prefix = '/' \
-         OR NEW.path = s.prefix \
-         OR (NEW.path >= s.prefix || '/' AND NEW.path < s.prefix || '0'))";
+    // Ancestors of the written path, so the catalog is joined by equality on
+    // its `(prefix, name)` key rather than compared row by row. A containment
+    // predicate scans every declaration ever made, and an upgraded database
+    // keeps its per-thread declaration rows forever.
+    let ancestors = "WITH RECURSIVE rfs_ancestors(prefix) AS ( \
+           SELECT NEW.path \
+           UNION ALL \
+           SELECT CASE \
+             WHEN strpos(reverse(prefix), '/') <= 1 THEN '/' \
+             ELSE left(prefix, length(prefix) - strpos(reverse(prefix), '/')) \
+           END \
+           FROM rfs_ancestors WHERE prefix <> '/' \
+         )";
     let mut key_values = Vec::new();
     let mut key_presence = Vec::new();
     for i in 0..crate::index::MAX_ORDERED_INDEX_KEYS {
@@ -2273,10 +2307,11 @@ async fn ensure_postgres_static_ordered_projection(
              INSERT INTO root_filesystem_ordered_index_rows(\
                index_name, path, k0, k1, k2, k3, k4, k5, k6, k7\
              ) \
+             {ancestors} \
              SELECT DISTINCT ON (s.name) s.name, NEW.path, {key_values} \
-             FROM root_filesystem_index_specs s \
+             FROM rfs_ancestors a \
+             JOIN root_filesystem_index_specs s ON s.prefix = a.prefix \
              WHERE s.kind IN ('exact', 'prefix') \
-               AND {containment} \
                AND {key_presence} \
              ORDER BY s.name, length(s.prefix) DESC \
              ON CONFLICT (index_name, path) DO UPDATE SET {updates}; \
