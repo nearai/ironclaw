@@ -6,14 +6,14 @@ use serde::{Deserialize, Serialize};
 use ironclaw_host_api::decision::RuntimeCredentialAuthRequirement;
 
 use crate::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, CapabilityActivityId, GateRef,
+    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, CapabilityActivityId, EventCursor,
     GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
-    RetryTurnRequest, RetryTurnResponse, RunProfileResolver, SourceBindingRef,
-    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActiveRunRefState,
-    TurnAdmissionPolicy, TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId,
-    TurnRunProfile, TurnRunState, TurnRunnerId, TurnScope, TurnStatus, TurnTimestamp,
-    events::EventCursor, run_profile::LoopModelRouteSnapshot,
+    RetryTurnRequest, RetryTurnResponse, SourceBindingRef, SubmitChildRunRequest,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActiveRunRefState, TurnAdmissionPolicy,
+    TurnCheckpointId, TurnError, TurnGateRef, TurnId, TurnLeaseToken, TurnRunId, TurnRunProfile,
+    TurnRunState, TurnRunnerId, TurnScope, TurnStatus, TurnTimestamp,
 };
+use ironclaw_loop_contracts::{LoopModelRouteSnapshot, RunProfileResolver};
 
 #[async_trait]
 pub trait AgentTurnRuntimePort: Send + Sync {
@@ -158,9 +158,9 @@ pub struct TurnRunRecord {
     /// captured at loop exit. Rides the JSON-blob snapshot like
     /// `resolved_model_route`; `None` when no usage was reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_usage: Option<crate::run_profile::LoopModelUsage>,
+    pub model_usage: Option<ironclaw_loop_contracts::LoopModelUsage>,
     pub checkpoint_id: Option<TurnCheckpointId>,
-    pub gate_ref: Option<GateRef>,
+    pub gate_ref: Option<TurnGateRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_activity_id: Option<CapabilityActivityId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

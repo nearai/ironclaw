@@ -18,10 +18,10 @@ use crate::db::{
 };
 use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
-    BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry, Entry, FileStat,
-    FileType, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexName,
-    IndexSpec, IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo, TxnCapability,
-    VersionedEntry,
+    AtomicSubtreeEntry, BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry,
+    Entry, FileStat, FileType, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind,
+    IndexName, IndexSpec, IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo,
+    TxnCapability, VersionedEntry, root::validate_atomic_subtree_entries,
 };
 /// PostgreSQL-backed [`RootFilesystem`] storing file contents by virtual path.
 pub struct PostgresRootFilesystem {
@@ -281,6 +281,32 @@ impl RootFilesystem for PostgresRootFilesystem {
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
         let client = self.client().await?;
         postgres_get_with_client(&client, path).await
+    }
+
+    async fn create_subtree_atomic(
+        &self,
+        prefix: &VirtualPath,
+        entries: Vec<AtomicSubtreeEntry>,
+    ) -> Result<Vec<RecordVersion>, FilesystemError> {
+        validate_atomic_subtree_entries(prefix, &entries)?;
+        let mut client = self.client().await?;
+        let transaction = client.transaction().await.map_err(|error| {
+            db_error(
+                prefix.clone(),
+                FilesystemOperation::CreateSubtreeAtomic,
+                error,
+            )
+        })?;
+        let versions =
+            postgres_create_subtree_with_transaction(&transaction, prefix, entries).await?;
+        transaction.commit().await.map_err(|error| {
+            db_error(
+                prefix.clone(),
+                FilesystemOperation::CreateSubtreeAtomic,
+                error,
+            )
+        })?;
+        Ok(versions)
     }
 
     async fn ensure_index(
@@ -1443,6 +1469,99 @@ async fn cached_execute(
 ) -> Result<u64, tokio_postgres::Error> {
     let statement = client.prepare_cached(sql).await?;
     client.execute(&statement, params).await
+}
+
+async fn postgres_create_subtree_with_transaction(
+    transaction: &tokio_postgres::Transaction<'_>,
+    prefix: &VirtualPath,
+    entries: Vec<AtomicSubtreeEntry>,
+) -> Result<Vec<RecordVersion>, FilesystemError> {
+    transaction
+        .query_one(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&prefix.as_str()],
+        )
+        .await
+        .map_err(|error| {
+            db_error(
+                prefix.clone(),
+                FilesystemOperation::CreateSubtreeAtomic,
+                error,
+            )
+        })?;
+
+    let (lower, upper) = descendant_path_range(prefix);
+    if let Some(row) = transaction
+        .query_opt(
+            "SELECT version FROM root_filesystem_entries \
+             WHERE path = $1 OR (path >= $2 AND path < $3) LIMIT 1",
+            &[&prefix.as_str(), &lower, &upper],
+        )
+        .await
+        .map_err(|error| {
+            db_error(
+                prefix.clone(),
+                FilesystemOperation::CreateSubtreeAtomic,
+                error,
+            )
+        })?
+    {
+        let version_raw: i64 = row.get("version");
+        return Err(FilesystemError::VersionMismatch {
+            path: prefix.clone(),
+            expected: None,
+            found: Some(record_version_from_i64(prefix, version_raw)?),
+        });
+    }
+
+    let mut versions = Vec::with_capacity(entries.len());
+    for item in entries {
+        let indexed_json = serde_json::to_value(&item.entry.indexed).map_err(|_| {
+            FilesystemError::SerializeIndexed {
+                path: item.path.clone(),
+                operation: FilesystemOperation::CreateSubtreeAtomic,
+            }
+        })?;
+        let kind = item
+            .entry
+            .kind
+            .as_ref()
+            .map(|record_kind| record_kind.as_str().to_string());
+        let content_type = item.entry.content_type.as_str().to_string();
+        let body = item.entry.body;
+        let path = item.path.as_str();
+        let (child_lower, child_upper) = descendant_path_range(&item.path);
+        let rows = transaction
+            .execute(
+                PUT_ABSENT_SQL,
+                &[
+                    &path,
+                    &body,
+                    &content_type,
+                    &kind,
+                    &indexed_json,
+                    &child_lower,
+                    &child_upper,
+                ],
+            )
+            .await
+            .map_err(|error| {
+                db_error(
+                    item.path.clone(),
+                    FilesystemOperation::CreateSubtreeAtomic,
+                    error,
+                )
+            })?;
+        if rows == 0 {
+            return Err(FilesystemError::VersionMismatch {
+                path: item.path,
+                expected: None,
+                found: None,
+            });
+        }
+        versions.push(RecordVersion::from_backend(1));
+    }
+    Ok(versions)
 }
 
 /// `CasExpectation::Absent` put: insert iff `path` is not an implicit directory

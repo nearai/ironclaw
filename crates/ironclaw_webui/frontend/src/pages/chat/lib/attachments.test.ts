@@ -59,9 +59,12 @@ test("formatBytes renders human units", () => {
 
 test("attachmentKindFromMime classifies by prefix", () => {
   assert.equal(attachmentKindFromMime("image/png"), "image");
+  assert.equal(attachmentKindFromMime("image/gif"), "image");
   assert.equal(attachmentKindFromMime("AUDIO/MPEG"), "audio");
+  assert.equal(attachmentKindFromMime("video/mp4"), "video");
   assert.equal(attachmentKindFromMime("application/pdf"), "document");
-  assert.equal(attachmentKindFromMime(""), "document");
+  assert.equal(attachmentKindFromMime("model/gltf-binary"), "other");
+  assert.equal(attachmentKindFromMime(""), "other");
 });
 
 test("attachmentPreviewMode maps each MIME family to its render mode", () => {

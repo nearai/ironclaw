@@ -8,12 +8,12 @@ use std::collections::{BTreeMap, btree_map::Entry};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::extension::Extension;
 use ironclaw_host_api::{
     capability::CapabilityDescriptor,
     dispatch::{
         CapabilityDispatchRequest, DispatchError, DispatchFailureDetail, RuntimeDispatchErrorKind,
     },
-    extension::Extension,
     ids::{CapabilityId, ExtensionId},
     resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
     runtime::{DispatchErrorLane, RuntimeKind},
@@ -239,10 +239,12 @@ pub enum CapabilityRegistrationError {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
+    use ironclaw_extension_contracts::extension::{
+        Extension, ExtensionContract, ExtensionInstanceId, ExtensionRuntimeIdentity,
+    };
     use ironclaw_host_api::{
         capability::{CapabilityDescriptor, EffectKind, PermissionMode},
         dispatch::{CapabilityDispatchRequest, DispatchError},
-        extension::{Extension, ExtensionContract, ExtensionInstanceId, ExtensionRuntimeIdentity},
         ids::ExtensionId,
         resource::{ResourceEstimate, ResourceProfile},
         runtime::{RuntimeKind, TrustClass},

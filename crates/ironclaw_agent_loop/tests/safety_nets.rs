@@ -11,13 +11,11 @@ use ironclaw_agent_loop::{
         state_after_no_progress_warning_attempt, surface_version,
     },
 };
-use ironclaw_turns::{
-    CapabilityActivityId, LoopExit, LoopFailureKind,
-    run_profile::{
-        AgentLoopHostErrorKind, CapabilityInputRef, ContentDigest, LoopCancelReasonKind,
-        LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopRequest,
-        LoopRequestBatch, LoopRunInfoPort,
-    },
+use ironclaw_host_api::turn::CapabilityActivityId;
+use ironclaw_loop_contracts::{
+    AgentLoopHostErrorKind, CapabilityInputRef, ContentDigest, LoopCancelReasonKind,
+    LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopExit, LoopFailureKind,
+    LoopRequest, LoopRequestBatch, LoopRunInfoPort,
 };
 
 #[tokio::test(start_paused = true)]
@@ -669,7 +667,7 @@ async fn recovery_budget_exhaustion_uses_single_call_retry() {
 
 fn assert_no_progress_typed_failure(
     host: &MockAgentLoopDriverHost,
-    explanation_message_refs: &[ironclaw_turns::LoopMessageRef],
+    explanation_message_refs: &[ironclaw_host_api::turn::LoopMessageRef],
 ) {
     // A no-progress stop with the nudge gate off never completes with a canned
     // "I stopped" reply masquerading as a completed turn. The ONLY assistant

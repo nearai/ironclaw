@@ -13,7 +13,7 @@ subsystems that used to live apart (see `README.md` for the fold-in map):
    from `ironclaw_reborn_composition::webui`) — `webui_v2_app(bundle, config)`
    composes the full `Router` and layers the fixed middleware stack; owns the
    `WebuiAuthenticator` / `WebuiAuthentication` host-auth vocabulary and the
-   feature-gated OpenAI-compat mounts.
+   OpenAI-compat mounts (unconditional — this crate's only feature is `test-support`).
 3. **Serve loop + host authentication** (`src/lib.rs`, `src/auth/`,
    `src/session.rs`, `src/oidc.rs`) — `serve_webui_v2` binds the listener and
    runs `axum::serve`; the `Env`/`Session`/`Oidc` authenticators, the
@@ -30,11 +30,12 @@ Composition deliberately stops at the
 fully composed `Router` but must never bind a socket. This crate is the
 host-owned counterpart that binds the `TcpListener` and drives the serve loop.
 
-Path A of `docs/reborn/how-to-port-channel-to-reborn.md` rules apply: host auth
-stays host-owned in this crate, no `src/` (v1) imports, no v1 secrets / settings
-/ DB, and no direct `ironclaw_product` edge (reach it through
-composition's facade). Enforced by `ironclaw_architecture`
-(`tests/reborn_dependency_boundaries.rs`).
+The "Native host surface" rules of `docs/reborn/how-to-port-channel-to-reborn.md`
+apply: host auth stays host-owned in this crate, and behavior is reached through
+`ironclaw_host_api::product_surface::ProductSurface`. The crate *does* carry a
+direct `ironclaw_product` dependency (see `Cargo.toml`), but it is limited to
+wire DTOs and ProductSurface descriptors — never behavior. Enforced by
+`ironclaw_architecture` (`tests/reborn_dependency_boundaries.rs`).
 
 ## Surface
 
@@ -49,6 +50,10 @@ composition's facade). Enforced by `ironclaw_architecture`
 | `webui_v2_app(product_surface, config) -> WebuiV2App` | Compose a host-supplied `ProductSurface` + `WebuiServeConfig` into the full middleware-wrapped `Router` (also `webui_v2_app_with_lifecycle`). |
 | `WebuiServeConfig` | Host-owned serve config (tenant, authenticator, default agent/project, public/protected mounts, Google OAuth). |
 | `WebuiAuthenticator` trait / `WebuiAuthentication` | Host-auth vocabulary the bearer middleware resolves each token through. |
+
+Run and full-thread regression artifact exports are QA-only. Host composition
+mounts their routes and exposes their browser affordances only when
+`IRONCLAW_REBORN_REGRESSION_ARTIFACT_EXPORT=true`; the default is disabled.
 
 Middleware modules (`src/webui_*.rs`) layer in a fixed order —
 **ws-origin → per-route body limit → bearer auth → rate limit → handler** —
@@ -92,12 +97,13 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.send_message` | POST | `/api/webchat/v2/threads/{thread_id}/messages` | — | `TurnCoordinator` |
 | `webui.v2.get_timeline` | GET | `/api/webchat/v2/threads/{thread_id}/timeline` (`?limit&cursor`) | — | `ProjectionOnly` |
 | `webui.v2.get_run_artifact` | GET | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/artifact` | — | `ProjectionOnly` |
+| `webui.v2.get_thread_artifact` | GET | `/api/webchat/v2/threads/{thread_id}/artifact` | — | `ProjectionOnly` |
 | `webui.v2.logs` | GET | `/api/webchat/v2/logs` | — | `ProjectionOnly` |
 | `webui.v2.stream_events` | GET | `/api/webchat/v2/threads/{thread_id}/events` | **SSE** | `ProjectionOnly` |
 | `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | **WebSocket** | `ProjectionOnly` |
 | `webui.v2.cancel_run` / `retry_run` / `resolve_gate` | POST | `…/runs/{run_id}/…` | — | `TurnCoordinator` |
 | `webui.v2.list/pause/resume/rename/delete_automation` | GET/POST/DELETE | `/api/webchat/v2/automations…` | — | `ProductSurface` |
-| `webui.v2.list/install/import/remove/get_setup/setup_extension` | GET/POST | `/api/webchat/v2/extensions…` | — | `ProjectionOnly` / `ProductSurface` |
+| `webui.v2.list/install/import/remove/get_setup/setup_extension/register_hosted_mcp` | GET/POST | `/api/webchat/v2/extensions…` | — | `ProjectionOnly` / `ProductSurface` |
 | `webui.v2.*_llm_*` | GET/POST | `/api/webchat/v2/llm/…` | — | `ProjectionOnly` / `ProductSurface` |
 | `webui.v2.settings.list_tools` / `set_tools_auto_approve` / `set_tool_permission` | GET/POST | `/api/webchat/v2/settings/tools…` | — | `ProjectionOnly` / `ProductSurface` |
 | `webui.v2.operator.*` (setup, config, config/{key}, validate, diagnostics, status, logs, service) | GET/POST | `/api/webchat/v2/operator/…` | — | `ProjectionOnly` / `ProductSurface` |
@@ -117,6 +123,14 @@ and applies deterministic trace redaction before serialization. Its logs are a
 bounded process-local diagnostic sidecar: `logs.complete` is always false and
 availability/truncation are explicit. Deployment-wide logs are not exposed
 through this caller route.
+
+`webui.v2.get_thread_artifact` applies the same caller ownership and redaction
+rules to every replayable message in the thread and queries logs at thread
+scope. Its `ironclaw.thread_artifact.v1` messages retain `run_id`, allowing the
+fixture importer to reconstruct multiple turns without mixing threads. Export
+is all-or-nothing and returns `413` when the thread exceeds 1,000 persisted
+messages, 16 MiB of stored message data, or 20 MiB after redaction and log
+assembly. The endpoint is limited to six requests per caller per minute.
 
 **Operator-gating.** LLM config, operator setup/config/service-control, and
 extension zip-import routes are operator-wide: `webui_v2_app` mounts them only
@@ -351,7 +365,7 @@ composition):
 
 **Host authentication:**
 
-- `src/{auth, oidc, session}/tests` — unit tests per module
+- `src/auth/` module tests, plus the `mod tests` blocks in `src/oidc.rs` and `src/session.rs` (those two are files, not directories)
   (provider URL building, PKCE math, ID-token decode, pending
   store, redirect sanitization, session lookup).
 - `tests/google_oauth_routes.rs` — caller-level tests on
@@ -375,7 +389,6 @@ composition):
   WebChat v2 route").
 - `tests/oidc_e2e.rs` — pre-existing JWKS-signed ID-token e2e
   for the OIDC authenticator path.
-- `tests/serve_loop.rs` — listener bind + graceful shutdown.
 
 ## Validation
 

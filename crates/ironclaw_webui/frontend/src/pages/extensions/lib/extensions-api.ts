@@ -24,6 +24,18 @@ export function installExtension(packageRef, options: ExtensionMutationOptions =
     }),
   });
 }
+// Admission only: identity, manifests, tools, and credentials are server-owned.
+export function registerCustomMcp(payload) {
+  return apiFetch("/api/webchat/v2/extensions/register-hosted-mcp", {
+    method: "POST",
+    body: JSON.stringify({
+      desired_id: payload.desiredId,
+      desired_name: payload.desiredName,
+      endpoint: payload.endpoint,
+      auth_selection: payload.authSelection,
+    }),
+  });
+}
 export function removeExtension(packageRef, options: ExtensionMutationOptions = {}) {
   const clientId = options?.clientActionId;
   return apiFetch(

@@ -6,7 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, LoopInputAck, LoopInputAckToken, LoopInputBatch,
     LoopInputCursor, LoopInputPort, LoopRunContext, LoopRunInfoPort,
 };
@@ -174,15 +174,13 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId};
-    use ironclaw_turns::{
-        LoopGateRef, LoopMessageRef, RunProfileResolutionRequest, RunProfileResolver, TurnId,
-        TurnRunId, TurnScope,
-        run_profile::{
-            AgentLoopHostErrorKind, CapabilitySurfaceVersion, InMemoryRunProfileResolver,
-            LoopCancelReasonKind, LoopInput, LoopInputAckToken, LoopInputCursor,
-            LoopInputCursorToken, LoopInputPort, LoopInterruptKind, LoopRunContext,
-        },
+    use ironclaw_loop_contracts::{
+        AgentLoopHostErrorKind, CapabilitySurfaceVersion, InMemoryRunProfileResolver,
+        LoopCancelReasonKind, LoopInput, LoopInputAckToken, LoopInputCursor, LoopInputCursorToken,
+        LoopInputPort, LoopInterruptKind, LoopRunContext, RunProfileResolutionRequest,
+        RunProfileResolver,
     };
+    use ironclaw_turns::{LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnScope};
 
     use super::*;
     use crate::{HostInputBatch, HostInputEnvelope, HostInputQueue};

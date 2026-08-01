@@ -8,14 +8,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use ironclaw_extension_contracts::extension::{
+    Extension, ExtensionContract, ExtensionInstanceId, ExtensionRuntimeIdentity,
+};
 use ironclaw_extensions::ResolvedExtensionManifest;
 use ironclaw_host_api::{
-    capability::CapabilityDescriptor,
-    extension::{Extension, ExtensionContract, ExtensionInstanceId, ExtensionRuntimeIdentity},
-    ids::CapabilityId,
-    runtime::TrustClass,
-    tool_adapter::ToolAdapter,
-    trust::RequestedTrustClass,
+    capability::CapabilityDescriptor, ids::CapabilityId, runtime::TrustClass,
+    tool_adapter::ToolAdapter, trust::RequestedTrustClass,
 };
 use ironclaw_product::ChannelAdapter;
 

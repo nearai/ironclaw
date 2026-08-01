@@ -21,19 +21,17 @@ use ironclaw_host_api::{
     safe_summary::SafeSummary,
     scope::Principal,
 };
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume,
+    CapabilityDeniedReasonKind, CapabilityInputRef, CapabilityProgress, CapabilityResumeToken,
+    ConcurrencyHint, LoopRunContext, resolution,
+};
 use ironclaw_loop_host::{
     CapabilityResultWrite, DurablePersistence, SyntheticCapability, SyntheticCapabilityDescriptor,
     SyntheticCapabilityHandler, SyntheticCapabilityInvocation,
 };
 use ironclaw_product::{OutboundPreferencesProductService, RebornOutboundDeliveryTargetId};
-use ironclaw_turns::{
-    LoopGateRef,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume,
-        CapabilityDeniedReasonKind, CapabilityInputRef, CapabilityProgress, CapabilityResumeToken,
-        ConcurrencyHint, LoopRunContext, resolution,
-    },
-};
+use ironclaw_turns::LoopGateRef;
 
 use crate::outbound::{
     OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION,
@@ -869,7 +867,7 @@ mod tests {
     use super::*;
     use crate::runtime::capability_host::assert_recoverable_failure;
     use ironclaw_host_api::product_surface::ProductSurfaceErrorKind;
-    use ironclaw_turns::run_profile::LoopSafeSummary;
+    use ironclaw_loop_contracts::LoopSafeSummary;
 
     fn service_error(code: ProductSurfaceErrorCode) -> ProductSurfaceError {
         ProductSurfaceError {

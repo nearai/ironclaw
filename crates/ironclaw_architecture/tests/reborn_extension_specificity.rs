@@ -257,13 +257,14 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "credential-prefix redaction (github_pat_)",
     ),
     (
-        "crates/ironclaw_turns/src/run_profile/host/validate.rs",
+        "crates/ironclaw_loop_contracts/src/host/validate.rs",
         "github",
         "credential-prefix redaction (github_pat_) — relocated here when \
-         run_profile/host.rs was decomposed (#6391)",
+         run_profile/host.rs was decomposed (#6391), and again when WS1.2 moved \
+         run_profile/** into ironclaw_loop_contracts",
     ),
     (
-        "crates/ironclaw_turns/src/run_profile/host/validate.rs",
+        "crates/ironclaw_loop_contracts/src/host/validate.rs",
         "google",
         "credential-prefix redaction (Google/GCP key shapes) at the \
          model-visible boundary — vendor-specific safety detection",
@@ -287,7 +288,7 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
          the leak-scanner carve-out domain (#5965)",
     ),
     (
-        "crates/ironclaw_turns/src/run_profile/prompt_text.rs",
+        "crates/ironclaw_loop_contracts/src/prompt_text.rs",
         "github",
         "credential-prefix redaction (github_pat_)",
     ),
@@ -1259,14 +1260,15 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     // lane-4: migration — one-time forward-migration call sites naming the v1 vocabulary they fold forward — correct-by-design (same pattern the retired-taxonomy gate sanctions); would become a SANCTIONED_PATHS carve if the sites move into a dedicated migration module
     // lane-4: doc-str — incidental doc-comment / error-string / tool-description examples that NAME an extension but branch on nothing — the code routes by a manifest field (display_name/provider/effects); reword or leave (Ben's call)
+    (
+        "crates/ironclaw_extension_contracts/src/surface.rs",
+        "slack",
+    ),
     ("crates/ironclaw_filesystem/src/index.rs", "acme"),
     ("crates/ironclaw_host_api/src/capability.rs", "slack"),
     ("crates/ironclaw_host_api/src/http.rs", "slack"),
     ("crates/ironclaw_host_api/src/ids.rs", "github"),
-    ("crates/ironclaw_host_api/src/surface.rs", "slack"),
     ("crates/ironclaw_loop_host/src/capability_port.rs", "gmail"),
-    ("crates/ironclaw_auth/src/loopback_oauth.rs", "google"),
-    ("crates/ironclaw_auth/src/loopback_oauth.rs", "notion"),
     (
         "crates/ironclaw_outbound/src/delivered_gate_routes.rs",
         "slack",
@@ -1421,6 +1423,37 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
 ];
 
+/// WS0 baseline for the extension-specificity allowlist (target-architecture
+/// epic #3773, workstream #6920): the number of `(path, term)` pairs measured
+/// **on this checkout**, not copied from the design docs.
+///
+/// Measured 2026-07-30 against `origin/main` @ `ae0989c37` by counting the
+/// entries of `ALLOWLIST` above (`ALLOWLIST.len()`, printed by the ratchet
+/// below on failure).
+///
+/// PROPOSAL §11.2.8 shrinks this list to the §8.1 rule-4 set and CHECKLIST
+/// WS12 wants it empty. The staleness half of that discipline already lives in
+/// the gate above (an entry that no longer matches fails); this ceiling is the
+/// other half — the list cannot *grow* untracked either. Lower it in the same
+/// PR that deletes entries so the new floor is locked in.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 130;
+
+/// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
+#[test]
+fn reborn_extension_specificity_allowlist_ratchets_down_only() {
+    assert!(
+        ALLOWLIST.len() <= WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE,
+        "extension-specificity ALLOWLIST grew to {} entries (WS0 baseline {}): this list is \
+         shrink-only (PROPOSAL §11.2.8). Degenericize the code — route on a manifest-declared \
+         capability instead of naming the vendor — rather than allowlisting a new pair. If the \
+         owner has approved a deliberate carve-out, raise \
+         WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE in the same PR with the rationale in the \
+         PR body.",
+        ALLOWLIST.len(),
+        WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE
+    );
+}
+
 /// One `(relative path, matched term)` scanner hit.
 type HitEntry = (String, String);
 
@@ -1464,7 +1497,8 @@ fn reborn_generic_code_names_no_concrete_extension() {
     if !new_violations.is_empty() {
         failures.push(format!(
             "concrete extension names in generic code (fix the code, or — for pre-existing \
-             debt only — add the exact entries below to ALLOWLIST):\n{}",
+             debt only — add the exact entries below to ALLOWLIST, which also requires raising \
+             WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE, a reviewed decision):\n{}",
             new_violations
                 .iter()
                 .map(|(path, term)| format!("    (\"{path}\", \"{term}\"),"))

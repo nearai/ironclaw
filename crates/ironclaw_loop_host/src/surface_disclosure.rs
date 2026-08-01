@@ -11,7 +11,7 @@ use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
     READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
 };
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     AgentLoopHostError, CapabilityCallCandidate, CapabilityDescriptorView, LoopCapabilityPort,
     LoopRequest, LoopRequestBatch, ProviderToolCall, ProviderToolCallCapabilityIds,
     ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,

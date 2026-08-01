@@ -8,8 +8,10 @@ import unittest
 from pathlib import Path
 
 from ws12_workflow_contracts import (
+    E2E_WORKFLOW,
     REQUIRED_MARKERS,
     load_workflows,
+    validate_e2e_scope_filters,
     validate_workflow_texts,
 )
 
@@ -62,6 +64,66 @@ class WorkflowContractSabotageTests(unittest.TestCase):
                     )
                 )
 
+    def test_reborn_e2e_scope_filters_pass_as_checked_in(self) -> None:
+        self.assertEqual(validate_e2e_scope_filters(self.workflows[E2E_WORKFLOW]), [])
+
+    def test_flat_tree_scope_regex_fails_loudly(self) -> None:
+        """Re-narrowing the scope regex to `crates/ironclaw_*` must not pass.
+
+        This is the exact regression the WS10 rewrite exists to prevent: the
+        pattern still matches every path in today's flat tree, so nothing looks
+        broken until crates move and every E2E job silently stops running.
+        """
+        sabotaged = self.workflows[E2E_WORKFLOW].replace(
+            "grep -Eq '^(crates/|", "grep -Eq '^(crates/ironclaw_[^/]+/|"
+        )
+        errors = validate_e2e_scope_filters(sabotaged)
+
+        self.assertTrue(
+            any("substrates/ironclaw_events" in error for error in errors), errors
+        )
+
+    def test_flat_tree_paths_glob_fails_loudly(self) -> None:
+        sabotaged = self.workflows[E2E_WORKFLOW].replace(
+            '- "crates/**"', '- "crates/ironclaw_*/**"'
+        )
+        errors = validate_e2e_scope_filters(sabotaged)
+
+        self.assertTrue(any("push `paths:` filter" in error for error in errors), errors)
+
+    def test_over_broad_scope_regex_fails_loudly(self) -> None:
+        """The filter must stay a filter — matching everything is not a fix."""
+        sabotaged = self.workflows[E2E_WORKFLOW].replace(
+            "grep -Eq '^(crates/|", "grep -Eq '^(|"
+        )
+        errors = validate_e2e_scope_filters(sabotaged)
+
+        self.assertTrue(any("must NOT be in scope" in error for error in errors), errors)
+
+    def test_scope_regex_survives_an_escaped_newline_continuation(self) -> None:
+        """A guard split across a line continuation is still a guard.
+
+        Regression for the one-line-only form: it reported this exact workflow
+        as having no scope regex at all, failing the build over a formatting
+        choice (.claude/rules/review-discipline.md — guardrails must handle
+        multiline syntax).
+        """
+        wrapped = self.workflows[E2E_WORKFLOW].replace(
+            "| grep -Eq '^(crates/|", "| grep -Eq \\\n            '^(crates/|"
+        )
+        self.assertNotEqual(wrapped, self.workflows[E2E_WORKFLOW])
+
+        self.assertEqual(validate_e2e_scope_filters(wrapped), [])
+
+    def test_missing_scope_regex_fails_loudly(self) -> None:
+        sabotaged = self.workflows[E2E_WORKFLOW].replace("grep -Eq '^(crates/|", "true #")
+        errors = validate_e2e_scope_filters(sabotaged)
+
+        self.assertTrue(
+            any("could not find the `changes` job scope regex" in e for e in errors),
+            errors,
+        )
+
     def test_code_style_runs_workflow_and_shard_sabotage_tests(self) -> None:
         workflow = (ROOT / ".github/workflows/code_style.yml").read_text(
             encoding="utf-8"
@@ -69,6 +131,36 @@ class WorkflowContractSabotageTests(unittest.TestCase):
 
         self.assertIn("python3 scripts/ci/test_ws12_suite_shards.py", workflow)
         self.assertIn("python3 scripts/ci/test_ws12_workflow_contracts.py", workflow)
+
+    def test_code_style_fast_checks_share_one_runner_without_losing_gates(self) -> None:
+        workflow = (ROOT / ".github/workflows/code_style.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("  fast-checks:", workflow)
+        for marker in (
+            "cargo fmt --all -- --check",
+            "EmbarkStudios/cargo-deny-action@",
+            "git ls-files -ci --exclude-standard",
+            "scripts/ci/check-include-str-paths.sh",
+            "scripts/ci/check-hermetic-env.sh",
+            "scripts/check_no_panics.py --reborn-baseline",
+            "scripts/ci/check-composition-budget.sh",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, workflow)
+
+        for retired_job in (
+            "  clippy-matrix:",
+            "  format:",
+            "  deny-check:",
+            "  tracked-ignored-files:",
+            "  static-checks:",
+            "  no-panics:",
+            "  composition-budget:",
+        ):
+            with self.subTest(retired_job=retired_job):
+                self.assertNotIn(retired_job, workflow)
 
 
 if __name__ == "__main__":

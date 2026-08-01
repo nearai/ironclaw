@@ -1,9 +1,13 @@
 [workspace]
-members = [".", "crates/ironclaw_common", "crates/ironclaw_observability", "crates/ironclaw_host_api", "crates/ironclaw_host_ingress", "crates/ironclaw_libsql_runtime", "crates/ironclaw_filesystem", "crates/ironclaw_attachments", "crates/ironclaw_extractors", "crates/ironclaw_memory", "crates/ironclaw_memory_native", "crates/ironclaw_memory_mem0", "crates/ironclaw_events", "crates/ironclaw_event_projections", "crates/ironclaw_event_streams", "crates/ironclaw_reborn_event_store", "crates/ironclaw_extensions", "crates/ironclaw_extension_host", "crates/ironclaw_processes", "crates/ironclaw_dispatcher", "crates/ironclaw_scripts", "crates/ironclaw_process_sandbox", "crates/ironclaw_mcp", "crates/ironclaw_wasm", "crates/ironclaw_wasm_limiter", "crates/ironclaw_capabilities", "crates/ironclaw_secrets", "crates/ironclaw_network", "crates/ironclaw_host_runtime", "crates/ironclaw_runtime_policy", "crates/ironclaw_authorization", "crates/ironclaw_approvals", "crates/ironclaw_resources", "crates/ironclaw_auth", "crates/ironclaw_trust", "crates/ironclaw_turns", "crates/ironclaw_agent_loop", "crates/ironclaw_threads", "crates/ironclaw_prompt_envelope", "crates/ironclaw_hooks", "crates/ironclaw_loop_host", "crates/ironclaw_runner", "crates/ironclaw_reborn_config", "crates/ironclaw_operator", "crates/ironclaw_reborn_composition", "crates/ironclaw_reborn_identity", "crates/ironclaw_first_party_extensions", "crates/ironclaw_reborn_cli", "crates/ironclaw_reborn_traces", "crates/ironclaw_webui", "crates/ironclaw_reborn_openai_compat", "crates/ironclaw_conversations", "crates/ironclaw_product", "crates/ironclaw_telegram_extension", "crates/ironclaw_telegram_v2_adapter", "crates/ironclaw_slack_extension", "crates/ironclaw_outbound", "crates/ironclaw_triggers", "crates/ironclaw_projects", "crates/ironclaw_architecture", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_llm", "crates/ironclaw_embeddings", "tools/ironclaw_stress"]
+members = [".", "crates/ironclaw_common", "crates/ironclaw_observability", "crates/ironclaw_host_api", "crates/ironclaw_host_ingress", "crates/ironclaw_libsql_runtime", "crates/ironclaw_filesystem", "crates/ironclaw_attachments", "crates/ironclaw_extractors", "crates/ironclaw_memory", "crates/ironclaw_memory_native", "crates/ironclaw_memory_mem0", "crates/ironclaw_events", "crates/ironclaw_event_projections", "crates/ironclaw_event_streams", "crates/ironclaw_reborn_event_store", "crates/ironclaw_extensions", "crates/ironclaw_extension_host", "crates/ironclaw_processes", "crates/ironclaw_scripts", "crates/ironclaw_process_sandbox", "crates/ironclaw_mcp", "crates/ironclaw_wasm", "crates/ironclaw_wasm_limiter", "crates/ironclaw_capabilities", "crates/ironclaw_secrets", "crates/ironclaw_network", "crates/ironclaw_host_runtime", "crates/ironclaw_runtime_policy", "crates/ironclaw_authorization", "crates/ironclaw_approvals", "crates/ironclaw_resources", "crates/ironclaw_auth", "crates/ironclaw_trust", "crates/ironclaw_turns", "crates/ironclaw_loop_contracts", "crates/ironclaw_extension_contracts", "crates/ironclaw_agent_loop", "crates/ironclaw_threads", "crates/ironclaw_prompt_envelope", "crates/ironclaw_hooks", "crates/ironclaw_loop_host", "crates/ironclaw_runner", "crates/ironclaw_reborn_config", "crates/ironclaw_operator", "crates/ironclaw_reborn_composition", "crates/ironclaw_reborn_identity", "crates/ironclaw_first_party_extensions", "crates/ironclaw_first_party_extension_ports", "crates/ironclaw_reborn_cli", "crates/ironclaw_reborn_traces", "crates/ironclaw_webui", "crates/ironclaw_reborn_openai_compat", "crates/ironclaw_conversations", "crates/ironclaw_product", "crates/ironclaw_telegram_extension", "crates/ironclaw_telegram_v2_adapter", "crates/ironclaw_slack_extension", "crates/ironclaw_outbound", "crates/ironclaw_triggers", "crates/ironclaw_projects", "crates/ironclaw_architecture", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_llm", "tools/ironclaw_stress"]
 default-members = ["crates/ironclaw_reborn_cli"]
 exclude = [
     "crates/ironclaw_silk_decoder",
-    "fuzz",
+    # The root `fuzz/` package was deleted in WS8: it declared
+    # `[dependencies.ironclaw] path = ".."` and fuzzed `ironclaw::safety` /
+    # `ironclaw::tools`, but the root package has had no lib target since the
+    # v1 monolith was removed, so it could not resolve. `ironclaw_safety/fuzz`
+    # is a separate, live fuzz package and stays.
     "crates/ironclaw_safety/fuzz",
 ]
 
@@ -14,11 +18,11 @@ rust-version = "1.96"
 # WASM sandbox for untrusted tool execution.
 # Floor 46.0.1: minimum current major patch containing the fixes for the
 # Wasmtime WASI FilePerms advisories RUSTSEC-2026-0149 and RUSTSEC-2026-0188.
-wasmtime = { version = "46.0.1", features = ["component-model"] }
+wasmtime = { version = "47.0.2", features = ["component-model"] }
 # Only the WASI p2 host API is linked (`p2::add_to_linker_sync`). Keeping
 # defaults off avoids compiling unused p0/p1 WITX proc macros under remote CI
 # sccache workers, where registry sidecar WITX files are not present.
-wasmtime-wasi = { version = "46.0.1", default-features = false, features = ["p2"] }
+wasmtime-wasi = { version = "47.0.2", default-features = false, features = ["p2"] }
 
 # Maintainability guardrails against dead/speculative public API
 # (the "Theme 1" anti-pattern from the maintainability audit: accessors,
@@ -184,6 +188,8 @@ ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
 # `test-support` unlocks the shared in-memory process-journal-backed turn
 # runtime used by integration tests. cfg(test) does not propagate from an
 # integration-test binary into its deps, so the feature is explicit here.
+ironclaw_loop_contracts = { path = "crates/ironclaw_loop_contracts", version = "0.1.0" }
+ironclaw_extension_contracts = { path = "crates/ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_turns = { path = "crates/ironclaw_turns", version = "0.1.0", features = ["test-support"] }
 # `InMemoryDurableEventLog` for the W5-WEBUI-API-1 SSE scenario's test-local
 # `ProjectionStream` wiring (`build_webui_event_stream_for_test`).
@@ -204,8 +210,6 @@ ironclaw_wasm = { path = "crates/ironclaw_wasm", version = "0.1.0" }
 # `OutboundStateStore` the triggered-delivery outcome-seam int-tier
 # proof injects (asserting a real `TriggeredRunDeliveryDriver`'s recorded
 # outcome via the same public store trait the composition factory accepts).
-# Same idea for embeddings: `MockEmbeddings` is only reachable in dev builds.
-ironclaw_embeddings = { path = "crates/ironclaw_embeddings", version = "0.1.0", features = ["test-support"] }
 # Named `#[case]` parametrization for the storage-backend matrix tests (slice 3).
 rstest = "0.23"
 
@@ -357,6 +361,10 @@ path = "tests/integration/lease_wedge.rs"
 [[test]]
 name = "reborn_integration_mcp"
 path = "tests/integration/mcp.rs"
+
+[[test]]
+name = "reborn_integration_hosted_mcp_registration"
+path = "tests/integration/hosted_mcp_registration.rs"
 
 [[test]]
 name = "reborn_integration_oauth_connect"

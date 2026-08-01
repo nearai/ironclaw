@@ -354,6 +354,48 @@ If the scenario must be part of the Reborn coverage gate, add its file or
 pytest node ID to
 [`tests/e2e/reborn_coverage_tests.txt`](../../tests/e2e/reborn_coverage_tests.txt).
 
+The merged Reborn LCOV report enforces three complementary ratchets:
+
+- the aggregate floor preserves the stronger 85.11% post-process-journal
+  baseline (which supersedes the historical 80.81% floor);
+- critical production crates have percentage and covered-line floors in
+  [`tests/integration/coverage-floor.toml`](../../tests/integration/coverage-floor.toml);
+- added, instrumentable production lines and branch arms must be covered. The
+  denominator comes from the pull-request diff intersected with LLVM `DA` and
+  `BRDA` records, not from a hand-maintained file list.
+
+Changed-code exemptions live in
+[`tests/integration/changed-coverage-exemptions.toml`](../../tests/integration/changed-coverage-exemptions.toml).
+They must name exact line numbers and/or branch-line numbers plus an owner,
+reason, issue, and future review date. Globs and whole-file exemptions are not
+accepted. Test modules and test-support paths are excluded mechanically; a
+production source file missing entirely from LCOV fails rather than
+disappearing from the denominator. Added lines in renamed production files
+remain in scope.
+
+Branch LCOV exports use `--skip-functions` because changed-code gates consume
+line and branch records only. They pin `nightly-2025-11-01` (LLVM 21.1.3):
+newer bundled LLVM versions have a confirmed
+[`getInstantiationGroups` branch-mapping crash](https://github.com/rust-lang/rust/issues/157358)
+for async generic Rust code. The coverage-only compiler therefore passes
+`--ignore-rust-version` and bootstraps only the three library features used by
+current dependencies that stabilized after Rust 1.93: `array_windows`,
+`debug_closure_helpers`, and `slice_as_array`. Normal build, clippy, and test
+jobs remain the authoritative current-MSRV checks. Dedicated cache keys
+prevent mixing objects from the two compilers. The branch-export self-test
+fails if the safe toolchain, exact compatibility envelope, MSRV override, or
+record filter is removed, if discovery is empty, or if an expected
+workflow/script path goes stale. The blocking workflow also runs the changed
+coverage and LCOV-merge sabotage suites before accepting the real report.
+
+The standalone shipping `ironclaw` binary is separately built under
+`cargo llvm-cov`, driven by the production-composed Python E2E manifest, and
+terminated through its graceful shutdown path. The Code Coverage workflow
+clears profiles emitted by the instrumented prebuild before starting pytest,
+then fails if the E2E run produces no new profiles. It uploads its branch-aware
+LCOV as the `reborn-shipping-binary-e2e-coverage` artifact before sending it to
+Codecov.
+
 ```bash
 cd tests/e2e
 pytest scenarios/test_reborn_webui_v2_smoke.py

@@ -1,7 +1,5 @@
-use ironclaw_turns::{
-    GateRef, GetRunStateRequest, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope,
-    TurnStatus,
-};
+use ironclaw_host_api::turn::{TurnActor, TurnGateRef, TurnRunId, TurnScope, TurnStatus};
+use ironclaw_turns::{GetRunStateRequest, TurnCoordinator, TurnError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BlockedGateState {
@@ -27,7 +25,7 @@ pub(crate) async fn blocked_gate_state(
     scope: &TurnScope,
     actor: &TurnActor,
     run_id: TurnRunId,
-    gate_ref: &GateRef,
+    gate_ref: &TurnGateRef,
     blocked_status: TurnStatus,
 ) -> Result<BlockedGateState, BlockedGateStateError> {
     let state = turn_coordinator

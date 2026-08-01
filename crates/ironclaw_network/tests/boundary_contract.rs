@@ -8,7 +8,6 @@ fn network_crate_does_not_depend_on_workflow_runtime_secret_or_observability_cra
         "ironclaw_authorization",
         "ironclaw_approvals",
         "ironclaw_capabilities",
-        "ironclaw_dispatcher",
         "ironclaw_events",
         "ironclaw_extensions",
         "ironclaw_filesystem",

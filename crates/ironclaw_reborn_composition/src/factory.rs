@@ -86,6 +86,7 @@ use ironclaw_conversations::{
     AdapterInstallationId, AdapterKind, ConversationActorPairingService, ExternalActorRef,
 };
 use ironclaw_events::{DurableAuditLog, DurableEventLog};
+use ironclaw_extension_contracts::recipe::RecipeClientCredentials;
 use ironclaw_extension_host::channel_pairing::ChannelPairingRegistry;
 use ironclaw_extension_host::{
     ActiveExtensionPublisher, AdminConfigurationCatalogUse, AdminConfigurationService,
@@ -151,7 +152,6 @@ use ironclaw_host_api::{
     ids::{CorrelationId, ExtensionId, InvocationId, PackageId, RunId, UserId, VendorId},
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
-    recipe::RecipeClientCredentials,
     resource::{ResourceEstimate, ResourceScope},
     runtime::{RuntimeKind, TrustClass},
 };
@@ -166,7 +166,8 @@ use ironclaw_host_runtime::{
     builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
     builtin_first_party_package_for_process_backend,
 };
-use ironclaw_outbound::CommunicationPreferenceRepository;
+use ironclaw_loop_contracts::InMemoryRunProfileResolver;
+use ironclaw_outbound::{CommunicationPreferenceRepository, ReplyAttachmentIntentPort};
 use ironclaw_outbound::{
     DeliveredGateRouteStore, OutboundStateStorePort, TriggeredRunDeliveryStore,
 };
@@ -194,9 +195,7 @@ use ironclaw_triggers::{
     TriggerRepository,
 };
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
-use ironclaw_turns::{
-    AgentTurnRuntimePort, GetRunStateRequest, InMemoryRunProfileResolver, TurnScope,
-};
+use ironclaw_turns::{AgentTurnRuntimePort, GetRunStateRequest, TurnScope};
 use ironclaw_turns::{ExternalToolCatalog, InMemoryExternalToolCatalog};
 use secrecy::SecretString;
 
@@ -287,6 +286,7 @@ pub(crate) struct RebornRuntimeStores {
         Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>,
     pub(crate) skill_auto_activate_learned: Arc<AtomicBool>,
     pub(crate) outbound_state: Arc<dyn OutboundStateStorePort>,
+    pub(crate) reply_attachment_intents: Arc<dyn ReplyAttachmentIntentPort>,
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
     pub(crate) process_gate_query_source:
@@ -329,7 +329,6 @@ pub(crate) struct RebornRuntimeStores {
         Arc<ironclaw_extension_host::FilesystemChannelDmTargetStore>,
     pub(crate) channel_disconnect_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionService>>>,
-    pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) host_runtime_http_egress: Option<ironclaw_host_runtime::HostRuntimeHttpEgressPort>,
     pub(crate) skill_mounts: MountView,
     pub(crate) memory_mounts: MountView,
@@ -344,7 +343,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) memory_service_resolver: MemoryServiceResolver,
     /// Lifecycle hooks declared by the bound memory provider. Host-initiated
     /// retrieval, recording, and profile reads are wired only when declared.
-    pub(crate) memory_lifecycle: ironclaw_host_api::memory::MemoryDescriptor,
+    pub(crate) memory_lifecycle: ironclaw_extension_contracts::memory::MemoryDescriptor,
     pub(crate) workspace_mounts: MountView,
     pub(crate) standalone_storage_root: Option<PathBuf>,
     pub(crate) default_system_prompt_path: Option<PathBuf>,
@@ -1228,7 +1227,7 @@ fn manifest_channel_account_setup_descriptors(
             let channel = manifest.channel.as_ref()?;
             let connection = channel.connection.as_ref()?;
             if connection.strategy
-                != ironclaw_host_api::channel::ChannelConnectionStrategy::WebGeneratedCode
+                != ironclaw_extension_contracts::channel::ChannelConnectionStrategy::WebGeneratedCode
             {
                 return None;
             }

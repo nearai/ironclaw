@@ -4,16 +4,15 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, LoadCheckpointPayloadRequest,
+    LoadedCheckpointPayload, LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef,
+    LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
+    LoopInputCursor, LoopInputPort, LoopProgressEvent, LoopProgressPort, LoopRunContext,
+    LoopRunInfoPort, RedactedCheckpointPayload, StageCheckpointPayloadRequest,
+};
 use ironclaw_turns::{
-    GetLoopCheckpointRequest, LoopCheckpointStateRef, LoopCheckpointStore,
-    PutLoopCheckpointRequest, RedactedCheckpointPayload, TurnCheckpointId,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, LoadCheckpointPayloadRequest,
-        LoadedCheckpointPayload, LoopCheckpointPort, LoopCheckpointRequest,
-        LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
-        LoopInputCursor, LoopInputPort, LoopProgressEvent, LoopProgressPort, LoopRunContext,
-        LoopRunInfoPort, StageCheckpointPayloadRequest,
-    },
+    GetLoopCheckpointRequest, LoopCheckpointStore, PutLoopCheckpointRequest, TurnCheckpointId,
 };
 
 use super::turn_error_to_host_error;
@@ -377,7 +376,12 @@ impl LoopProgressPort for HostManagedLoopProgressPort {
             LoopProgressEvent::CompactionLeakDetected {
                 task_id,
                 reason_kind,
-            } => emitter.compaction_leak_detected(task_id, reason_kind).await,
+                redacted_leak_count,
+            } => {
+                emitter
+                    .compaction_leak_detected(task_id, reason_kind, redacted_leak_count)
+                    .await
+            }
             // Goal refresh has event types reserved in the run-profile surface,
             // but no producer path in the current loop.
             LoopProgressEvent::GoalRefreshStarted { .. }

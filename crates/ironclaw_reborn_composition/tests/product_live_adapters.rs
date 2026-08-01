@@ -24,6 +24,13 @@ use ironclaw_host_runtime::{
     SKILL_INSTALL_CAPABILITY_ID, SurfaceKind,
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, CapabilityInputRef, InMemoryLoopHostMilestoneSink,
+    InstructionSafetyContext, LoopCancelReasonKind, LoopModelBudgetAccountant,
+    LoopModelPolicyGuard, LoopRequest, LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard,
+    PromptMode, ProviderToolCall, RegisterProviderToolCallRequest, RunProfileResolutionRequest,
+    RunProfileResolver, VisibleCapabilityRequest,
+};
 use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityWriteResult, DurablePersistence, EmptyUserProfileSource,
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
@@ -59,14 +66,7 @@ use ironclaw_runner::{
 use ironclaw_threads::{InMemorySessionThreadService, SessionThreadService, ThreadScope};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{
-    AgentTurnRuntimePort, LoopCheckpointStore, LoopResultRef, RunProfileResolutionRequest,
-    RunProfileResolver, TurnId, TurnRunId, TurnScope,
-    run_profile::{
-        AgentLoopHostError, CapabilityInputRef, InMemoryLoopHostMilestoneSink,
-        InstructionSafetyContext, LoopCancelReasonKind, LoopModelBudgetAccountant,
-        LoopModelPolicyGuard, LoopRequest, LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard,
-        PromptMode, ProviderToolCall, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
-    },
+    AgentTurnRuntimePort, LoopCheckpointStore, LoopResultRef, TurnId, TurnRunId, TurnScope,
 };
 
 use ironclaw_turns::test_support::{in_memory_agent_turn_runtime, in_memory_loop_checkpoint_store};
@@ -217,7 +217,7 @@ async fn capability_io_rejects_cross_run_input_and_result_refs() {
         .expect_err("cross-run input refs must fail closed");
     assert_eq!(
         input_error.kind,
-        ironclaw_turns::run_profile::AgentLoopHostErrorKind::ScopeMismatch
+        ironclaw_loop_contracts::AgentLoopHostErrorKind::ScopeMismatch
     );
 
     let result_ref = write_capability_result_for_test(
@@ -234,7 +234,7 @@ async fn capability_io_rejects_cross_run_input_and_result_refs() {
         .expect_err("cross-run result refs must fail closed");
     assert_eq!(
         result_error.kind,
-        ironclaw_turns::run_profile::AgentLoopHostErrorKind::ScopeMismatch
+        ironclaw_loop_contracts::AgentLoopHostErrorKind::ScopeMismatch
     );
 }
 
@@ -301,7 +301,7 @@ async fn capability_io_rejects_unstaged_run_scoped_refs() {
         .expect_err("unstaged same-run input refs must fail closed");
     assert_eq!(
         input_error.kind,
-        ironclaw_turns::run_profile::AgentLoopHostErrorKind::InvalidInvocation
+        ironclaw_loop_contracts::AgentLoopHostErrorKind::InvalidInvocation
     );
 
     let result_error = io
@@ -309,7 +309,7 @@ async fn capability_io_rejects_unstaged_run_scoped_refs() {
         .expect_err("unstaged same-run result refs must fail closed");
     assert_eq!(
         result_error.kind,
-        ironclaw_turns::run_profile::AgentLoopHostErrorKind::InvalidInvocation
+        ironclaw_loop_contracts::AgentLoopHostErrorKind::InvalidInvocation
     );
 }
 
@@ -327,7 +327,7 @@ async fn capability_io_enforces_staging_entry_and_byte_caps() {
         .expect_err("staging must enforce an entry cap");
     assert_eq!(
         entry_error.kind,
-        ironclaw_turns::run_profile::AgentLoopHostErrorKind::BudgetExceeded
+        ironclaw_loop_contracts::AgentLoopHostErrorKind::BudgetExceeded
     );
 
     let oversized_result = serde_json::json!("x".repeat(4 * 1024 * 1024));
@@ -342,7 +342,7 @@ async fn capability_io_enforces_staging_entry_and_byte_caps() {
     .expect_err("staging must enforce a serialized-byte cap");
     assert_eq!(
         byte_error.kind,
-        ironclaw_turns::run_profile::AgentLoopHostErrorKind::BudgetExceeded
+        ironclaw_loop_contracts::AgentLoopHostErrorKind::BudgetExceeded
     );
 }
 
@@ -358,7 +358,7 @@ async fn capability_io_rejects_oversized_staged_input_payload() {
 
     assert_eq!(
         byte_error.kind,
-        ironclaw_turns::run_profile::AgentLoopHostErrorKind::BudgetExceeded
+        ironclaw_loop_contracts::AgentLoopHostErrorKind::BudgetExceeded
     );
 }
 
@@ -1220,7 +1220,7 @@ async fn adapter_bundle_maps_authority_resolution_failure_to_host_error() {
 
     assert_eq!(
         error.kind,
-        ironclaw_turns::run_profile::AgentLoopHostErrorKind::InvalidInvocation
+        ironclaw_loop_contracts::AgentLoopHostErrorKind::InvalidInvocation
     );
     assert!(
         error
@@ -1408,6 +1408,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
     ));
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        reply_attachment_intent_port: None,
         gate_record_store: None,
         process_system: ProcessRuntimeSystem::in_memory_ephemeral().expect("process system"),
         thread_service: Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
@@ -1863,7 +1864,7 @@ impl HostInputQueue for EmptyInputQueue {
     async fn next_after(
         &self,
         _run_id: TurnRunId,
-        after: ironclaw_turns::run_profile::LoopInputCursorToken,
+        after: ironclaw_loop_contracts::LoopInputCursorToken,
         _limit: usize,
     ) -> Result<HostInputBatch, HostInputQueueError> {
         Ok(HostInputBatch {
@@ -1875,7 +1876,7 @@ impl HostInputQueue for EmptyInputQueue {
     async fn ack_consumed(
         &self,
         _run_id: TurnRunId,
-        _tokens: Vec<ironclaw_turns::run_profile::LoopInputAckToken>,
+        _tokens: Vec<ironclaw_loop_contracts::LoopInputAckToken>,
     ) -> Result<(), HostInputQueueError> {
         Ok(())
     }

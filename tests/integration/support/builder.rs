@@ -28,6 +28,10 @@ use std::time::Duration;
 use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
+use ironclaw_host_api::turn::{
+    IdempotencyKey, ReplyTargetBindingRef, SanitizedCancelReason, SourceBindingRef, TurnActor,
+    TurnGateRef, TurnRunId, TurnScope, TurnStatus,
+};
 use ironclaw_host_api::{
     http::RuntimeHttpEgressRequest,
     ids::{CapabilityId, InvocationId, UserId},
@@ -36,6 +40,9 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_llm::Role;
+use ironclaw_loop_contracts::{
+    CommunicationContextProvider, InstructionSafetyContext, LoopHostMilestone,
+};
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product::{
     ConversationBindingService, DefaultProductSurface, ProductConversationRouteKind,
@@ -45,14 +52,9 @@ use ironclaw_product::{ProductInboundAck, ProductTriggerReason};
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_threads::ThreadScope;
-use ironclaw_turns::run_profile::{
-    CommunicationContextProvider, InstructionSafetyContext, LoopHostMilestone,
-};
 use ironclaw_turns::{
-    AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, GateRef, GateResumeDisposition,
-    IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
-    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnCoordinator, TurnRunId, TurnRunState,
-    TurnScope, TurnStatus,
+    AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, GateResumeDisposition,
+    ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnRunState,
 };
 
 use super::capability_backend::{
@@ -153,12 +155,10 @@ pub struct RebornIntegrationHarnessBuilder {
     model_mode: ThreadModelMode,
     /// C-TRACECAP seam: install an in-memory `TurnEventSink` when `true`.
     turn_event_sink: bool,
-    /// Force `ToolDisclosureMode::Bridged` into the underlying group's ONE
-    /// planned runtime, bypassing `REBORN_TOOL_DISCLOSURE`/`from_env()`
+    /// Tool disclosure mode for the underlying group's ONE planned runtime.
+    /// General harnesses pin `Off`; focused tests opt into `Bridged` explicitly
     /// (test-only knob; see `RebornIntegrationGroupBuilder::tool_disclosure`).
-    /// `None` (default) resolves via `ToolDisclosureMode::from_env()`, matching
-    /// today's behavior byte-for-byte.
-    tool_disclosure: Option<ToolDisclosureMode>,
+    tool_disclosure: ToolDisclosureMode,
     /// #5647 RED-pin seam: pass-through to
     /// `RebornIntegrationGroupBuilder::with_narrowed_capability_allow_set_for_bridged_test`. `None` (default) preserves today's forced-`All` behavior.
     narrowed_bridged_allow_set: Option<Vec<CapabilityId>>,
@@ -335,6 +335,18 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Return a typed provider decode/response error `failures` times through
+    /// the real vendor-provider seam.
+    pub fn provider_response_error_model_times(
+        mut self,
+        failure: RecoverableModelFailure,
+        failures: usize,
+    ) -> Self {
+        self.model_mode =
+            ThreadModelMode::Recoverable(RecoverableModelFailureScript::new(failure, failures));
+        self
+    }
+
     /// Report output truncation `failures` times, then resume scripted
     /// playback through the real provider gateway and recovery path.
     pub fn output_truncated_model_times(mut self, failures: usize) -> Self {
@@ -427,9 +439,8 @@ impl RebornIntegrationHarnessBuilder {
     /// (enabler (b), `REBORN_TOOL_DISCLOSURE=Bridged`), so the bridged decorator
     /// (`ToolDisclosureCapabilityDecorator`) replaces the flat per-capability
     /// tool list with the bridge meta tools in the `tools` argument shipped
-    /// to the model. Only `tool_search` is ever ADVERTISED to the model;
-    /// `tool_describe`/`tool_call` are retained internally for describe-first
-    /// routing and never appear on the model-visible tool surface (see
+    /// to the model. Deferred surfaces advertise the complete
+    /// `tool_search`/`tool_describe`/`tool_call` protocol (see
     /// `tool_disclosure.rs`'s `bridged_mode_defers_wide_catalog_to_bridge_meta_tools`).
     /// Deferral is ALSO threshold-gated (`select_active_set`,
     /// `DisclosureCaps::default().max_tools = 32`): backends under the cap
@@ -440,7 +451,7 @@ impl RebornIntegrationHarnessBuilder {
     /// the `#[tokio::test]` concurrent-test race a raw env var would hit (see
     /// `ToolDisclosureMode::from_env`, `apply_hermetic_env`).
     pub fn with_tool_disclosure_bridged(mut self) -> Self {
-        self.tool_disclosure = Some(ToolDisclosureMode::Bridged);
+        self.tool_disclosure = ToolDisclosureMode::Bridged;
         self
     }
 
@@ -451,7 +462,7 @@ impl RebornIntegrationHarnessBuilder {
     /// `RebornIntegrationGroupBuilder::with_tool_disclosure_off` for why the
     /// env-resolution path alone is not control-safe.
     pub fn with_tool_disclosure_off(mut self) -> Self {
-        self.tool_disclosure = Some(ToolDisclosureMode::Off);
+        self.tool_disclosure = ToolDisclosureMode::Off;
         self
     }
 
@@ -686,13 +697,12 @@ impl RebornIntegrationHarnessBuilder {
             group_builder = group_builder.with_turn_event_sink();
         }
         match self.tool_disclosure {
-            Some(ToolDisclosureMode::Bridged) => {
+            ToolDisclosureMode::Bridged => {
                 group_builder = group_builder.with_tool_disclosure_bridged();
             }
-            Some(ToolDisclosureMode::Off) => {
+            ToolDisclosureMode::Off => {
                 group_builder = group_builder.with_tool_disclosure_off();
             }
-            None => {}
         }
         if let Some(ids) = self.narrowed_bridged_allow_set {
             group_builder = group_builder.with_narrowed_capability_allow_set_for_bridged_test(ids);
@@ -834,7 +844,9 @@ impl RebornIntegrationHarness {
             shell_mode: ShellMode::default(),
             model_mode: ThreadModelMode::Normal,
             turn_event_sink: false,
-            tool_disclosure: None,
+            // General integration tests stay hermetic across production default
+            // changes. Disclosure-specific tests opt into Bridged explicitly.
+            tool_disclosure: ToolDisclosureMode::Off,
             narrowed_bridged_allow_set: None,
             budget_accounting: false,
             communication_context_provider: None,
@@ -873,9 +885,9 @@ impl RebornIntegrationHarness {
 
     /// Number of loop milestones recorded for this harness right now (i.e.
     /// `[baseline_milestone_count..]` so far). Capture at the START of a turn
-    /// on a multi-turn harness and pass to `assert_compaction_failed_since` so
-    /// a prior turn's milestone can't satisfy the assertion — the
-    /// milestone analogue of `history_len`.
+    /// on a multi-turn harness and pass to a named compaction `*_since`
+    /// assertion so a prior turn's milestone can't satisfy it — the milestone
+    /// analogue of `history_len`.
     pub async fn milestone_len(&self) -> HarnessResult<usize> {
         Ok(self.loop_milestones().len())
     }
@@ -929,7 +941,7 @@ impl RebornIntegrationHarness {
             );
         }
         let (event_id, envelope) = self.build_user_envelope(text)?;
-        let attachment = ironclaw_attachments::InboundAttachment {
+        let attachment = ironclaw_host_api::attachment::InboundAttachment {
             id: format!("{event_id}-att-0"),
             mime_type: mime_type.to_string(),
             filename: Some(filename.to_string()),
@@ -966,14 +978,14 @@ impl RebornIntegrationHarness {
         let inbound = attachments
             .into_iter()
             .enumerate()
-            .map(
-                |(index, (filename, mime_type, bytes))| ironclaw_attachments::InboundAttachment {
+            .map(|(index, (filename, mime_type, bytes))| {
+                ironclaw_host_api::attachment::InboundAttachment {
                     id: format!("{event_id}-att-{index}"),
                     mime_type: mime_type.to_string(),
                     filename: Some(filename.to_string()),
                     bytes,
-                },
-            )
+                }
+            })
             .collect();
         let ack = self
             .workflow
@@ -1107,14 +1119,14 @@ impl RebornIntegrationHarness {
     }
 
     /// Submit a user turn and wait until it blocks on an approval gate, returning
-    /// the run id and the raised `GateRef`. The named C1 fixture: a scripted
+    /// the run id and the raised `TurnGateRef`. The named C1 fixture: a scripted
     /// destructive tool call in a `RebornIntegrationGroup::live_approvals` thread
     /// blocks here; the test then calls `approve_gate`/`deny_gate` and
     /// `wait_for_status(Completed)`.
     pub async fn submit_turn_until_blocked(
         &self,
         text: &str,
-    ) -> HarnessResult<(TurnRunId, GateRef)> {
+    ) -> HarnessResult<(TurnRunId, TurnGateRef)> {
         let run_id = self.submit_turn_async(text).await?;
         let state = self
             .wait_for_status(run_id, TurnStatus::BlockedApproval)
@@ -1129,14 +1141,14 @@ impl RebornIntegrationHarness {
     }
 
     /// Submit a user turn and wait until it blocks on an **auth** gate, returning
-    /// the run id and the raised `GateRef`. Mirror of `submit_turn_until_blocked`
+    /// the run id and the raised `TurnGateRef`. Mirror of `submit_turn_until_blocked`
     /// for the `RebornIntegrationGroup::live_auth_gate` fixture: a scripted
     /// capability whose credential account resolves to `AuthRequired` blocks here
     /// at `TurnStatus::BlockedAuth` (E-AUTHGATE seam).
     pub async fn submit_turn_until_auth_blocked(
         &self,
         text: &str,
-    ) -> HarnessResult<(TurnRunId, GateRef)> {
+    ) -> HarnessResult<(TurnRunId, TurnGateRef)> {
         let run_id = self.submit_turn_async(text).await?;
         let state = self
             .wait_for_status(run_id, TurnStatus::BlockedAuth)
@@ -1158,7 +1170,7 @@ impl RebornIntegrationHarness {
     /// payload outright.
     pub async fn submit_approval_resolution(
         &self,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
         decision: ironclaw_product::ApprovalDecision,
     ) -> HarnessResult<ProductInboundAck> {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
@@ -1178,7 +1190,7 @@ impl RebornIntegrationHarness {
     /// `deny_auth_gate`'s direct coordinator resume.
     pub async fn submit_auth_resolution(
         &self,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
         result: ironclaw_product::AuthResolutionResult,
     ) -> HarnessResult<ProductInboundAck> {
         let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
@@ -1270,7 +1282,7 @@ impl RebornIntegrationHarness {
     pub async fn assert_gate_survives_reopen(
         &self,
         run_id: TurnRunId,
-        expected_gate_ref: &GateRef,
+        expected_gate_ref: &TurnGateRef,
     ) -> HarnessResult<()> {
         let StorageReopen::LibSql { db_path } = &self._shared.storage_reopen else {
             return Err("assert_gate_survives_reopen requires StorageMode::LibSql".into());
@@ -1293,7 +1305,7 @@ impl RebornIntegrationHarness {
                 .get_run_state(&self.turn_scope, run_id)
                 .await?;
             if state.status == TurnStatus::BlockedApproval {
-                return match state.gate_ref.as_ref().map(GateRef::as_str) {
+                return match state.gate_ref.as_ref().map(TurnGateRef::as_str) {
                     Some(seen) if seen == expected_gate_ref.as_str() => Ok(()),
                     other => Err(format!(
                         "gate ref after reopen was {other:?}, expected {:?}",
@@ -1810,7 +1822,11 @@ impl RebornIntegrationHarness {
     /// stale or wrong (non-approval) gate ref fails the resume with
     /// `TurnError::InvalidTransition` instead of silently resuming whatever
     /// gate class happens to be blocked.
-    pub async fn approve_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub async fn approve_gate(
+        &self,
+        run_id: TurnRunId,
+        gate_ref: &TurnGateRef,
+    ) -> HarnessResult<()> {
         self.capability_recorder
             .approve_standalone_gate(gate_ref)
             .await?;
@@ -1832,8 +1848,8 @@ impl RebornIntegrationHarness {
     pub async fn approve_gate_with_stale_resume_ref(
         &self,
         run_id: TurnRunId,
-        real_gate_ref: &GateRef,
-        stale_gate_ref: &GateRef,
+        real_gate_ref: &TurnGateRef,
+        stale_gate_ref: &TurnGateRef,
     ) -> HarnessResult<()> {
         self.capability_recorder
             .approve_standalone_gate(real_gate_ref)
@@ -1854,7 +1870,11 @@ impl RebornIntegrationHarness {
     /// stale-ref resume: the record is already `Approved`, so re-calling
     /// `approve_gate` would hit a double-resolve `NotPending` error instead of
     /// completing the still-blocked run.
-    pub async fn resume_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub async fn resume_gate(
+        &self,
+        run_id: TurnRunId,
+        gate_ref: &TurnGateRef,
+    ) -> HarnessResult<()> {
         self.resume_run(
             run_id,
             gate_ref.clone(),
@@ -1871,7 +1891,7 @@ impl RebornIntegrationHarness {
     ///
     /// See [`approve_gate`](Self::approve_gate) for why this resumes with
     /// `ResumeTurnPrecondition::BlockedApprovalGate`.
-    pub async fn deny_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub async fn deny_gate(&self, run_id: TurnRunId, gate_ref: &TurnGateRef) -> HarnessResult<()> {
         self.capability_recorder
             .deny_standalone_gate(gate_ref)
             .await?;
@@ -1895,7 +1915,11 @@ impl RebornIntegrationHarness {
     /// (server-enforced: `resume_turn_once` requires `status == BlockedAuth`),
     /// same shape as `deny_gate`'s `BlockedApprovalGate`. A client-side
     /// `gate:auth-` prefix check adds cheap defense-in-depth on top.
-    pub async fn deny_auth_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub async fn deny_auth_gate(
+        &self,
+        run_id: TurnRunId,
+        gate_ref: &TurnGateRef,
+    ) -> HarnessResult<()> {
         if !gate_ref.as_str().starts_with("gate:auth-") {
             return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
         }
@@ -1923,7 +1947,7 @@ impl RebornIntegrationHarness {
     pub async fn resolve_auth_gate(
         &self,
         run_id: TurnRunId,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
     ) -> HarnessResult<()> {
         if !gate_ref.as_str().starts_with("gate:auth-") {
             return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
@@ -2111,7 +2135,7 @@ impl RebornIntegrationHarness {
     async fn resume_run(
         &self,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         resume_disposition: Option<GateResumeDisposition>,
         precondition: ResumeTurnPrecondition,
     ) -> HarnessResult<()> {
@@ -2133,7 +2157,7 @@ impl RebornIntegrationHarness {
         &self,
         scope: TurnScope,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         resume_disposition: Option<GateResumeDisposition>,
         precondition: ResumeTurnPrecondition,
     ) -> HarnessResult<()> {
@@ -2409,9 +2433,8 @@ pub(crate) fn apply_hermetic_env() {
             std::env::remove_var("RESPONSE_CACHE_ENABLED");
             std::env::remove_var("NEARAI_SESSION_TOKEN");
             // No integration test should inherit the ambient tool-disclosure
-            // knob: `ToolDisclosureMode::from_env()` resolution is opt-in per
-            // test via `.with_tool_disclosure_bridged()`/`.with_tool_disclosure_off()`,
-            // never ambient (see `tool_disclosure.rs`'s negative control).
+            // knob. Builders pin Off and disclosure tests opt into Bridged;
+            // scrubbing is defense in depth for the retained env fallback.
             std::env::remove_var(ironclaw_runner::runtime::REBORN_TOOL_DISCLOSURE_ENV);
         }
     });

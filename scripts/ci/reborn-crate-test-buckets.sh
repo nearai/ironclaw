@@ -38,8 +38,8 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_agent_loop: "agent-runtime",
       ironclaw_approvals: "agent-runtime",
       ironclaw_capabilities: "agent-runtime",
-      ironclaw_dispatcher: "agent-runtime",
       ironclaw_host_api: "agent-runtime",
+      ironclaw_loop_contracts: "agent-runtime",
       ironclaw_loop_host: "agent-runtime",
 
       ironclaw_runner: "reborn-core",
@@ -101,6 +101,7 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_telegram_extension: "channel-adapters",
       ironclaw_telegram_v2_adapter: "channel-adapters",
 
+      ironclaw_extension_contracts: "extension-operator",
       ironclaw_extension_host: "extension-operator",
       ironclaw_extensions: "extension-operator",
       ironclaw_operator: "extension-operator",

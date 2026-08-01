@@ -6,22 +6,23 @@
 //! submit/deferred handling behind that seam prevents adapter-specific binding
 //! code from owning the whole inbound turn pipeline.
 
-use std::sync::Arc;
 use std::time::Duration;
+use std::{collections::BTreeSet, sync::Arc};
 
 use crate::{
-    ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProductRejection, ProductSourceChannel,
+    ChannelAdapter, ChannelAttachmentRef, ChannelError, ProductAdapterId, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductSourceChannel,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_attachments::InboundAttachment;
+use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
 #[cfg(test)]
 use ironclaw_host_api::ids::UserId;
+use ironclaw_host_api::{attachment::InboundAttachment, tool_adapter::RestrictedEgress};
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
-    MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadService, ThreadMessageId,
-    ThreadScope,
+    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest,
+    ListThreadsForScopeRequest, MessageContent, MessageStatus, ReplayAcceptedInboundMessageRequest,
+    SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
@@ -49,6 +50,9 @@ use crate::reborn_services::InboundAttachmentLander;
 const BEFORE_INBOUND_POLICY_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(any(test, feature = "test-support"))]
 const BEFORE_INBOUND_POLICY_TIMEOUT: Duration = Duration::from_millis(10);
+const ATTACHMENT_CLEANUP_TIMEOUT: Duration = Duration::from_millis(250);
+const ATTACHMENT_CLEANUP_MAX_THREADS: usize = 50;
+const ATTACHMENT_CLEANUP_MAX_MESSAGES: usize = 10_000;
 
 /// Run a before-inbound policy with the workflow-owned wall-clock budget.
 ///
@@ -195,6 +199,24 @@ pub trait InboundTurnService: Send + Sync {
         self.accept_user_message_with_before_policy(envelope, before_inbound_policy)
             .await
     }
+
+    /// Accept a channel user message with the exact transient adapter and
+    /// restricted egress authority pinned by the ingress router.
+    async fn accept_user_message_with_before_policy_and_channel_transfer(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        before_inbound_policy: &dyn BeforeInboundPolicy,
+        _channel_adapter: Arc<dyn ChannelAdapter>,
+        _channel_egress: Arc<dyn RestrictedEgress>,
+    ) -> Result<InboundUserMessageDispatch, ProductSurfaceFailure> {
+        if !envelope.channel_attachment_refs().is_empty() {
+            return Err(permanent_attachment_failure(
+                "channel attachment transfer is not supported by this turn service",
+            ));
+        }
+        self.accept_user_message_with_before_policy(envelope, before_inbound_policy)
+            .await
+    }
 }
 
 /// Default implementation that composes a [`ConversationBindingService`] with a
@@ -230,6 +252,82 @@ where
     ) -> Self {
         self.inbound_attachments = Some(inbound_attachments);
         self
+    }
+
+    async fn reconcile_stale_attachment_batches(&self, thread_scope: &ThreadScope) {
+        let Some(lander) = self.inbound_attachments.as_ref() else {
+            return;
+        };
+        let reconciliation = async {
+            let page = self
+                .thread_service
+                .list_threads_for_scope(ListThreadsForScopeRequest {
+                    scope: thread_scope.clone(),
+                    limit: Some((ATTACHMENT_CLEANUP_MAX_THREADS + 1) as u32),
+                    cursor: None,
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+            if page.next_cursor.is_some() || page.threads.len() > ATTACHMENT_CLEANUP_MAX_THREADS {
+                return Ok(None);
+            }
+
+            let mut storage_keys = BTreeSet::new();
+            let mut message_count = 0usize;
+            for thread in page.threads {
+                let history = self
+                    .thread_service
+                    .list_thread_history(ThreadHistoryRequest {
+                        scope: thread_scope.clone(),
+                        thread_id: thread.thread_id,
+                    })
+                    .await
+                    .map_err(|error| error.to_string())?;
+                message_count = message_count.saturating_add(history.messages.len());
+                if message_count > ATTACHMENT_CLEANUP_MAX_MESSAGES {
+                    return Ok(None);
+                }
+                storage_keys.extend(
+                    history
+                        .messages
+                        .into_iter()
+                        .flat_map(|message| message.attachments)
+                        .filter_map(|attachment| attachment.storage_key),
+                );
+            }
+            let storage_keys = storage_keys.into_iter().collect::<Vec<_>>();
+            lander
+                .cleanup_stale(thread_scope, &storage_keys)
+                .await
+                .map(Some)
+                .map_err(|error| error.to_string())
+        };
+
+        match tokio::time::timeout(ATTACHMENT_CLEANUP_TIMEOUT, reconciliation).await {
+            Ok(Ok(Some(report))) if report.deleted_batches > 0 => {
+                tracing::debug!(
+                    scanned_batches = report.scanned_batches,
+                    deleted_batches = report.deleted_batches,
+                    "reconciled stale inbound attachment batches"
+                );
+            }
+            Ok(Ok(Some(_))) => {}
+            Ok(Ok(None)) => {
+                tracing::debug!(
+                    "skipped stale inbound attachment cleanup because the durable reference scan \
+                     exceeded its safety bound"
+                );
+            }
+            Ok(Err(reason)) => {
+                tracing::warn!(
+                    reason = %reason,
+                    "best-effort stale inbound attachment cleanup failed"
+                );
+            }
+            Err(_) => {
+                tracing::warn!("best-effort stale inbound attachment cleanup timed out");
+            }
+        }
     }
 }
 
@@ -271,8 +369,14 @@ where
         envelope: &ProductInboundEnvelope,
         before_inbound_policy: &dyn BeforeInboundPolicy,
     ) -> Result<InboundUserMessageDispatch, ProductSurfaceFailure> {
-        self.accept_with_before_policy_inner(envelope, before_inbound_policy, Vec::new())
-            .await
+        self.accept_with_before_policy_inner(
+            envelope,
+            before_inbound_policy,
+            Vec::new(),
+            None,
+            None,
+        )
+        .await
     }
 
     async fn accept_user_message_with_before_policy_and_attachments(
@@ -281,8 +385,31 @@ where
         before_inbound_policy: &dyn BeforeInboundPolicy,
         attachments: Vec<InboundAttachment>,
     ) -> Result<InboundUserMessageDispatch, ProductSurfaceFailure> {
-        self.accept_with_before_policy_inner(envelope, before_inbound_policy, attachments)
-            .await
+        self.accept_with_before_policy_inner(
+            envelope,
+            before_inbound_policy,
+            attachments,
+            None,
+            None,
+        )
+        .await
+    }
+
+    async fn accept_user_message_with_before_policy_and_channel_transfer(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        before_inbound_policy: &dyn BeforeInboundPolicy,
+        channel_adapter: Arc<dyn ChannelAdapter>,
+        channel_egress: Arc<dyn RestrictedEgress>,
+    ) -> Result<InboundUserMessageDispatch, ProductSurfaceFailure> {
+        self.accept_with_before_policy_inner(
+            envelope,
+            before_inbound_policy,
+            Vec::new(),
+            Some(channel_adapter),
+            Some(channel_egress),
+        )
+        .await
     }
 }
 
@@ -297,6 +424,8 @@ where
         envelope: &ProductInboundEnvelope,
         before_inbound_policy: &dyn BeforeInboundPolicy,
         attachments: Vec<InboundAttachment>,
+        pinned_channel_adapter: Option<Arc<dyn ChannelAdapter>>,
+        pinned_channel_egress: Option<Arc<dyn RestrictedEgress>>,
     ) -> Result<InboundUserMessageDispatch, ProductSurfaceFailure> {
         let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
             return Err(ProductSurfaceFailure::UnsupportedActionKind {
@@ -310,6 +439,16 @@ where
             .await?
         {
             return Ok(InboundUserMessageDispatch::Accepted(outcome));
+        }
+
+        // Bound the original untrusted channel descriptor set before it
+        // reaches a policy backend. Rewritten descriptors are reconciled and
+        // revalidated later, immediately before provider fetch.
+        if !envelope.channel_attachment_refs().is_empty() {
+            validate_attachment_sources(
+                payload.attachments.as_slice(),
+                envelope.channel_attachment_refs(),
+            )?;
         }
 
         let policy_outcome = check_before_inbound_policy(
@@ -340,9 +479,113 @@ where
             }
         };
 
+        let attachments = self
+            .resolve_inbound_attachments(
+                envelope_for_turn,
+                attachments,
+                pinned_channel_adapter.as_deref(),
+                pinned_channel_egress.as_deref(),
+            )
+            .await?;
+
         self.accept_prepared_user_message(prepared_for_turn, envelope_for_turn, attachments)
             .await
             .map(InboundUserMessageDispatch::Accepted)
+    }
+
+    async fn resolve_inbound_attachments(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        inline_attachments: Vec<InboundAttachment>,
+        pinned_channel_adapter: Option<&dyn ChannelAdapter>,
+        pinned_channel_egress: Option<&dyn RestrictedEgress>,
+    ) -> Result<Vec<InboundAttachment>, ProductSurfaceFailure> {
+        let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
+            return Err(ProductSurfaceFailure::UnsupportedActionKind {
+                kind: "non_user_message".into(),
+            });
+        };
+        let sources = envelope.channel_attachment_refs();
+        if !inline_attachments.is_empty() {
+            if !sources.is_empty() {
+                return Err(permanent_attachment_failure(
+                    "mixed inline and channel attachment sources are not allowed",
+                ));
+            }
+            return Ok(inline_attachments);
+        }
+        if payload.attachments.is_empty() {
+            return Ok(Vec::new());
+        }
+        if sources.is_empty() {
+            return Err(permanent_attachment_failure(
+                "attachment descriptors have no channel transfer references",
+            ));
+        }
+        validate_attachment_sources(payload.attachments.as_slice(), sources)?;
+
+        let adapter = pinned_channel_adapter.ok_or_else(|| {
+            permanent_attachment_failure("channel attachment transfer is not configured")
+        })?;
+        let egress = pinned_channel_egress.ok_or_else(|| {
+            permanent_attachment_failure("channel attachment transfer is not configured")
+        })?;
+        let mut fetched = Vec::with_capacity(sources.len());
+        let mut total_bytes = 0usize;
+        for source in sources {
+            let mut attachment = adapter
+                .fetch_attachment(source, egress)
+                .await
+                .map_err(channel_attachment_error)?;
+            if attachment.id != source.descriptor.external_file_id {
+                return Err(permanent_attachment_failure(
+                    "fetched attachment id does not match its descriptor",
+                ));
+            }
+            // Compare canonical forms on both sides. The descriptor keeps the
+            // vendor's raw media type (which legitimately carries parameters
+            // such as `; charset=utf-8`), so normalizing only the fetched side
+            // would reject every attachment whose declared type is not already
+            // canonical instead of catching a genuine provider mismatch.
+            let mime_type = ironclaw_common::normalize_mime_type(&attachment.mime_type);
+            let declared_mime_type =
+                ironclaw_common::normalize_mime_type(&source.descriptor.mime_type);
+            if mime_type != declared_mime_type || !ironclaw_common::is_supported_mime(&mime_type) {
+                return Err(permanent_attachment_failure(
+                    "fetched attachment MIME type does not match its descriptor",
+                ));
+            }
+            attachment.mime_type = mime_type;
+            // The descriptor's filename wins when the vendor supplied one;
+            // otherwise keep whatever the adapter recovered. Some vendor
+            // payload kinds (inline photos, voice notes, stickers) carry no
+            // filename at all, and the adapter derives one from the provider
+            // download path — overwriting unconditionally discarded it.
+            if let Some(descriptor_filename) = source.descriptor.filename.clone() {
+                attachment.filename = Some(descriptor_filename);
+            }
+            if attachment.bytes.len() > DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes {
+                return Err(permanent_attachment_failure(
+                    "attachment exceeds the per-file byte limit",
+                ));
+            }
+            if let Some(declared_size) = source.descriptor.size_bytes
+                && declared_size != attachment.bytes.len() as u64
+            {
+                return Err(ProductSurfaceFailure::InboundAttachmentFailed {
+                    reason: "fetched attachment size does not match its descriptor".into(),
+                    retryable: true,
+                });
+            }
+            total_bytes = total_bytes.saturating_add(attachment.bytes.len());
+            if total_bytes > DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes {
+                return Err(permanent_attachment_failure(
+                    "attachments exceed the total byte limit",
+                ));
+            }
+            fetched.push(attachment);
+        }
+        Ok(fetched)
     }
 
     async fn prepare_user_message(
@@ -449,12 +692,12 @@ where
                 reason: format!("failed to ensure thread: {e}"),
             })?;
 
-        // Inline attachment bytes (e.g. images on the OpenAI-compatible
-        // surface) are landed into project storage through the same authority
+        // Inbound attachment bytes (inline or fetched after channel policy)
+        // are landed into project storage through the same authority
         // the agent's file tools resolve through, then carried on the message as
         // refs — never as raw bytes through the bytes-free product envelope.
-        let content = if attachments.is_empty() {
-            MessageContent::text(payload.text.clone())
+        let (content, landed_refs) = if attachments.is_empty() {
+            (MessageContent::text(payload.text.clone()), None)
         } else {
             let lander = self.inbound_attachments.as_ref().ok_or_else(|| {
                 ProductSurfaceFailure::TurnSubmissionRejected {
@@ -471,11 +714,14 @@ where
                 .map_err(|e| ProductSurfaceFailure::Transient {
                     reason: format!("failed to land inbound attachments: {e}"),
                 })?;
-            MessageContent::with_attachments(payload.text.clone(), refs)
+            (
+                MessageContent::with_attachments(payload.text.clone(), refs.clone()),
+                Some(refs),
+            )
         };
 
         let reply_target_binding_id = prepared.source_binding_id.clone();
-        let accepted = self
+        let accepted = match self
             .thread_service
             .accept_inbound_message(AcceptInboundMessageRequest {
                 scope: prepared.thread_scope.clone(),
@@ -487,25 +733,129 @@ where
                 content,
             })
             .await
-            .map_err(|e| ProductSurfaceFailure::Transient {
-                reason: format!("failed to accept inbound message: {e}"),
-            })?;
+        {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                let acceptance_reason = format!("failed to accept inbound message: {error}");
+                if let Some(refs) = landed_refs {
+                    let lander = self.inbound_attachments.as_ref().ok_or_else(|| {
+                        ProductSurfaceFailure::Transient {
+                            reason: format!("{acceptance_reason}; attachment rollback unavailable"),
+                        }
+                    })?;
+                    if let Err(rollback_error) =
+                        lander.rollback(&prepared.thread_scope, &refs).await
+                    {
+                        return Err(ProductSurfaceFailure::Transient {
+                            reason: format!(
+                                "{acceptance_reason}; failed to roll back inbound attachments: \
+                                 {rollback_error}"
+                            ),
+                        });
+                    }
+                }
+                return Err(ProductSurfaceFailure::Transient {
+                    reason: acceptance_reason,
+                });
+            }
+        };
 
-        ProductInboundTurnHandoff::NeedsSubmission(Box::new(AcceptedProductInboundTurn {
-            binding: prepared.binding,
-            thread_scope: prepared.thread_scope,
-            message_id: accepted.message_id,
-            source_binding_id: prepared.source_binding_id,
-            reply_target_binding_id,
-            idempotency_key_raw: prepared.submit_idempotency_key,
-            received_at: envelope.received_at(),
-            adapter_id: prepared.adapter_id,
-            source_channel: prepared.source_channel,
-            surface_type: prepared.surface_type,
-            requested_model: payload.requested_model.clone(),
-        }))
-        .submit_or_replay(&self.thread_service, &self.turn_coordinator)
-        .await
+        let cleanup_scope = prepared.thread_scope.clone();
+        let cleanup_needed = landed_refs.is_some();
+        let outcome =
+            ProductInboundTurnHandoff::NeedsSubmission(Box::new(AcceptedProductInboundTurn {
+                binding: prepared.binding,
+                thread_scope: prepared.thread_scope,
+                message_id: accepted.message_id,
+                source_binding_id: prepared.source_binding_id,
+                reply_target_binding_id,
+                idempotency_key_raw: prepared.submit_idempotency_key,
+                received_at: envelope.received_at(),
+                adapter_id: prepared.adapter_id,
+                source_channel: prepared.source_channel,
+                surface_type: prepared.surface_type,
+                requested_model: payload.requested_model.clone(),
+            }))
+            .submit_or_replay(&self.thread_service, &self.turn_coordinator)
+            .await?;
+        if cleanup_needed {
+            self.reconcile_stale_attachment_batches(&cleanup_scope)
+                .await;
+        }
+        Ok(outcome)
+    }
+}
+
+fn validate_attachment_sources(
+    descriptors: &[crate::ProductAttachmentDescriptor],
+    sources: &[ChannelAttachmentRef],
+) -> Result<(), ProductSurfaceFailure> {
+    if descriptors.len() != sources.len() {
+        return Err(permanent_attachment_failure(
+            "channel attachment references do not match message descriptors",
+        ));
+    }
+    if sources.len() > DEFAULT_ATTACHMENT_BUDGETS.max_count {
+        return Err(permanent_attachment_failure(
+            "attachments exceed the count limit",
+        ));
+    }
+    let mut declared_total = 0u64;
+    for (descriptor, source) in descriptors.iter().zip(sources) {
+        if descriptor != &source.descriptor {
+            return Err(permanent_attachment_failure(
+                "channel attachment references do not match message descriptors",
+            ));
+        }
+        if !ironclaw_common::is_supported_mime(&descriptor.mime_type) {
+            return Err(permanent_attachment_failure(
+                "attachment MIME type is not supported",
+            ));
+        }
+        if let Some(size) = descriptor.size_bytes {
+            if size > DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64 {
+                return Err(permanent_attachment_failure(
+                    "attachment exceeds the per-file byte limit",
+                ));
+            }
+            declared_total = declared_total.saturating_add(size);
+            if declared_total > DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes as u64 {
+                return Err(permanent_attachment_failure(
+                    "attachments exceed the total byte limit",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn channel_attachment_error(error: ChannelError) -> ProductSurfaceFailure {
+    match error {
+        ChannelError::AttachmentTransfer { retryable, .. } => {
+            ProductSurfaceFailure::InboundAttachmentFailed {
+                reason: "channel attachment transfer failed".into(),
+                retryable,
+            }
+        }
+        ChannelError::Configuration { .. } => ProductSurfaceFailure::InboundAttachmentFailed {
+            reason: "channel attachment transfer failed".into(),
+            retryable: true,
+        },
+        ChannelError::Unsupported => permanent_attachment_failure(
+            "channel adapter does not support inbound attachment transfer",
+        ),
+        ChannelError::Parse { .. }
+        | ChannelError::Render { .. }
+        | ChannelError::VendorWiring { .. } => {
+            permanent_attachment_failure("channel attachment transfer failed")
+        }
+    }
+}
+
+fn permanent_attachment_failure(reason: impl Into<String>) -> ProductSurfaceFailure {
+    ProductSurfaceFailure::InboundAttachmentFailed {
+        reason: reason.into(),
+        retryable: false,
     }
 }
 
@@ -965,918 +1315,4 @@ fn segment(name: &str, value: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{future::pending, sync::Mutex};
-
-    use crate::{
-        AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ProductAdapterId,
-        ProductTriggerReason, UserMessagePayload,
-    };
-    use async_trait::async_trait;
-    use chrono::TimeZone;
-    use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
-    use ironclaw_threads::{
-        AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-        AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
-        AppendToolResultReferenceRequest, ContextMessages, ContextWindow,
-        CreateSummaryArtifactRequest, EnsureThreadRequest, ListThreadsForScopeRequest,
-        ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
-        MessageContent, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-        SessionThreadError, SessionThreadRecord, SummaryArtifact, ThreadHistory,
-        ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-        UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
-    };
-    use ironclaw_turns::{
-        CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest,
-        ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion,
-        SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError, TurnId, TurnOriginKind,
-        TurnRunId, TurnRunState, TurnScope, TurnStatus, TurnSurfaceType, events::EventCursor,
-    };
-
-    use crate::action::SourceBindingKey;
-
-    use super::*;
-
-    // --- Minimal stubs for submit path tests ---
-
-    #[derive(Default)]
-    struct CapturingTurnCoordinator {
-        submissions: Mutex<Vec<SubmitTurnRequest>>,
-    }
-
-    impl CapturingTurnCoordinator {
-        fn submissions(&self) -> Vec<SubmitTurnRequest> {
-            self.submissions.lock().unwrap().clone()
-        }
-    }
-
-    #[async_trait]
-    impl TurnCoordinator for CapturingTurnCoordinator {
-        async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
-            Ok(TurnRunId::new())
-        }
-
-        async fn submit_turn(
-            &self,
-            request: SubmitTurnRequest,
-        ) -> Result<SubmitTurnResponse, TurnError> {
-            let run_id = TurnRunId::new();
-            let message_ref = request.accepted_message_ref.clone();
-            let reply_ref = request.reply_target_binding_ref.clone();
-            self.submissions.lock().unwrap().push(request);
-            Ok(SubmitTurnResponse::Accepted {
-                turn_id: TurnId::new(),
-                run_id,
-                status: TurnStatus::Completed,
-                resolved_run_profile_id: RunProfileId::default_profile(),
-                resolved_run_profile_version: RunProfileVersion::new(1),
-                event_cursor: EventCursor(0),
-                accepted_message_ref: message_ref,
-                reply_target_binding_ref: reply_ref,
-            })
-        }
-
-        async fn resume_turn(
-            &self,
-            _request: ResumeTurnRequest,
-        ) -> Result<ResumeTurnResponse, TurnError> {
-            unimplemented!("not used in submit path tests")
-        }
-
-        async fn retry_turn(
-            &self,
-            _request: RetryTurnRequest,
-        ) -> Result<RetryTurnResponse, TurnError> {
-            unimplemented!("not used in submit path tests")
-        }
-
-        async fn cancel_run(
-            &self,
-            _request: CancelRunRequest,
-        ) -> Result<CancelRunResponse, TurnError> {
-            unimplemented!("not used in submit path tests")
-        }
-
-        async fn get_run_state(
-            &self,
-            _request: GetRunStateRequest,
-        ) -> Result<TurnRunState, TurnError> {
-            unimplemented!("not used in submit path tests")
-        }
-    }
-
-    struct StubSessionThreadService;
-
-    #[async_trait]
-    impl ironclaw_threads::SessionThreadService for StubSessionThreadService {
-        async fn ensure_thread(
-            &self,
-            _request: EnsureThreadRequest,
-        ) -> Result<SessionThreadRecord, SessionThreadError> {
-            unimplemented!("not used in submit path tests")
-        }
-
-        async fn accept_inbound_message(
-            &self,
-            _request: AcceptInboundMessageRequest,
-        ) -> Result<AcceptedInboundMessage, SessionThreadError> {
-            unimplemented!("not used in submit path tests")
-        }
-
-        async fn replay_accepted_inbound_message(
-            &self,
-            _request: ReplayAcceptedInboundMessageRequest,
-        ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
-            Ok(None)
-        }
-
-        async fn mark_message_submitted(
-            &self,
-            _scope: &ThreadScope,
-            _thread_id: &ironclaw_host_api::ids::ThreadId,
-            _message_id: ThreadMessageId,
-            _turn_id: String,
-            _turn_run_id: String,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            Ok(stub_message_record(_message_id))
-        }
-
-        async fn mark_message_rejected_busy(
-            &self,
-            _scope: &ThreadScope,
-            _thread_id: &ironclaw_host_api::ids::ThreadId,
-            _message_id: ThreadMessageId,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("not used in submit path tests")
-        }
-
-        async fn append_assistant_draft(
-            &self,
-            _request: AppendAssistantDraftRequest,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("not used in submit path tests")
-        }
-
-        async fn append_tool_result_reference(
-            &self,
-            _request: AppendToolResultReferenceRequest,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("not used in submit path tests")
-        }
-
-        async fn append_capability_display_preview(
-            &self,
-            _request: AppendCapabilityDisplayPreviewRequest,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("not used in submit path tests")
-        }
-
-        async fn update_tool_result_reference(
-            &self,
-            _request: UpdateToolResultReferenceRequest,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("not used in submit path tests")
-        }
-
-        async fn update_assistant_draft(
-            &self,
-            _request: UpdateAssistantDraftRequest,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("not used in submit path tests")
-        }
-
-        async fn finalize_assistant_message(
-            &self,
-            _scope: &ThreadScope,
-            _thread_id: &ironclaw_host_api::ids::ThreadId,
-            _message_id: ThreadMessageId,
-            _content: MessageContent,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("not used in submit path tests")
-        }
-
-        async fn redact_message(
-            &self,
-            _request: RedactMessageRequest,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("not used in submit path tests")
-        }
-
-        async fn load_context_window(
-            &self,
-            _request: LoadContextWindowRequest,
-        ) -> Result<ContextWindow, SessionThreadError> {
-            unimplemented!("not used in submit path tests")
-        }
-
-        async fn load_context_messages(
-            &self,
-            _request: LoadContextMessagesRequest,
-        ) -> Result<ContextMessages, SessionThreadError> {
-            unimplemented!("not used in submit path tests")
-        }
-
-        async fn list_thread_history(
-            &self,
-            _request: ThreadHistoryRequest,
-        ) -> Result<ThreadHistory, SessionThreadError> {
-            unimplemented!("not used in submit path tests")
-        }
-
-        async fn create_summary_artifact(
-            &self,
-            _request: CreateSummaryArtifactRequest,
-        ) -> Result<SummaryArtifact, SessionThreadError> {
-            unimplemented!("not used in submit path tests")
-        }
-
-        async fn list_threads_for_scope(
-            &self,
-            _request: ListThreadsForScopeRequest,
-        ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
-            unimplemented!("not used in submit path tests")
-        }
-    }
-
-    fn stub_message_record(message_id: ThreadMessageId) -> ThreadMessageRecord {
-        ThreadMessageRecord {
-            message_id,
-            thread_id: thread_id(),
-            sequence: 1,
-            kind: ironclaw_threads::MessageKind::User,
-            status: ironclaw_threads::MessageStatus::Submitted,
-            created_at: None,
-            updated_at: None,
-            actor_id: None,
-            source_binding_id: None,
-            reply_target_binding_id: None,
-            turn_id: None,
-            turn_run_id: None,
-            tool_result_ref: None,
-            tool_result_provider_call: None,
-            content: None,
-            attachments: Vec::new(),
-            redaction_ref: None,
-        }
-    }
-
-    /// The legacy `from_replay` path hard-codes `TurnSurfaceType::Direct` and injects the
-    /// adapter id. This test drives the handoff through `submit_or_replay` and asserts
-    /// that the submitted `SubmitTurnRequest.product_context` carries `Direct` surface and
-    /// the adapter from the replay call.
-    #[tokio::test]
-    async fn replay_submit_carries_direct_surface_type_and_adapter_id() {
-        let adapter_id = ProductAdapterId::new("telegram").unwrap();
-        let message_id = ThreadMessageId::new();
-        let handoff = ProductInboundTurnHandoff::from_replay(
-            replay(
-                message_id,
-                MessageStatus::DeferredBusy,
-                Some("src:replay"),
-                Some("reply:replay"),
-                None,
-            ),
-            "turn-key-replay".to_string(),
-            received_at(),
-            adapter_id.clone(),
-        )
-        .expect("replay handoff");
-
-        let coordinator = CapturingTurnCoordinator::default();
-        let thread_service = StubSessionThreadService;
-
-        handoff
-            .submit_or_replay(&thread_service, &coordinator)
-            .await
-            .expect("submit_or_replay succeeds");
-
-        let submissions = coordinator.submissions();
-        assert_eq!(submissions.len(), 1, "one turn must be submitted");
-        let ctx = submissions[0]
-            .product_context
-            .as_ref()
-            .expect("product_context must be set");
-        assert_eq!(
-            ctx.surface_type,
-            Some(TurnSurfaceType::Direct),
-            "replay path must carry Direct surface type"
-        );
-        assert_eq!(
-            ctx.adapter.as_ref().map(|a| a.as_str()),
-            Some(adapter_id.as_str()),
-            "replay path must carry the adapter id"
-        );
-        assert_eq!(
-            ctx.origin,
-            TurnOriginKind::Inbound,
-            "replay path must record Inbound origin (Untrusted classification)"
-        );
-    }
-
-    struct PendingBeforeInboundPolicy;
-
-    #[async_trait]
-    impl BeforeInboundPolicy for PendingBeforeInboundPolicy {
-        async fn check_user_message(
-            &self,
-            _request: BeforeInboundPolicyRequest,
-        ) -> Result<BeforeInboundPolicyOutcome, ProductSurfaceFailure> {
-            pending().await
-        }
-    }
-
-    #[tokio::test]
-    async fn check_before_inbound_policy_times_out_as_retryable_failure() {
-        let err = check_before_inbound_policy(&PendingBeforeInboundPolicy, policy_request())
-            .await
-            .expect_err("pending policy should time out");
-
-        assert!(matches!(
-            err,
-            ProductSurfaceFailure::BeforeInboundPolicyFailed {
-                permanent: false,
-                ..
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn noop_before_inbound_policy_allows_user_messages() {
-        let outcome = NoopBeforeInboundPolicy
-            .check_user_message(policy_request())
-            .await
-            .expect("noop policy should not fail");
-
-        assert_eq!(outcome, BeforeInboundPolicyOutcome::Allow);
-    }
-
-    #[test]
-    fn submitted_replay_becomes_already_submitted_handoff() {
-        let submitted_run_id = TurnRunId::new();
-        let message_id = ThreadMessageId::new();
-        let handoff = ProductInboundTurnHandoff::from_replay(
-            replay(
-                message_id,
-                MessageStatus::Submitted,
-                Some("src:alpha"),
-                Some("reply:alpha"),
-                Some(submitted_run_id.to_string()),
-            ),
-            "turn-key".to_string(),
-            received_at(),
-            ProductAdapterId::new("test_adapter").unwrap(),
-        )
-        .expect("submitted replay handoff");
-
-        let ProductInboundTurnHandoff::AlreadySubmitted {
-            accepted_message_ref: actual_message_ref,
-            submitted_run_id: actual_run_id,
-            binding,
-        } = handoff
-        else {
-            panic!("expected submitted replay to short-circuit turn submission")
-        };
-
-        assert_eq!(actual_run_id, submitted_run_id);
-        assert_eq!(
-            actual_message_ref,
-            accepted_message_ref(message_id).unwrap()
-        );
-        assert_eq!(binding.thread_id, thread_id());
-    }
-
-    #[test]
-    fn rejected_busy_replay_becomes_already_rejected_handoff() {
-        let message_id = ThreadMessageId::new();
-        let handoff = ProductInboundTurnHandoff::from_replay(
-            replay(
-                message_id,
-                MessageStatus::RejectedBusy,
-                Some("src:alpha"),
-                Some("reply:alpha"),
-                None,
-            ),
-            "turn-key".to_string(),
-            received_at(),
-            ProductAdapterId::new("test_adapter").unwrap(),
-        )
-        .expect("rejected busy replay handoff");
-
-        let ProductInboundTurnHandoff::AlreadyRejected {
-            accepted_message_ref: actual_message_ref,
-            active_run_id,
-            ..
-        } = handoff
-        else {
-            panic!("expected rejected busy replay to be terminal, not resubmitted")
-        };
-
-        assert_eq!(
-            actual_message_ref,
-            accepted_message_ref(message_id).unwrap()
-        );
-        assert!(active_run_id.is_none());
-    }
-
-    #[test]
-    fn legacy_replay_without_actor_id_uses_owner_as_actor() {
-        let message_id = ThreadMessageId::new();
-        let mut replay = replay(
-            message_id,
-            MessageStatus::DeferredBusy,
-            Some("src:alpha"),
-            Some("reply:alpha"),
-            None,
-        );
-        replay.actor_id = None;
-
-        let handoff = ProductInboundTurnHandoff::from_replay(
-            replay,
-            "turn-key".to_string(),
-            received_at(),
-            ProductAdapterId::new("test_adapter").unwrap(),
-        )
-        .expect("legacy replay handoff");
-
-        let ProductInboundTurnHandoff::NeedsSubmission(submission) = handoff else {
-            panic!("expected legacy replay to require a new turn submission")
-        };
-
-        assert_eq!(submission.binding.actor_user_id, user_id());
-        assert_eq!(submission.binding.subject_user_id, Some(user_id()));
-        assert_eq!(submission.message_id, message_id);
-    }
-
-    #[test]
-    fn prepared_replay_uses_fresh_binding_scope_over_persisted_scope() {
-        let message_id = ThreadMessageId::new();
-        let mut replay = replay(
-            message_id,
-            MessageStatus::DeferredBusy,
-            Some("src:alpha"),
-            Some("reply:alpha"),
-            None,
-        );
-        replay.scope.owner_user_id = None;
-        let subject_user_id = UserId::new("user:team-subject").unwrap();
-        let prepared = PreparedUserMessage {
-            binding: ResolvedBinding {
-                tenant_id: tenant_id(),
-                actor_user_id: user_id(),
-                subject_user_id: Some(subject_user_id.clone()),
-                thread_id: thread_id(),
-                agent_id: Some(AgentId::new("agent:alpha").unwrap()),
-                project_id: None,
-            },
-            thread_scope: ThreadScope {
-                tenant_id: tenant_id(),
-                agent_id: AgentId::new("agent:alpha").unwrap(),
-                project_id: None,
-                owner_user_id: Some(subject_user_id.clone()),
-                mission_id: None,
-            },
-            source_binding_id: "src:alpha".to_string(),
-            submit_idempotency_key: "turn-key".to_string(),
-            adapter_id: ProductAdapterId::new("test_adapter").unwrap(),
-            source_channel: ProductSourceChannel::new("test_adapter").unwrap(),
-            surface_type: TurnSurfaceType::Direct,
-        };
-
-        let handoff = ProductInboundTurnHandoff::from_replay_with_prepared(
-            replay,
-            "turn-key".to_string(),
-            received_at(),
-            &prepared,
-        )
-        .expect("prepared replay handoff");
-
-        let ProductInboundTurnHandoff::NeedsSubmission(submission) = handoff else {
-            panic!("expected prepared replay to require a new turn submission")
-        };
-
-        assert_eq!(
-            submission.binding.subject_user_id,
-            Some(subject_user_id.clone())
-        );
-        assert_eq!(submission.thread_scope.owner_user_id, Some(subject_user_id));
-        assert_eq!(submission.message_id, message_id);
-    }
-
-    /// A BotMention shared route must produce `TurnSurfaceType::Channel` in the
-    /// submitted `SubmitTurnRequest.product_context`. This exercises the
-    /// `ProductConversationRouteKind::Shared => TurnSurfaceType::Channel` branch
-    /// in `prepare_user_message` through the replay-with-prepared handoff path,
-    /// which is the same submission seam the full inbound-turn pipeline uses.
-    #[tokio::test]
-    async fn shared_user_message_records_channel_surface_type() {
-        let message_id = ThreadMessageId::new();
-        let prepared = PreparedUserMessage {
-            binding: ResolvedBinding {
-                tenant_id: tenant_id(),
-                actor_user_id: user_id(),
-                subject_user_id: Some(user_id()),
-                thread_id: thread_id(),
-                agent_id: Some(AgentId::new("agent:alpha").unwrap()),
-                project_id: None,
-            },
-            thread_scope: ThreadScope {
-                tenant_id: tenant_id(),
-                agent_id: AgentId::new("agent:alpha").unwrap(),
-                project_id: None,
-                owner_user_id: Some(user_id()),
-                mission_id: None,
-            },
-            source_binding_id: "src:shared".to_string(),
-            submit_idempotency_key: "turn-key-shared".to_string(),
-            adapter_id: ProductAdapterId::new("slack").unwrap(),
-            source_channel: ProductSourceChannel::new("slack").unwrap(),
-            // BotMention shared route maps to Channel surface type.
-            surface_type: TurnSurfaceType::Channel,
-        };
-
-        let handoff = ProductInboundTurnHandoff::from_replay_with_prepared(
-            replay(
-                message_id,
-                MessageStatus::DeferredBusy,
-                Some("src:shared"),
-                Some("reply:shared"),
-                None,
-            ),
-            "turn-key-shared".to_string(),
-            received_at(),
-            &prepared,
-        )
-        .expect("shared route replay handoff");
-
-        let coordinator = CapturingTurnCoordinator::default();
-        let thread_service = StubSessionThreadService;
-
-        handoff
-            .submit_or_replay(&thread_service, &coordinator)
-            .await
-            .expect("submit_or_replay succeeds");
-
-        let submissions = coordinator.submissions();
-        assert_eq!(submissions.len(), 1, "one turn must be submitted");
-        let ctx = submissions[0]
-            .product_context
-            .as_ref()
-            .expect("product_context must be set");
-        assert_eq!(
-            ctx.surface_type,
-            Some(TurnSurfaceType::Channel),
-            "BotMention shared route must carry Channel surface type"
-        );
-        assert_eq!(
-            ctx.source_channel
-                .as_ref()
-                .map(ironclaw_turns::RunOriginAdapter::as_str),
-            Some("slack"),
-            "shared route must preserve source channel"
-        );
-    }
-
-    fn policy_request() -> BeforeInboundPolicyRequest {
-        BeforeInboundPolicyRequest {
-            adapter_id: ProductAdapterId::new("test_adapter").expect("adapter"),
-            installation_id: AdapterInstallationId::new("install_alpha").expect("installation"),
-            external_actor_ref: ExternalActorRef::new("test", "user1", Option::<String>::None)
-                .expect("actor"),
-            external_conversation_ref: ExternalConversationRef::new(None, "conv1", None, None)
-                .expect("conversation"),
-            source_binding_key: SourceBindingKey::new("space:0:;conversation:5:conv1;topic:0:;")
-                .expect("source binding key"),
-            rate_limit_key: SourceBindingKey::new("space:0:;conversation:5:conv1;topic:0:;")
-                .expect("rate limit key"),
-            user_message: UserMessagePayload::new(
-                "hello",
-                vec![],
-                ProductTriggerReason::DirectChat,
-            )
-            .expect("message"),
-        }
-    }
-
-    fn replay(
-        message_id: ThreadMessageId,
-        status: MessageStatus,
-        source_binding_id: Option<&str>,
-        reply_target_binding_id: Option<&str>,
-        turn_run_id: Option<String>,
-    ) -> AcceptedInboundMessageReplay {
-        AcceptedInboundMessageReplay {
-            scope: ThreadScope {
-                tenant_id: tenant_id(),
-                agent_id: AgentId::new("agent:alpha").unwrap(),
-                project_id: None,
-                owner_user_id: Some(user_id()),
-                mission_id: None,
-            },
-            thread_id: thread_id(),
-            message_id,
-            sequence: 1,
-            status,
-            actor_id: Some(user_id().as_str().to_string()),
-            source_binding_id: source_binding_id.map(str::to_string),
-            reply_target_binding_id: reply_target_binding_id.map(str::to_string),
-            turn_run_id,
-        }
-    }
-
-    fn received_at() -> DateTime<Utc> {
-        Utc.timestamp_opt(0, 0).single().unwrap()
-    }
-
-    fn tenant_id() -> TenantId {
-        TenantId::new("tenant:alpha").unwrap()
-    }
-
-    fn user_id() -> UserId {
-        UserId::new("user:alpha").unwrap()
-    }
-
-    fn thread_id() -> ThreadId {
-        ThreadId::new("thread:alpha").unwrap()
-    }
-
-    // --- Inline-attachment landing (vision, #4644) ---
-
-    use crate::{
-        AuthRequirement, ExternalEventId, ParsedProductInbound, ProductInboundEnvelope,
-        ProductInboundPayload, ProtocolAuthEvidence, TrustedInboundContext,
-    };
-    use ironclaw_threads::{AttachmentKind, AttachmentRef, InMemorySessionThreadService};
-
-    use crate::binding::ResolveBindingRequest;
-    use ironclaw_host_api::product_surface::ProductSurfaceError;
-
-    struct LandingBindingStub;
-
-    #[async_trait]
-    impl ConversationBindingService for LandingBindingStub {
-        async fn resolve_binding(
-            &self,
-            _request: ResolveBindingRequest,
-        ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
-            Ok(ResolvedBinding {
-                tenant_id: tenant_id(),
-                actor_user_id: user_id(),
-                subject_user_id: Some(user_id()),
-                thread_id: thread_id(),
-                agent_id: Some(AgentId::new("agent:alpha").unwrap()),
-                project_id: None,
-            })
-        }
-
-        async fn lookup_binding(
-            &self,
-            request: ResolveBindingRequest,
-        ) -> Result<ResolvedBinding, ProductSurfaceFailure> {
-            self.resolve_binding(request).await
-        }
-    }
-
-    #[derive(Default)]
-    struct CapturingLander {
-        landed: Mutex<Vec<InboundAttachment>>,
-    }
-
-    #[async_trait]
-    impl InboundAttachmentLander for CapturingLander {
-        async fn land(
-            &self,
-            _thread_scope: &ThreadScope,
-            message_id: &str,
-            attachments: Vec<InboundAttachment>,
-        ) -> Result<Vec<AttachmentRef>, ProductSurfaceError> {
-            let refs = attachments
-                .iter()
-                .enumerate()
-                .map(|(index, attachment)| AttachmentRef {
-                    id: attachment.id.clone(),
-                    kind: AttachmentKind::Image,
-                    mime_type: attachment.mime_type.clone(),
-                    filename: attachment.filename.clone(),
-                    size_bytes: Some(attachment.bytes.len() as u64),
-                    storage_key: Some(format!(
-                        "/workspace/attachments/test/{message_id}-{index}-img"
-                    )),
-                    extracted_text: None,
-                })
-                .collect();
-            self.landed.lock().unwrap().extend(attachments);
-            Ok(refs)
-        }
-    }
-
-    fn user_message_envelope() -> ProductInboundEnvelope {
-        let installation_id = AdapterInstallationId::new("install_alpha").expect("install");
-        let evidence = ProtocolAuthEvidence::test_verified(
-            AuthRequirement::SharedSecretHeader {
-                header_name: "X-Secret".into(),
-            },
-            installation_id.as_str(),
-        );
-        let context = TrustedInboundContext::from_verified_evidence(
-            ProductAdapterId::new("test_adapter").expect("adapter"),
-            installation_id,
-            received_at(),
-            &evidence,
-        )
-        .expect("trusted context");
-        let parsed = ParsedProductInbound::new(
-            ExternalEventId::new("evt:image-1").expect("event"),
-            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
-            ExternalConversationRef::new(None, "conv1", None, None).expect("conversation"),
-            ProductInboundPayload::UserMessage(
-                UserMessagePayload::new("look at this", vec![], ProductTriggerReason::DirectChat)
-                    .expect("payload"),
-            ),
-        )
-        .expect("parsed inbound");
-        ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("envelope")
-    }
-
-    /// Caller-level coverage for the native vision door: a user message carrying
-    /// host-staged inline bytes must route those bytes through the
-    /// [`InboundAttachmentLander`] before message acceptance (the bytes never
-    /// touch the bytes-free product envelope). Mirrors the WebChat landing path.
-    #[tokio::test]
-    async fn native_attachment_path_lands_inline_bytes_before_acceptance() {
-        let thread_service = std::sync::Arc::new(InMemorySessionThreadService::default());
-        let lander = std::sync::Arc::new(CapturingLander::default());
-        let service = DefaultInboundTurnService::new(
-            LandingBindingStub,
-            thread_service,
-            CapturingTurnCoordinator::default(),
-        )
-        .with_inbound_attachments(lander.clone());
-
-        let envelope = user_message_envelope();
-        let bytes = vec![0x89, b'P', b'N', b'G'];
-        let attachment = InboundAttachment {
-            id: "openai-image-0".to_string(),
-            mime_type: "image/png".to_string(),
-            filename: Some("image-0.png".to_string()),
-            bytes: bytes.clone(),
-        };
-
-        let dispatch = service
-            .accept_user_message_with_before_policy_and_attachments(
-                &envelope,
-                &NoopBeforeInboundPolicy,
-                vec![attachment],
-            )
-            .await
-            .expect("accepting a user message with inline attachments succeeds");
-
-        assert!(matches!(dispatch, InboundUserMessageDispatch::Accepted(_)));
-        let landed = lander.landed.lock().unwrap();
-        assert_eq!(landed.len(), 1, "the inline image is landed exactly once");
-        assert_eq!(landed[0].mime_type, "image/png");
-        assert_eq!(landed[0].bytes, bytes);
-    }
-
-    /// Without a lander wired, a user message carrying inline bytes must fail
-    /// closed (rejected), never silently dropping the attachment.
-    #[tokio::test]
-    async fn native_attachment_path_without_lander_fails_closed() {
-        let thread_service = std::sync::Arc::new(InMemorySessionThreadService::default());
-        let service = DefaultInboundTurnService::new(
-            LandingBindingStub,
-            thread_service,
-            CapturingTurnCoordinator::default(),
-        );
-
-        let envelope = user_message_envelope();
-        let attachment = InboundAttachment {
-            id: "openai-image-0".to_string(),
-            mime_type: "image/png".to_string(),
-            filename: Some("image-0.png".to_string()),
-            bytes: vec![0x89, b'P', b'N', b'G'],
-        };
-
-        let result = service
-            .accept_user_message_with_before_policy_and_attachments(
-                &envelope,
-                &NoopBeforeInboundPolicy,
-                vec![attachment],
-            )
-            .await;
-
-        assert!(
-            matches!(
-                result,
-                Err(ProductSurfaceFailure::TurnSubmissionRejected { .. })
-            ),
-            "a missing lander must reject the turn, never silently drop the attachment"
-        );
-    }
-
-    /// A turn service that does not override the attachments method, exercising
-    /// the trait default. Its `accept_user_message_with_before_policy` returns a
-    /// distinct `Transient` error so a test can tell "the default delegated"
-    /// (Transient) apart from "the default rejected" (TurnSubmissionRejected).
-    struct DefaultAttachmentsTurnService;
-
-    #[async_trait]
-    impl InboundTurnService for DefaultAttachmentsTurnService {
-        async fn replay_accepted_user_message(
-            &self,
-            _envelope: &ProductInboundEnvelope,
-        ) -> Result<Option<InboundTurnOutcome>, ProductSurfaceFailure> {
-            Ok(None)
-        }
-
-        async fn accept_user_message(
-            &self,
-            _envelope: &ProductInboundEnvelope,
-        ) -> Result<InboundTurnOutcome, ProductSurfaceFailure> {
-            Err(ProductSurfaceFailure::Transient {
-                reason: "delegated".into(),
-            })
-        }
-
-        async fn accept_user_message_with_before_policy(
-            &self,
-            _envelope: &ProductInboundEnvelope,
-            _before_inbound_policy: &dyn BeforeInboundPolicy,
-        ) -> Result<InboundUserMessageDispatch, ProductSurfaceFailure> {
-            Err(ProductSurfaceFailure::Transient {
-                reason: "delegated".into(),
-            })
-        }
-    }
-
-    /// The trait default must reject a turn carrying inline bytes rather than
-    /// silently dropping them, but still pass an attachment-free turn straight
-    /// through to the underlying acceptance path.
-    #[tokio::test]
-    async fn default_attachments_impl_rejects_bytes_but_passes_empty_through() {
-        let service = DefaultAttachmentsTurnService;
-        let envelope = user_message_envelope();
-
-        let rejected = service
-            .accept_user_message_with_before_policy_and_attachments(
-                &envelope,
-                &NoopBeforeInboundPolicy,
-                vec![InboundAttachment {
-                    id: "openai-image-0".to_string(),
-                    mime_type: "image/png".to_string(),
-                    filename: Some("image-0.png".to_string()),
-                    bytes: vec![0x89, b'P', b'N', b'G'],
-                }],
-            )
-            .await;
-        assert!(
-            matches!(
-                rejected,
-                Err(ProductSurfaceFailure::TurnSubmissionRejected { .. })
-            ),
-            "the default must fail closed on inline bytes, never silently drop them"
-        );
-
-        let delegated = service
-            .accept_user_message_with_before_policy_and_attachments(
-                &envelope,
-                &NoopBeforeInboundPolicy,
-                Vec::new(),
-            )
-            .await;
-        assert!(
-            matches!(delegated, Err(ProductSurfaceFailure::Transient { .. })),
-            "with no attachments the default must delegate to the normal path"
-        );
-    }
-
-    #[test]
-    fn rejected_busy_replay_with_invalid_turn_run_id_fails_loudly() {
-        let message_id = ThreadMessageId::new();
-        let result = ProductInboundTurnHandoff::from_replay(
-            replay(
-                message_id,
-                MessageStatus::RejectedBusy,
-                Some("src:alpha"),
-                Some("reply:alpha"),
-                Some("not-a-uuid".to_string()),
-            ),
-            "turn-key".to_string(),
-            received_at(),
-            ProductAdapterId::new("test_adapter").unwrap(),
-        );
-        let err = match result {
-            Err(e) => e,
-            Ok(_) => panic!("expected Err for malformed turn_run_id, got Ok"),
-        };
-
-        match err {
-            ProductSurfaceFailure::TurnSubmissionRejected { reason } => {
-                assert!(
-                    reason.contains("invalid rejected busy turn_run_id"),
-                    "expected reason to contain 'invalid rejected busy turn_run_id', got: {reason}"
-                );
-            }
-            other => panic!("expected TurnSubmissionRejected, got: {other:?}"),
-        }
-    }
-}
+mod tests;

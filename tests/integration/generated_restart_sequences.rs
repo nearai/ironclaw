@@ -13,7 +13,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
-use ironclaw_turns::{TurnRunId, TurnStatus};
+use ironclaw_host_api::turn::{TurnRunId, TurnStatus};
 use reborn_support::builder::StorageMode;
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
@@ -49,7 +49,7 @@ async fn build_restarted_harness(
 ) -> (
     reborn_support::builder::RebornIntegrationHarness,
     TurnRunId,
-    ironclaw_turns::GateRef,
+    ironclaw_host_api::turn::TurnGateRef,
 ) {
     let group = RebornIntegrationGroup::builder()
         .storage(StorageMode::LibSql)

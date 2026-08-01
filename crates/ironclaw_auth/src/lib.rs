@@ -15,14 +15,14 @@ mod credential;
 pub mod domain;
 mod engine;
 mod error;
+// Test doubles for every product-auth port. Gated so release builds carry no
+// fake service implementations; downstream test callers enable
+// `ironclaw_auth/test-support` from `[dev-dependencies]`.
+#[cfg(any(test, feature = "test-support"))]
 mod fakes;
 mod flow;
 mod ids;
 mod interaction;
-pub mod loopback_oauth;
-// `pub` for the v1 monolith's historical `ironclaw_auth::oauth::…` loopback
-// re-export path (see the compat note at the top of the module); narrows back
-// to `mod` when v1 retires.
 pub mod oauth;
 pub mod product_auth;
 mod provider;
@@ -47,6 +47,12 @@ pub use credential::{
     binding_scope_owns_account,
 };
 pub use domain::select_latest_duplicate_user_reusable_account;
+pub use engine::admission::{
+    AdmissionClientProfile, AuthorizationServerAdmissionMetadata, AuthorizationServerMetadataFetch,
+    EmptyOAuthClientProfileRegistry, OAuthClientProfileRegistry, OAuthRecipeAdmission,
+    OAuthRecipeAdmissionRequest, ProtectedResourceAdmissionMetadata,
+    ProtectedResourceMetadataFetch,
+};
 pub use engine::keepalive;
 pub use engine::keepalive::{
     AlwaysLeaderKeepaliveLock, KEEPALIVE_SWEEP_SHUTDOWN_TIMEOUT, KeepaliveCandidateSource,
@@ -59,6 +65,7 @@ pub use engine::{
     PreparedOAuthFlow, ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
 };
 pub use error::{AuthErrorCode, AuthProductError};
+#[cfg(any(test, feature = "test-support"))]
 pub use fakes::InMemoryAuthProductServices;
 pub use flow::{
     AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowKind, AuthFlowManager,
@@ -90,8 +97,9 @@ pub use product_auth::api::auth::{
     RebornAuthContinuationDispatcher, RebornAuthProductError, RebornCredentialLifecycleError,
     RebornManualTokenChallenge, RebornManualTokenError, RebornManualTokenSetupRequest,
     RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse, RebornOAuthCallbackError,
-    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
-    RebornOAuthStartFlowRequest, RebornProductAuthServicePorts, RebornProductAuthServices,
+    RebornOAuthCallbackFlowIdentity, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
+    RebornOAuthCallbackResponse, RebornOAuthStartFlowRequest, RebornProductAuthServicePorts,
+    RebornProductAuthServices,
 };
 pub use product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock;
 pub use product_auth::credentials::runtime_credentials::{

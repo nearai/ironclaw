@@ -8,14 +8,18 @@ use std::time::Duration as StdDuration;
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
 use ironclaw_conversations::{
     ConversationBindingService as ConversationBindingPort, ExternalActorBindingEpoch,
     InMemoryConversationServices,
 };
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, LoopGateRef, RunProfileId, RunProfileVersion, TurnActor,
+    TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
+};
 use ironclaw_host_api::{
+    attachment::InboundAttachment,
     ids::{AgentId, ApprovalRequestId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
@@ -56,10 +60,8 @@ use ironclaw_product::{
 };
 use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
-    GetRunStateRequest, LoopGateRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-    RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
-    TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
+    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnCoordinator, TurnError, TurnRunState,
 };
 
 fn sample_envelope(event_suffix: &str) -> ProductInboundEnvelope {
@@ -194,13 +196,13 @@ impl TurnCoordinator for RecordingTurnCoordinator {
 }
 
 struct RecordingApprovalInteractionService {
-    pending: Vec<(GateRef, TurnRunId)>,
+    pending: Vec<(TurnGateRef, TurnRunId)>,
     fallback_run_id: TurnRunId,
     resolutions: Mutex<Vec<ResolveApprovalInteractionRequest>>,
 }
 
 impl RecordingApprovalInteractionService {
-    fn new(gate_ref: GateRef, run_id: TurnRunId) -> Self {
+    fn new(gate_ref: TurnGateRef, run_id: TurnRunId) -> Self {
         Self {
             pending: vec![(gate_ref, run_id)],
             fallback_run_id: run_id,
@@ -208,7 +210,7 @@ impl RecordingApprovalInteractionService {
         }
     }
 
-    fn with_pending(pending: Vec<(GateRef, TurnRunId)>) -> Self {
+    fn with_pending(pending: Vec<(TurnGateRef, TurnRunId)>) -> Self {
         let fallback_run_id = pending
             .first()
             .map(|(_, run_id)| *run_id)
@@ -291,12 +293,12 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
 /// scope still reports its gate as pending.
 struct ScopedPendingApprovalInteractionService {
     pending_thread: ThreadId,
-    pending: Vec<(GateRef, TurnRunId)>,
+    pending: Vec<(TurnGateRef, TurnRunId)>,
     resolutions: Mutex<Vec<ResolveApprovalInteractionRequest>>,
 }
 
 impl ScopedPendingApprovalInteractionService {
-    fn new(pending_thread: ThreadId, pending: Vec<(GateRef, TurnRunId)>) -> Self {
+    fn new(pending_thread: ThreadId, pending: Vec<(TurnGateRef, TurnRunId)>) -> Self {
         Self {
             pending_thread,
             pending,
@@ -369,13 +371,13 @@ impl ApprovalInteractionService for ScopedPendingApprovalInteractionService {
 }
 
 struct RecordingAuthInteractionService {
-    gate_ref: GateRef,
+    gate_ref: TurnGateRef,
     run_id: TurnRunId,
     resolutions: Mutex<Vec<ResolveAuthInteractionRequest>>,
 }
 
 impl RecordingAuthInteractionService {
-    fn new(gate_ref: GateRef, run_id: TurnRunId) -> Self {
+    fn new(gate_ref: TurnGateRef, run_id: TurnRunId) -> Self {
         Self {
             gate_ref,
             run_id,
@@ -1088,7 +1090,7 @@ async fn record_conversation_route_for_gate_ref(
 async fn record_scoped_approval_conversation_route(
     store: &dyn ironclaw_outbound::DeliveredGateRouteStore,
     recorded_at: chrono::DateTime<Utc>,
-) -> (GateRef, TurnRunId, TurnScope) {
+) -> (TurnGateRef, TurnRunId, TurnScope) {
     let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
     let (run_id, scope) =
         record_conversation_route_for_gate_ref(store, gate_ref.as_str(), recorded_at).await;
@@ -1209,7 +1211,7 @@ async fn auth_resolution_payload_routes_through_auth_interaction_service() {
     let inbound = Arc::new(FakeInboundTurnService::new());
     let ledger = Arc::new(FakeIdempotencyLedger::new());
     let binding = Arc::new(FakeConversationBindingService::new());
-    let gate_ref = GateRef::new("gate:auth-product").expect("auth gate ref");
+    let gate_ref = TurnGateRef::new("gate:auth-product").expect("auth gate ref");
     let run_id = TurnRunId::new();
     let credential_ref = CredentialAccountId::new();
     let auth_service = Arc::new(RecordingAuthInteractionService::new(
@@ -1270,7 +1272,7 @@ async fn auth_callback_and_denied_payloads_route_through_auth_interaction_servic
         let inbound = Arc::new(FakeInboundTurnService::new());
         let ledger = Arc::new(FakeIdempotencyLedger::new());
         let binding = Arc::new(FakeConversationBindingService::new());
-        let gate_ref = GateRef::new(format!("gate:{event_suffix}")).expect("auth gate ref");
+        let gate_ref = TurnGateRef::new(format!("gate:{event_suffix}")).expect("auth gate ref");
         let run_id = TurnRunId::new();
         let auth_service = Arc::new(RecordingAuthInteractionService::new(
             gate_ref.clone(),
@@ -1333,7 +1335,7 @@ async fn auth_deny_from_threaded_direct_prompt_uses_base_direct_binding() {
         .resolve_binding(ResolveBindingRequest::from_envelope(&base_envelope))
         .await
         .expect("seed base direct conversation binding");
-    let gate_ref = GateRef::new("gate:auth-direct-thread").expect("auth gate");
+    let gate_ref = TurnGateRef::new("gate:auth-direct-thread").expect("auth gate");
     let auth_service = Arc::new(RecordingAuthInteractionService::new(
         gate_ref.clone(),
         TurnRunId::new(),
@@ -1761,7 +1763,7 @@ async fn scoped_approval_missing_gate_fallback_reuses_dispatcher_binding() {
 async fn auth_resolution_resolves_via_conversation_route_after_missing_auth() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
-    let gate_ref = GateRef::new("gate:auth-conversation-route").expect("auth gate ref");
+    let gate_ref = TurnGateRef::new("gate:auth-conversation-route").expect("auth gate ref");
     let (run_id, route_scope) =
         record_conversation_route_for_gate_ref(route_store.as_ref(), gate_ref.as_str(), Utc::now())
             .await;
@@ -1802,8 +1804,8 @@ async fn auth_resolution_resolves_via_conversation_route_after_missing_auth() {
 async fn explicit_approval_delivered_route_requires_gate_ref_match() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
-    let route_gate_ref = GateRef::new("gate:approval-route-match").expect("gate ref");
-    let payload_gate_ref = GateRef::new("gate:approval-route-mismatch").expect("gate ref");
+    let route_gate_ref = TurnGateRef::new("gate:approval-route-match").expect("gate ref");
+    let payload_gate_ref = TurnGateRef::new("gate:approval-route-mismatch").expect("gate ref");
     record_conversation_route_for_gate_ref(
         route_store.as_ref(),
         route_gate_ref.as_str(),
@@ -1838,8 +1840,8 @@ async fn explicit_approval_delivered_route_requires_gate_ref_match() {
 async fn explicit_auth_delivered_route_requires_gate_ref_match() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
-    let route_gate_ref = GateRef::new("gate:auth-route-match").expect("gate ref");
-    let payload_gate_ref = GateRef::new("gate:auth-route-mismatch").expect("gate ref");
+    let route_gate_ref = TurnGateRef::new("gate:auth-route-match").expect("gate ref");
+    let payload_gate_ref = TurnGateRef::new("gate:auth-route-mismatch").expect("gate ref");
     record_conversation_route_for_gate_ref(
         route_store.as_ref(),
         route_gate_ref.as_str(),
@@ -1893,7 +1895,7 @@ async fn scoped_approval_two_pending_routes_resolves_most_recent() {
     let older_run = TurnRunId::new();
     let newer_run = TurnRunId::new();
     let make_record =
-        |gate_ref: &GateRef, run_id, recorded_at| ironclaw_outbound::DeliveredGateRouteRecord {
+        |gate_ref: &TurnGateRef, run_id, recorded_at| ironclaw_outbound::DeliveredGateRouteRecord {
             tenant_id: tenant_id.clone(),
             user_id: user_id.clone(),
             gate_ref: gate_ref.as_str().to_string(),
@@ -1970,7 +1972,7 @@ async fn scoped_approval_one_stale_one_pending_resolves_and_prunes() {
     let stale_gate = approval_gate_ref(ApprovalRequestId::new()).expect("gate");
     let pending_run = TurnRunId::new();
     let make_record =
-        |gate_ref: &GateRef, run_id, recorded_at| ironclaw_outbound::DeliveredGateRouteRecord {
+        |gate_ref: &TurnGateRef, run_id, recorded_at| ironclaw_outbound::DeliveredGateRouteRecord {
             tenant_id: tenant_id.clone(),
             user_id: user_id.clone(),
             gate_ref: gate_ref.as_str().to_string(),
@@ -2159,8 +2161,8 @@ async fn scoped_approval_actor_mismatch_filtered_out() {
 async fn explicit_approval_gate_ref_mismatch_leaves_original_rejection() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
-    let route_gate_ref = GateRef::new("gate:approval-stored-ref").expect("stored gate ref");
-    let payload_gate_ref = GateRef::new("gate:approval-payload-ref").expect("payload gate ref");
+    let route_gate_ref = TurnGateRef::new("gate:approval-stored-ref").expect("stored gate ref");
+    let payload_gate_ref = TurnGateRef::new("gate:approval-payload-ref").expect("payload gate ref");
     record_conversation_route_for_gate_ref(
         route_store.as_ref(),
         route_gate_ref.as_str(),
@@ -2214,7 +2216,7 @@ async fn auth_two_live_routes_same_conversation_rejects_ambiguous() {
     // actor, same gate_ref, not expired) but differ only in run_id + scope.
     let tenant_id = TenantId::new("tenant:install_alpha").expect("tenant");
     let user_id = UserId::new("user:user1").expect("user");
-    let shared_gate_ref = GateRef::new("gate:auth-ambiguous-shared").expect("shared gate ref");
+    let shared_gate_ref = TurnGateRef::new("gate:auth-ambiguous-shared").expect("shared gate ref");
     let make_record = |run_id: TurnRunId| ironclaw_outbound::DeliveredGateRouteRecord {
         tenant_id: tenant_id.clone(),
         user_id: user_id.clone(),
@@ -2313,7 +2315,7 @@ async fn auth_two_live_routes_same_conversation_rejects_ambiguous() {
 ///
 /// Both stored routes carry valid gate ref strings. The assertion is that the
 /// auth-kind filter (`is_auth_gate_ref`) drops the stale approval route by
-/// prefix — not by GateRef validation — leaving only the live auth route to be
+/// prefix — not by TurnGateRef validation — leaving only the live auth route to be
 /// forwarded to the auth interaction service.
 #[tokio::test]
 async fn bare_auth_deny_with_stale_approval_route_selects_auth_route_not_approval() {
@@ -2331,7 +2333,8 @@ async fn bare_auth_deny_with_stale_approval_route_selects_auth_route_not_approva
 
     // The auth deny uses a different, auth-prefixed gate_ref — the one that
     // was actually delivered with the auth prompt.
-    let auth_gate_ref = GateRef::new("gate:auth-deny-with-stale-approval").expect("auth gate ref");
+    let auth_gate_ref =
+        TurnGateRef::new("gate:auth-deny-with-stale-approval").expect("auth gate ref");
     let auth_service = Arc::new(MissingAuthThenRecordingAuthService::default());
     let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
@@ -2476,7 +2479,7 @@ impl ApprovalInteractionService for StaleGateReturningApprovalService {
 async fn auth_resolution_stale_auth_does_not_fall_back_to_delivered_route() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
-    let gate_ref = GateRef::new("gate:auth-stale-no-fallback").expect("auth gate ref");
+    let gate_ref = TurnGateRef::new("gate:auth-stale-no-fallback").expect("auth gate ref");
     // Record a live delivered route for the same gate so that IF the fallback ran
     // it would resolve successfully — confirming the test would catch a regression.
     record_conversation_route_for_gate_ref(route_store.as_ref(), gate_ref.as_str(), Utc::now())
@@ -2691,8 +2694,8 @@ async fn exact_named_generic_approval_gate_is_forwarded_not_dropped_by_kind_filt
 async fn explicit_auth_gate_ref_mismatch_leaves_original_rejection() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
-    let route_gate_ref = GateRef::new("gate:auth-stored-ref").expect("stored gate ref");
-    let payload_gate_ref = GateRef::new("gate:auth-payload-ref").expect("payload gate ref");
+    let route_gate_ref = TurnGateRef::new("gate:auth-stored-ref").expect("stored gate ref");
+    let payload_gate_ref = TurnGateRef::new("gate:auth-payload-ref").expect("payload gate ref");
     record_conversation_route_for_gate_ref(
         route_store.as_ref(),
         route_gate_ref.as_str(),
@@ -2731,14 +2734,14 @@ async fn explicit_auth_gate_ref_mismatch_leaves_original_rejection() {
 
 /// A stored delivered-route whose raw gate_ref string passes the approval-kind
 /// prefix predicate (`is_approval_gate_ref`: `starts_with("gate:approval-")`)
-/// but is too long to pass `GateRef::new` (> 256 bytes) must be SELECTED by
+/// but is too long to pass `TurnGateRef::new` (> 256 bytes) must be SELECTED by
 /// the kind filter — not silently dropped — and then surface an
 /// `InvalidGateRef` rejection rather than a silent Miss or BindingRequired.
 ///
 /// This verifies the `InvalidGateRef` branch in
 /// `resolve_via_delivered_approval_route` that was previously unreachable
-/// because the old `fn(&GateRef) -> bool` filter pre-validated the stored
-/// string with `GateRef::new`, silently dropping any route that failed
+/// because the old `fn(&TurnGateRef) -> bool` filter pre-validated the stored
+/// string with `TurnGateRef::new`, silently dropping any route that failed
 /// construction before the predicate could run.  The new `fn(&str) -> bool`
 /// predicate receives the raw stored string directly, so an
 /// oversized-but-prefixed string is selected and surfaces the error.
@@ -2746,20 +2749,20 @@ async fn explicit_auth_gate_ref_mismatch_leaves_original_rejection() {
 /// The invalid string used here is `"gate:approval-" + "a" * 243` = 257 bytes:
 ///  - passes `is_approval_gate_ref` (starts with `"gate:approval-"`)
 ///  - passes `validate_token_string` used by adapter payloads (max 512 bytes)
-///  - fails `GateRef::new` (`validate_ref` cap is 256 bytes)
+///  - fails `TurnGateRef::new` (`validate_ref` cap is 256 bytes)
 #[tokio::test]
 async fn bare_approve_with_invalid_stored_approval_route_rejects_invalid_gate_ref() {
-    // "gate:approval-" = 14 bytes; 14 + 243 = 257 bytes → fails GateRef::new.
+    // "gate:approval-" = 14 bytes; 14 + 243 = 257 bytes → fails TurnGateRef::new.
     let invalid_gate_ref_str = format!("gate:approval-{}", "a".repeat(243));
     assert_eq!(invalid_gate_ref_str.len(), 257);
-    // Confirm predicate accepts but GateRef::new rejects.
+    // Confirm predicate accepts but TurnGateRef::new rejects.
     assert!(
         ironclaw_product::is_approval_gate_ref(&invalid_gate_ref_str),
         "test string must pass is_approval_gate_ref"
     );
     assert!(
-        ironclaw_turns::GateRef::new(invalid_gate_ref_str.as_str()).is_err(),
-        "test string must fail GateRef::new"
+        ironclaw_host_api::turn::TurnGateRef::new(invalid_gate_ref_str.as_str()).is_err(),
+        "test string must fail TurnGateRef::new"
     );
 
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
@@ -2769,7 +2772,7 @@ async fn bare_approve_with_invalid_stored_approval_route_rejects_invalid_gate_re
 
     // with_pending(Vec::new()) → list_pending returns [] → MissingGate
     // fallback fires → resolve_via_delivered_approval_route(None, …) →
-    // kind filter runs → route is selected → GateRef::new fails → InvalidGateRef.
+    // kind filter runs → route is selected → TurnGateRef::new fails → InvalidGateRef.
     let approval_service = Arc::new(RecordingApprovalInteractionService::with_pending(Vec::new()));
     let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
@@ -2799,24 +2802,24 @@ async fn bare_approve_with_invalid_stored_approval_route_rejects_invalid_gate_re
         "expected InvalidGateRef → InvalidRequest/400, got: {err:?}"
     );
     // The approval service must NOT be called — the error comes from
-    // GateRef reconstruction in the delivered-route path, before the
+    // TurnGateRef reconstruction in the delivered-route path, before the
     // interaction service is reached.
     assert!(
         approval_service.resolutions().is_empty(),
-        "approval service must not be called when GateRef reconstruction fails"
+        "approval service must not be called when TurnGateRef reconstruction fails"
     );
 }
 
 /// A stored delivered-route whose raw gate_ref string passes the auth-kind
 /// prefix predicate (`is_auth_gate_ref`: `starts_with("gate:auth-")`) but is
-/// too long to pass `GateRef::new` (> 256 bytes) must be SELECTED by the
+/// too long to pass `TurnGateRef::new` (> 256 bytes) must be SELECTED by the
 /// exact-ref match in the BindingRequired delivered-route fallback — and then
 /// surface an `InvalidGateRef` rejection rather than a silent Miss.
 ///
 /// This verifies the `InvalidGateRef` branch in
 /// `resolve_via_delivered_auth_route`.  The BindingRequired fallback path is
 /// used because it fires BEFORE `dispatch_auth_resolution` calls
-/// `GateRef::new` on the payload string (line ~1135), allowing the oversized
+/// `TurnGateRef::new` on the payload string, allowing the oversized
 /// invalid gate_ref to reach the delivered-route selection code.  The
 /// BindingRequired path calls `resolve_via_delivered_auth_route` with
 /// `expected_gate_ref = Some(payload.auth_request_ref)`, so the oversized
@@ -2825,20 +2828,20 @@ async fn bare_approve_with_invalid_stored_approval_route_rejects_invalid_gate_re
 /// The invalid string used here is `"gate:auth-" + "a" * 247` = 257 bytes:
 ///  - passes `is_auth_gate_ref` (starts with `"gate:auth-"`)
 ///  - passes `validate_token_string` used by adapter payloads (max 512 bytes)
-///  - fails `GateRef::new` (`validate_ref` cap is 256 bytes)
+///  - fails `TurnGateRef::new` (`validate_ref` cap is 256 bytes)
 #[tokio::test]
 async fn bare_auth_deny_with_invalid_stored_auth_route_rejects_invalid_gate_ref() {
-    // "gate:auth-" = 10 bytes; 10 + 247 = 257 bytes → fails GateRef::new.
+    // "gate:auth-" = 10 bytes; 10 + 247 = 257 bytes → fails TurnGateRef::new.
     let invalid_gate_ref_str = format!("gate:auth-{}", "a".repeat(247));
     assert_eq!(invalid_gate_ref_str.len(), 257);
-    // Confirm predicate accepts but GateRef::new rejects.
+    // Confirm predicate accepts but TurnGateRef::new rejects.
     assert!(
         ironclaw_product::is_auth_gate_ref(&invalid_gate_ref_str),
         "test string must pass is_auth_gate_ref"
     );
     assert!(
-        ironclaw_turns::GateRef::new(invalid_gate_ref_str.as_str()).is_err(),
-        "test string must fail GateRef::new"
+        ironclaw_host_api::turn::TurnGateRef::new(invalid_gate_ref_str.as_str()).is_err(),
+        "test string must fail TurnGateRef::new"
     );
 
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
@@ -2854,7 +2857,7 @@ async fn bare_auth_deny_with_invalid_stored_auth_route_rejects_invalid_gate_ref(
     //
     // BindingRequired fallback → resolve_via_delivered_auth_route with
     // expected_gate_ref=Some(invalid_gate_ref_str) → exact-ref match selects
-    // the stored route → GateRef::new on the stored gate_ref fails → InvalidGateRef.
+    // the stored route → TurnGateRef::new on the stored gate_ref fails → InvalidGateRef.
     let auth_service = Arc::new(MissingAuthThenRecordingAuthService::default());
     let workflow = DefaultProductSurface::new(
         Arc::new(FakeInboundTurnService::new()),
@@ -2888,7 +2891,7 @@ async fn bare_auth_deny_with_invalid_stored_auth_route_rejects_invalid_gate_ref(
     // is consulted — service must not be called at all.
     assert!(
         auth_service.resolutions().is_empty(),
-        "auth service must not be called when GateRef reconstruction fails in the BindingRequired fallback"
+        "auth service must not be called when TurnGateRef reconstruction fails in the BindingRequired fallback"
     );
 }
 

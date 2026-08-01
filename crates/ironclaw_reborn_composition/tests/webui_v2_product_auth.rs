@@ -22,11 +22,11 @@ use ironclaw_auth::{
     SecretSubmitRequest, SecretSubmitResult,
 };
 use ironclaw_auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
+use ironclaw_extension_contracts::state::LifecyclePublicState;
 use ironclaw_host_api::{
     ids::{AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId},
     product_surface::{ProductSurfaceCaller, ProductSurfaceError},
     resource::ResourceScope,
-    state::LifecyclePublicState,
 };
 use ironclaw_product::{
     EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
@@ -428,7 +428,7 @@ impl ironclaw_auth::EngineClientCredentialsSource for StaticVendorClientCredenti
     async fn resolve(
         &self,
         vendor: &str,
-        _credentials: &ironclaw_host_api::recipe::RecipeClientCredentials,
+        _credentials: &ironclaw_extension_contracts::recipe::RecipeClientCredentials,
     ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, AuthProductError> {
         let client_id = match vendor {
             "google" => "google-client.apps.googleusercontent.com",
@@ -465,30 +465,32 @@ impl ironclaw_host_api::http::RuntimeHttpEgress for PanicVendorEgress {
 /// (ceiling rejection, host-built params) is exercised as production data
 /// would drive it.
 fn google_test_engine() -> Arc<ironclaw_auth::AuthEngine> {
-    let recipe: ironclaw_host_api::recipe::VendorAuthRecipe = serde_json::from_value(json!({
-        "method": "oauth2_code",
-        "display_name": "Google account",
-        "authorization_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
-        "token_endpoint": "https://oauth2.googleapis.com/token",
-        "scopes": [GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE],
-        "extra_authorize_params": {
-            "access_type": "offline",
-            "include_granted_scopes": "true",
-            "prompt": "consent"
-        },
-        "client_credentials": { "client_id_handle": "google_oauth_client_id" },
-        "token_response": {
-            "access_token": "/access_token",
-            "refresh_token": "/refresh_token",
-            "expires_in": "/expires_in",
-            "scope": { "path": "/scope", "missing": "fallback_to_requested" }
-        },
-    }))
-    .expect("google test recipe parses");
+    let recipe: ironclaw_extension_contracts::recipe::VendorAuthRecipe =
+        serde_json::from_value(json!({
+            "method": "oauth2_code",
+            "display_name": "Google account",
+            "authorization_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+            "token_endpoint": "https://oauth2.googleapis.com/token",
+            "scopes": [GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE],
+            "extra_authorize_params": {
+                "access_type": "offline",
+                "include_granted_scopes": "true",
+                "prompt": "consent"
+            },
+            "client_credentials": { "client_id_handle": "google_oauth_client_id" },
+            "token_response": {
+                "access_token": "/access_token",
+                "refresh_token": "/refresh_token",
+                "expires_in": "/expires_in",
+                "scope": { "path": "/scope", "missing": "fallback_to_requested" }
+            },
+        }))
+        .expect("google test recipe parses");
     vendor_test_engine(ironclaw_auth::ResolvedVendorAuthRecipe {
         vendor: "google".to_string(),
         recipe,
         token_exchange_resource: None,
+        protected_resource_metadata_url: None,
     })
 }
 
@@ -1371,6 +1373,7 @@ async fn product_auth_oauth_flow_status_hides_cross_scope_flow_as_not_found() {
             scope: other_scope,
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("github").expect("provider"),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
                     .expect("authorization url"),

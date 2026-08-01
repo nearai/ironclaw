@@ -1,17 +1,39 @@
+import { NearProcessIndicator } from "./near-process-indicator";
 
-export function TypingIndicator() {
+type TypingIndicatorProps =
+  | { state?: "working"; durationSeconds?: never }
+  | { state: "done"; durationSeconds: number };
+
+function formatDuration(durationSeconds: number): string {
+  if (durationSeconds < 60) {
+    return `${durationSeconds}s`;
+  }
+
+  const hours = Math.floor(durationSeconds / 3_600);
+  const minutes = Math.floor((durationSeconds % 3_600) / 60);
+  const seconds = durationSeconds % 60;
+
+  return [hours, minutes, seconds]
+    .map((part) => String(part).padStart(2, "0"))
+    .join(":");
+}
+
+export function TypingIndicator({
+  state = "working",
+  durationSeconds,
+}: TypingIndicatorProps = {}) {
   return (
     <div className="flex flex-col items-start">
       <div className="flex min-w-0 flex-col gap-2 v2-chat-readable-width">
-        <div
-          data-testid="typing-indicator"
-          className="w-fit rounded-[18px] border border-white/10 bg-iron-800/60 px-4 py-3"
-        >
-          <div className="flex gap-1">
-            <span className="v2-typing-dot h-2 w-2 rounded-full bg-iron-200" />
-            <span className="v2-typing-dot h-2 w-2 rounded-full bg-iron-200" />
-            <span className="v2-typing-dot h-2 w-2 rounded-full bg-iron-200" />
-          </div>
+        <div data-testid="typing-indicator" className="w-fit">
+          <NearProcessIndicator
+            state={state}
+            label={
+              state === "done"
+                ? `Worked for ${formatDuration(durationSeconds)}`
+                : "Working…"
+            }
+          />
         </div>
       </div>
     </div>

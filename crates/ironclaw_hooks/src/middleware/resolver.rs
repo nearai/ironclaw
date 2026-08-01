@@ -15,7 +15,7 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::ids::ExtensionId;
-use ironclaw_turns::run_profile::LoopRequest;
+use ironclaw_loop_contracts::LoopRequest;
 
 /// Resolves a [`LoopRequest`]'s input ref to a sanitized JSON view.
 ///
@@ -104,13 +104,13 @@ impl CapabilityProviderResolver for NullCapabilityProviderResolver {
 mod tests {
     use super::*;
     use ironclaw_host_api::ids::CapabilityId;
-    use ironclaw_turns::run_profile::{CapabilityInputRef, CapabilitySurfaceVersion};
+    use ironclaw_loop_contracts::{CapabilityInputRef, CapabilitySurfaceVersion};
 
     #[tokio::test]
     async fn null_resolver_returns_none() {
         let resolver = NullCapabilityInputResolver;
         let invocation = LoopRequest {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("v1").expect("ok"),
             capability_id: CapabilityId::new("cap.x").expect("ok"),
             input_ref: CapabilityInputRef::new("input:x").expect("ok"),

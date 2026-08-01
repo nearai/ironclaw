@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AcceptedMessageRef, ReplyTargetBindingRef, RunProfileId, RunProfileVersion, TurnActor,
-    TurnRunId, TurnStatus, events::EventCursor,
+    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
+    TurnActor, TurnRunId, TurnStatus,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

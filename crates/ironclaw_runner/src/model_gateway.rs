@@ -26,6 +26,15 @@ use ironclaw_llm::{
     ToolCompletionResponse, ToolDefinition, clean_response, contains_codex_text_tool_call_syntax,
     recover_codex_text_tool_calls_from_tool_names, vision_models::is_vision_model,
 };
+use ironclaw_loop_contracts::LoopModelUsage;
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, EphemeralInstructionMaterializationStore,
+    InMemoryLoopHostMilestoneSink, InstructionMaterializationStore, InstructionSafetyContext,
+    LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort,
+    LoopModelProgressSink, LoopModelRequest, LoopModelResponse, LoopPromptBundleRequest,
+    LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelProfileId, PromptMode, ProviderToolCall,
+    ProviderToolDefinition, RegisterProviderToolCallRequest, sanitize_model_visible_text,
+};
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
@@ -38,19 +47,8 @@ use ironclaw_safety::{
     is_provider_arguments_too_large_summary, provider_arguments_exceed_max_bytes,
 };
 use ironclaw_threads::{ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope};
-use ironclaw_turns::run_profile::LoopModelUsage;
-use ironclaw_turns::{
-    ModelInvalidOutputDetailReason as InvalidOutputReason, TurnId, TurnRunId,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, EphemeralInstructionMaterializationStore,
-        HostManagedLoopPromptPort, InMemoryLoopHostMilestoneSink, InstructionMaterializationStore,
-        InstructionSafetyContext, LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest,
-        LoopModelPort, LoopModelProgressSink, LoopModelRequest, LoopModelResponse,
-        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelProfileId,
-        PromptMode, ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
-        sanitize_model_visible_text,
-    },
-};
+use ironclaw_turns::HostManagedLoopPromptPort;
+use ironclaw_turns::{ModelInvalidOutputDetailReason as InvalidOutputReason, TurnId, TurnRunId};
 use tracing::debug;
 
 mod prompt_cache_activity;
@@ -177,7 +175,7 @@ struct LlmModelProfileRoute {
 /// Production Reborn model gateway backed by durable session-thread context.
 ///
 /// This is the concrete adapter intended to sit behind
-/// [`HostManagedLoopModelPort`](ironclaw_turns::run_profile::HostManagedLoopModelPort):
+/// [`HostManagedLoopModelPort`](ironclaw_turns::HostManagedLoopModelPort):
 /// it resolves loop message refs from the durable thread service, then delegates
 /// provider routing and sanitization to the host-managed model gateway.
 #[derive(Clone)]
@@ -490,7 +488,7 @@ where
     async fn stream_model_with_capabilities(
         &self,
         request: HostManagedModelRequest,
-        capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+        capabilities: Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         let route = self
             .policy
@@ -542,7 +540,7 @@ where
     async fn stream_model_with_capabilities_and_progress(
         &self,
         request: HostManagedModelRequest,
-        capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+        capabilities: Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
         sink: Arc<dyn HostManagedModelStreamSink>,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         let route = self
@@ -811,7 +809,7 @@ where
     async fn stream_model_with_capabilities(
         &self,
         request: HostManagedModelRequest,
-        capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+        capabilities: Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         let slot = slot_for_model_profile(&request.model_profile_id)?;
         let request_snapshot = request
@@ -856,7 +854,7 @@ where
     async fn stream_model_with_capabilities_and_progress(
         &self,
         request: HostManagedModelRequest,
-        capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+        capabilities: Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
         sink: Arc<dyn HostManagedModelStreamSink>,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         let slot = slot_for_model_profile(&request.model_profile_id)?;
@@ -1311,7 +1309,7 @@ impl CompletionStreamSink for ProviderStreamSink {
 async fn complete_model_request<P>(
     provider: &P,
     completion: CompletionRequest,
-    capabilities: Option<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>>,
+    capabilities: Option<Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>>,
     provider_turn_scope: Option<String>,
     stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
     request_context: ProviderRequestContext,
@@ -1662,7 +1660,7 @@ fn estimate_tool_schema_tokens(definitions: &[ProviderToolDefinition]) -> u32 {
 )]
 async fn tool_response_to_host(
     response: ToolCompletionResponse,
-    capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+    capabilities: Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
     provider_turn_scope: &str,
     replay_identity: &ProviderReplayIdentity,
     unavailable_capability_guard: Option<&UnavailableCapabilityGuard>,
@@ -1842,7 +1840,7 @@ async fn tool_response_to_host(
 
 fn provider_calls_are_advertised_or_resolvable(
     advertised_tool_names: &HashSet<ProviderToolName>,
-    capabilities: &dyn ironclaw_turns::run_profile::LoopCapabilityPort,
+    capabilities: &dyn ironclaw_loop_contracts::LoopCapabilityPort,
     provider_calls: &[ProviderToolCall],
 ) -> bool {
     for provider_call in provider_calls {
@@ -2660,13 +2658,8 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
         )
         .safe_with_detail(provider_detail);
     }
-    if is_credit_exhaustion_error(&error) {
-        return HostManagedModelError::safe(
-            HostManagedModelErrorKind::CredentialUnavailable,
-            MODEL_CREDITS_EXHAUSTED_SUMMARY,
-        )
-        .with_reason_kind(MODEL_CREDITS_EXHAUSTED_REASON_KIND)
-        .safe_with_detail(provider_detail.clone());
+    if is_legacy_credit_exhaustion_error(&error) {
+        return model_credits_exhausted_error().safe_with_detail(provider_detail);
     }
     match error {
         LlmError::ContextLengthExceeded { .. } => HostManagedModelError::safe(
@@ -2709,9 +2702,66 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
                 error
             }
         }
-        _ => HostManagedModelError::safe(
-            HostManagedModelErrorKind::Unavailable,
-            "model service is unavailable",
+        LlmError::InvalidResponse { .. } => HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidOutput,
+            "model provider returned an invalid response",
+        ),
+        LlmError::EmptyResponse { .. } => HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidOutput,
+            InvalidOutputReason::EmptyAssistantResponse.safe_summary(),
+        ),
+        LlmError::Json(_) => HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidOutput,
+            "model provider returned invalid JSON",
+        ),
+        LlmError::QuotaExceeded { .. } => model_credits_exhausted_error(),
+        LlmError::StreamInterrupted { .. } | LlmError::RequestFailed { .. } => {
+            HostManagedModelError::safe(
+                HostManagedModelErrorKind::Unavailable,
+                "model service is unavailable",
+            )
+        }
+        LlmError::Http(error) => {
+            let status = error.status().map(|status| status.as_u16());
+            match status {
+                Some(402) => model_credits_exhausted_error(),
+                Some(401 | 403) => HostManagedModelError::safe(
+                    HostManagedModelErrorKind::CredentialUnavailable,
+                    "model credentials are unavailable",
+                ),
+                Some(429) => HostManagedModelError::safe(
+                    HostManagedModelErrorKind::RateLimited,
+                    "model provider rate limited the request",
+                ),
+                Some(500..=599) => HostManagedModelError::safe(
+                    HostManagedModelErrorKind::ProviderUnavailable,
+                    "model provider is temporarily unavailable",
+                ),
+                _ if ironclaw_llm::error::is_transient_http_error(&error) => {
+                    HostManagedModelError::safe(
+                        HostManagedModelErrorKind::Unavailable,
+                        "model service connection failed",
+                    )
+                }
+                _ if error.is_decode() => HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidOutput,
+                    "model provider returned an invalid response",
+                ),
+                _ => HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    "model provider HTTP request failed",
+                ),
+            }
+        }
+        LlmError::Io(error) if ironclaw_llm::error::is_transient_io_error(&error) => {
+            HostManagedModelError::safe(
+                HostManagedModelErrorKind::Unavailable,
+                "model service connection failed",
+            )
+        }
+        LlmError::Io(_) => HostManagedModelError::safe(
+            HostManagedModelErrorKind::CredentialUnavailable,
+            "model provider session storage is unavailable",
         ),
     }
     .safe_with_detail(provider_detail)
@@ -2740,10 +2790,17 @@ fn is_unconfigured_provider_error(error: &LlmError) -> bool {
     )
 }
 
-fn is_credit_exhaustion_error(error: &LlmError) -> bool {
-    if matches!(error, LlmError::QuotaExceeded { .. }) {
-        return true;
-    }
+fn model_credits_exhausted_error() -> HostManagedModelError {
+    HostManagedModelError::safe(
+        HostManagedModelErrorKind::CredentialUnavailable,
+        MODEL_CREDITS_EXHAUSTED_SUMMARY,
+    )
+    .with_reason_kind(MODEL_CREDITS_EXHAUSTED_REASON_KIND)
+}
+
+/// Compatibility fallback for older/external providers that have not adopted
+/// the typed `QuotaExceeded` variant yet.
+fn is_legacy_credit_exhaustion_error(error: &LlmError) -> bool {
     let LlmError::RequestFailed { reason, .. } = error else {
         return false;
     };
@@ -3119,7 +3176,7 @@ mod tests {
     }
 
     #[test]
-    fn is_credit_exhaustion_error_matches_all_trigger_phrases() {
+    fn legacy_credit_exhaustion_error_matches_all_trigger_phrases() {
         let phrases = [
             "HTTP 402",
             "402 Payment Required",
@@ -3134,17 +3191,20 @@ mod tests {
         for phrase in &phrases {
             let err = request_failed(&format!("error: {phrase}: some detail"));
             assert!(
-                is_credit_exhaustion_error(&err),
+                is_legacy_credit_exhaustion_error(&err),
                 "should match phrase: {phrase}"
             );
         }
         // Case-insensitive
         let err = request_failed("HTTP 402 payment required");
-        assert!(is_credit_exhaustion_error(&err), "should match lowercase");
+        assert!(
+            is_legacy_credit_exhaustion_error(&err),
+            "should match lowercase"
+        );
     }
 
     #[test]
-    fn is_credit_exhaustion_error_returns_false_for_non_request_failed_variants() {
+    fn legacy_credit_exhaustion_error_returns_false_for_typed_variants() {
         let non_request_failed = [
             LlmError::ContextLengthExceeded {
                 used: 1000,
@@ -3163,19 +3223,19 @@ mod tests {
         ];
         for err in &non_request_failed {
             assert!(
-                !is_credit_exhaustion_error(err),
+                !is_legacy_credit_exhaustion_error(err),
                 "should not match: {err:?}"
             );
         }
     }
 
     #[test]
-    fn is_credit_exhaustion_error_returns_false_for_non_matching_request_failed() {
+    fn legacy_credit_exhaustion_error_returns_false_for_other_request_failures() {
         let err = request_failed("Internal server error");
-        assert!(!is_credit_exhaustion_error(&err));
+        assert!(!is_legacy_credit_exhaustion_error(&err));
 
         let err = request_failed("rate limit exceeded");
-        assert!(!is_credit_exhaustion_error(&err));
+        assert!(!is_legacy_credit_exhaustion_error(&err));
     }
 
     #[test]

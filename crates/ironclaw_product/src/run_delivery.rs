@@ -33,16 +33,16 @@ use crate::{
 };
 use async_trait::async_trait;
 use ironclaw_host_api::ids::UserId;
+use ironclaw_host_api::turn::{TurnGateRef, TurnRunId, TurnScope, TurnStatus};
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundError,
     OutboundStateStorePort,
 };
-use ironclaw_turns::{
-    GateRef, GetRunStateRequest, TurnCoordinator, TurnRunId, TurnRunState, TurnScope, TurnStatus,
-};
+use ironclaw_turns::{GetRunStateRequest, TurnCoordinator, TurnRunState};
 
 use crate::auth_prompt::{BlockedAuthFlowCanceller, BlockedAuthPromptRequest};
 
+use crate::ProjectFilesystemReader;
 use crate::delivery_coordinator::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, DeliveryCoordinator, DeliveryIntent,
     NoticeDeliveryRequest,
@@ -113,7 +113,7 @@ pub fn triggered_run_delivery_settings() -> RunDeliverySettings {
 pub trait ApprovalPromptContextSource: Send + Sync {
     async fn approval_prompt_context(
         &self,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
         owner_user_id: &UserId,
         scope: &TurnScope,
     ) -> Option<ApprovalPromptContextView>;
@@ -140,6 +140,10 @@ pub struct RunDeliveryServices {
     pub outbound_store: Arc<dyn OutboundStateStorePort>,
     pub route_store: Arc<dyn DeliveredGateRouteStore>,
     pub communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
+    /// Canonical project-scoped reader used to materialize assistant-authored
+    /// `/workspace/...` references only after outbound policy approves the
+    /// delivery.
+    pub project_filesystem: Arc<dyn ProjectFilesystemReader>,
     /// The coordinator every send goes through (OUT-1: none bypasses).
     pub coordinator: Arc<DeliveryCoordinator>,
     /// The channel extension whose surface these components serve (the

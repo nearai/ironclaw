@@ -1,17 +1,17 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_loop_contracts::{
+    InstructionMaterializationStore, LoopCapabilityPort, LoopModelGateway, LoopModelGatewayError,
+    LoopModelGatewayRequest, LoopModelPort, LoopModelProgressSink, LoopModelResponse,
+    LoopPromptBundleAuthority,
+};
 use ironclaw_loop_host::{
     HostIdentityContextSource, HostManagedModelGateway, HostManagedModelStreamSink,
     HostSkillContextSource, LoopAttachmentReadPort, ThreadBackedLoopModelPort,
     ThreadContextWindowCache,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
-use ironclaw_turns::run_profile::{
-    InstructionMaterializationStore, LoopCapabilityPort, LoopModelGateway, LoopModelGatewayError,
-    LoopModelGatewayRequest, LoopModelPort, LoopModelProgressSink, LoopModelResponse,
-    LoopPromptBundleAuthority,
-};
 
 use crate::model_gateway_error_mapping::host_error_to_model_gateway_error;
 

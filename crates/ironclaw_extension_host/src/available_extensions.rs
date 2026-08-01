@@ -1,4 +1,7 @@
 // arch-exempt: large_file, bundled extension catalog and manifest projection, plan #5905
+use ironclaw_extension_contracts::{
+    channel::ChannelConnectionStrategy, surface::CapabilitySurfaceKind,
+};
 use ironclaw_extensions::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionAdminConfigurationDescriptor,
     ExtensionManifestRecord, ExtensionPackage, ExtensionRuntime, HostApiContractRegistry,
@@ -6,11 +9,9 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    channel::ChannelConnectionStrategy,
     host_port::HostPortCatalog,
     ids::{CapabilityId, ExtensionId, VendorId},
     path::VirtualPath,
-    surface::CapabilitySurfaceKind,
 };
 use ironclaw_product::{
     ChannelConnectionRequirement, LifecycleChannelDirections,
@@ -115,7 +116,7 @@ pub struct AvailableExtensionPackage {
     /// The channel surface's declared `[channel.presentation]` (markdown +
     /// message cap), cached at construction like `channel_directions`. Fed into
     /// prompt construction via the lifecycle summary (OUT-11).
-    pub channel_presentation: Option<ironclaw_host_api::channel::ChannelPresentation>,
+    pub channel_presentation: Option<ironclaw_extension_contracts::channel::ChannelPresentation>,
     pub assets: Vec<AvailableExtensionAsset>,
     /// Bespoke onboarding copy carried down from a migrated inventory bundle
     /// (`ironclaw_first_party_extensions::packages`). `None` for packages whose
@@ -160,6 +161,7 @@ impl AvailableExtensionPackage {
                 ManifestSource::HostBundled => LifecycleExtensionSource::HostBundled,
                 ManifestSource::InstalledLocal => LifecycleExtensionSource::Installed,
                 ManifestSource::RegistryInstalled => LifecycleExtensionSource::Registry,
+                ManifestSource::UserRegistered => LifecycleExtensionSource::Installed,
             },
             runtime_kind: runtime_kind(&self.package.manifest.runtime),
             surface_kinds: self.surface_kinds.clone(),
@@ -434,13 +436,13 @@ impl AvailableExtensionCatalog {
         })?;
         let mut resolved = Vec::new();
         for package in &catalog.packages {
-            let record = ExtensionManifestRecord::from_toml(
+            let record = ExtensionManifestRecord::from_toml_with_root_binding(
                 &package.manifest_toml,
                 ManifestSource::HostBundled,
                 &host_ports,
                 None,
                 &contracts,
-                Some(package.package.root.clone()),
+                package.package.root_binding.clone(),
             )
             .map_err(|error| ProductSurfaceFailure::InvalidBindingRequest {
                 reason: format!(
@@ -775,13 +777,13 @@ fn bundled_extension_package(
             reason: format!("host API contracts rejected bundled {label} extension: {error}"),
         }
     })?;
-    let record = ExtensionManifestRecord::from_toml(
+    let record = ExtensionManifestRecord::from_toml_with_root_binding(
         manifest_toml,
         ManifestSource::HostBundled,
         &host_ports,
         None,
         &contracts,
-        Some(root.clone()),
+        ironclaw_extensions::PackageRootBinding::Materialized(root.clone()),
     )
     .map_err(|error| ProductSurfaceFailure::InvalidBindingRequest {
         reason: format!("bundled {label} extension manifest is invalid: {error}"),
@@ -945,7 +947,7 @@ fn channel_directions_from_manifest_record(
 /// `channel_directions` and fed into prompt construction (OUT-11).
 fn channel_presentation_from_manifest_record(
     record: &ExtensionManifestRecord,
-) -> Option<ironclaw_host_api::channel::ChannelPresentation> {
+) -> Option<ironclaw_extension_contracts::channel::ChannelPresentation> {
     record
         .resolved()
         .channel
@@ -1099,13 +1101,13 @@ where
             reason: format!("available extension manifest is not UTF-8: {error}"),
         }
     })?;
-    let record = ExtensionManifestRecord::from_toml(
+    let record = ExtensionManifestRecord::from_toml_with_root_binding(
         manifest_toml,
         stamp,
         host_ports,
         None,
         contracts,
-        Some(entry.path.clone()),
+        ironclaw_extensions::PackageRootBinding::Materialized(entry.path.clone()),
     )
     .map_err(map_binding_error)?;
     let surface_kinds = surface_kinds_from_manifest_record(&record, entry.name.as_str())?;
@@ -1125,7 +1127,8 @@ where
     // remove -> available -> reinstall flow with
     // "failed to read available extension asset"; and cataloging only
     // manifest + wasm module would lose schemas/prompt docs on reinstall.
-    let assets = inline_extension_dir_assets(fs, &package.root).await?;
+    let root = package.materialized_root().map_err(map_binding_error)?;
+    let assets = inline_extension_dir_assets(fs, root).await?;
     Ok(Some(AvailableExtensionPackage {
         package_ref: LifecyclePackageRef::new(
             LifecyclePackageKind::Extension,

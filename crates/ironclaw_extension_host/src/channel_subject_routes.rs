@@ -26,10 +26,8 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{
-    ids::{ExtensionId, TenantId, UserId},
-    recipe::RecipeSecretField,
-};
+use ironclaw_extension_contracts::recipe::RecipeSecretField;
+use ironclaw_host_api::ids::{ExtensionId, TenantId, UserId};
 use ironclaw_product::{AdapterInstallationId, ProductAdapterId};
 use ironclaw_product::{
     ProductConversationSubjectRouteResolutionRequest, ProductConversationSubjectRouteResolver,

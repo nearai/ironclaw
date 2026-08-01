@@ -4,7 +4,8 @@ use crate::failure_categories::{
     MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY, TRANSCRIPT_WRITE_FAILED_CATEGORY,
 };
 use ironclaw_agent_loop::state::CheckpointKind;
-use ironclaw_turns::{ModelInvalidOutputDetailReason, run_profile::LoopSafeSummary};
+use ironclaw_loop_contracts::LoopSafeSummary;
+use ironclaw_turns::ModelInvalidOutputDetailReason;
 
 const CHECKPOINT_REJECTION_PREFIX: &str = "The host rejected the ";
 const CHECKPOINT_REJECTION_CAUSE_SEPARATOR: &str = " checkpoint because ";
@@ -324,7 +325,8 @@ mod tests {
     };
     use ironclaw_agent_loop::state::CheckpointKind;
     use ironclaw_host_api::result_meta::{MODEL_DIAGNOSTIC_MAX_BYTES, ModelDiagnostic};
-    use ironclaw_turns::{ModelInvalidOutputDetailReason, run_profile::LoopSafeSummary};
+    use ironclaw_loop_contracts::LoopSafeSummary;
+    use ironclaw_turns::ModelInvalidOutputDetailReason;
 
     #[test]
     fn checkpoint_rejection_explanation_is_bounded_and_provenance_validated() {

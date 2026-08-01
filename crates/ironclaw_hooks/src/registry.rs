@@ -5,7 +5,7 @@
 //! drift. The skeleton in this PR exposes the binding shape and a simple
 //! resolver; the actual `RunProfile.hooks` field and the manifest→binding
 //! installer pipeline land in follow-up slices that touch
-//! `ironclaw_turns::run_profile` and the extension installer.
+//! `ironclaw_host_api::turn::run_profile` and the extension installer.
 
 use std::collections::HashMap;
 

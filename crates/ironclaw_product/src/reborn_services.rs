@@ -21,14 +21,18 @@ use crate::{
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::future::try_join_all;
-use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{
     AuthFlowStatus, AuthProductScope, AuthProviderId, CredentialAccountId,
     CredentialAccountProjection, CredentialAccountStatus, CredentialAccountUpdateBinding,
     ProviderScope,
 };
 use ironclaw_common::{AutomationName, AutomationNameError};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, IdempotencyKey, SanitizedCancelReason, TurnActor, TurnGateRef, TurnRunId,
+    TurnScope, TurnStatus,
+};
 use ironclaw_host_api::{
+    attachment::InboundAttachment,
     capability::{EffectKind, GrantConstraints, PermissionMode},
     ids::{
         ActivityId, AgentId, CapabilityId, ExtensionId, InvocationId, ProjectId, ResultRef,
@@ -51,9 +55,8 @@ use ironclaw_threads::{
     ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
-    ResumeTurnRequest, RetryTurnRequest, SanitizedCancelReason, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
+    GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest, RetryTurnRequest,
+    SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError,
 };
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -108,6 +111,7 @@ mod product_commands;
 mod project_fs;
 mod projects;
 mod run_artifact;
+mod thread_artifact;
 mod trace_credits;
 mod types;
 mod views;
@@ -155,7 +159,7 @@ pub use fs_browse::{
     RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
     RebornFsStatResponse,
 };
-pub use ironclaw_host_api::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
+pub use ironclaw_extension_contracts::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
 pub use lifecycle_setup::EXTENSION_SETUP_VIEW;
 pub use llm_config::{
     ActiveModelReader, CodexLoginStart, LLM_CONFIG_VIEW, LlmActiveSelection, LlmConfigService,
@@ -200,6 +204,10 @@ pub use projects::{
 pub use run_artifact::{
     RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornRunArtifact, RebornRunArtifactRequest,
     RunArtifactLogs, RunArtifactMessage, RunArtifactRedaction, RunArtifactToolCall,
+};
+pub use thread_artifact::{
+    RebornThreadArtifact, RebornThreadArtifactRequest, THREAD_ARTIFACT_MAX_MESSAGES,
+    THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW,
 };
 pub use types::{
     RebornAccountBindingSource, RebornAttachmentBytes, RebornAttachmentRequest, RebornAuthAccount,
@@ -280,6 +288,10 @@ pub const LLM_ACTIVE_SET_CAPABILITY: ProductCapabilityDescriptor =
 pub const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
 pub const EXTENSION_INSTALL_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(EXTENSION_INSTALL_CAPABILITY_ID);
+pub const EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID: &str =
+    "builtin.extension_register_hosted_mcp";
+pub const EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID);
 pub const EXTENSION_IMPORT_CAPABILITY_ID: &str = "builtin.extension_import";
 pub const EXTENSION_IMPORT_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(EXTENSION_IMPORT_CAPABILITY_ID);
@@ -728,7 +740,7 @@ impl ChannelConnectionService for StaticChannelConnectionService {
     }
 }
 
-pub use ironclaw_host_api::package_lifecycle::ChannelConfigField as RebornChannelConfigField;
+pub use ironclaw_extension_contracts::package_lifecycle::ChannelConfigField as RebornChannelConfigField;
 
 /// The generic channel-config configure port: per-extension operator config
 /// declared by the extension manifest's channel-config fields. Host
@@ -1238,8 +1250,8 @@ enum GateResolutionRoute {
 impl GateResolutionRoute {
     fn from_run_state(
         status: TurnStatus,
-        parked_gate_ref: Option<&GateRef>,
-        requested_gate_ref: &GateRef,
+        parked_gate_ref: Option<&TurnGateRef>,
+        requested_gate_ref: &TurnGateRef,
         resolution: &ProductGateResolution,
     ) -> Result<Self, ProductSurfaceError> {
         match status {
@@ -1269,7 +1281,7 @@ impl GateResolutionRoute {
         }
     }
 
-    fn from_gate_shape(gate_ref: &GateRef, resolution: &ProductGateResolution) -> Self {
+    fn from_gate_shape(gate_ref: &TurnGateRef, resolution: &ProductGateResolution) -> Self {
         match (
             is_approval_gate_ref(gate_ref.as_str()),
             is_auth_gate_ref(gate_ref.as_str()),
@@ -2314,6 +2326,12 @@ impl ProductCapabilityDescriptor {
 /// used only to disambiguate the storage path; the implementation writes
 /// through the same `MountView` the agent's file tools resolve through, so
 /// landed bytes are readable by `file_read`/`list_dir` in later turns.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AttachmentCleanupReport {
+    pub scanned_batches: usize,
+    pub deleted_batches: usize,
+}
+
 #[async_trait]
 pub trait InboundAttachmentLander: Send + Sync {
     async fn land(
@@ -2322,6 +2340,34 @@ pub trait InboundAttachmentLander: Send + Sync {
         message_id: &str,
         attachments: Vec<InboundAttachment>,
     ) -> Result<Vec<AttachmentRef>, ProductSurfaceError>;
+
+    /// Remove one complete batch previously returned by [`Self::land`].
+    ///
+    /// The inbound workflow calls this only when durable message acceptance
+    /// fails after landing. Implementations must constrain deletion to the
+    /// batch represented by `attachments`; they must never sweep unrelated
+    /// workspace paths.
+    async fn rollback(
+        &self,
+        thread_scope: &ThreadScope,
+        attachments: &[AttachmentRef],
+    ) -> Result<(), ProductSurfaceError>;
+
+    /// Reconcile old committed batches against an exhaustive set of durable
+    /// attachment storage keys for this exact thread scope.
+    ///
+    /// Callers must skip this operation when their reference scan was
+    /// truncated. The complete snapshot may include attachment domains the
+    /// implementation does not own, such as agent-created outbound workspace
+    /// files; implementations ignore those references and fail closed when no
+    /// owned reference proves the snapshot usable. Implementations keep a
+    /// reconciliation window and bounded filesystem scan so recent in-flight
+    /// work and unrelated workspace paths are never removed.
+    async fn cleanup_stale(
+        &self,
+        thread_scope: &ThreadScope,
+        referenced_storage_keys: &[String],
+    ) -> Result<AttachmentCleanupReport, ProductSurfaceError>;
 }
 
 /// Reads a landed attachment's bytes back for the WebUI bytes endpoint. The
@@ -3916,6 +3962,12 @@ where
                 let artifact = self.build_run_artifact(caller, request).await?;
                 views::view_page(artifact)
             }
+            id if id == THREAD_ARTIFACT_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(ProductSurfaceError::internal_from)?;
+                let artifact = self.build_thread_artifact(caller, request).await?;
+                views::view_page(artifact)
+            }
             id if id == GLOBAL_AUTO_APPROVE_VIEW.id => {
                 let _: RebornGlobalAutoApproveRequest = serde_json::from_value(query.params)
                     .map_err(ProductSurfaceError::internal_from)?;
@@ -4127,10 +4179,17 @@ where
             .await?;
         // dispatch-exempt: read-only, already-authorized workspace file download
         // through the service's own port — not an in-turn mutating tool call.
-        reader
+        let file = reader
             .read_file(&thread_scope, &request.path)
             .await
-            .map_err(map_project_fs_error)
+            .map_err(map_project_fs_error)?;
+        Ok(ProjectFsFile {
+            path: file.path.as_str().to_string(),
+            filename: file.filename,
+            mime_type: file.mime_type,
+            size_bytes: file.bytes.len() as u64,
+            bytes: file.bytes,
+        })
     }
 
     async fn list_fs_mounts(
@@ -6042,7 +6101,7 @@ where
         scope: TurnScope,
         actor: TurnActor,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         client_action_id: IdempotencyKey,
         resolution: ProductGateResolution,
     ) -> Result<RebornResolveGateResponse, ProductSurfaceError> {
@@ -6084,7 +6143,7 @@ where
         scope: &TurnScope,
         actor: &TurnActor,
         run_id: TurnRunId,
-        gate_ref: &GateRef,
+        gate_ref: &TurnGateRef,
         resolution: &ProductGateResolution,
     ) -> Result<GateResolutionRoute, ProductSurfaceError> {
         let state = match self
@@ -6121,7 +6180,7 @@ where
         scope: TurnScope,
         actor: TurnActor,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         client_action_id: IdempotencyKey,
         resolution: ProductGateResolution,
     ) -> Result<RebornResolveGateResponse, ProductSurfaceError> {
@@ -6164,7 +6223,7 @@ where
         scope: TurnScope,
         actor: TurnActor,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         client_action_id: IdempotencyKey,
         resolution: ProductGateResolution,
     ) -> Result<RebornResolveGateResponse, ProductSurfaceError> {
@@ -6339,8 +6398,8 @@ fn map_project_service_error(error: ProjectServiceError) -> ProductSurfaceError 
 }
 
 fn validate_current_gate_ref(
-    parked_gate_ref: Option<&GateRef>,
-    requested_gate_ref: &GateRef,
+    parked_gate_ref: Option<&TurnGateRef>,
+    requested_gate_ref: &TurnGateRef,
     kind: ProductSurfaceErrorKind,
 ) -> Result<(), ProductSurfaceError> {
     match parked_gate_ref {
@@ -6371,7 +6430,7 @@ async fn assert_generic_run_parked_on_gate(
     turn_coordinator: &dyn TurnCoordinator,
     scope: &TurnScope,
     run_id: TurnRunId,
-    expected_gate_ref: &GateRef,
+    expected_gate_ref: &TurnGateRef,
 ) -> Result<(), ProductSurfaceError> {
     let state = turn_coordinator
         .get_run_state(GetRunStateRequest {
@@ -6504,7 +6563,7 @@ fn parse_replay_run_id(value: Option<String>) -> Result<TurnRunId, ProductSurfac
 fn webui_source_binding_ref_from_raw(
     prefix: &str,
     raw: &str,
-) -> Result<ironclaw_turns::SourceBindingRef, ProductSurfaceError> {
+) -> Result<ironclaw_host_api::turn::SourceBindingRef, ProductSurfaceError> {
     bounded_source_binding_ref(prefix, raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES).map_err(|_| {
         ProductSurfaceError::from_status(ProductSurfaceErrorCode::Internal, 500, false)
     })
@@ -6513,7 +6572,7 @@ fn webui_source_binding_ref_from_raw(
 fn webui_reply_target_binding_ref_from_raw(
     prefix: &str,
     raw: &str,
-) -> Result<ironclaw_turns::ReplyTargetBindingRef, ProductSurfaceError> {
+) -> Result<ironclaw_host_api::turn::ReplyTargetBindingRef, ProductSurfaceError> {
     bounded_reply_target_binding_ref(prefix, raw, DEFAULT_BINDING_REF_RAW_MAX_BYTES).map_err(|_| {
         ProductSurfaceError::from_status(ProductSurfaceErrorCode::Internal, 500, false)
     })
@@ -6786,7 +6845,7 @@ fn webui_retry_binding_id(
     )
 }
 
-fn gate_ref_string(gate_ref: &ironclaw_turns::GateRef) -> String {
+fn gate_ref_string(gate_ref: &ironclaw_host_api::turn::TurnGateRef) -> String {
     gate_ref.as_str().to_string()
 }
 
@@ -7042,7 +7101,7 @@ fn kind_for_surface_rejection(kind: ProductSurfaceRejectionKind) -> ProductSurfa
 }
 
 fn create_thread_metadata_json(
-    client_action_id: &ironclaw_turns::IdempotencyKey,
+    client_action_id: &ironclaw_host_api::turn::IdempotencyKey,
 ) -> Result<String, ProductSurfaceError> {
     serde_json::to_string(&serde_json::json!({
         "client_action_id": client_action_id.as_str(),
@@ -7167,7 +7226,7 @@ fn product_agent_bound_caller_from_webui(
 
 fn generated_thread_id(
     caller: &ProductSurfaceCaller,
-    client_action_id: &ironclaw_turns::IdempotencyKey,
+    client_action_id: &ironclaw_host_api::turn::IdempotencyKey,
 ) -> ThreadId {
     let seed = format!(
         "{}{}{}{}{}{}",

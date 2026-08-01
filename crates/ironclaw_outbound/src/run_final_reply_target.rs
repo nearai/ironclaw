@@ -1,9 +1,9 @@
 use async_trait::async_trait;
+use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use ironclaw_host_api::{
     ids::{RunId, UserId},
     resource::ResourceScope,
 };
-use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
 
 use crate::OutboundDeliveryTargetId;

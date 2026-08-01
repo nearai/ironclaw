@@ -1,0 +1,125 @@
+# PR-blocking mutation gate for named critical invariants only.
+#
+# This is an allowlist of functions, never a workspace mutation score. The
+# gate runs an entry when its source file changes (and runs every entry when
+# this manifest or the gate changes). A surviving or timed-out mutant fails.
+# Unviable mutants are reported but do not count: they cannot change behavior.
+
+[[invariant]]
+domain = "authorization"
+package = "ironclaw_authorization"
+path = "crates/ironclaw_authorization/src/lib.rs"
+function = "principal_matches_context"
+rationale = "A principal must match the typed execution identity before a grant can authorize work."
+watch_paths = [
+  "crates/ironclaw_authorization/Cargo.toml",
+  "crates/ironclaw_authorization/tests/capability_access_contract.rs",
+]
+
+[[invariant]]
+domain = "approvals"
+package = "ironclaw_approvals"
+path = "crates/ironclaw_approvals/src/lib.rs"
+function = "capability_for_action"
+rationale = "An approval lease must remain bound to the exact dispatch or spawn capability."
+watch_paths = [
+  "crates/ironclaw_approvals/Cargo.toml",
+  "crates/ironclaw_approvals/tests/approval_resolution_contract.rs",
+]
+
+[[invariant]]
+domain = "credential scope"
+package = "ironclaw_secrets"
+path = "crates/ironclaw_secrets/src/crypto.rs"
+function = "credential_account_aad"
+rationale = "Encrypted credential material must remain cryptographically bound to account and resource scope."
+test_args = ["--lib", "credential_account_ciphertext_is_bound_to_owner_scope_and_account"]
+watch_paths = ["crates/ironclaw_secrets/Cargo.toml"]
+
+[[invariant]]
+domain = "tenant isolation"
+package = "ironclaw_authorization"
+path = "crates/ironclaw_authorization/src/lib.rs"
+function = "same_scope_owner"
+rationale = "Lease lookup and mutation must not cross tenant, user, agent, project, mission, or thread ownership."
+watch_paths = [
+  "crates/ironclaw_authorization/Cargo.toml",
+  "crates/ironclaw_authorization/tests/capability_lease_contract.rs",
+]
+
+[[invariant]]
+domain = "persistence CAS"
+package = "ironclaw_filesystem"
+path = "crates/ironclaw_filesystem/src/cas.rs"
+function = "capabilities_support_cas"
+rationale = "Read-modify-write must fail closed unless the selected backend proves CAS support."
+watch_paths = [
+  "crates/ironclaw_filesystem/Cargo.toml",
+  "crates/ironclaw_filesystem/src/cas/tests.rs",
+]
+
+[[invariant]]
+domain = "retry classification"
+package = "ironclaw_llm"
+path = "crates/ironclaw_llm/src/retry.rs"
+function = "is_retryable"
+rationale = "Permanent, credential, and policy failures must not be blindly repeated."
+watch_paths = [
+  "crates/ironclaw_llm/Cargo.toml",
+  "crates/ironclaw_llm/src/retry.rs",
+  "crates/ironclaw_llm/src/failover.rs",
+]
+
+[[invariant]]
+domain = "trigger scheduling"
+package = "ironclaw_triggers"
+path = "crates/ironclaw_triggers/src/lib.rs"
+function = "next_cron_slot_after"
+rationale = "A recurring trigger must select a strictly later valid slot in its declared timezone."
+watch_paths = [
+  "crates/ironclaw_triggers/Cargo.toml",
+  "crates/ironclaw_triggers/src/tests.rs",
+]
+
+[[invariant]]
+domain = "idempotency"
+package = "ironclaw_processes"
+path = "crates/ironclaw_processes/src/journal_store/state.rs"
+function = "remember_submission_result"
+rationale = "The process-journal authority must retain bounded durable submit replay identity and evict the oldest record."
+test_args = ["--lib", "replay_imports_and_bounded_idempotency_maps_cover_replacement_and_eviction"]
+watch_paths = [
+  "crates/ironclaw_processes/Cargo.toml",
+  "crates/ironclaw_processes/src/journal_store/state_tests.rs",
+]
+
+[[invariant]]
+domain = "delivery deduplication"
+package = "ironclaw_product"
+path = "crates/ironclaw_product/src/run_delivery/observer.rs"
+function = "try_claim"
+rationale = "Only one live or already-settled delivery loop may own a run's final reply."
+test_args = ["--lib", "delivery_run_ledger_distinguishes_active_and_delivered_claims"]
+watch_paths = ["crates/ironclaw_product/Cargo.toml"]
+
+[[invariant]]
+domain = "delivery routing registration"
+package = "ironclaw_extension_host"
+path = "crates/ironclaw_extension_host/src/channel_outbound_targets.rs"
+function = "register_generic_channel_outbound_targets"
+rationale = "Production composition must expose generic channel targets through the authoritative registry (#6726/#6761)."
+watch_paths = [
+  "crates/ironclaw_extension_host/Cargo.toml",
+  "crates/ironclaw_extension_host/src/channel_host/e2e_tests.rs",
+]
+
+[[invariant]]
+domain = "redaction"
+package = "ironclaw_safety"
+path = "crates/ironclaw_safety/src/redaction.rs"
+function = "redact_exact_values"
+rationale = "Every exact secret representation selected by the safety boundary must be removed from output."
+watch_paths = [
+  "crates/ironclaw_safety/Cargo.toml",
+  "crates/ironclaw_safety/src/redaction.rs",
+]

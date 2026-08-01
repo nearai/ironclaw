@@ -4,13 +4,15 @@
 //! canonical Reborn commands without depending on route handlers, protocol auth
 //! evidence, WASM, or adapter registries.
 
-use ironclaw_attachments::InboundAttachment;
+use ironclaw_attachments::{AttachmentBudgets, DEFAULT_ATTACHMENT_BUDGETS};
+use ironclaw_host_api::turn::{IdempotencyKey, SanitizedCancelReason, TurnGateRef, TurnRunId};
 use ironclaw_host_api::{
+    attachment::InboundAttachment,
     ids::ThreadId,
     product_surface::{ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode},
     turn::{TurnActor, TurnScope},
 };
-use ironclaw_turns::{CancelRunRequest, GateRef, IdempotencyKey, SanitizedCancelReason, TurnRunId};
+use ironclaw_turns::CancelRunRequest;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -18,12 +20,6 @@ const CLIENT_ACTION_ID_MAX_BYTES: usize = 256;
 const USER_MESSAGE_TEXT_MAX_BYTES: usize = 64 * 1024;
 const GATE_REF_MAX_BYTES: usize = 256;
 const CREDENTIAL_REF_MAX_BYTES: usize = 512;
-/// Inline-attachment budgets, mirroring the v1 web gateway: at most
-/// `MAX_INLINE_ATTACHMENTS` files, `MAX_INLINE_ATTACHMENT_BYTES` decoded bytes
-/// per file, and `MAX_INLINE_TOTAL_ATTACHMENT_BYTES` decoded bytes total.
-const MAX_INLINE_ATTACHMENTS: usize = 10;
-const MAX_INLINE_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
-const MAX_INLINE_TOTAL_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const ATTACHMENT_FILENAME_MAX_BYTES: usize = 256;
 
 /// Browser-facing inline-attachment contract advertised to the WebUI.
@@ -41,12 +37,11 @@ pub struct ProductAttachmentCapabilities {
     /// ".pdf"]` — never `image/*` wildcards (which would advertise unsupported
     /// formats, and which break folder navigation in the native macOS picker).
     pub accept: Vec<String>,
-    /// Maximum number of attachments per message.
-    pub max_count: usize,
-    /// Maximum decoded byte size of a single attachment.
-    pub max_file_bytes: usize,
-    /// Maximum combined decoded byte size of all attachments in one message.
-    pub max_total_bytes: usize,
+    /// The count/byte budgets `decode_attachments` enforces. Flattened, so the
+    /// wire shape is unchanged and a new budget field reaches the browser
+    /// without an intermediate edit here.
+    #[serde(flatten)]
+    pub budgets: AttachmentBudgets,
 }
 
 /// The inline-attachment contract advertised to browsers. Generated from the
@@ -55,9 +50,7 @@ pub struct ProductAttachmentCapabilities {
 pub fn product_attachment_capabilities() -> ProductAttachmentCapabilities {
     ProductAttachmentCapabilities {
         accept: ironclaw_common::accept_tokens(),
-        max_count: MAX_INLINE_ATTACHMENTS,
-        max_file_bytes: MAX_INLINE_ATTACHMENT_BYTES,
-        max_total_bytes: MAX_INLINE_TOTAL_ATTACHMENT_BYTES,
+        budgets: DEFAULT_ATTACHMENT_BUDGETS,
     }
 }
 
@@ -120,7 +113,7 @@ impl ProductSubmitTurnRequest {
     pub fn decode_attachments(&self) -> Result<Vec<InboundAttachment>, ProductSurfaceError> {
         use base64::Engine;
 
-        if self.attachments.len() > MAX_INLINE_ATTACHMENTS {
+        if self.attachments.len() > DEFAULT_ATTACHMENT_BUDGETS.max_count {
             return Err(validation_error(
                 "attachments",
                 ProductSurfaceValidationCode::TooLong,
@@ -146,14 +139,14 @@ impl ProductSubmitTurnRequest {
                         ProductSurfaceValidationCode::InvalidValue,
                     )
                 })?;
-            if bytes.len() > MAX_INLINE_ATTACHMENT_BYTES {
+            if bytes.len() > DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes {
                 return Err(validation_error(
                     "attachments",
                     ProductSurfaceValidationCode::TooLong,
                 ));
             }
             total_bytes = total_bytes.saturating_add(bytes.len());
-            if total_bytes > MAX_INLINE_TOTAL_ATTACHMENT_BYTES {
+            if total_bytes > DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes {
                 return Err(validation_error(
                     "attachments",
                     ProductSurfaceValidationCode::TooLong,
@@ -390,7 +383,7 @@ pub enum ProductInboundCommand {
         scope: TurnScope,
         actor: TurnActor,
         run_id: TurnRunId,
-        gate_ref: GateRef,
+        gate_ref: TurnGateRef,
         client_action_id: IdempotencyKey,
         resolution: ProductGateResolution,
     },
@@ -548,9 +541,9 @@ fn parse_run_id(value: Option<String>) -> Result<TurnRunId, ProductSurfaceError>
         .map_err(|_| validation_error("run_id", ProductSurfaceValidationCode::InvalidId))
 }
 
-fn parse_gate_ref(value: Option<String>) -> Result<GateRef, ProductSurfaceError> {
+fn parse_gate_ref(value: Option<String>) -> Result<TurnGateRef, ProductSurfaceError> {
     let value = required_text("gate_ref", value, GATE_REF_MAX_BYTES, TextMode::Token)?;
-    GateRef::new(value)
+    TurnGateRef::new(value)
         .map_err(|_| validation_error("gate_ref", ProductSurfaceValidationCode::InvalidId))
 }
 

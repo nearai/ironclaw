@@ -8,6 +8,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
+    LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
+    LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, PromptMode,
+};
 use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
     CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
@@ -55,11 +60,6 @@ use ironclaw_turns::{
     RunProfileVersion, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
     TurnActor, TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState,
     TurnRunWake, TurnScope, TurnStatus,
-    run_profile::{
-        AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
-        LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
-        LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, PromptMode,
-    },
 };
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
@@ -265,7 +265,7 @@ impl LoopCapabilityResultWriter for UnusedCapabilityResultWriter {
         _write: CapabilityResultWrite<'_>,
     ) -> Result<CapabilityWriteResult, AgentLoopHostError> {
         Err(AgentLoopHostError::new(
-            ironclaw_turns::run_profile::AgentLoopHostErrorKind::InvalidInvocation,
+            ironclaw_loop_contracts::AgentLoopHostErrorKind::InvalidInvocation,
             "unused capability result writer",
         ))
     }
@@ -724,6 +724,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         );
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        reply_attachment_intent_port: None,
         gate_record_store: None,
         process_system,
         thread_service: Arc::new(thread_service.clone()),
@@ -894,6 +895,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         );
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        reply_attachment_intent_port: None,
         gate_record_store: None,
         process_system,
         thread_service: Arc::new(thread_service.clone()),
@@ -1080,6 +1082,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         );
     let error = match build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        reply_attachment_intent_port: None,
         gate_record_store: None,
         process_system,
         thread_service: Arc::new(thread_service.clone()),

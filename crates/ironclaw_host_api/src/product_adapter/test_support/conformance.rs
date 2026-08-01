@@ -171,6 +171,12 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
                     );
                 }
             }
+            Ok(InboundOutcome::BatchFragment(fragment)) => {
+                conformance_value(
+                    fragment.validate(),
+                    "conformance: batch fragments normalized from odd input must satisfy bounds",
+                );
+            }
             Ok(InboundOutcome::Ignore) | Err(_) => {}
         }
     }

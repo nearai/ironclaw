@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
+use crate::stored_message::serialize_stored_thread_message;
 use crate::summary_artifacts::find_overlapping_summary;
 use crate::title::derive_thread_title;
 use crate::tool_result_records::{
@@ -20,6 +21,7 @@ use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
     AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
+    BoundedThreadMessageSnapshot, BoundedThreadMessages, BoundedThreadMessagesRequest,
     CapabilityDisplayPreviewEnvelope, ContextMessage, ContextMessages, ContextWindow,
     CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
     LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
@@ -342,6 +344,8 @@ impl SessionThreadService for InMemorySessionThreadService {
         &self,
         request: AppendFinalizedAssistantMessageRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let (content, attachments) = request.content.into_parts();
+        crate::contract::validate_attachment_refs(&attachments)?;
         let mut state = self.state.lock().await;
         let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
         if let Some(existing) = thread.messages.iter_mut().find(|message| {
@@ -353,8 +357,8 @@ impl SessionThreadService for InMemorySessionThreadService {
                 let before_created_at = existing.created_at;
                 let before_updated_at = existing.updated_at;
                 existing.status = MessageStatus::Finalized;
-                existing.content = Some(request.content.into_text());
-                existing.attachments = Vec::new();
+                existing.content = Some(content);
+                existing.attachments = attachments;
                 existing.updated_at = Some(now);
                 crate::contract::validate_message_timestamp_fields_not_cleared(
                     existing.message_id,
@@ -384,8 +388,8 @@ impl SessionThreadService for InMemorySessionThreadService {
             turn_run_id: Some(request.turn_run_id),
             tool_result_ref: None,
             tool_result_provider_call: None,
-            content: Some(request.content.into_text()),
-            attachments: Vec::new(),
+            content: Some(content),
+            attachments,
             redaction_ref: None,
         };
         thread.next_sequence += 1;
@@ -724,6 +728,8 @@ impl SessionThreadService for InMemorySessionThreadService {
         message_id: ThreadMessageId,
         content: MessageContent,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let (content, attachments) = content.into_parts();
+        crate::contract::validate_attachment_refs(&attachments)?;
         let mut state = self.state.lock().await;
         let thread = get_thread_mut(&mut state, scope, thread_id)?;
         let message = thread
@@ -736,8 +742,8 @@ impl SessionThreadService for InMemorySessionThreadService {
         let before_created_at = message.created_at;
         let before_updated_at = message.updated_at;
         message.status = MessageStatus::Finalized;
-        message.content = Some(content.into_text());
-        message.attachments = Vec::new();
+        message.content = Some(content);
+        message.attachments = attachments;
         message.updated_at = Some(now);
         crate::contract::validate_message_timestamp_fields_not_cleared(
             message.message_id,
@@ -828,6 +834,41 @@ impl SessionThreadService for InMemorySessionThreadService {
             messages: history_messages(thread),
             summary_artifacts: history_summary_artifacts(thread),
         })
+    }
+
+    async fn list_thread_messages_bounded(
+        &self,
+        request: BoundedThreadMessagesRequest,
+    ) -> Result<BoundedThreadMessages, SessionThreadError> {
+        let state = self.state.lock().await;
+        let thread = get_thread(&state, &request.scope, &request.thread_id)?;
+        if thread.messages.len() > request.max_messages {
+            return Ok(BoundedThreadMessages::LimitExceeded);
+        }
+        let mut bytes = 0_usize;
+        for message in &thread.messages {
+            bytes = bytes.saturating_add(serialize_stored_thread_message(message)?.len());
+            if bytes > request.max_bytes {
+                return Ok(BoundedThreadMessages::LimitExceeded);
+            }
+        }
+        let message_ids = thread
+            .messages
+            .iter()
+            .map(|message| message.message_id)
+            .collect::<Vec<_>>();
+        Ok(BoundedThreadMessages::Complete(Box::new(
+            BoundedThreadMessageSnapshot {
+                history: ThreadMessageRange {
+                    thread: thread.record.clone(),
+                    messages: history_messages(thread),
+                },
+                context: ContextMessages {
+                    thread_id: request.thread_id,
+                    messages: context_messages_by_id(thread, &message_ids),
+                },
+            },
+        )))
     }
 
     async fn list_thread_messages_range(

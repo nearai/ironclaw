@@ -25,7 +25,8 @@ use ironclaw_host_api::{
 
 use crate::lifecycle::EgressFactory;
 
-/// Default response-body cap for channel vendor calls.
+/// Default response-body cap for channel vendor calls without an explicit
+/// manifest bound.
 pub const CHANNEL_EGRESS_RESPONSE_BODY_LIMIT_BYTES: u64 = 256 * 1024;
 /// Default per-call timeout for channel vendor calls.
 pub const CHANNEL_EGRESS_TIMEOUT_MS: u64 = 10_000;
@@ -56,7 +57,12 @@ pub struct DeclaredChannelEgress {
     /// Declared body-credential bindings: each maps a handle to the RFC 6901
     /// JSON pointer where the host inserts its resolved value. A request
     /// naming an undeclared handle is rejected before any transport activity.
-    pub body_credentials: Vec<ironclaw_host_api::channel::ChannelBodyCredentialDescriptor>,
+    pub body_credentials:
+        Vec<ironclaw_extension_contracts::channel::ChannelBodyCredentialDescriptor>,
+    pub paths: Vec<String>,
+    pub path_prefixes: Vec<String>,
+    pub request_body_limit_bytes: Option<u64>,
+    pub response_body_limit_bytes: Option<u64>,
 }
 
 /// The credential part of an approved plan: the declared handle plus the
@@ -88,6 +94,10 @@ pub struct ApprovedChannelEgress {
     /// manifest-declared `BodyJsonPointer` target. Resolution and insertion
     /// are the transport's job, host-side.
     pub body_credentials: Vec<ApprovedChannelCredential>,
+    /// Manifest-declared request-body cap. The policy layer checks the
+    /// adapter-supplied body before approval; the host runtime must check the
+    /// final body again after credential injection.
+    pub request_body_limit: Option<u64>,
     pub response_body_limit: u64,
     pub timeout_ms: u64,
 }
@@ -138,14 +148,27 @@ impl PolicyEnforcedChannelEgress {
             .host_str()
             .ok_or(RestrictedEgressError::PolicyDenied)?
             .to_ascii_lowercase();
-        let declared = self
+        let request_path = url.path();
+        let same_host: Vec<&DeclaredChannelEgress> = self
             .declared
             .iter()
-            .find(|target| target.scheme == scheme && target.host.eq_ignore_ascii_case(&host))
-            .ok_or_else(|| RestrictedEgressError::UndeclaredHost { host: host.clone() })?;
-        if !declared.methods.contains(&request.method) {
-            return Err(RestrictedEgressError::UndeclaredMethod);
+            .filter(|target| target.scheme == scheme && target.host.eq_ignore_ascii_case(&host))
+            .collect();
+        if same_host.is_empty() {
+            return Err(RestrictedEgressError::UndeclaredHost { host });
         }
+        let declared = same_host.iter().copied().find(|target| {
+            target.methods.contains(&request.method) && target.matches_path(request_path)
+        });
+        let Some(declared) = declared else {
+            if same_host
+                .iter()
+                .any(|target| target.methods.contains(&request.method))
+            {
+                return Err(RestrictedEgressError::PolicyDenied);
+            }
+            return Err(RestrictedEgressError::UndeclaredMethod);
+        };
         for (name, _) in &request.headers {
             if HOST_OWNED_HEADERS
                 .iter()
@@ -196,8 +219,16 @@ impl PolicyEnforcedChannelEgress {
                 handle: handle.clone(),
                 target: RuntimeCredentialTarget::BodyJsonPointer {
                     pointer: declared_binding.pointer.clone(),
+                    post_injection_body_limit_bytes: None,
                 },
             });
+        }
+        let body = request.body.unwrap_or_default();
+        if declared
+            .request_body_limit_bytes
+            .is_some_and(|limit| body.len() as u64 > limit)
+        {
+            return Err(RestrictedEgressError::PolicyDenied);
         }
         Ok(ApprovedChannelEgress {
             extension_id: self.extension_id.clone(),
@@ -205,11 +236,15 @@ impl PolicyEnforcedChannelEgress {
             method: request.method,
             url: request.url,
             headers: request.headers,
-            body: request.body.unwrap_or_default(),
+            body,
             host,
             credential,
             body_credentials,
-            response_body_limit: CHANNEL_EGRESS_RESPONSE_BODY_LIMIT_BYTES,
+            request_body_limit: declared.request_body_limit_bytes,
+            response_body_limit: declared
+                .response_body_limit_bytes
+                .unwrap_or(CHANNEL_EGRESS_RESPONSE_BODY_LIMIT_BYTES)
+                .min(ironclaw_extension_contracts::channel::MAX_CHANNEL_EGRESS_TRANSFER_BYTES),
             timeout_ms: CHANNEL_EGRESS_TIMEOUT_MS,
         })
     }
@@ -222,8 +257,9 @@ impl RestrictedEgress for PolicyEnforcedChannelEgress {
         request: RestrictedEgressRequest,
     ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
         let approved = self.approve(request)?;
+        let response_body_limit = approved.response_body_limit;
         let response = self.transport.execute(approved).await?;
-        if response.body.len() as u64 > CHANNEL_EGRESS_RESPONSE_BODY_LIMIT_BYTES {
+        if response.body.len() as u64 > response_body_limit {
             // Defensive double-check; the transport enforces the cap at the
             // network boundary.
             return Err(RestrictedEgressError::ResponseTooLarge);
@@ -233,9 +269,30 @@ impl RestrictedEgress for PolicyEnforcedChannelEgress {
 }
 
 impl DeclaredChannelEgress {
+    fn matches_path(&self, request_path: &str) -> bool {
+        if self.paths.is_empty() && self.path_prefixes.is_empty() {
+            return true;
+        }
+        self.paths
+            .iter()
+            .any(|path| normalized_declared_path(path) == request_path)
+            || self.path_prefixes.iter().any(|prefix| {
+                // Segment-boundary match, not a raw byte prefix. Descriptor
+                // validation already requires a trailing `/`, but enforcing it
+                // here too means a prefix that reached policy by any other
+                // route still cannot authorize a sibling path that merely
+                // shares its bytes (`/file/botX` vs `/file/botXEvil/…`).
+                let declared = normalized_declared_path(prefix);
+                let declared = declared.strip_suffix('/').unwrap_or(&declared);
+                request_path
+                    .strip_prefix(declared)
+                    .is_some_and(|rest| rest.starts_with('/'))
+            })
+    }
+
     /// Lift one resolved `[[channel.egress]]` declaration into policy form.
     pub fn from_descriptor(
-        descriptor: &ironclaw_host_api::channel::ChannelEgressDescriptor,
+        descriptor: &ironclaw_extension_contracts::channel::ChannelEgressDescriptor,
     ) -> Self {
         Self {
             scheme: descriptor.scheme,
@@ -244,8 +301,18 @@ impl DeclaredChannelEgress {
             credential_handle: descriptor.credential_handle.clone(),
             injection: descriptor.injection.clone(),
             body_credentials: descriptor.body_credentials.clone(),
+            paths: descriptor.paths.clone(),
+            path_prefixes: descriptor.path_prefixes.clone(),
+            request_body_limit_bytes: descriptor.request_body_limit_bytes,
+            response_body_limit_bytes: descriptor.response_body_limit_bytes,
         }
     }
+}
+
+fn normalized_declared_path(path: &str) -> String {
+    url::Url::parse(&format!("https://manifest.invalid{path}"))
+        .map(|url| url.path().to_string())
+        .unwrap_or_else(|_| path.to_string())
 }
 
 /// The production [`EgressFactory`]: builds a policy-enforced egress from the
@@ -267,7 +334,7 @@ impl EgressFactory for TransportBackedEgressFactory {
         &self,
         extension_id: &str,
         installation_id: &str,
-        declared: &[ironclaw_host_api::channel::ChannelEgressDescriptor],
+        declared: &[ironclaw_extension_contracts::channel::ChannelEgressDescriptor],
     ) -> Arc<dyn RestrictedEgress> {
         Arc::new(PolicyEnforcedChannelEgress::new(
             extension_id,
@@ -313,6 +380,10 @@ mod tests {
             credential_handle: Some(SecretHandle::new("vendor_bot_token").unwrap()),
             injection: None,
             body_credentials: Vec::new(),
+            paths: Vec::new(),
+            path_prefixes: Vec::new(),
+            request_body_limit_bytes: None,
+            response_body_limit_bytes: None,
         }]
     }
 
@@ -445,8 +516,9 @@ mod tests {
     #[tokio::test]
     async fn declared_body_credential_is_approved_with_its_declared_pointer() {
         let mut declared = declared_vendor();
+        declared[0].request_body_limit_bytes = Some(256);
         declared[0].body_credentials = vec![
-            ironclaw_host_api::channel::ChannelBodyCredentialDescriptor {
+            ironclaw_extension_contracts::channel::ChannelBodyCredentialDescriptor {
                 handle: SecretHandle::new("vendor_webhook_secret").unwrap(),
                 pointer: "/secret_token".to_string(),
             },
@@ -461,10 +533,12 @@ mod tests {
             approved[0].body_credentials[0].handle.as_str(),
             "vendor_webhook_secret"
         );
+        assert_eq!(approved[0].request_body_limit, Some(256));
         assert!(
             matches!(
                 &approved[0].body_credentials[0].target,
-                RuntimeCredentialTarget::BodyJsonPointer { pointer } if pointer == "/secret_token"
+                RuntimeCredentialTarget::BodyJsonPointer { pointer, .. }
+                    if pointer == "/secret_token"
             ),
             "the pointer comes from the DECLARATION, never from the adapter"
         );
@@ -486,7 +560,7 @@ mod tests {
         // Declared for a DIFFERENT handle: still rejected.
         let mut declared = declared_vendor();
         declared[0].body_credentials = vec![
-            ironclaw_host_api::channel::ChannelBodyCredentialDescriptor {
+            ironclaw_extension_contracts::channel::ChannelBodyCredentialDescriptor {
                 handle: SecretHandle::new("vendor_webhook_secret").unwrap(),
                 pointer: "/secret_token".to_string(),
             },
@@ -506,7 +580,7 @@ mod tests {
     async fn duplicate_body_credential_opt_in_is_rejected_before_transport() {
         let mut declared = declared_vendor();
         declared[0].body_credentials = vec![
-            ironclaw_host_api::channel::ChannelBodyCredentialDescriptor {
+            ironclaw_extension_contracts::channel::ChannelBodyCredentialDescriptor {
                 handle: SecretHandle::new("vendor_webhook_secret").unwrap(),
                 pointer: "/secret_token".to_string(),
             },
@@ -551,5 +625,123 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, RestrictedEgressError::ResponseTooLarge));
+    }
+
+    #[tokio::test]
+    async fn declared_path_and_body_bounds_are_enforced_before_transport() {
+        let mut declared = declared_vendor();
+        declared[0].paths = vec!["/api/exact".to_string()];
+        declared[0].path_prefixes = vec!["/files/".to_string()];
+        declared[0].request_body_limit_bytes = Some(2);
+        let (egress, transport) = egress_over(declared);
+
+        egress
+            .send(post("https://vendor.example/api/exact"))
+            .await
+            .expect("exact path is declared");
+        egress
+            .send(post("https://vendor.example/files/report.pdf"))
+            .await
+            .expect("prefix path is declared");
+
+        let error = egress
+            .send(post("https://vendor.example/api/exact-suffix"))
+            .await
+            .expect_err("exact declaration must not be prefix-matched");
+        assert!(matches!(error, RestrictedEgressError::PolicyDenied));
+
+        let mut oversized = post("https://vendor.example/api/exact");
+        oversized.body = Some(b"123".to_vec());
+        let error = egress
+            .send(oversized)
+            .await
+            .expect_err("oversized body must be denied");
+        assert!(matches!(error, RestrictedEgressError::PolicyDenied));
+        assert_eq!(transport.approved.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn same_host_targets_are_selected_by_method_and_path_with_declared_response_cap() {
+        let mut post_target = declared_vendor().remove(0);
+        post_target.paths = vec!["/api/getFile".to_string()];
+        post_target.response_body_limit_bytes = Some(64 * 1024);
+        let mut download_target = post_target.clone();
+        download_target.methods = vec![NetworkMethod::Get];
+        download_target.paths.clear();
+        download_target.path_prefixes = vec!["/file/".to_string()];
+        download_target.response_body_limit_bytes = Some(5 * 1024 * 1024);
+        let (egress, transport) = egress_over(vec![post_target, download_target]);
+
+        let mut download = post("https://vendor.example/file/report.pdf");
+        download.method = NetworkMethod::Get;
+        download.body = None;
+        egress
+            .send(download)
+            .await
+            .expect("download target matches");
+
+        let approved = transport.approved.lock().unwrap();
+        assert_eq!(approved.len(), 1);
+        assert_eq!(approved[0].method, NetworkMethod::Get);
+        assert_eq!(approved[0].response_body_limit, 5 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn placeholder_paths_and_zero_request_bound_match_the_shipped_declaration() {
+        let mut exact = declared_vendor().remove(0);
+        exact.paths = vec!["/bot{token}/getFile".to_string()];
+        let mut download = exact.clone();
+        download.methods = vec![NetworkMethod::Get];
+        download.paths.clear();
+        download.path_prefixes = vec!["/file/bot{token}/".to_string()];
+        download.request_body_limit_bytes = Some(0);
+        let (egress, transport) = egress_over(vec![exact, download]);
+
+        egress
+            .send(post("https://vendor.example/bot{token}/getFile"))
+            .await
+            .expect("tokenized exact path is declared");
+
+        let mut get = post("https://vendor.example/file/bot{token}/photos/x.png");
+        get.method = NetworkMethod::Get;
+        get.body = None;
+        egress
+            .send(get)
+            .await
+            .expect("tokenized prefix with an empty GET body is declared");
+
+        assert_eq!(transport.approved.lock().unwrap().len(), 2);
+    }
+
+    /// Prefix matching is a segment match, not a byte-prefix match. A declared
+    /// `/file/bot123/` must not authorize `/file/bot123Evil/...`: that sibling
+    /// shares the declared bytes but is a different path the manifest author
+    /// never allowed on this pinned host and credential.
+    #[tokio::test]
+    async fn path_prefix_does_not_authorize_a_sibling_sharing_its_bytes() {
+        let mut target = declared_vendor().remove(0);
+        target.methods = vec![NetworkMethod::Get];
+        target.paths.clear();
+        target.path_prefixes = vec!["/file/bot123/".to_string()];
+        let (egress, transport) = egress_over(vec![target]);
+
+        let mut sibling = post("https://vendor.example/file/bot123Evil/secrets.txt");
+        sibling.method = NetworkMethod::Get;
+        sibling.body = None;
+        let error = egress
+            .send(sibling)
+            .await
+            .expect_err("a sibling path sharing the prefix bytes must be denied");
+        assert!(matches!(error, RestrictedEgressError::PolicyDenied));
+
+        let mut allowed = post("https://vendor.example/file/bot123/report.pdf");
+        allowed.method = NetworkMethod::Get;
+        allowed.body = None;
+        egress
+            .send(allowed)
+            .await
+            .expect("a genuine sub-path of the declared prefix is allowed");
+
+        assert_eq!(transport.approved.lock().unwrap().len(), 1);
     }
 }

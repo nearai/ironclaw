@@ -17,15 +17,13 @@ use ironclaw_agent_loop::{
         LoopExecutionState,
     },
 };
-use ironclaw_turns::{
-    LoopExit, LoopExitId, LoopFailureKind, RunProfileVersion,
-    run_profile::{
-        AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverHost,
-        AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, AgentLoopHostError,
-        AgentLoopHostErrorKind, LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopDriverId,
-        LoopRunContext,
-    },
+use ironclaw_loop_contracts::{
+    AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverHost,
+    AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, AgentLoopHostError,
+    AgentLoopHostErrorKind, LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopDriverId,
+    LoopExit, LoopFailureKind, LoopRunContext,
 };
+use ironclaw_turns::{LoopExitId, RunProfileVersion};
 
 use crate::model_failure_mapping::host_stage_failure_category;
 use crate::{
@@ -471,23 +469,21 @@ mod tests {
         MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedCapabilityOutcome,
         test_run_context,
     };
-    use ironclaw_turns::{
-        LoopMessageRef, RedactedCheckpointPayload, TurnCheckpointId,
-        run_profile::{
-            AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef,
-            BeginAssistantDraft, CheckpointSchemaId, FinalizeAssistantMessage,
-            LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCancellationPort,
-            LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest,
-            LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
-            LoopCompactionRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
-            LoopDriverId, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
-            LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
-            LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort,
-            LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
-            LoopTranscriptPort, StageCheckpointPayloadRequest, UpdateAssistantDraft,
-            VisibleCapabilityRequest, VisibleCapabilitySurface,
-        },
+    use ironclaw_loop_contracts::{
+        AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
+        CheckpointSchemaId, FinalizeAssistantMessage, LoadCheckpointPayloadRequest,
+        LoadedCheckpointPayload, LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort,
+        LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError,
+        LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest, LoopContextBundle,
+        LoopContextPort, LoopContextRequest, LoopDriverId, LoopInputAckToken, LoopInputBatch,
+        LoopInputCursor, LoopInputPort, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest,
+        LoopPromptPort, LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort,
+        LoopSafeSummary, LoopTranscriptPort, RedactedCheckpointPayload,
+        StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     };
+    use ironclaw_turns::{LoopMessageRef, TurnCheckpointId};
     use std::sync::Mutex;
 
     #[test]
@@ -904,7 +900,7 @@ mod tests {
         restored_state.iteration = 7;
         restored_state.input_cursor = LoopInputCursor::from_host_token(
             &source_context,
-            ironclaw_turns::run_profile::LoopInputCursorToken::new("input-cursor:source-seen")
+            ironclaw_loop_contracts::LoopInputCursorToken::new("input-cursor:source-seen")
                 .expect("valid cursor"),
         );
         let checkpoint_id = TurnCheckpointId::new();
@@ -1118,9 +1114,7 @@ mod tests {
         );
     }
 
-    fn run_context_for_driver(
-        driver: &PlannedDriver,
-    ) -> ironclaw_turns::run_profile::LoopRunContext {
+    fn run_context_for_driver(driver: &PlannedDriver) -> ironclaw_loop_contracts::LoopRunContext {
         let descriptor = driver.descriptor();
         let mut context = test_run_context("planned-driver-resume");
         context.resolved_run_profile.loop_driver = descriptor.clone();
@@ -1379,8 +1373,8 @@ mod tests {
     ) -> ironclaw_agent_loop::state::LoopExecutionState {
         use ironclaw_agent_loop::state::PendingAuthResume;
         use ironclaw_host_api::ids::CapabilityId;
+        use ironclaw_loop_contracts::{CapabilityInputRef, CapabilitySurfaceVersion};
         use ironclaw_turns::LoopGateRef;
-        use ironclaw_turns::run_profile::{CapabilityInputRef, CapabilitySurfaceVersion};
 
         let gate_ref = LoopGateRef::new("gate:test-auth-deny").expect("valid gate ref");
         let activity_id = ironclaw_turns::CapabilityActivityId::new();
@@ -1470,7 +1464,7 @@ mod tests {
         // The executor must not re-block on auth. A denial-stamped pending auth
         // resume is surfaced as a model-visible failure and the loop continues
         // to completion or another terminal state — never another Blocked exit.
-        if let ironclaw_turns::LoopExit::Blocked(_) =
+        if let ironclaw_loop_contracts::LoopExit::Blocked(_) =
             result.expect("resume should produce a terminal loop exit")
         {
             panic!(
@@ -1558,10 +1552,10 @@ mod tests {
     ) -> ironclaw_agent_loop::state::LoopExecutionState {
         use ironclaw_agent_loop::state::PendingApprovalResume;
         use ironclaw_host_api::ids::{ApprovalRequestId, CapabilityId, CorrelationId};
-        use ironclaw_turns::LoopGateRef;
-        use ironclaw_turns::run_profile::{
+        use ironclaw_loop_contracts::{
             CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion,
         };
+        use ironclaw_turns::LoopGateRef;
 
         let gate_ref = LoopGateRef::new("gate:test-approval-deny").expect("valid gate ref");
         let activity_id = ironclaw_turns::CapabilityActivityId::new();
@@ -1668,9 +1662,9 @@ mod tests {
     ) -> ironclaw_agent_loop::state::LoopExecutionState {
         use ironclaw_agent_loop::state::PendingExternalToolResume;
         use ironclaw_host_api::ids::CapabilityId;
+        use ironclaw_loop_contracts::{CapabilityInputRef, CapabilitySurfaceVersion};
         use ironclaw_turns::CapabilityActivityId;
         use ironclaw_turns::LoopGateRef;
-        use ironclaw_turns::run_profile::{CapabilityInputRef, CapabilitySurfaceVersion};
 
         let gate_ref = LoopGateRef::new("gate:test-external-tool-deny").expect("valid gate ref");
         let mut state = ironclaw_agent_loop::state::LoopExecutionState::initial_for_run(context);
@@ -1746,10 +1740,10 @@ mod tests {
     ) -> ironclaw_agent_loop::state::LoopExecutionState {
         use ironclaw_agent_loop::state::{PendingApprovalResume, PendingAuthResume};
         use ironclaw_host_api::ids::{ApprovalRequestId, CapabilityId, CorrelationId};
-        use ironclaw_turns::LoopGateRef;
-        use ironclaw_turns::run_profile::{
+        use ironclaw_loop_contracts::{
             CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion,
         };
+        use ironclaw_turns::LoopGateRef;
 
         let auth_gate_ref = LoopGateRef::new("gate:dual-auth").expect("valid gate ref");
         let approval_gate_ref = LoopGateRef::new("gate:dual-approval").expect("valid gate ref");
@@ -1869,7 +1863,7 @@ mod tests {
 
         // The loop must not re-block on the approval gate — the denial is stamped
         // and the executor surfaces it as a model-visible failure.
-        if let ironclaw_turns::LoopExit::Blocked(_) =
+        if let ironclaw_loop_contracts::LoopExit::Blocked(_) =
             result.expect("resume should produce a terminal loop exit")
         {
             panic!(
@@ -1933,10 +1927,10 @@ mod tests {
     ) -> ironclaw_agent_loop::state::LoopExecutionState {
         use ironclaw_agent_loop::state::{PendingApprovalResume, PendingAuthResume};
         use ironclaw_host_api::ids::{ApprovalRequestId, CapabilityId, CorrelationId};
-        use ironclaw_turns::LoopGateRef;
-        use ironclaw_turns::run_profile::{
+        use ironclaw_loop_contracts::{
             CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion,
         };
+        use ironclaw_turns::LoopGateRef;
 
         let gate_ref = LoopGateRef::new("gate:ambiguous-shared").expect("valid gate ref");
         let auth_activity_id = ironclaw_turns::CapabilityActivityId::new();

@@ -3,6 +3,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
+use ironclaw_extension_contracts::state::InstallationState;
 use ironclaw_host_api::{
     action::NetworkMethod,
     http::{
@@ -12,7 +13,6 @@ use ironclaw_host_api::{
     ids::{CapabilityId, ExtensionId, InvocationId},
     resource::ResourceScope,
     runtime::{RuntimeKind, TrustClass},
-    state::InstallationState,
 };
 use ironclaw_host_runtime::{
     BUILTIN_FIRST_PARTY_PROVIDER, HostRuntimeHttpEgressPort, HostRuntimeHttpEgressRequest,

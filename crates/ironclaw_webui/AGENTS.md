@@ -15,8 +15,8 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
   - `src/webui_v2/descriptors.rs` + `tests/webui_v2_descriptors_contract.rs` — the route contract.
   - `src/webui_v2/handlers.rs` + `tests/webui_v2_handlers_contract.rs` — handler dispatch.
   - `src/webui_serve.rs` — the `webui_v2_app` gateway assembly + middleware order.
-  - `Cargo.toml` — feature gates (`openai-compat-beta`,
-    `dev-in-memory-session`) and the (deliberately narrow) dependency shape.
+  - `Cargo.toml` — the single feature gate (`test-support`) and the
+    (deliberately narrow) dependency shape.
 
 ## What this crate owns (composed subsystems)
 
@@ -32,7 +32,7 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
    config)` composes the full `axum::Router` and layers the fixed middleware
    stack — ws-origin → body limit → bearer auth → rate limit → handler — plus the
    `WebuiAuthenticator` / `WebuiAuthentication` host-auth vocabulary and the
-   feature-gated OpenAI-compat mounts.
+   OpenAI-compat mounts (unconditional — this crate's only feature is `test-support`).
 3. **Serve loop + host authentication** (`src/lib.rs`, `src/auth/`,
    `src/session.rs`, `src/oidc.rs`, `src/signed_session_login.rs`):
    `serve_webui_v2` (listener bind + `axum::serve` + graceful shutdown), the
@@ -55,7 +55,7 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
   workflow services, facades, lower substrates, runtime, or DB crates; reach
   execution through `ProductSurface` supplied by host assembly. The architecture
   boundary test enforces this DTO/descriptor-only edge.
-- **v1 anything** — no `src/` (monolith) import, no `ironclaw_engine`, no v1
+- **v1 anything** — the monolith `src/` tree and `ironclaw_engine` are gone, so there is nothing to import; likewise no v1
   channel code, no v1 secrets / settings / DB. This is a Path A native host
   surface (`docs/reborn/how-to-port-channel-to-reborn.md`).
 - **Business/durable state.** Everything the gateway needs flows through
@@ -63,7 +63,6 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 
 ## Allowed dependencies
 
-`ironclaw_host_ingress` (Axum route-mount carriers),
 `ironclaw_auth` (product-auth service facade and route DTOs),
 `ironclaw_common` (shared hashing primitive used to redact auth-token samples),
 `ironclaw_product` (wire DTOs and product command/view descriptors),

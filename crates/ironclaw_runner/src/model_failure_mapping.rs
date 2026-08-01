@@ -1,5 +1,5 @@
 use ironclaw_agent_loop::executor::HostStage;
-use ironclaw_turns::run_profile::{AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind};
+use ironclaw_loop_contracts::{AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind};
 
 use crate::failure_categories::{
     BUDGET_ACCOUNTING_FAILED_CATEGORY, MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,

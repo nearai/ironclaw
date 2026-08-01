@@ -18,8 +18,11 @@ covered at the crate tier; here every lifecycle/delete user stays a `member`,
 which can never strand the tenant's admins.
 """
 
+import asyncio
+import json
 import re
 import uuid
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -135,6 +138,132 @@ async def test_list_users_contains_new_user(admin_client, test_user):
     assert test_user["id"] in ids
 
 
+async def test_admin_users_ui_paginates_retries_and_deduplicates(
+    reborn_v2_page, reborn_v2_server
+):
+    """The served Admin users page preserves cursor pages and retries safely."""
+    requested_cursors = []
+    pagination_attempts = 0
+    release_final_page = asyncio.Event()
+
+    def user_record(user_id, display_name):
+        return {
+            "user_id": user_id,
+            "display_name": display_name,
+            "email": f"{user_id}@example.com",
+            "role": "member",
+            "status": "active",
+            "job_count": 0,
+            "total_cost": 0,
+        }
+
+    async def handle_users(route):
+        nonlocal pagination_attempts
+        query = parse_qs(urlparse(route.request.url).query)
+        cursor = query.get("cursor", [None])[0]
+        requested_cursors.append(cursor)
+
+        if cursor is None:
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "users": [
+                            user_record("first-user", "First User"),
+                            user_record("shared-user", "Shared User"),
+                        ],
+                        "next_cursor": "cursor-1",
+                    }
+                ),
+            )
+            return
+
+        assert cursor == "cursor-1"
+        pagination_attempts += 1
+        # React Query retries a failed query once. Fail both automatic attempts
+        # so the page reaches its explicit retry state.
+        if pagination_attempts <= 2:
+            await route.fulfill(
+                status=503,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "error": "service_unavailable",
+                        "kind": "service_unavailable",
+                        "retryable": True,
+                    }
+                ),
+            )
+            return
+
+        await release_final_page.wait()
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "users": [
+                        user_record("shared-user", "Shared User"),
+                        user_record("second-user", "Second User"),
+                    ],
+                    "next_cursor": None,
+                }
+            ),
+        )
+
+    page = reborn_v2_page
+    await page.route(f"**{ADMIN_BASE}/users*", handle_users)
+    await page.goto(
+        f"{reborn_v2_server}/admin/users?token={REBORN_V2_AUTH_TOKEN}"
+    )
+
+    load_more = page.locator(SEL_V2["admin_users_load_more"])
+    await expect(page.get_by_role("button", name="First User", exact=True)).to_be_visible(
+        timeout=15000
+    )
+    await expect(page.get_by_role("button", name="Shared User", exact=True)).to_have_count(
+        1
+    )
+    await expect(page.get_by_role("button", name="Second User", exact=True)).to_have_count(
+        0
+    )
+    await expect(load_more).to_be_visible()
+
+    await load_more.click()
+    load_more_error = page.locator(SEL_V2["admin_users_load_more_error"])
+    await expect(load_more_error).to_be_visible(timeout=15000)
+    await expect(page.get_by_role("button", name="First User", exact=True)).to_be_visible()
+    await expect(page.get_by_role("button", name="Shared User", exact=True)).to_have_count(
+        1
+    )
+    assert pagination_attempts == 2
+
+    async with page.expect_request(
+        lambda request: "cursor=cursor-1" in request.url
+    ):
+        await load_more.click()
+    try:
+        await expect(load_more).to_be_disabled()
+        await expect(load_more).to_contain_text("Loading...")
+        # A native click on the disabled control must not start a duplicate page.
+        await load_more.evaluate("(element) => element.click()")
+        await page.wait_for_timeout(100)
+        assert pagination_attempts == 3
+    finally:
+        release_final_page.set()
+
+    await expect(page.get_by_role("button", name="Second User", exact=True)).to_be_visible(
+        timeout=15000
+    )
+    await expect(page.get_by_role("button", name="Shared User", exact=True)).to_have_count(
+        1
+    )
+    await expect(load_more_error).to_have_count(0)
+    await expect(load_more).to_have_count(0)
+    assert requested_cursors == [None, "cursor-1", "cursor-1", "cursor-1"]
+
+
 async def test_get_user_detail(admin_client, test_user):
     r = await admin_client.get(f"{ADMIN_BASE}/users/{test_user['id']}")
     assert r.status_code == 200, r.text
@@ -221,6 +350,64 @@ async def test_admin_user_detail_refreshes_role_and_status_after_mutations(
         SEL_V2["admin_activate_button_name"],
         SEL_V2["admin_active_status_name"],
     )
+
+
+async def test_admin_confirm_dialogs_restore_focus_after_escape_and_backdrop_cancel(
+    admin_client, reborn_v2_page, reborn_v2_server, test_user
+):
+    """Admin confirmations share browser keyboard, backdrop, and focus behavior."""
+    page = reborn_v2_page
+    await page.goto(
+        f"{reborn_v2_server}/admin/users?token={REBORN_V2_AUTH_TOKEN}"
+    )
+
+    user_link = page.get_by_role(
+        "button", name=test_user["display_name"], exact=True
+    )
+    user_row = user_link.locator(
+        "xpath=ancestor::div[contains(@class, 'justify-between')][1]"
+    )
+    suspend_trigger = user_row.get_by_role(
+        "button", name=SEL_V2["admin_suspend_button_name"], exact=True
+    )
+    await suspend_trigger.click()
+
+    suspend_dialog = page.get_by_role(
+        "dialog", name="Suspend user", exact=True
+    )
+    await expect(suspend_dialog).to_be_visible()
+    await expect(suspend_dialog).to_contain_text(test_user["display_name"])
+    await expect(
+        suspend_dialog.locator(SEL_V2["confirm_dialog_cancel"])
+    ).to_be_focused()
+    await page.keyboard.press("Escape")
+    await expect(suspend_dialog).to_have_count(0)
+    await expect(suspend_trigger).to_be_focused()
+
+    await user_link.click()
+    await expect(
+        page.get_by_role(
+            "heading", name=test_user["display_name"], exact=True
+        )
+    ).to_be_visible(timeout=15000)
+    delete_trigger = page.locator(SEL_V2["admin_user_detail_delete"])
+    await delete_trigger.click()
+
+    delete_dialog = page.get_by_role("dialog", name="Delete user", exact=True)
+    await expect(delete_dialog).to_contain_text(test_user["display_name"])
+    await expect(
+        delete_dialog.locator(SEL_V2["confirm_dialog_cancel"])
+    ).to_be_focused()
+    await delete_dialog.locator(
+        ":scope > div[aria-hidden='true']"
+    ).click(position={"x": 2, "y": 2})
+    await expect(delete_dialog).to_have_count(0)
+    await expect(delete_trigger).to_be_focused()
+
+    retained = await admin_client.get(
+        f"{ADMIN_BASE}/users/{test_user['id']}"
+    )
+    assert retained.status_code == 200, retained.text
 
 
 async def test_admin_token_visibility_matches_user_creation_lifecycle(

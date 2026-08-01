@@ -20,6 +20,14 @@ use ironclaw_host_api::{
     scope::Principal,
 };
 use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind};
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
+    CapabilitySurfaceVersion, ConcurrencyHint, InMemoryLoopHostMilestoneSink,
+    InstructionSafetyContext, LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken,
+    LoopInputCursorToken, LoopRequest, LoopRequestBatch, LoopRunContext, NoOpBudgetAccountant,
+    NoOpPolicyGuard, ParentLoopOutput, PromptMode, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, resolution,
+};
 use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     EmptyLoopCapabilityPort, EmptyUserProfileSource, HostIdentityContextBuildError,
@@ -67,14 +75,6 @@ use ironclaw_turns::ProcessLoopCheckpointStore;
 use ironclaw_turns::{
     AgentTurnRuntimePort, CancelRunRequest, IdempotencyKey, LoopResultRef, SanitizedCancelReason,
     TurnActor, TurnCoordinator, TurnRunId, TurnRunState, TurnRunWake, TurnScope, TurnStatus,
-    run_profile::{
-        AgentLoopHostError, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilitySurfaceVersion, ConcurrencyHint, InMemoryLoopHostMilestoneSink,
-        InstructionSafetyContext, LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken,
-        LoopInputCursorToken, LoopRequest, LoopRequestBatch, LoopRunContext, NoOpBudgetAccountant,
-        NoOpPolicyGuard, ParentLoopOutput, PromptMode, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, resolution,
-    },
 };
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
@@ -380,6 +380,7 @@ impl ProductLiveAgentLoopHarness {
         ));
         let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
             attachment_read_port: None,
+            reply_attachment_intent_port: None,
             gate_record_store: turn_executor_gate_store,
             process_system,
             thread_service: Arc::new(thread_service.clone()),
@@ -870,7 +871,7 @@ impl RecordingDelegatingCapabilityPort {
         };
         let result_ref = LoopResultRef::new(origin.as_str()).map_err(|error| {
             AgentLoopHostError::new(
-                ironclaw_turns::run_profile::AgentLoopHostErrorKind::InvalidInvocation,
+                ironclaw_loop_contracts::AgentLoopHostErrorKind::InvalidInvocation,
                 format!("invalid preserved loop result ref: {error}"),
             )
         })?;
@@ -955,7 +956,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             LoopResultRef::new(self.capability.result_ref.clone())
                 .expect("valid harness result ref"),
             self.capability.safe_summary.clone(),
-            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
             self.capability.terminate_hint,
             0,
             None,
@@ -1224,7 +1225,7 @@ fn dispatch_grants_for_user<const N: usize>(
 
 fn adapter_error(error: impl Display) -> AgentLoopHostError {
     AgentLoopHostError::new(
-        ironclaw_turns::run_profile::AgentLoopHostErrorKind::Internal,
+        ironclaw_loop_contracts::AgentLoopHostErrorKind::Internal,
         error.to_string(),
     )
 }

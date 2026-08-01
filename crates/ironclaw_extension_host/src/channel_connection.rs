@@ -31,13 +31,15 @@ use ironclaw_host_api::{
 };
 use ironclaw_product::{ChannelAuthAccountState, ChannelConnectionService};
 
+use ironclaw_extension_contracts::channel_identity::{
+    ChannelConnectionScope, ChannelConnectionScopeSource,
+};
 use ironclaw_extension_host::{
     FilesystemChannelDmTargetStore, channel_config_connection_scope_source,
     discover_channel_extensions,
 };
-use ironclaw_host_api::{
-    channel_identity::{ChannelConnectionScope, ChannelConnectionScopeSource},
-    user_identity::{RebornUserIdentityBindingDeleteStore, RebornUserIdentityLookup},
+use ironclaw_host_api::user_identity::{
+    RebornUserIdentityBindingDeleteStore, RebornUserIdentityLookup,
 };
 
 /// Narrow disconnect-side port over product-auth lifecycle cleanup, so the

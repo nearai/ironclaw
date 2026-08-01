@@ -8,20 +8,17 @@ use ironclaw_host_api::{
     ids::{AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId},
     resolution::{Resolution, ResolutionBatch},
 };
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityFailureDetail,
+    CapabilityInputRef, CapabilityProgress, CapabilitySurfaceVersion, LoopCapabilityPort,
+    LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
+    ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+};
 use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResultWrite, DurablePersistence, LoopCapabilityResultWriter,
 };
-use ironclaw_turns::{
-    CapabilityActivityId, TurnId,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
-        CapabilityFailureDetail, CapabilityInputRef, CapabilityProgress, CapabilitySurfaceVersion,
-        LoopCapabilityPort, LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall,
-        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
-        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
-        resolution,
-    },
-};
+use ironclaw_turns::{CapabilityActivityId, TurnId};
 use serde_json::{Value, json};
 use tracing::debug;
 
@@ -490,13 +487,11 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
             }
         }
         // Callable = the full reachable catalog (captured above) UNION the tools
-        // actually advertised this turn UNION every bridge capability. Only
-        // `tool_search` is advertised now, but the `tool_describe` / `tool_call`
-        // synthetic capabilities are still used internally — describe-first routes
-        // a schema response through `tool_describe`'s capability id. Keeping ALL
-        // bridge capabilities callable authorizes that internal routing at the
-        // executor visibility gate even though they are no longer advertised;
-        // without it a describe-first response is rejected as "not visible".
+        // actually advertised this turn UNION every bridge capability. Deferred
+        // surfaces advertise all three bridges, and describe-first routing can
+        // also synthesize a response through `tool_describe`'s capability id.
+        // Keeping every bridge callable authorizes both paths at the executor
+        // visibility gate.
         let mut callable: BTreeSet<CapabilityId> = callable_capability_ids.into_iter().collect();
         callable.extend(
             surface
@@ -908,6 +903,11 @@ impl ToolDisclosureCapabilityPort {
             BridgeKind::Search => self.invoke_tool_search(&request, &bridge).await,
             BridgeKind::Describe => self.invoke_tool_describe(&request, &bridge).await,
             BridgeKind::DescribeFirst => self.invoke_describe_first(&request, &bridge).await,
+            BridgeKind::Call if decode_tool_call_arguments(&bridge.arguments).is_none() => {
+                Ok(failed_invalid_input(
+                    "tool_call arguments must be a JSON object encoded as a string",
+                ))
+            }
             BridgeKind::Call => Ok(failed_invalid_input(
                 "tool_call target is not a known tool; use tool_search to find the correct tool name",
             )),
@@ -1099,11 +1099,9 @@ impl ToolDisclosureCapabilityPort {
         if is_bridge_name(name) {
             return Ok(None);
         }
-        let arguments = tool_call
-            .arguments
-            .get("arguments")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
+        let Some(arguments) = decode_tool_call_arguments(&tool_call.arguments) else {
+            return Ok(None);
+        };
         let guard = self.turn_state()?;
         let Some(state) = guard.as_ref() else {
             return Ok(None);
@@ -1306,6 +1304,19 @@ fn provider_call_digest_input(provider_call_id: &str, name: &str, arguments: &Va
     .to_string()
 }
 
+/// Decode the provider-safe `tool_call.arguments` string while continuing to
+/// accept the original object form from recorded replays and in-flight callers.
+fn decode_tool_call_arguments(bridge_arguments: &Value) -> Option<Value> {
+    match bridge_arguments.get("arguments") {
+        None => Some(json!({})),
+        Some(Value::String(encoded)) => serde_json::from_str::<Value>(encoded)
+            .ok()
+            .filter(Value::is_object),
+        Some(value @ Value::Object(_)) => Some(value.clone()),
+        Some(_) => None,
+    }
+}
+
 fn failed_invalid_input(summary: &'static str) -> Resolution {
     resolution::failed(
         ironclaw_host_api::result_meta::FailureKind::InputEncode,
@@ -1366,14 +1377,12 @@ mod tests {
         resolution::ToolVerdict,
         result_meta::FailureKind,
     };
-    use ironclaw_loop_host::CapabilityWriteResult;
-    use ironclaw_turns::{
-        InMemoryRunProfileResolver, LoopResultRef, RunProfileResolver, TurnRunId, TurnScope,
-        run_profile::{
-            CapabilityDescriptorView, ConcurrencyHint, ResolvedRunProfile,
-            RunProfileResolutionRequest,
-        },
+    use ironclaw_loop_contracts::{
+        CapabilityDescriptorView, ConcurrencyHint, InMemoryRunProfileResolver, ResolvedRunProfile,
+        RunProfileResolutionRequest, RunProfileResolver,
     };
+    use ironclaw_loop_host::CapabilityWriteResult;
+    use ironclaw_turns::{LoopResultRef, TurnRunId, TurnScope};
 
     struct SpyPort {
         definitions: Vec<ProviderToolDefinition>,
@@ -1600,19 +1609,14 @@ mod tests {
             "visible surface must preserve inner descriptor metadata"
         );
         let advertised = port.tool_definitions().expect("tool definitions");
-        assert!(
-            advertised
-                .iter()
-                .any(|definition| definition.name.as_str() == TOOL_SEARCH_NAME),
-            "tool_search stays advertised as the discovery entry point"
-        );
-        assert!(
-            !advertised
-                .iter()
-                .any(|definition| definition.name.as_str() == TOOL_CALL_NAME),
-            "tool_call is no longer advertised (discovery is capability_info + direct call); \
-             it still resolves internally for the forgiving path"
-        );
+        for bridge in [TOOL_SEARCH_NAME, TOOL_DESCRIBE_NAME, TOOL_CALL_NAME] {
+            assert!(
+                advertised
+                    .iter()
+                    .any(|definition| definition.name.as_str() == bridge),
+                "deferred surfaces advertise the complete discovery protocol: missing {bridge}"
+            );
+        }
         assert!(
             !advertised
                 .iter()
@@ -1658,7 +1662,7 @@ mod tests {
         let target = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_call(
                 TOOL_CALL_NAME,
-                json!({"name": "hidden_tool", "arguments": {"path": "demo"}}),
+                json!({"name": "hidden_tool", "arguments": r#"{"path":"demo"}"#}),
             )))
             .await
             .expect("disclosed tool_call registers as target");
@@ -1696,10 +1700,9 @@ mod tests {
                 .lock()
                 .expect("registered calls lock")
                 .last()
-                .expect("target call")
-                .name
-                .as_str(),
-            "hidden_tool"
+                .map(|call| (call.name.as_str(), &call.arguments)),
+            Some(("hidden_tool", &json!({"path": "demo"}))),
+            "the provider-safe string must decode before inner registration"
         );
         assert_eq!(
             inner
@@ -2874,6 +2877,89 @@ mod tests {
                 .expect("invocations lock")
                 .is_empty(),
             "recursion must not dispatch to the inner port"
+        );
+    }
+
+    #[tokio::test]
+    async fn advertised_tool_describe_errors_are_recoverable_without_dispatch() {
+        let inner = Arc::new(SpyPort {
+            definitions: vec![provider_definition(
+                "fixture.read_file",
+                "read_file",
+                "Read a file",
+            )],
+            surface_version: CapabilitySurfaceVersion::new("surface:test")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        });
+        let port = disclosure_port(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("surface builds turn state");
+
+        for (arguments, expected) in [
+            (json!({}), "tool_describe requires name"),
+            (json!({"name": 42}), "tool_describe requires name"),
+            (
+                json!({"name": TOOL_SEARCH_NAME}),
+                "tool_describe target must not be a bridge",
+            ),
+            (
+                json!({"name": "does_not_exist"}),
+                "tool_describe target is unknown",
+            ),
+        ] {
+            let candidate =
+                port.register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                    provider_call(TOOL_DESCRIBE_NAME, arguments),
+                ))
+                .await
+                .expect("tool_describe registers on the bridge path");
+            let outcome = port
+                .invoke_capability(LoopRequest {
+                    activity_id: candidate.activity_id,
+                    surface_version: candidate.surface_version,
+                    capability_id: candidate.capability_id,
+                    input_ref: candidate.input_ref,
+                    approval_resume: None,
+                    auth_resume: None,
+                })
+                .await
+                .expect("tool_describe returns a recoverable result");
+            assert!(
+                matches!(
+                    outcome,
+                    Resolution::Done(ref output)
+                        if matches!(
+                            &output.verdict,
+                            ToolVerdict::RecoverableFailure { diagnostic, .. }
+                                if diagnostic.model_visible_text() == Some(expected)
+                        )
+                ),
+                "unexpected tool_describe outcome for {expected}: {outcome:?}"
+            );
+        }
+
+        assert!(
+            inner
+                .registered_calls
+                .lock()
+                .expect("registered calls lock")
+                .is_empty(),
+            "invalid tool_describe calls must not register an inner capability"
+        );
+        assert!(
+            inner
+                .invocations
+                .lock()
+                .expect("invocations lock")
+                .is_empty(),
+            "invalid tool_describe calls must not dispatch an inner capability"
         );
     }
 

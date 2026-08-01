@@ -1,5 +1,5 @@
 use crate::state::{IndexedMessageKind, LoopExecutionState, MessageIndexEntry};
-use ironclaw_turns::run_profile::LoopRunContext;
+use ironclaw_loop_contracts::LoopRunContext;
 
 use super::compaction::{
     CompactionDecision, CompactionStrategy, DefaultCompactionStrategy, is_eligible_user_boundary,
@@ -114,7 +114,7 @@ mod tests {
         CompactionEffectivenessBaseline, CompactionPromptSnapshot, LoopExecutionState,
         MessageIndexEntry,
     };
-    use ironclaw_turns::run_profile::PromptContextTokenBudget;
+    use ironclaw_loop_contracts::PromptContextTokenBudget;
 
     fn active_task_preserving_strategy(
         preserve_tail_tokens: u64,
