@@ -1,6 +1,7 @@
 // --- Inline-attachment landing (vision, #4644) ---
 
 use super::*;
+use ironclaw_loop_host::RejectingInputEnqueue;
 
 use crate::{
     AttachmentCleanupReport, AuthRequirement, ExternalEventId, ParsedProductInbound,
@@ -261,6 +262,7 @@ async fn policy_rewrite_can_filter_channel_attachments_and_keeps_the_exact_sourc
         LandingBindingStub,
         Arc::new(InMemorySessionThreadService::default()),
         CapturingTurnCoordinator::default(),
+        Arc::new(RejectingInputEnqueue),
     )
     .with_inbound_attachments(Arc::new(CapturingLander::default()));
     let envelope =
@@ -306,6 +308,7 @@ async fn policy_rewrite_can_reorder_channel_attachments_and_sources_follow_descr
         LandingBindingStub,
         Arc::new(InMemorySessionThreadService::default()),
         CapturingTurnCoordinator::default(),
+        Arc::new(RejectingInputEnqueue),
     )
     .with_inbound_attachments(Arc::new(CapturingLander::default()));
     let envelope =
@@ -358,6 +361,7 @@ async fn policy_rewrite_rejects_injected_or_ambiguous_channel_attachment_sources
             LandingBindingStub,
             Arc::new(InMemorySessionThreadService::default()),
             CapturingTurnCoordinator::default(),
+            Arc::new(RejectingInputEnqueue),
         )
         .with_inbound_attachments(Arc::new(CapturingLander::default()));
         let envelope = user_message_envelope_with_refs(event_id, sources);
@@ -450,6 +454,7 @@ async fn channel_attachment_fetches_after_policy_then_lands_once() {
         LandingBindingStub,
         Arc::new(InMemorySessionThreadService::default()),
         CapturingTurnCoordinator::default(),
+        Arc::new(RejectingInputEnqueue),
     )
     .with_inbound_attachments(lander.clone());
     let envelope = user_message_envelope_with_refs("evt:channel-allow", vec![source]);
@@ -503,6 +508,7 @@ async fn declared_mime_parameters_do_not_reject_a_matching_attachment() {
         LandingBindingStub,
         Arc::new(InMemorySessionThreadService::default()),
         CapturingTurnCoordinator::default(),
+        Arc::new(RejectingInputEnqueue),
     )
     .with_inbound_attachments(lander.clone());
     let envelope = user_message_envelope_with_refs("evt:channel-mime-params", vec![source]);
@@ -554,6 +560,7 @@ async fn adapter_recovered_filename_survives_when_the_descriptor_has_none() {
         LandingBindingStub,
         Arc::new(InMemorySessionThreadService::default()),
         CapturingTurnCoordinator::default(),
+        Arc::new(RejectingInputEnqueue),
     )
     .with_inbound_attachments(lander.clone());
     let envelope = user_message_envelope_with_refs("evt:channel-photo", vec![source]);
@@ -584,6 +591,7 @@ async fn rejected_policy_never_fetches_channel_attachment() {
         LandingBindingStub,
         Arc::new(InMemorySessionThreadService::default()),
         CapturingTurnCoordinator::default(),
+        Arc::new(RejectingInputEnqueue),
     )
     .with_inbound_attachments(lander.clone());
     let envelope = user_message_envelope_with_refs("evt:channel-reject", vec![source]);
@@ -623,6 +631,7 @@ async fn accepted_message_replay_does_not_refetch_or_reland_attachment() {
         LandingBindingStub,
         Arc::new(InMemorySessionThreadService::default()),
         CapturingTurnCoordinator::default(),
+        Arc::new(RejectingInputEnqueue),
     )
     .with_inbound_attachments(lander.clone());
     let envelope = user_message_envelope_with_refs("evt:channel-replay", vec![source]);
@@ -660,6 +669,7 @@ async fn declared_attachment_over_budget_fails_before_fetch_or_landing() {
         LandingBindingStub,
         Arc::new(InMemorySessionThreadService::default()),
         CapturingTurnCoordinator::default(),
+        Arc::new(RejectingInputEnqueue),
     )
     .with_inbound_attachments(lander.clone());
     let envelope = user_message_envelope_with_refs("evt:channel-too-large", vec![source]);
@@ -707,6 +717,7 @@ async fn retryable_channel_transfer_can_retry_without_duplicate_landing() {
         LandingBindingStub,
         Arc::new(InMemorySessionThreadService::default()),
         CapturingTurnCoordinator::default(),
+        Arc::new(RejectingInputEnqueue),
     )
     .with_inbound_attachments(lander.clone());
     let envelope = user_message_envelope_with_refs("evt:channel-retry", vec![source]);
@@ -764,6 +775,7 @@ async fn missing_transfer_support_fails_closed_without_landing() {
         LandingBindingStub,
         Arc::new(InMemorySessionThreadService::default()),
         CapturingTurnCoordinator::default(),
+        Arc::new(RejectingInputEnqueue),
     )
     .with_inbound_attachments(lander.clone());
     let envelope = user_message_envelope_with_refs("evt:channel-unsupported", vec![source]);
@@ -790,6 +802,7 @@ async fn mixed_inline_and_channel_sources_fail_before_fetch_or_landing() {
         LandingBindingStub,
         Arc::new(InMemorySessionThreadService::default()),
         CapturingTurnCoordinator::default(),
+        Arc::new(RejectingInputEnqueue),
     )
     .with_inbound_attachments(lander.clone());
     let envelope = user_message_envelope_with_refs("evt:channel-mixed", vec![source]);
@@ -842,6 +855,7 @@ async fn count_and_declared_total_limits_fail_before_fetch() {
             LandingBindingStub,
             Arc::new(InMemorySessionThreadService::default()),
             CapturingTurnCoordinator::default(),
+            Arc::new(RejectingInputEnqueue),
         )
         .with_inbound_attachments(Arc::new(CapturingLander::default()));
         let envelope = user_message_envelope_with_refs(event_id, sources);
@@ -879,6 +893,7 @@ async fn actual_per_file_and_total_limits_fail_without_landing() {
         LandingBindingStub,
         Arc::new(InMemorySessionThreadService::default()),
         CapturingTurnCoordinator::default(),
+        Arc::new(RejectingInputEnqueue),
     )
     .with_inbound_attachments(per_file_lander.clone());
     let per_file_envelope =
@@ -924,6 +939,7 @@ async fn actual_per_file_and_total_limits_fail_without_landing() {
         LandingBindingStub,
         Arc::new(InMemorySessionThreadService::default()),
         CapturingTurnCoordinator::default(),
+        Arc::new(RejectingInputEnqueue),
     )
     .with_inbound_attachments(total_lander.clone());
     let total_envelope =
@@ -959,6 +975,7 @@ async fn native_attachment_path_lands_inline_bytes_before_acceptance() {
         LandingBindingStub,
         thread_service,
         CapturingTurnCoordinator::default(),
+        Arc::new(RejectingInputEnqueue),
     )
     .with_inbound_attachments(lander.clone());
 
@@ -1029,6 +1046,7 @@ async fn native_attachment_path_rolls_back_landed_batch_when_message_acceptance_
         LandingBindingStub,
         thread_service,
         CapturingTurnCoordinator::default(),
+        Arc::new(RejectingInputEnqueue),
     )
     .with_inbound_attachments(Arc::new(ProjectScopedAttachmentLander::new(Arc::clone(
         &attachment_filesystem,
@@ -1086,6 +1104,7 @@ async fn native_attachment_path_without_lander_fails_closed() {
         LandingBindingStub,
         thread_service,
         CapturingTurnCoordinator::default(),
+        Arc::new(RejectingInputEnqueue),
     );
 
     let envelope = user_message_envelope();

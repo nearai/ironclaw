@@ -1880,7 +1880,6 @@ impl HostInputQueue for EmptyInputQueue {
     ) -> Result<(), HostInputQueueError> {
         Ok(())
     }
-
 }
 
 struct EmptyIdentityContextSource;

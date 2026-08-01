@@ -765,9 +765,9 @@ impl GenericChannelHostAssembly {
                 Arc::clone(&binding),
                 Arc::clone(&self.deps.thread_service),
                 Arc::clone(&self.deps.turn_coordinator),
+                Arc::clone(&self.deps.input_enqueue),
             )
-            .with_inbound_attachments(Arc::clone(&self.deps.inbound_attachments))
-            .with_input_enqueue(Arc::clone(&self.deps.input_enqueue)),
+            .with_inbound_attachments(Arc::clone(&self.deps.inbound_attachments)),
         );
         let mut workflow = DefaultProductSurface::new(
             inbound,

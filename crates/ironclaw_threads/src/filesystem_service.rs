@@ -1654,7 +1654,11 @@ where
         thread_id: &ThreadId,
         message_id: ThreadMessageId,
     ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
-        if self.read_thread_versioned(scope, thread_id).await?.is_none() {
+        if self
+            .read_thread_versioned(scope, thread_id)
+            .await?
+            .is_none()
+        {
             return Ok(None);
         }
         Ok(self
@@ -1682,7 +1686,7 @@ where
                 None,
             )
             .await?
-            && should_reuse_assistant_run_message(&existing, &requested_content)
+            && crate::contract::should_reuse_assistant_run_message(&existing, &requested_content)
         {
             return Ok(existing);
         }
@@ -1735,7 +1739,7 @@ where
             .await?
         {
             if existing.status != MessageStatus::Draft {
-                if should_reuse_assistant_run_message(&existing, &content) {
+                if crate::contract::should_reuse_assistant_run_message(&existing, &content) {
                     // Retry of the same finalized reply (or a redacted/deleted
                     // row that must not be resurrected): idempotent return.
                     return Ok(existing);
@@ -3104,17 +3108,6 @@ fn assistant_message_matches_run(
     message.kind == MessageKind::Assistant
         && message.turn_run_id.as_deref() == Some(turn_run_id)
         && required_status.is_none_or(|status| message.status == status)
-}
-
-fn should_reuse_assistant_run_message(
-    message: &ThreadMessageRecord,
-    requested_content: &str,
-) -> bool {
-    match message.status {
-        MessageStatus::Draft | MessageStatus::Redacted | MessageStatus::Deleted => true,
-        MessageStatus::Finalized => message.content.as_deref() == Some(requested_content),
-        _ => false,
-    }
 }
 
 const REDACTED_SUMMARY_CONTENT: &str = "[redacted]";

@@ -6614,9 +6614,8 @@ fn steering_admission_error(
             ProductSurfaceError::internal_invariant()
         }
         SteeringAdmissionError::RunState(error) => map_turn_error(error),
-        SteeringAdmissionError::MarkQueued(error) | SteeringAdmissionError::SettleRejected(error) => {
-            map_thread_error(error)
-        }
+        SteeringAdmissionError::MarkQueued(error)
+        | SteeringAdmissionError::SettleRejected(error) => map_thread_error(error),
         SteeringAdmissionError::Enqueue(error) => {
             // Carry the cause to the server log; the user-facing surface stays
             // the sanitized retryable 503 (error-handling.md).
@@ -6637,7 +6636,6 @@ fn parse_replay_run_id(value: Option<String>) -> Result<TurnRunId, ProductSurfac
         )
     })
 }
-
 
 fn webui_source_binding_ref_from_raw(
     prefix: &str,

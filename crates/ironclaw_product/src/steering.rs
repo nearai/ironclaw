@@ -223,7 +223,11 @@ async fn mark_queued_reconciling(
         Err(error) => error,
     };
     let row = match thread_service
-        .read_thread_message(&request.thread_scope, request.thread_id(), request.message_id)
+        .read_thread_message(
+            &request.thread_scope,
+            request.thread_id(),
+            request.message_id,
+        )
         .await
     {
         Ok(row) => row,
@@ -265,7 +269,11 @@ async fn settle_rejected(
     request: &SteeringAdmissionRequest,
 ) -> Result<(), SteeringAdmissionError> {
     thread_service
-        .mark_message_rejected_busy(&request.thread_scope, request.thread_id(), request.message_id)
+        .mark_message_rejected_busy(
+            &request.thread_scope,
+            request.thread_id(),
+            request.message_id,
+        )
         .await
         .map(|_| ())
         .map_err(SteeringAdmissionError::SettleRejected)

@@ -633,7 +633,6 @@ mod tests {
             }
             Ok(())
         }
-
     }
 
     struct FailingInputQueue;
@@ -658,7 +657,6 @@ mod tests {
         ) -> Result<(), HostInputQueueError> {
             Ok(())
         }
-
     }
 
     async fn test_run_context(label: &str) -> LoopRunContext {

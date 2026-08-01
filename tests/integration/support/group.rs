@@ -1668,8 +1668,8 @@ impl<'g> RebornThreadBuilder<'g> {
             Arc::clone(&binding_service),
             thread_harness.service_instance()?,
             Arc::clone(&shared.coordinator),
-        )
-        .with_input_enqueue(Arc::clone(&shared.input_enqueue));
+            Arc::clone(&shared.input_enqueue),
+        );
         // C-ATTACH: wire the real lander when the backend has one (`attachment_tools()`)
         // so `submit_inbound_with_attachments` lands through it instead of
         // failing closed. `None` for every other group (unchanged behavior).

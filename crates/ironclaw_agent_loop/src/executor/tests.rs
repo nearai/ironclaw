@@ -49,10 +49,9 @@ use super::{
     AgentLoopExecutor, AgentLoopExecutorError, AssistantReplyInput, AssistantReplyStage, BatchStep,
     BudgetInput, BudgetStage, BudgetStep, CanonicalAgentLoopExecutor, CapabilityInput,
     CapabilityStage, DrainInput, ExecutorStage, ExitInput, ExitStage, GateInput, GateStage,
-    HostStage, InputStage, InputStep, ModelInput, ModelStage, PromptInput,
-    PromptStage, PromptStep, StageContext, TurnCompletedStep,
-    UserFacingInputDrainMode, consume_drainable_inputs, sanitize_result_ref_suffix,
-    synthetic_provider_error_result_ref,
+    HostStage, InputStage, InputStep, ModelInput, ModelStage, PromptInput, PromptStage, PromptStep,
+    StageContext, TurnCompletedStep, UserFacingInputDrainMode, consume_drainable_inputs,
+    sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
 };
 
 #[allow(dead_code)]
@@ -363,12 +362,7 @@ async fn budget_stage_exits_at_iteration_limit() {
     state.terminal_warning_state.clear_active();
 
     let step = BudgetStage
-        .process(
-            ctx,
-            BudgetInput {
-                state,
-            },
-        )
+        .process(ctx, BudgetInput { state })
         .await
         .expect("budget stage");
 
@@ -484,12 +478,7 @@ async fn explanation_prompt_bundle_error_degrades_to_original_failed_exit() {
     state.terminal_warning_state.clear_active();
 
     let step = BudgetStage
-        .process(
-            ctx,
-            BudgetInput {
-                state,
-            },
-        )
+        .process(ctx, BudgetInput { state })
         .await
         .expect("budget stage");
 
@@ -544,12 +533,7 @@ async fn prompt_stage_compacts_candidate_emits_redaction_once_then_rebuilds_fina
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -691,12 +675,7 @@ async fn prompt_stage_circuit_breaker_disables_compaction_after_repeated_ineffec
 
     for completed_compactions in 1..=CompactionStrategyState::INEFFECTIVE_COMPACTION_TRIP_LIMIT {
         let step = PromptStage
-            .process(
-                ctx,
-                PromptInput {
-                    state,
-                },
-            )
+            .process(ctx, PromptInput { state })
             .await
             .expect("prompt stage");
         let output = match step {
@@ -726,12 +705,7 @@ async fn prompt_stage_circuit_breaker_disables_compaction_after_repeated_ineffec
     // Drive the prompt stage again with the breaker open and the prompt still
     // over threshold: threshold-triggered compaction must NOT run again.
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage after breaker opened");
     let output = match step {
@@ -797,12 +771,7 @@ async fn prompt_stage_forced_compaction_bypasses_open_circuit_breaker() {
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
     let output = match step {
@@ -867,12 +836,7 @@ async fn prompt_stage_deferred_compaction_returns_to_normal_prompt_path() {
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -954,12 +918,7 @@ async fn prompt_stage_successful_compaction_clears_deferred_watermark() {
     });
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1011,12 +970,7 @@ async fn prompt_stage_cancellation_after_deferred_compaction_returns_cancelled_e
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1048,12 +1002,7 @@ async fn prompt_stage_compaction_index_maps_system_summary_and_other_kinds() {
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1101,12 +1050,7 @@ async fn prompt_stage_cancellation_after_prompt_bundle_returns_cancelled_exit() 
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1158,12 +1102,7 @@ async fn prompt_stage_compaction_inference_timeout_returns_to_normal_prompt_path
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1225,12 +1164,7 @@ async fn prompt_stage_compaction_security_rejection_returns_to_normal_prompt_pat
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1297,12 +1231,7 @@ async fn compaction_failure_cancellation_skips_explanation_and_returns_cancelled
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1364,12 +1293,7 @@ async fn prompt_stage_compaction_cancelled_returns_cancelled_exit() {
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1413,12 +1337,7 @@ async fn prompt_stage_cancellation_during_compaction_aborts_prompt_planning() {
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1454,12 +1373,7 @@ async fn prompt_stage_compaction_aborts_immediately_when_cancellation_already_se
 
     let step = tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        PromptStage.process(
-            ctx,
-            PromptInput {
-                state,
-            },
-        ),
+        PromptStage.process(ctx, PromptInput { state }),
     )
     .await
     .expect("already-requested cancellation should not wait for compaction")
@@ -1494,12 +1408,7 @@ async fn prompt_stage_cancellation_after_compaction_success_skips_final_bundle_r
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -2217,14 +2126,7 @@ async fn prompt_stage_host_unavailable_on_visible_capabilities_propagates_error(
     };
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    let result = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-            },
-        )
-        .await;
+    let result = PromptStage.process(ctx, PromptInput { state }).await;
     let error = match result {
         Ok(_) => panic!("visible capabilities failure should propagate"),
         Err(error) => error,
@@ -2248,14 +2150,7 @@ async fn prompt_stage_host_unavailable_on_build_prompt_bundle_propagates_error()
     };
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    let result = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-            },
-        )
-        .await;
+    let result = PromptStage.process(ctx, PromptInput { state }).await;
     let error = match result {
         Ok(_) => panic!("prompt bundle failure should propagate"),
         Err(error) => error,
@@ -2282,14 +2177,7 @@ async fn prompt_stage_preserves_policy_denied_kind_from_prompt_bundle() {
     };
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    let result = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-            },
-        )
-        .await;
+    let result = PromptStage.process(ctx, PromptInput { state }).await;
     let error = match result {
         Ok(_) => panic!("policy denial must stop prompt construction"),
         Err(error) => error,
@@ -2316,14 +2204,7 @@ async fn prompt_stage_maps_cancelled_prompt_bundle_error_to_cancelled() {
     };
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    let result = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-            },
-        )
-        .await;
+    let result = PromptStage.process(ctx, PromptInput { state }).await;
 
     assert!(matches!(result, Err(AgentLoopExecutorError::Cancelled)));
 }
@@ -2342,14 +2223,7 @@ async fn prompt_stage_redacts_rejected_prompt_error_summary() {
     };
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    let result = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-            },
-        )
-        .await;
+    let result = PromptStage.process(ctx, PromptInput { state }).await;
     let error = match result {
         Ok(_) => panic!("rejected prompt error summary should propagate safely"),
         Err(error) => error,
@@ -2664,12 +2538,7 @@ async fn budget_iteration_limit_schedules_normal_warning_turn() {
     state.iteration = family.planner().budget().iteration_limit(&state);
 
     let step = BudgetStage
-        .process(
-            ctx,
-            BudgetInput {
-                state,
-            },
-        )
+        .process(ctx, BudgetInput { state })
         .await
         .expect("budget stage");
 
@@ -2831,12 +2700,7 @@ async fn consumed_iteration_warning_falls_back_to_failed_exit() {
     state.terminal_warning_state.clear_active();
 
     let step = BudgetStage
-        .process(
-            ctx,
-            BudgetInput {
-                state,
-            },
-        )
+        .process(ctx, BudgetInput { state })
         .await
         .expect("budget stage should finalize the exhausted warning path");
 
@@ -2936,7 +2800,6 @@ async fn stopped_on_suspension_completed_outcome_still_appends_result() {
     assert_eq!(appended.len(), 1);
     assert_eq!(appended[0].result_ref, result_ref);
 }
-
 
 #[tokio::test]
 async fn terminate_hint_after_batch_completes_without_extra_model_call() {
@@ -5855,12 +5718,7 @@ async fn prompt_stage_returns_skip_model_when_flag_set() {
     state.post_capability_state.skip_model_this_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -5890,7 +5748,6 @@ async fn prompt_stage_returns_skip_model_when_flag_set() {
         "no prompt bundle should be requested when skipping the model"
     );
 }
-
 
 // ---------------------------------------------------------------------------
 // WU-A Step 9 — caller-level executor tests for PostCapabilityStage + SkipModel

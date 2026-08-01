@@ -354,14 +354,11 @@ impl SessionThreadService for InMemorySessionThreadService {
         message_id: ThreadMessageId,
     ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
         let mut state = self.state.lock().await;
-        let Ok(thread) = get_thread_mut(&mut state, scope, thread_id) else {
-            return Ok(None);
-        };
-        Ok(thread
-            .messages
-            .iter()
-            .find(|message| message.message_id == message_id)
-            .cloned())
+        // silent-ok: point-read maps a lookup miss (thread or message) to absence
+        match get_message_mut(&mut state, scope, thread_id, message_id) {
+            Ok(message) => Ok(Some(message.clone())),
+            Err(_) => Ok(None),
+        }
     }
 
     async fn append_assistant_draft(
@@ -374,7 +371,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         if let Some(existing) = thread.messages.iter().rev().find(|message| {
             message.kind == MessageKind::Assistant
                 && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
-                && should_reuse_assistant_run_message(message, &requested_content)
+                && crate::contract::should_reuse_assistant_run_message(message, &requested_content)
         }) {
             return Ok(existing.clone());
         }
@@ -441,7 +438,7 @@ impl SessionThreadService for InMemorySessionThreadService {
                 thread.record.updated_at = Some(now);
                 return Ok(existing.clone());
             }
-            if should_reuse_assistant_run_message(existing, &content) {
+            if crate::contract::should_reuse_assistant_run_message(existing, &content) {
                 // Retry of the same finalized reply (or a redacted/deleted
                 // row that must not be resurrected): idempotent return.
                 return Ok(existing.clone());
@@ -1435,17 +1432,6 @@ fn history_message(message: &ThreadMessageRecord) -> ThreadMessageRecord {
         content: message.content.clone(),
         attachments: message.attachments.clone(),
         redaction_ref: message.redaction_ref.clone(),
-    }
-}
-
-fn should_reuse_assistant_run_message(
-    message: &ThreadMessageRecord,
-    requested_content: &str,
-) -> bool {
-    match message.status {
-        MessageStatus::Draft | MessageStatus::Redacted | MessageStatus::Deleted => true,
-        MessageStatus::Finalized => message.content.as_deref() == Some(requested_content),
-        _ => false,
     }
 }
 

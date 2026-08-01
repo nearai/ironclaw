@@ -2391,7 +2391,7 @@ impl SessionThreadService for ScriptedThreadService {
         let status = match &self.behavior {
             ScriptedThreadBehavior::RejectedBusyMarkFails { .. } => MessageStatus::RejectedBusy,
             ScriptedThreadBehavior::DeferredBusyMarkFails { .. } => MessageStatus::DeferredBusy,
-            _ => return scripted_stub_unreachable("read_thread_message"),
+            _ => scripted_stub_unreachable("read_thread_message"),
         };
         Ok(Some(ThreadMessageRecord {
             message_id,

@@ -9,9 +9,9 @@ use super::{
     AgentLoopExecutorError, AssistantReplyInput, BudgetInput, BudgetStep, COMPLETION_NUDGE_LIMIT,
     CancelCheck, CapabilityInput, CheckpointInput, CheckpointKind, CheckpointStage,
     DefaultExecutorPipeline, DrainInput, ExecutorStage, ExitInput, InputStep, ModelInput,
-    ModelStep, PromptInput, PromptStep, ReplyAdmissionInput, ReplyAdmissionStep,
-    StageContext, StopInput, StopKind, StopObservationInput, StopObservationStep, StopStep,
-    TurnCompletedStep, UserFacingInputDrainMode, latency,
+    ModelStep, PromptInput, PromptStep, ReplyAdmissionInput, ReplyAdmissionStep, StageContext,
+    StopInput, StopKind, StopObservationInput, StopObservationStep, StopStep, TurnCompletedStep,
+    UserFacingInputDrainMode, latency,
 };
 
 impl DefaultExecutorPipeline {
@@ -39,10 +39,7 @@ impl DefaultExecutorPipeline {
                 "budget",
                 host.run_context(),
                 state.iteration,
-                self.budget.process(
-                    ctx,
-                    BudgetInput { state },
-                ),
+                self.budget.process(ctx, BudgetInput { state },),
             )? {
                 BudgetStep::Continue { state: next } => {
                     state = *next;
@@ -88,10 +85,7 @@ impl DefaultExecutorPipeline {
                 "prompt",
                 host.run_context(),
                 state.iteration,
-                self.prompt.process(
-                    ctx,
-                    PromptInput { state },
-                ),
+                self.prompt.process(ctx, PromptInput { state },),
             )? {
                 PromptStep::Exit(exit) => return Ok(exit),
 
@@ -493,9 +487,7 @@ impl DefaultExecutorPipeline {
                             )?;
                             return Ok(exit);
                         }
-                        StopStep::Continue {
-                            state: next,
-                        } => {
+                        StopStep::Continue { state: next } => {
                             next_state = next;
                         }
                         StopStep::Exit(exit) => return Ok(exit),

@@ -18,8 +18,8 @@ use crate::strategies::{
 };
 
 use super::{
-    AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage,
-    StageContext, apply_capability_filter, cancelled_exit, debug_host_unavailable,
+    AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, HostStage, StageContext,
+    apply_capability_filter, cancelled_exit, debug_host_unavailable,
     pending_approval_resume_candidate, pending_auth_resume_candidate,
     pending_external_tool_resume_candidate,
 };
@@ -215,9 +215,7 @@ impl<'a> PromptPlanningPipeline<'a> {
         // to stop.observe().
         if self.state.post_capability_state.skip_model_this_iteration {
             self.state.post_capability_state.skip_model_this_iteration = false;
-            let compaction = PromptCompactionStep::new(self.ctx)
-                .run(self.state)
-                .await?;
+            let compaction = PromptCompactionStep::new(self.ctx).run(self.state).await?;
             let state = match compaction {
                 PromptCompactionOutcome::Exited(exit) => return Ok(PromptStep::Exit(exit)),
                 PromptCompactionOutcome::Skipped(mut state) => {
@@ -320,9 +318,7 @@ impl<'a> PromptPlanningPipeline<'a> {
             return Ok(PromptStep::Exit(exit));
         }
 
-        let compaction = PromptCompactionStep::new(self.ctx)
-            .run(self.state)
-            .await?;
+        let compaction = PromptCompactionStep::new(self.ctx).run(self.state).await?;
         let final_bundle = match compaction {
             PromptCompactionOutcome::Exited(exit) => return Ok(PromptStep::Exit(exit)),
             PromptCompactionOutcome::Skipped(state) => {
@@ -440,9 +436,7 @@ struct PromptCompactionStep<'a> {
 
 impl<'a> PromptCompactionStep<'a> {
     fn new(ctx: StageContext<'a>) -> Self {
-        Self {
-            ctx,
-        }
+        Self { ctx }
     }
 
     async fn run(
@@ -477,10 +471,7 @@ impl<'a> PromptCompactionStep<'a> {
                 LoopProgressEvent::CompactionStarted { task_id, initiator },
             )
             .await;
-        state = match CheckpointStage
-            .cancel_if_requested(self.ctx, state)
-            .await?
-        {
+        state = match CheckpointStage.cancel_if_requested(self.ctx, state).await? {
             CancelCheck::Continue(state) => *state,
             CancelCheck::Exit(exit) => {
                 return Ok(PromptCompactionOutcome::Exited(exit));
@@ -519,8 +510,14 @@ impl<'a> PromptCompactionStep<'a> {
                 return compaction_cancelled_exit(self.ctx, state).await;
             }
             CompactionCallOutcome::Completed(Err(error)) => {
-                return compaction_failed_continue(self.ctx, state, task_id, drop_through_seq, &error)
-                    .await;
+                return compaction_failed_continue(
+                    self.ctx,
+                    state,
+                    task_id,
+                    drop_through_seq,
+                    &error,
+                )
+                .await;
             }
         };
 
@@ -537,10 +534,7 @@ impl<'a> PromptCompactionStep<'a> {
                 )
                 .await;
         }
-        state = match CheckpointStage
-            .cancel_if_requested(self.ctx, state)
-            .await?
-        {
+        state = match CheckpointStage.cancel_if_requested(self.ctx, state).await? {
             CancelCheck::Continue(state) => *state,
             CancelCheck::Exit(exit) => {
                 return Ok(PromptCompactionOutcome::Exited(exit));
@@ -666,10 +660,7 @@ async fn defer_compaction(
         through_seq: drop_through_seq,
         prompt_fingerprint: state.compaction_prompt.fingerprint(),
     });
-    state = match CheckpointStage
-        .cancel_if_requested(ctx, state)
-        .await?
-    {
+    state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
         CancelCheck::Continue(state) => *state,
         CancelCheck::Exit(exit) => return Ok(PromptCompactionOutcome::Exited(exit)),
     };

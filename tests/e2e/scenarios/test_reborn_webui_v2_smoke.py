@@ -1574,7 +1574,9 @@ async def test_reborn_v2_failed_cancel_keeps_active_run_visible(reborn_v2_page):
 
     await expect(cancel_button).to_be_visible(timeout=10000)
     await expect(cancel_button).to_be_enabled(timeout=10000)
-    await expect(composer).to_have_attribute("data-send-disabled", "true")
+    # The run is still active after the failed cancel, and a busy run no
+    # longer gates the composer: sends are queued behind the active run.
+    await expect(composer).to_have_attribute("data-send-disabled", "false")
     error_toast = reborn_v2_page.locator(SEL_V2["toast"]).filter(
         has_text="Couldn't stop this run"
     )

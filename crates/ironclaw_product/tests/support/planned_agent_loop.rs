@@ -35,7 +35,7 @@ use ironclaw_loop_host::{
     HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse, JsonSpawnSubagentInputCodec,
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
-    RunCancellationFactory, RunCancellationHandle,
+    RejectingInputEnqueue, RunCancellationFactory, RunCancellationHandle,
 };
 use ironclaw_product::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
@@ -516,6 +516,7 @@ impl ProductLiveAgentLoopHarness {
             self.binding_service.clone(),
             self.thread_service.clone(),
             Arc::clone(&self.composition.coordinator),
+            Arc::new(RejectingInputEnqueue),
         );
         service.accept_user_message(envelope).await
     }
@@ -1035,7 +1036,6 @@ impl HostInputQueue for EmptyInputQueue {
     ) -> Result<(), HostInputQueueError> {
         Ok(())
     }
-
 }
 
 struct EmptyIdentityContextSource;

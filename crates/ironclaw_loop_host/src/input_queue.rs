@@ -333,8 +333,7 @@ impl RunQueueModel {
             if self.is_acked(sequence) {
                 continue;
             }
-            let Some(entry) = self.entries.iter().find(|entry| entry.sequence == sequence)
-            else {
+            let Some(entry) = self.entries.iter().find(|entry| entry.sequence == sequence) else {
                 return Err(HostInputQueueError::InvalidCursor {
                     reason: format!(
                         "ack token references sequence {sequence} that is neither live nor \
@@ -601,7 +600,8 @@ pub(crate) fn cursor_token(sequence: u64) -> Result<LoopInputCursorToken, HostIn
 }
 
 pub(crate) fn ack_token(sequence: u64) -> Result<LoopInputAckToken, HostInputQueueError> {
-    LoopInputAckToken::new(format!("input-ack:{sequence}")).map_err(|_| HostInputQueueError::Internal)
+    LoopInputAckToken::new(format!("input-ack:{sequence}"))
+        .map_err(|_| HostInputQueueError::Internal)
 }
 
 pub(crate) fn ack_sequence(token: &LoopInputAckToken) -> Result<u64, HostInputQueueError> {

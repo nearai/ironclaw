@@ -705,6 +705,23 @@ pub struct UpdateThreadGoalRequest {
     pub goal: ThreadGoal,
 }
 
+/// Whether `append_assistant_draft` / `append_finalized_assistant_message`
+/// should reuse an existing assistant row for the same run instead of starting
+/// a sibling. Retries of the same draft/final content reuse the record (and
+/// redacted/deleted rows are never resurrected); a DIFFERENT finalized reply
+/// starts a sibling — a steered run replies more than once. Shared by both
+/// backends so the dedup policy cannot drift.
+pub(crate) fn should_reuse_assistant_run_message(
+    message: &ThreadMessageRecord,
+    requested_content: &str,
+) -> bool {
+    match message.status {
+        MessageStatus::Draft | MessageStatus::Redacted | MessageStatus::Deleted => true,
+        MessageStatus::Finalized => message.content.as_deref() == Some(requested_content),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

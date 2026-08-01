@@ -11,8 +11,8 @@ use ironclaw_host_api::{
     path::{MountAlias, VirtualPath},
 };
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService,
-    MessageContent, MessageStatus, ThreadHistoryRequest,
+    AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
+    MessageStatus, ThreadHistoryRequest,
 };
 use ironclaw_turns::{LoopMessageRef, TurnScope};
 
@@ -79,7 +79,6 @@ fn in_memory_queue(thread_service: Arc<InMemorySessionThreadService>) -> InMemor
     InMemoryHostInputQueue::new(thread_service as Arc<dyn SessionThreadService>)
 }
 
-
 #[tokio::test]
 async fn durable_queue_survives_store_reconstruction() {
     // The core durability guarantee: a message queued before a restart is
@@ -113,11 +112,8 @@ async fn durable_queue_survives_store_reconstruction() {
 
     // Second "process" (restart): a brand-new queue object over the SAME
     // durable backend must surface the queued input.
-    let queue = FilesystemHostInputQueue::new(
-        make_fs(Arc::clone(&backend)),
-        owner_scope(),
-        thread_service,
-    );
+    let queue =
+        FilesystemHostInputQueue::new(make_fs(Arc::clone(&backend)), owner_scope(), thread_service);
     let batch = queue
         .next_after(run_id, origin(), 8)
         .await
@@ -216,7 +212,6 @@ async fn in_memory_enqueue_poll_ack_flips_status_and_stops_redelivery() {
     let queue = in_memory_queue(Arc::clone(&thread_service));
     conformance_enqueue_poll_ack(queue, thread_service).await;
 }
-
 
 /// Terminal reconciliation (both backends: the durable queue here, the
 /// in-memory queue below shares the helpers): `reject_unconsumed` claims
@@ -341,8 +336,6 @@ async fn in_memory_reject_unconsumed_flips_stranded_rows_and_stops_redelivery() 
     conformance_reject_unconsumed(queue, thread_service).await;
 }
 
-
-
 /// The origin cursor is the unique run-start position: the first enqueued
 /// input's cursor is sequence 1, strictly after origin (sequence 0), and a
 /// cursor at or past the next-to-issue sequence is rejected as unissued
@@ -403,7 +396,6 @@ async fn in_memory_origin_cursor_is_unique_and_future_cursors_are_rejected() {
     )))
     .await;
 }
-
 
 /// Regression: a corrupt persisted queue document surfaces as
 /// `Unavailable` from BOTH `next_after` and `enqueue_queued_message`, and
@@ -602,11 +594,8 @@ async fn ack_rejects_unknown_sequence_instead_of_poisoning_state() {
     let backend = Arc::new(InMemoryBackend::new());
     let thread_service: Arc<dyn SessionThreadService> =
         Arc::new(InMemorySessionThreadService::default());
-    let queue = FilesystemHostInputQueue::new(
-        make_fs(Arc::clone(&backend)),
-        owner_scope(),
-        thread_service,
-    );
+    let queue =
+        FilesystemHostInputQueue::new(make_fs(Arc::clone(&backend)), owner_scope(), thread_service);
     let run_id = TurnRunId::new();
     // Create the queue document with a single live entry at sequence 0.
     queue

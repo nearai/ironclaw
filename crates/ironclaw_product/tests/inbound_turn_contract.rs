@@ -14,6 +14,7 @@ use ironclaw_loop_contracts::{
     LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
     LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, PromptMode,
 };
+use ironclaw_loop_host::RejectingInputEnqueue;
 use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
     CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
@@ -339,7 +340,6 @@ impl HostInputQueue for EmptyInputQueue {
     ) -> Result<(), HostInputQueueError> {
         Ok(())
     }
-
 }
 
 struct EmptyIdentityContextSource;
@@ -587,8 +587,12 @@ async fn user_message_resolves_binding_persists_message_and_submits_turn() {
     let thread_service = InMemorySessionThreadService::default();
     let store = Arc::new(in_memory_agent_turn_runtime());
     let coordinator = DefaultTurnCoordinator::new(store);
-    let service =
-        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator,
+        Arc::new(RejectingInputEnqueue),
+    );
 
     let envelope = sample_user_message_envelope("turn1");
     let outcome: InboundTurnOutcome = service
@@ -629,6 +633,7 @@ async fn shared_user_message_submits_subject_owned_turn_scope() {
         binding_service,
         thread_service.clone(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     );
     let envelope = sample_user_message_envelope_with_install_text_and_trigger(
         "shared-turn-owner",
@@ -687,8 +692,12 @@ async fn user_message_no_profile_submission_uses_planned_reborn_default() {
         Arc::new(default_planned_run_profile_resolver().expect("planned default profile resolver"));
     let coordinator =
         DefaultTurnCoordinator::new(store.clone()).with_run_profile_resolver(resolver);
-    let service =
-        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator,
+        Arc::new(RejectingInputEnqueue),
+    );
 
     let envelope = sample_user_message_envelope("planned-product-default");
     let outcome = service
@@ -814,6 +823,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         binding_service,
         thread_service.clone(),
         Arc::clone(&composition.coordinator),
+        Arc::new(RejectingInputEnqueue),
     );
 
     let outcome = service
@@ -984,6 +994,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         binding_service,
         thread_service.clone(),
         Arc::clone(&composition.coordinator),
+        Arc::new(RejectingInputEnqueue),
     );
 
     let outcome = service
@@ -1175,8 +1186,12 @@ async fn busy_thread_persists_second_message_as_rejected_busy() {
     let thread_service = InMemorySessionThreadService::default();
     let store = Arc::new(in_memory_agent_turn_runtime());
     let coordinator = DefaultTurnCoordinator::new(store);
-    let service =
-        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator,
+        Arc::new(RejectingInputEnqueue),
+    );
 
     let first = sample_user_message_envelope("busy1");
     service.accept_user_message(&first).await.expect("first");
@@ -1219,9 +1234,12 @@ async fn busy_thread_with_input_queue_defers_second_message_until_queue_ack() {
         Arc::new(thread_service.clone()) as Arc<dyn SessionThreadService>,
     ));
     let input_enqueue: Arc<dyn HostInputEnqueuePort> = input_queue.clone();
-    let service =
-        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator)
-            .with_input_enqueue(input_enqueue);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator,
+        input_enqueue,
+    );
 
     let first = sample_user_message_envelope("queue-busy1");
     service.accept_user_message(&first).await.expect("first");
@@ -1324,9 +1342,12 @@ async fn busy_thread_queue_submit_tolerates_input_ack_before_queued_mark() {
     let coordinator = DefaultTurnCoordinator::new(store);
     let input_enqueue: Arc<dyn HostInputEnqueuePort> =
         Arc::new(AckingInputEnqueue::new(Arc::new(thread_service.clone())));
-    let service =
-        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator)
-            .with_input_enqueue(input_enqueue);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator,
+        input_enqueue,
+    );
 
     let first = sample_user_message_envelope("queue-race1");
     service.accept_user_message(&first).await.expect("first");
@@ -1531,9 +1552,12 @@ async fn busy_submit_marks_message_queued_before_input_is_drainable() {
     ));
     let observed = enqueue.observed_status.clone();
     let input_enqueue: Arc<dyn HostInputEnqueuePort> = enqueue;
-    let service =
-        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator)
-            .with_input_enqueue(input_enqueue);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator,
+        input_enqueue,
+    );
 
     let first = sample_user_message_envelope("queue-order1");
     service.accept_user_message(&first).await.expect("first");
@@ -1597,9 +1621,12 @@ async fn busy_submit_rejects_when_active_run_profile_disallows_steering() {
         Arc::new(thread_service.clone()) as Arc<dyn SessionThreadService>,
     ));
     let input_enqueue: Arc<dyn HostInputEnqueuePort> = input_queue.clone();
-    let service =
-        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator)
-            .with_input_enqueue(input_enqueue);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator,
+        input_enqueue,
+    );
 
     let first = sample_user_message_envelope("no-steer1");
     service.accept_user_message(&first).await.expect("first");
@@ -1654,8 +1681,12 @@ async fn retry_validates_live_binding_before_accepted_message_replay() {
         reason: "transient submit failure".into(),
     }));
     let coordinator_handle = coordinator.clone();
-    let service =
-        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator,
+        Arc::new(RejectingInputEnqueue),
+    );
 
     let envelope = sample_user_message_envelope("binding-churn");
     let first_err = service
@@ -1721,8 +1752,12 @@ async fn replay_lookup_is_namespaced_by_installation() {
     coordinator.push_result(Err(TurnError::Unavailable {
         reason: "transient submit failure".into(),
     }));
-    let service =
-        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator,
+        Arc::new(RejectingInputEnqueue),
+    );
 
     let first = sample_user_message_envelope_with_install_and_text(
         "shared-event",
@@ -1782,6 +1817,7 @@ async fn legacy_deferred_busy_retry_resubmits_existing_message() {
         binding_service,
         thread_service.clone(),
         coordinator.clone(),
+        Arc::new(RejectingInputEnqueue),
     );
 
     // First call: submit successfully so the message row exists in the thread
@@ -1865,7 +1901,12 @@ async fn reply_target_binding_ref_has_single_reply_prefix() {
     let thread_service = InMemorySessionThreadService::default();
     let coordinator = CapturingTurnCoordinator::default();
     let captured_submit = coordinator.last_submit.clone();
-    let service = DefaultInboundTurnService::new(binding_service, thread_service, coordinator);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service,
+        coordinator,
+        Arc::new(RejectingInputEnqueue),
+    );
 
     let envelope = sample_user_message_envelope("reply-prefix");
     service
@@ -1904,7 +1945,12 @@ async fn max_valid_external_ids_do_not_overflow_turn_refs() {
     let thread_service = InMemorySessionThreadService::default();
     let store = Arc::new(in_memory_agent_turn_runtime());
     let coordinator = DefaultTurnCoordinator::new(store);
-    let service = DefaultInboundTurnService::new(binding_service, thread_service, coordinator);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service,
+        coordinator,
+        Arc::new(RejectingInputEnqueue),
+    );
 
     let long_event_id = "e".repeat(250);
     let envelope = sample_user_message_envelope(&long_event_id);
@@ -1924,7 +1970,12 @@ async fn overflowing_turn_ref_inputs_hash_deterministically() {
         let thread_service = InMemorySessionThreadService::default();
         let coordinator = CapturingTurnCoordinator::default();
         let captured_submit = coordinator.last_submit.clone();
-        let service = DefaultInboundTurnService::new(binding_service, thread_service, coordinator);
+        let service = DefaultInboundTurnService::new(
+            binding_service,
+            thread_service,
+            coordinator,
+            Arc::new(RejectingInputEnqueue),
+        );
 
         let envelope = sample_user_message_envelope(&long_event_id);
         service
@@ -1954,7 +2005,12 @@ async fn binding_failure_surfaces_workflow_error() {
     let thread_service = InMemorySessionThreadService::default();
     let store = Arc::new(in_memory_agent_turn_runtime());
     let coordinator = DefaultTurnCoordinator::new(store);
-    let service = DefaultInboundTurnService::new(binding_service, thread_service, coordinator);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service,
+        coordinator,
+        Arc::new(RejectingInputEnqueue),
+    );
 
     let envelope = sample_user_message_envelope("fail1");
     let err = service
@@ -1979,8 +2035,12 @@ async fn rejected_busy_replay_is_re_rejected_not_resubmitted() {
         status: TurnStatus::Running,
         event_cursor: EventCursor::default(),
     })));
-    let service =
-        DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
+    let service = DefaultInboundTurnService::new(
+        binding_service,
+        thread_service.clone(),
+        coordinator,
+        Arc::new(RejectingInputEnqueue),
+    );
 
     let envelope = sample_user_message_envelope("rejected-busy-replay");
     let first = service
@@ -2066,8 +2126,8 @@ async fn queued_replay_re_enqueues_crash_orphaned_message() {
         binding_service.clone(),
         thread_service.clone(),
         Arc::clone(&coordinator),
-    )
-    .with_input_enqueue(Arc::new(VanishingInputEnqueue));
+        Arc::new(VanishingInputEnqueue),
+    );
 
     let first = sample_user_message_envelope("orphan1");
     crashed.accept_user_message(&first).await.expect("first");
@@ -2098,8 +2158,8 @@ async fn queued_replay_re_enqueues_crash_orphaned_message() {
         binding_service,
         thread_service.clone(),
         Arc::clone(&coordinator),
-    )
-    .with_input_enqueue(real_queue.clone() as Arc<dyn HostInputEnqueuePort>);
+        real_queue.clone() as Arc<dyn HostInputEnqueuePort>,
+    );
     let replayed = restarted
         .accept_user_message(&second)
         .await
@@ -2133,8 +2193,8 @@ async fn queued_replay_settles_rejected_when_active_run_is_terminal() {
         binding_service.clone(),
         thread_service.clone(),
         Arc::clone(&coordinator),
-    )
-    .with_input_enqueue(Arc::new(VanishingInputEnqueue));
+        Arc::new(VanishingInputEnqueue),
+    );
 
     let first = sample_user_message_envelope("orphan-term1");
     let submitted = crashed.accept_user_message(&first).await.expect("first");
@@ -2179,8 +2239,8 @@ async fn queued_replay_settles_rejected_when_active_run_is_terminal() {
         binding_service,
         thread_service.clone(),
         Arc::clone(&coordinator),
-    )
-    .with_input_enqueue(real_queue.clone() as Arc<dyn HostInputEnqueuePort>);
+        real_queue.clone() as Arc<dyn HostInputEnqueuePort>,
+    );
     let replayed = restarted
         .accept_user_message(&second)
         .await

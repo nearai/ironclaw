@@ -15,9 +15,9 @@ use crate::executor::CanonicalAgentLoopExecutor;
 use ironclaw_loop_contracts::AgentLoopDriverHost;
 
 use super::{
-    AgentLoopExecutorError, CancelCheck, CheckpointWrite, ExecutorStage, HostStage,
-    StageContext, cancelled_exit_with_reason, cancelled_reason_from_signal,
-    checkpoint_kind_to_host, debug_host_unavailable,
+    AgentLoopExecutorError, CancelCheck, CheckpointWrite, ExecutorStage, HostStage, StageContext,
+    cancelled_exit_with_reason, cancelled_reason_from_signal, checkpoint_kind_to_host,
+    debug_host_unavailable,
 };
 
 #[cfg(test)]

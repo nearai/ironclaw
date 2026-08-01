@@ -307,5 +307,4 @@ fn cas_exhausted(operation: &'static str) -> HostInputQueueError {
 }
 
 #[cfg(test)]
-#[path = "durable_input_queue/tests.rs"]
 mod tests;

@@ -7,10 +7,7 @@ use crate::{
     strategies::{StopKind, StopOutcome, TurnEndKind, TurnSummary},
 };
 
-use super::{
-    AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage,
-    StageContext,
-};
+use super::{AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, StageContext};
 
 /// Stop-stage helper for callers that can observe and decide back-to-back.
 ///
@@ -39,8 +36,13 @@ pub(super) enum StopObservationStep {
 }
 
 pub(super) enum StopStep {
-    Continue { state: LoopExecutionState },
-    Stop { state: LoopExecutionState, kind: StopKind },
+    Continue {
+        state: LoopExecutionState,
+    },
+    Stop {
+        state: LoopExecutionState,
+        kind: StopKind,
+    },
     Exit(LoopExit),
 }
 

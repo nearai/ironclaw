@@ -3537,8 +3537,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
     };
     let host_input_queue_reader: Arc<dyn ironclaw_loop_host::HostInputQueue> =
         host_input_queue.clone();
-    let host_input_queue_for_cancel_reconcile: Arc<dyn ironclaw_loop_host::HostInputQueueReconcile> =
-        host_input_queue.clone();
+    let host_input_queue_for_cancel_reconcile: Arc<
+        dyn ironclaw_loop_host::HostInputQueueReconcile,
+    > = host_input_queue.clone();
     let host_input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort> = host_input_queue;
 
     #[cfg(feature = "test-support")]

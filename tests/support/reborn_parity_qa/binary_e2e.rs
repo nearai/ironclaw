@@ -40,7 +40,7 @@ use ironclaw_loop_contracts::{
 };
 use ironclaw_loop_host::{
     EmptyUserProfileSource, HostIdentityContextSource, HostManagedModelRequest,
-    JsonSpawnSubagentInputCodec,
+    JsonSpawnSubagentInputCodec, RejectingInputEnqueue,
 };
 use ironclaw_network::NetworkHttpRequest;
 use ironclaw_product::{
@@ -915,6 +915,7 @@ impl RebornBinaryE2EHarness {
             Arc::clone(&binding_service),
             thread_harness.service_instance()?,
             composition.coordinator.clone(),
+            Arc::new(RejectingInputEnqueue),
         ));
         let ledger: Arc<dyn IdempotencyLedger> = Arc::new(product_harness.idempotency_ledger());
         let workflow = DefaultProductSurface::new(inbound, ledger, binding_service);

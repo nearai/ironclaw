@@ -38,7 +38,10 @@ pub struct CancelReconcilingTurnCoordinator {
 }
 
 impl CancelReconcilingTurnCoordinator {
-    pub fn new(inner: Arc<dyn TurnCoordinator>, input_queue: Arc<dyn HostInputQueueReconcile>) -> Self {
+    pub fn new(
+        inner: Arc<dyn TurnCoordinator>,
+        input_queue: Arc<dyn HostInputQueueReconcile>,
+    ) -> Self {
         Self { inner, input_queue }
     }
 }
@@ -113,8 +116,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-    use ironclaw_loop_contracts::{LoopInputAckToken, LoopInputCursorToken};
-    use ironclaw_loop_host::{HostInputBatch, HostInputQueueError};
+    use ironclaw_loop_host::HostInputQueueError;
     use ironclaw_threads::ThreadMessageId;
     use ironclaw_turns::{
         EventCursor, IdempotencyKey, SanitizedCancelReason, TurnActor, TurnStatus,

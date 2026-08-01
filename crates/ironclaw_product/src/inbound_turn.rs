@@ -22,7 +22,9 @@ use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use ironclaw_host_api::attachment::InboundAttachment;
 #[cfg(test)]
 use ironclaw_host_api::ids::UserId;
-use ironclaw_loop_host::{HostInputEnqueuePort, RejectingInputEnqueue};
+use ironclaw_loop_host::HostInputEnqueuePort;
+#[cfg(doc)]
+use ironclaw_loop_host::RejectingInputEnqueue;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest,
     ListThreadsForScopeRequest, MessageContent, MessageStatus, ReplayAcceptedInboundMessageRequest,
@@ -252,13 +254,23 @@ where
     T: SessionThreadService,
     C: TurnCoordinator,
 {
-    pub fn new(binding_service: B, thread_service: T, turn_coordinator: C) -> Self {
+    /// `input_enqueue` is REQUIRED: production always wires the real steering
+    /// queue, and a defaulted null port would silently downgrade busy submits
+    /// to reject-busy. A deployment that genuinely disables steering passes
+    /// [`RejectingInputEnqueue`] explicitly — a chosen mode, never a forgotten
+    /// wire-up.
+    pub fn new(
+        binding_service: B,
+        thread_service: T,
+        turn_coordinator: C,
+        input_enqueue: Arc<dyn HostInputEnqueuePort>,
+    ) -> Self {
         Self {
             binding_service,
             thread_service,
             turn_coordinator,
             inbound_attachments: None,
-            input_enqueue: Arc::new(RejectingInputEnqueue),
+            input_enqueue,
         }
     }
 
@@ -270,11 +282,6 @@ where
         inbound_attachments: Arc<dyn InboundAttachmentLander>,
     ) -> Self {
         self.inbound_attachments = Some(inbound_attachments);
-        self
-    }
-
-    pub fn with_input_enqueue(mut self, input_enqueue: Arc<dyn HostInputEnqueuePort>) -> Self {
-        self.input_enqueue = input_enqueue;
         self
     }
 
@@ -1035,9 +1042,8 @@ impl ProductInboundTurnHandoff {
         }
 
         if replay.status == MessageStatus::Queued {
-            let active_run_id =
-                crate::steering::parse_stored_run_id(replay.turn_run_id.as_deref())
-                    .map_err(|reason| ProductSurfaceFailure::TurnSubmissionRejected { reason })?;
+            let active_run_id = crate::steering::parse_stored_run_id(replay.turn_run_id.as_deref())
+                .map_err(|reason| ProductSurfaceFailure::TurnSubmissionRejected { reason })?;
             return Ok(Self::AlreadyDeferred {
                 accepted_message_ref,
                 binding,
@@ -1341,7 +1347,9 @@ impl AcceptedProductInboundTurn {
 /// Map a fatal steering-admission failure into this surface's error type.
 /// The classification (what settles vs what fails) already happened in the
 /// gateway; this is pure error-shape translation.
-fn steering_admission_failure(error: crate::steering::SteeringAdmissionError) -> ProductSurfaceFailure {
+fn steering_admission_failure(
+    error: crate::steering::SteeringAdmissionError,
+) -> ProductSurfaceFailure {
     use crate::steering::SteeringAdmissionError;
     match error {
         SteeringAdmissionError::InvalidMessageRef(reason) => {
