@@ -2211,31 +2211,135 @@ mod postgres_tests {
             .ok()
     }
 
+    /// Installs the projection triggers once per binary, before tests race.
+    ///
+    /// Declaring an ordered index installs those triggers, and that takes an
+    /// ACCESS EXCLUSIVE lock on `root_filesystem_entries`. Against a *fresh*
+    /// database every test would otherwise race the install while its
+    /// neighbours write the same table, and a writer already holding a row lock
+    /// there while it waits on the installer's advisory lock is a deadlock —
+    /// PostgreSQL breaks it by killing one side, which surfaces as `BackendBusy`
+    /// in whichever test lost rather than in the one doing the DDL. Running it
+    /// once leaves every later declaration on the no-DDL fast path. A warm
+    /// database hides this completely, so it reproduces only against a fresh
+    /// one, which is what CI provisions and a repeat local run does not.
+    ///
+    /// The work borrows the first caller's filesystem instead of caching a pool:
+    /// every `#[tokio::test]` has its own runtime, and `tokio_postgres` drives
+    /// each connection from a task on the runtime that created it, so a pool
+    /// shared across tests dies as `connection closed` the moment its origin
+    /// test finishes.
+    static PROJECTION_INSTALLED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+    async fn install_projection_once(filesystem: &PostgresRootFilesystem) {
+        PROJECTION_INSTALLED
+            .get_or_init(|| async {
+                // A unique prefix that is an ancestor of nothing any test
+                // writes, so the declaration projects no rows for them.
+                let Ok(path) = VirtualPath::new(format!(
+                    "/secrets/leases/pgwarmup_{}",
+                    uuid::Uuid::new_v4().simple()
+                )) else {
+                    return;
+                };
+                let (Ok(name), Ok(key)) = (IndexName::new("warmup_probe"), IndexKey::new("rank"))
+                else {
+                    return;
+                };
+                let _ = filesystem
+                    .ensure_index(&path, &IndexSpec::new(name, vec![key], IndexKind::Exact))
+                    .await;
+            })
+            .await;
+    }
+
+    /// A private database for a test that mutates or asserts global schema.
+    ///
+    /// The projection triggers live on `root_filesystem_entries`, so installing
+    /// or sweeping them takes an ACCESS EXCLUSIVE lock on that whole table, and
+    /// the `pg_trigger` assertions read state every other test shares. Sharing
+    /// one database, such a test blocks unrelated concurrent writers — which
+    /// surfaces as a `BackendBusy` failure in whichever test happens to be
+    /// mid-write, far from the cause — and races its own assertions against
+    /// their declarations. Path prefixes isolate rows; they cannot isolate
+    /// schema, so a schema-level test gets a schema-level scope.
+    struct IsolatedDatabase {
+        filesystem: PostgresRootFilesystem,
+        prefix: String,
+        client: tokio_postgres::Client,
+        admin: tokio_postgres::Client,
+        name: String,
+    }
+
+    impl IsolatedDatabase {
+        /// Drop the database, so a run against a developer's own server does
+        /// not leak one per execution. `FORCE` closes the pool's connections,
+        /// which are not guaranteed to have gone away when the handles drop.
+        async fn cleanup(self) {
+            let Self {
+                filesystem,
+                client,
+                admin,
+                name,
+                ..
+            } = self;
+            drop(filesystem);
+            drop(client);
+            let _ = admin
+                .execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"), &[])
+                .await;
+        }
+    }
+
+    async fn postgres_isolated_root() -> Option<IsolatedDatabase> {
+        let config = postgres_url()
+            .await?
+            .parse::<tokio_postgres::Config>()
+            .ok()?;
+        let (admin, connection) = config.connect(tokio_postgres::NoTls).await.ok()?;
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        // `uuid::simple` is hex, so the identifier needs no quoting.
+        let name = format!("rfs_isolated_{}", uuid::Uuid::new_v4().simple());
+        admin
+            .execute(&format!("CREATE DATABASE {name}"), &[])
+            .await
+            .ok()?;
+
+        let mut isolated = config.clone();
+        isolated.dbname(&name);
+        let manager = deadpool_postgres::Manager::new(isolated.clone(), tokio_postgres::NoTls);
+        let pool = deadpool_postgres::Pool::builder(manager)
+            .max_size(4)
+            .build()
+            .ok()?;
+        let filesystem = PostgresRootFilesystem::new(pool);
+        filesystem.run_migrations().await.ok()?;
+        let (client, connection) = isolated.connect(tokio_postgres::NoTls).await.ok()?;
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        Some(IsolatedDatabase {
+            filesystem,
+            prefix: format!("/secrets/leases/pgtest_{}", uuid::Uuid::new_v4().simple()),
+            client,
+            admin,
+            name,
+        })
+    }
+
     /// Build a fresh Postgres-backed filesystem with migrations applied.
     /// Returns `None` if no Postgres is reachable — caller must early-return
     /// so the test passes in environments without a DB. Each test uses a
     /// unique path prefix so concurrent runs against a shared DB don't
     /// interfere.
-    /// A direct connection to the same database `postgres_root` uses. Seeding
-    /// a legacy trigger needs raw SQL, which belongs in the test rather than
-    /// as a test-only method on the production filesystem type.
-    async fn raw_postgres_client() -> tokio_postgres::Client {
-        let url = postgres_url()
-            .await
-            .expect("postgres url present when postgres_root yielded a filesystem");
-        let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
-            .await
-            .expect("connect to postgres");
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
-        client
-    }
-
     async fn postgres_root() -> Option<(PostgresRootFilesystem, String)> {
         let pool = postgres_pool().await?;
         let fs = PostgresRootFilesystem::new(pool);
         fs.run_migrations().await.ok()?;
+        install_projection_once(&fs).await;
         // Unique per-test prefix under /secrets/leases (a known VirtualPath
         // root). Concurrent test runs against the same Postgres get
         // isolation via the prefix; cleanup happens by the next test's
@@ -3210,12 +3314,19 @@ mod postgres_tests {
     /// tests still pass.
     #[tokio::test]
     async fn postgres_static_projection_sweeps_legacy_triggers() {
-        let Some((filesystem, prefix)) = postgres_root().await else {
+        // Its own database: this case rewrites and then asserts the trigger set
+        // of a shared table, which no path prefix can isolate.
+        let Some(isolated) = postgres_isolated_root().await else {
             return;
         };
+        let IsolatedDatabase {
+            ref filesystem,
+            ref prefix,
+            ref client,
+            ..
+        } = isolated;
         // Seed a survivor shaped like the per-declaration generation, over the
         // test's own connection: production types must not carry test seams.
-        let client = raw_postgres_client().await;
         client
             .batch_execute(
                 "CREATE OR REPLACE FUNCTION idx_rfs_legacy_probe_fn() RETURNS trigger                  LANGUAGE plpgsql AS $legacy$ BEGIN                    DELETE FROM root_filesystem_ordered_index_rows WHERE path = NEW.path;                    RETURN NEW; END; $legacy$;                  DROP TRIGGER IF EXISTS idx_rfs_legacy_probe ON root_filesystem_entries;                  CREATE TRIGGER idx_rfs_legacy_probe AFTER INSERT ON root_filesystem_entries                    FOR EACH ROW EXECUTE FUNCTION idx_rfs_legacy_probe_fn();",
@@ -3225,7 +3336,7 @@ mod postgres_tests {
 
         filesystem
             .ensure_index(
-                &vpath(&prefix, "sweep"),
+                &vpath(prefix, "sweep"),
                 &IndexSpec::new(
                     IndexName::new("sweep_probe_v1").unwrap(),
                     vec![IndexKey::new("rank").unwrap()],
@@ -3265,7 +3376,8 @@ mod postgres_tests {
             );
         }
         // And the behavior those triggers exist for, end to end.
-        super::static_projection_update_and_delete_contract(&filesystem, &prefix).await;
+        super::static_projection_update_and_delete_contract(filesystem, prefix).await;
+        isolated.cleanup().await;
     }
 
     #[tokio::test]
