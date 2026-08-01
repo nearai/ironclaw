@@ -1670,7 +1670,7 @@ def _find_tool_results(
     last_user_idx = -1
     if after_latest_user:
         for i in range(len(messages) - 1, -1, -1):
-            if messages[i].get("role") == "user":
+            if messages[i].get("role") == "user" and not _is_host_reminder(messages[i]):
                 last_user_idx = i
                 break
 

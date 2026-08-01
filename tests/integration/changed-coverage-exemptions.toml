@@ -2452,3 +2452,14 @@ owner = "@nearai/reborn"
 reason = "Error-mapping arm renames from the lane governor port (#7160 in #7170): the adapter arms are not integration-instrumented on this path (zero measured lines among the candidates -> empty-denominator); behavior pinned by the lane-seam denial tests added in the same slice. Same-run floors passed."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
+
+# ---------------------------------------------------------------------------
+# PR #7001 stable prompt prefix (#6985).
+
+[[exemption]]
+path = "crates/ironclaw_loop_contracts/src/instruction_bundle.rs"
+lines = [394, 408]
+owner = "@nearai/reborn"
+reason = "Closing `)?;` lines of the relocated push_runtime_context/push_inline_message calls (#6985 moved the calls after the thread section). LLVM maps only the `?` early-return error region to these physical lines; the success paths execute in every integration turn (runtime context) and in reborn_integration_prompt_prefix_stability (inline nudges), while the error arms guard host-validated inputs and are not reachable through the integration tier."
+issue = "https://github.com/nearai/ironclaw/issues/6985"
+review_after = "2026-10-31"
