@@ -60,19 +60,173 @@ expect_fail() {
   fi
 }
 
+# A configuration error (a high-risk entry that resolves to nothing) is not a
+# policy verdict about the PR, so it exits 2 through the existing
+# infrastructure-error channel rather than 1. Still blocking: any non-zero exit
+# fails the workflow step.
+expect_status() {
+  local name="$1"
+  local want="$2"
+  local expected="$3"
+  shift 3
+  local status=0
+  "$@" >"$TMP_ROOT/output" 2>&1 || status=$?
+  if [[ $status -ne $want ]]; then
+    echo "FAIL: $name returned the wrong status"
+    echo "expected exit $want, got $status"
+    cat "$TMP_ROOT/output"
+    exit 1
+  fi
+  if ! grep -Fq "$expected" "$TMP_ROOT/output"; then
+    echo "FAIL: $name did not report: $expected"
+    cat "$TMP_ROOT/output"
+    exit 1
+  fi
+}
+
+# Build a repo the crate inventory recognises: a `[workspace]` root manifest
+# (the discriminator `regression-test-check.py` uses to decide whether a missing
+# crate tree is a broken checkout) plus enough crates to clear
+# crate_tree.MIN_CRATE_DIRECTORIES, and every crate the high-risk list names.
+#
+# `$1` is the repo path; `$2` is the directory crates live under, so the same
+# scaffold can be built flat (`crates`) or nested under a family directory
+# (`crates/substrates`) — the WS7 layout that made the old literal-prefix list
+# silently stop matching.
+init_workspace_repo() {
+  local repo="$1"
+  local crate_root="${2:-crates}"
+  local crate index
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  git -C "$repo" config commit.gpgsign false
+  git -C "$repo" config core.hooksPath /dev/null
+  git -C "$repo" config user.email "regression-check@example.invalid"
+  git -C "$repo" config user.name "Regression Check Self-Test"
+  printf '[workspace]\nmembers = []\n' > "$repo/Cargo.toml"
+
+  # Every crate the gate's high-risk and static-asset entries name. Resolution
+  # refuses an entry naming a crate the checkout lacks, so this list cannot
+  # drift from the gate's: adding an entry for a new crate makes every fixture
+  # below fail loudly until the crate appears here.
+  for crate in ironclaw_turns ironclaw_processes ironclaw_llm \
+    ironclaw_agent_loop ironclaw_safety ironclaw_webui; do
+    mkdir -p "$repo/$crate_root/$crate/src"
+    printf '[package]\nname = "%s"\n' "$crate" \
+      > "$repo/$crate_root/$crate/Cargo.toml"
+    printf 'pub fn placeholder() {}\n' > "$repo/$crate_root/$crate/src/lib.rs"
+  done
+  mkdir -p "$repo/$crate_root/ironclaw_turns/src" \
+    "$repo/$crate_root/ironclaw_processes/src/journal_store" \
+    "$repo/$crate_root/ironclaw_llm/src" \
+    "$repo/$crate_root/ironclaw_agent_loop/src/executor" \
+    "$repo/$crate_root/ironclaw_agent_loop/src/state" \
+    "$repo/$crate_root/ironclaw_webui/frontend/public"
+  printf 'pub fn run() {}\n' \
+    | tee "$repo/$crate_root/ironclaw_turns/src/coordinator.rs" \
+      "$repo/$crate_root/ironclaw_turns/src/status.rs" \
+      "$repo/$crate_root/ironclaw_processes/src/supervisor.rs" \
+      "$repo/$crate_root/ironclaw_processes/src/journal_store/mod.rs" \
+      "$repo/$crate_root/ironclaw_llm/src/circuit_breaker.rs" \
+      "$repo/$crate_root/ironclaw_llm/src/retry.rs" \
+      "$repo/$crate_root/ironclaw_llm/src/failover.rs" \
+      "$repo/$crate_root/ironclaw_agent_loop/src/executor/mod.rs" \
+      "$repo/$crate_root/ironclaw_agent_loop/src/state/mod.rs" >/dev/null
+  printf 'asset\n' > "$repo/$crate_root/ironclaw_webui/frontend/public/logo.svg"
+
+  # Padding so discovery clears its fail-closed floor.
+  for index in $(seq 1 22); do
+    mkdir -p "$repo/$crate_root/ironclaw_pad$index/src"
+    printf '[package]\nname = "ironclaw_pad%s"\n' "$index" \
+      > "$repo/$crate_root/ironclaw_pad$index/Cargo.toml"
+    printf 'pub fn placeholder() {}\n' \
+      > "$repo/$crate_root/ironclaw_pad$index/src/lib.rs"
+  done
+
+  git -C "$repo" add -A
+  git -C "$repo" commit -qm "feat: workspace baseline"
+}
+
 unrelated="$TMP_ROOT/unrelated"
 init_repo "$unrelated"
 printf 'pub fn value() -> i32 { 2 }\n' > "$unrelated/src/lib.rs"
 expect_pass "unrelated feature skips the gate" run_check "$unrelated" \
   --title "feat: unrelated"
 
+# --- high-risk detection is inventory-driven, not path-shaped (#6963) --------
+# The pair below is the whole point: the same change, in a crate at two
+# different depths, must reach the same verdict. The literal-prefix list this
+# replaced passed the first and silently skipped the second.
+
 high_risk="$TMP_ROOT/high-risk"
-init_repo "$high_risk"
-mkdir -p "$high_risk/crates/ironclaw_safety/src"
+init_workspace_repo "$high_risk"
 printf 'pub fn policy() {}\n' > "$high_risk/crates/ironclaw_safety/src/policy.rs"
 expect_fail "high-risk feature triggers the gate" \
-  "Regression test required (high-risk change; high-risk paths:" \
+  "high-risk paths: crates/ironclaw_safety/src/" \
   run_check "$high_risk" --title "feat: unrelated"
+
+high_risk_nested="$TMP_ROOT/high-risk-nested"
+init_workspace_repo "$high_risk_nested" crates/substrates
+printf 'pub fn policy() {}\n' \
+  > "$high_risk_nested/crates/substrates/ironclaw_safety/src/policy.rs"
+expect_fail "high-risk change in a family-nested crate triggers the gate" \
+  "high-risk paths: crates/substrates/ironclaw_safety/src/" \
+  run_check "$high_risk_nested" --title "feat: unrelated"
+
+# A nested tree must not make everything high-risk either: the filter is still
+# a filter after the repoint. Dropping the high-risk file leaves NOTES.md as
+# the only change the gate sees.
+rm -f "$high_risk_nested/crates/substrates/ironclaw_safety/src/policy.rs"
+printf 'readme\n' > "$high_risk_nested/NOTES.md"
+expect_pass "an unrelated change in a nested tree still skips the gate" \
+  run_check "$high_risk_nested" --title "feat: unrelated"
+
+# --- fail closed: an entry that resolves to nothing must be loud -------------
+stale_crate="$TMP_ROOT/stale-crate"
+init_workspace_repo "$stale_crate"
+rm -rf "$stale_crate/crates/ironclaw_turns"
+printf 'note\n' > "$stale_crate/note.txt"
+expect_status "a high-risk entry naming an absent crate fails loudly" 2 \
+  "names a crate this checkout does not have" \
+  run_check "$stale_crate" --title "feat: unrelated"
+
+missing_tree="$TMP_ROOT/missing-crate-tree"
+init_workspace_repo "$missing_tree"
+rm -rf "$missing_tree/crates"
+printf 'note\n' > "$missing_tree/note.txt"
+expect_status "a workspace checkout with no crate tree fails loudly" 2 \
+  "crate discovery cannot run" \
+  run_check "$missing_tree" --title "feat: unrelated"
+
+# A checkout with no `[workspace]` manifest is not this workspace, so there is
+# no inventory to resolve against. It says so on stderr rather than resolving
+# to an empty list in silence.
+non_workspace="$TMP_ROOT/non-workspace"
+init_repo "$non_workspace"
+printf 'pub fn value() -> i32 { 2 }\n' > "$non_workspace/src/lib.rs"
+expect_pass "a non-workspace checkout announces that detection is inactive" \
+  run_check "$non_workspace" --title "feat: unrelated"
+if ! grep -Fq "high-risk path detection is inactive" "$TMP_ROOT/output"; then
+  echo "FAIL: the non-workspace skip must be announced, not silent"
+  cat "$TMP_ROOT/output"
+  exit 1
+fi
+
+# Deleting the last file under a high-risk subpath is tolerated for the diff
+# that does it: in CI the gate runs from the trusted base checkout, so the PR
+# removing the file cannot also remove the entry the base copy still names.
+# Without the escape, resolution would exit 2 here and the PR would have no
+# in-PR remedy. The change also edits a *surviving* high-risk file so the run
+# reaches a verdict, proving resolution tolerated the deleted prefix rather
+# than refusing the whole run.
+deleted_subpath="$TMP_ROOT/deleted-subpath"
+init_workspace_repo "$deleted_subpath"
+rm -f "$deleted_subpath/crates/ironclaw_llm/src/retry.rs"
+printf 'pub fn trip() {}\n' \
+  > "$deleted_subpath/crates/ironclaw_llm/src/circuit_breaker.rs"
+expect_fail "deleting a high-risk file is judged, not refused" \
+  "high-risk paths: crates/ironclaw_llm/src/circuit_breaker.rs" \
+  run_check "$deleted_subpath" --title "feat: unrelated"
 
 if (
   expect_fail "infrastructure error is not a policy rejection" "unused" \
@@ -335,8 +489,11 @@ expect_pass "reasoned independently approved label" run_check "$label_approved" 
 
 hook_repo="$TMP_ROOT/hook"
 init_repo "$hook_repo"
-mkdir -p "$hook_repo/scripts/ci"
+mkdir -p "$hook_repo/scripts/ci/lib"
 cp "$CHECKER" "$hook_repo/scripts/ci/regression-test-check.py"
+# The gate resolves high-risk paths through the crate inventory, so its sibling
+# library travels with it wherever it is deployed.
+cp "$REPO_ROOT/scripts/ci/lib/crate_tree.py" "$hook_repo/scripts/ci/lib/"
 printf 'pub fn value() -> i32 { 2 }\n' > "$hook_repo/src/lib.rs"
 git -C "$hook_repo" add src/lib.rs
 printf 'fix: escaped result\n' > "$hook_repo/COMMIT_MSG"

@@ -14,11 +14,47 @@
 #   ./scripts/build-wasm-extensions.sh --tools    # tools only
 #   ./scripts/build-wasm-extensions.sh --channels # channels only
 #   ./scripts/build-wasm-extensions.sh --first-party # first-party extensions only
+#
+# The first-party extension assets root is resolved from the crate inventory
+# (scripts/ci/lib/crate_tree.py) by crate NAME, not from the literal
+# crates/ironclaw_first_party_extensions path, so the target-architecture family
+# move (crates/<family>/ironclaw_*, PROPOSAL §5) does not leave this script
+# unable to find the manifests it is supposed to build
+# (docs/reborn/target-architecture/CHECKLIST.md WS10, #6963).
+#
+# Override for tests: FIRST_PARTY_ASSETS_ROOT bypasses discovery.
 
 set -euo pipefail
 shopt -s nullglob
 
 cd "$(dirname "$0")/.."
+
+FIRST_PARTY_CRATE="${FIRST_PARTY_CRATE:-ironclaw_first_party_extensions}"
+
+# Resolve the crate that owns the first-party extension assets, at any depth.
+# Failing here is deliberate: "cannot find the crate" must be an actionable
+# repoint, not an empty build that looks like there was nothing to do.
+resolve_first_party_assets_root() {
+    if [ -n "${FIRST_PARTY_ASSETS_ROOT:-}" ]; then
+        printf '%s\n' "${FIRST_PARTY_ASSETS_ROOT}"
+        return 0
+    fi
+
+    local inventory match count
+    if ! inventory=$(python3 scripts/ci/lib/crate_tree.py . 2>&1); then
+        echo "  FAIL first-party discovery (crate discovery failed: ${inventory})" >&2
+        return 1
+    fi
+    match=$(printf '%s\n' "${inventory}" | awk -F/ -v want="${FIRST_PARTY_CRATE}" '$NF == want')
+    count=$(printf '%s' "${match}" | grep -c . || true)
+    if [ "${count}" -ne 1 ]; then
+        echo "  FAIL first-party discovery (expected exactly one crate named \
+'${FIRST_PARTY_CRATE}', found ${count} — repoint FIRST_PARTY_CRATE in the same PR that \
+renamed or moved it)" >&2
+        return 1
+    fi
+    printf '%s/assets\n' "${match}"
+}
 
 # cargo-component may be installed under ~/.cargo while Homebrew rustc wins PATH on
 # developer machines. Force rustup rustc when available so installed WASI targets are
@@ -195,19 +231,29 @@ build_first_party_extension() {
     echo "  OK   $name"
 }
 
+# `${arr[@]+"${arr[@]}"}` rather than `"${arr[@]}"`: under `set -u`, bash before
+# 4.4 (macOS ships 3.2) treats an empty array expansion as an unbound variable
+# and dies with a shell diagnostic instead of reaching build_manifest_set's
+# "no manifests found" guard. Same outcome either way — non-zero — but only this
+# form reports WHICH set was empty, which is the actionable half.
 if $BUILD_TOOLS; then
     tool_manifests=(registry/tools/*.json)
-    build_manifest_set "WASM tools" build_extension "${tool_manifests[@]}"
+    build_manifest_set "WASM tools" build_extension ${tool_manifests[@]+"${tool_manifests[@]}"}
 fi
 
 if $BUILD_FIRST_PARTY; then
-    first_party_manifests=(crates/ironclaw_first_party_extensions/assets/*/manifest.toml)
-    build_manifest_set "first-party WASM extensions" build_first_party_extension "${first_party_manifests[@]}"
+    if first_party_assets=$(resolve_first_party_assets_root); then
+        first_party_manifests=("${first_party_assets}"/*/manifest.toml)
+    else
+        first_party_manifests=()
+    fi
+    build_manifest_set "first-party WASM extensions" build_first_party_extension \
+        ${first_party_manifests[@]+"${first_party_manifests[@]}"}
 fi
 
 if $BUILD_CHANNELS; then
     channel_manifests=(registry/channels/*.json)
-    build_manifest_set "WASM channels" build_extension "${channel_manifests[@]}"
+    build_manifest_set "WASM channels" build_extension ${channel_manifests[@]+"${channel_manifests[@]}"}
 fi
 
 echo ""

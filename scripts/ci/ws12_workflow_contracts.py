@@ -3,9 +3,20 @@
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+
+from crate_tree import (  # noqa: E402
+    CrateTreeError,
+    crate_directories,
+    crate_directory,
+)
 
 REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
     ".github/workflows/reborn-tests.yml": (
@@ -136,7 +147,327 @@ def validate_e2e_scope_filters(text: str) -> list[str]:
     return errors
 
 
-def validate_workflow_texts(workflows: dict[str, str]) -> list[str]:
+# ---------------------------------------------------------------------------
+# Crate-keyed scope filters (#6963)
+#
+# The E2E block above pins one workflow's scope filter. Three more filters key
+# on the flat `crates/ironclaw_*` shape and go dark the same way when crates
+# move into family directories: `code_style.yml`'s `has_reborn_cli` (the
+# dist-build lane skips), `platform-and-compat.yml`'s
+# `has_direct_wasm_abi_risk` (every WASM ABI check skips), and
+# `ironclaw-stress.yml`'s `paths:` filter (the workflow stops triggering at
+# all). None of them can assert anything about itself — a path filter that
+# matches nothing looks exactly like "nothing in scope".
+#
+# So the pin lives here, and it is inventory-driven rather than probe-only:
+# every crate NAME a filter enumerates is resolved against the real crate
+# inventory (scripts/ci/lib/crate_tree.py), and the filter must match that
+# crate's ACTUAL directory plus a nested equivalent. That gives three
+# fail-closed properties a probe list alone cannot:
+#
+#   1. a filter naming a crate that no longer exists is an error — the class
+#      that let `crates/ironclaw_wasm_product_adapters/` sit in the WASM filter
+#      long after the crate was deleted, matching nothing forever;
+#   2. a filter that stops matching a crate's real location is an error, so a
+#      rename or a deeper-than-expected move fails in Code Style instead of
+#      silently unhooking a lane;
+#   3. a filter that matches nothing at all is an error, because every probe
+#      set is required to be non-empty and every discovered-file probe is
+#      required to have discovered a file.
+# ---------------------------------------------------------------------------
+
+CODE_STYLE_WORKFLOW = ".github/workflows/code_style.yml"
+PLATFORM_WORKFLOW = ".github/workflows/platform-and-compat.yml"
+STRESS_WORKFLOW = ".github/workflows/ironclaw-stress.yml"
+
+# Every single-quoted ERE in a workflow that looks like a path scope filter.
+# Both spellings in use are covered: `grep -Eq '^(...)'` and the `has_match
+# '^(...)'` helper. A filter is selected out of the result by an anchor
+# substring that must appear in exactly one of them.
+SCOPE_ERE = re.compile(r"'(\^\([^']+\))'")
+
+# The `paths:` block of a workflow trigger: an indented `paths:` key followed by
+# `- "<glob>"` items. Comment lines are skipped so the rationale can live inline.
+PATHS_BLOCK = re.compile(r"^[ \t]*paths:[ \t]*$", re.MULTILINE)
+PATHS_ITEM = re.compile(r"^[ \t]*-[ \t]*\"([^\"]+)\"[ \t]*$")
+
+# Family directory used to build the "does this survive nesting?" probe. It is
+# the name PROPOSAL §5 uses in its worked example; nothing depends on the
+# spelling, only on it being one level deeper than today.
+NESTED_FAMILY = "substrates"
+
+
+@dataclasses.dataclass(frozen=True)
+class CrateScopeFilter:
+    """One workflow scope filter, pinned against the real crate inventory."""
+
+    workflow: str
+    name: str
+    # Substring identifying this filter uniquely within the workflow text.
+    anchor: str
+    # `regex` = a single-quoted ERE; `globs` = the trigger's `paths:` list.
+    kind: str
+    # (crate name, in-crate probe path) — the crate must exist, and the filter
+    # must match both its real location and a nested equivalent.
+    crates: tuple[tuple[str, str], ...] = ()
+    # (crate name, in-crate glob) — the glob must discover at least one real
+    # file, and every discovered file must be in scope.
+    crate_globs: tuple[tuple[str, str], ...] = ()
+    # Non-crate paths that must stay in scope.
+    in_scope: tuple[str, ...] = ()
+    # Paths that must stay OUT of scope: a filter that matches everything is
+    # not a fix.
+    out_of_scope: tuple[str, ...] = ()
+
+
+CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
+    CrateScopeFilter(
+        workflow=CODE_STYLE_WORKFLOW,
+        name="has_code",
+        anchor="migrations/",
+        kind="regex",
+        in_scope=(
+            "crates/ironclaw_llm/src/lib.rs",
+            f"crates/{NESTED_FAMILY}/ironclaw_events/src/lib.rs",
+            "crates/extensions/packages/slack/manifest.toml",
+            "tests/integration/mod.rs",
+        ),
+        out_of_scope=("README.md", "docs/plans/whatever.md", "openwiki/index.md"),
+    ),
+    CrateScopeFilter(
+        workflow=CODE_STYLE_WORKFLOW,
+        name="has_reborn_cli",
+        anchor="ironclaw_reborn_cli",
+        kind="regex",
+        crates=(
+            ("ironclaw_runner", "src/lib.rs"),
+            ("ironclaw_reborn_cli", "src/main.rs"),
+            ("ironclaw_reborn_config", "src/lib.rs"),
+            ("ironclaw_architecture", "tests/reborn_dependency_boundaries.rs"),
+        ),
+        in_scope=("Cargo.toml", "Cargo.lock", "scripts/ci/smoke-release-binary.py"),
+        out_of_scope=(
+            # The filter must stay a filter: the dist-build lane is expensive
+            # and is deliberately NOT triggered by every crate.
+            "crates/ironclaw_llm/src/lib.rs",
+            f"crates/{NESTED_FAMILY}/ironclaw_llm/src/lib.rs",
+            "crates/ironclaw_architecture/tests/reborn_retired_taxonomy.rs",
+            "README.md",
+        ),
+    ),
+    CrateScopeFilter(
+        workflow=PLATFORM_WORKFLOW,
+        name="has_direct_wasm_abi_risk",
+        anchor="wit/",
+        kind="regex",
+        crates=(
+            ("ironclaw_common", "src/lib.rs"),
+            ("ironclaw_wasm", "src/lib.rs"),
+        ),
+        # Probe derived from reality rather than from a guessed layout: the
+        # first-party extension manifests are found on disk and every one of
+        # them must be in scope. When WS2 moves extension packages, this stops
+        # discovering files or stops matching them — either way, loudly.
+        crate_globs=(("ironclaw_first_party_extensions", "assets/*/manifest.toml"),),
+        in_scope=("wit/host.wit", "registry/tools/x.json", "scripts/build-wasm-extensions.sh"),
+        out_of_scope=(
+            "crates/ironclaw_llm/src/lib.rs",
+            f"crates/{NESTED_FAMILY}/ironclaw_llm/src/lib.rs",
+            # Neighbouring crate whose name merely starts with the same text.
+            "crates/ironclaw_wasm_limiter/src/lib.rs",
+            "README.md",
+        ),
+    ),
+    CrateScopeFilter(
+        workflow=STRESS_WORKFLOW,
+        name="pull_request paths",
+        anchor="paths:",
+        kind="globs",
+        crates=(
+            ("ironclaw_filesystem", "src/lib.rs"),
+            ("ironclaw_threads", "src/lib.rs"),
+            ("ironclaw_turns", "src/lib.rs"),
+            ("ironclaw_resources", "src/lib.rs"),
+            ("ironclaw_host_api", "src/lib.rs"),
+        ),
+        in_scope=(
+            "tools/ironclaw_stress/src/main.rs",
+            "Cargo.toml",
+            "Cargo.lock",
+            ".github/workflows/ironclaw-stress.yml",
+        ),
+        out_of_scope=(
+            "crates/ironclaw_llm/src/lib.rs",
+            f"crates/{NESTED_FAMILY}/ironclaw_llm/src/lib.rs",
+            "README.md",
+        ),
+    ),
+)
+
+
+def github_glob_to_regex(glob: str) -> re.Pattern[str]:
+    """Compile one GitHub `paths:` filter pattern.
+
+    Implements the documented subset actually used by this repository's
+    filters: `**` matches any characters including `/`, `*` matches any
+    characters except `/`, `?` matches one character except `/`, and everything
+    else is literal. A full implementation of GitHub's syntax (`!` negation,
+    `+`) is deliberately out of scope — this exists to replay probe paths
+    through the filters we write, not to reimplement the platform.
+    """
+
+    out = ["^"]
+    index = 0
+    while index < len(glob):
+        char = glob[index]
+        if char == "*":
+            if glob.startswith("**", index):
+                out.append(".*")
+                index += 2
+                continue
+            out.append("[^/]*")
+        elif char == "?":
+            out.append("[^/]")
+        else:
+            out.append(re.escape(char))
+        index += 1
+    out.append("$")
+    return re.compile("".join(out))
+
+
+def extract_scope_regex(text: str, anchor: str) -> tuple[re.Pattern[str] | None, str]:
+    """Return the one single-quoted ERE in `text` containing `anchor`."""
+
+    matches = [pattern for pattern in SCOPE_ERE.findall(text) if anchor in pattern]
+    if len(matches) != 1:
+        return None, (
+            f"expected exactly one scope regex containing {anchor!r}, found "
+            f"{len(matches)}"
+        )
+    try:
+        return re.compile(matches[0]), matches[0]
+    except re.error as error:  # pragma: no cover - a malformed ERE is a typo
+        return None, f"scope regex {matches[0]!r} does not compile: {error}"
+
+
+def extract_paths_globs(text: str) -> tuple[list[str], str | None]:
+    """Return the `paths:` trigger filter's glob list."""
+
+    block = PATHS_BLOCK.search(text)
+    if block is None:
+        return [], "no `paths:` trigger filter found"
+    globs: list[str] = []
+    for line in text[block.end() :].splitlines()[1:]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        item = PATHS_ITEM.match(line)
+        if item is None:
+            break
+        globs.append(item.group(1))
+    if not globs:
+        return [], "the `paths:` trigger filter is empty"
+    return globs, None
+
+
+def _matcher(
+    scope: CrateScopeFilter, text: str
+) -> tuple[object | None, str | None]:
+    if scope.kind == "regex":
+        pattern, detail = extract_scope_regex(text, scope.anchor)
+        if pattern is None:
+            return None, detail
+        return (lambda path: bool(pattern.search(path))), None
+    globs, detail = extract_paths_globs(text)
+    if detail is not None:
+        return None, detail
+    compiled = [github_glob_to_regex(glob) for glob in globs]
+    return (
+        lambda path: any(pattern.match(path) for pattern in compiled)
+    ), None
+
+
+def validate_crate_scope_filters(
+    workflows: dict[str, str], root: Path = ROOT
+) -> list[str]:
+    """Return every way a crate-keyed workflow scope filter could go dark."""
+
+    errors: list[str] = []
+    try:
+        inventory = crate_directories(root)
+    except CrateTreeError as error:
+        return [f"crate inventory unavailable, scope filters unpinnable: {error}"]
+    if not inventory:  # pragma: no cover - crate_directories raises first
+        return ["crate inventory is empty, scope filters unpinnable"]
+
+    for scope in CRATE_SCOPE_FILTERS:
+        label = f"{scope.workflow}: {scope.name}"
+        text = workflows.get(scope.workflow)
+        if text is None:
+            errors.append(f"{label}: workflow not loaded")
+            continue
+        matches, detail = _matcher(scope, text)
+        if matches is None:
+            errors.append(f"{label}: {detail}")
+            continue
+
+        probes: list[tuple[str, bool]] = [(path, True) for path in scope.in_scope]
+        probes.extend((path, False) for path in scope.out_of_scope)
+
+        for name, relative in scope.crates:
+            if name not in text:
+                errors.append(
+                    f"{label}: no longer enumerates crate {name!r} — a governed "
+                    "crate silently dropped out of scope"
+                )
+                continue
+            try:
+                directory = crate_directory(name, root)
+            except CrateTreeError as error:
+                errors.append(
+                    f"{label}: names crate {name!r}, which the crate inventory "
+                    f"cannot resolve — repoint the filter rather than leaving a "
+                    f"term that matches nothing ({error})"
+                )
+                continue
+            probes.append((f"{directory}/{relative}", True))
+            probes.append((f"crates/{NESTED_FAMILY}/{name}/{relative}", True))
+
+        for name, pattern in scope.crate_globs:
+            try:
+                directory = crate_directory(name, root)
+            except CrateTreeError as error:
+                errors.append(f"{label}: names crate {name!r}: {error}")
+                continue
+            discovered = sorted(
+                candidate.relative_to(root).as_posix()
+                for candidate in (root / directory).glob(pattern)
+            )
+            if not discovered:
+                errors.append(
+                    f"{label}: probe {directory}/{pattern} discovered no files, so "
+                    "the filter is pinned against nothing — repoint the probe to "
+                    "wherever those files moved"
+                )
+                continue
+            probes.extend((path, True) for path in discovered)
+            probes.append(
+                (f"crates/{NESTED_FAMILY}/{name}/{pattern.replace('*', 'probe')}", True)
+            )
+
+        if not probes:  # pragma: no cover - every entry declares probes
+            errors.append(f"{label}: no probes declared, the pin asserts nothing")
+            continue
+        for path, expected in probes:
+            if matches(path) != expected:
+                verdict = "must be in scope" if expected else "must NOT be in scope"
+                errors.append(f"{label}: {path!r} {verdict}")
+    return errors
+
+
+def validate_workflow_texts(
+    workflows: dict[str, str], root: Path = ROOT
+) -> list[str]:
     """Return every missing lane marker; an empty result is the only pass."""
     errors: list[str] = []
     for path, markers in REQUIRED_MARKERS.items():
@@ -152,19 +483,20 @@ def validate_workflow_texts(workflows: dict[str, str]) -> list[str]:
     e2e = workflows.get(E2E_WORKFLOW)
     if e2e is not None:
         errors.extend(validate_e2e_scope_filters(e2e))
+    errors.extend(validate_crate_scope_filters(workflows, root))
     return errors
 
 
 def load_workflows(root: Path) -> dict[str, str]:
-    return {
-        path: (root / path).read_text(encoding="utf-8") for path in REQUIRED_MARKERS
-    }
+    paths = dict.fromkeys(
+        (*REQUIRED_MARKERS, *(scope.workflow for scope in CRATE_SCOPE_FILTERS))
+    )
+    return {path: (root / path).read_text(encoding="utf-8") for path in paths}
 
 
 def main() -> int:
-    root = Path(__file__).resolve().parents[2]
     try:
-        errors = validate_workflow_texts(load_workflows(root))
+        errors = validate_workflow_texts(load_workflows(ROOT), ROOT)
     except OSError as error:
         print(f"WS12 workflow contract failed: {error}", file=sys.stderr)
         return 1

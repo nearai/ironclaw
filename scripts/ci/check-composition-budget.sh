@@ -10,9 +10,20 @@
 #   scripts/ci/check-composition-budget.sh          # run the gate
 #   scripts/ci/check-composition-budget.sh --print   # print observed share only, never fail
 #
+# Both the numerator and the denominator are resolved from the crate inventory
+# (scripts/ci/lib/crate_tree.py — the outermost owner of each crates/**/Cargo.toml),
+# not from the flat `crates/ironclaw_*` shape. The numerator crate is found by
+# NAME at whatever depth its Cargo.toml sits, so the target-architecture family
+# move (crates/<family>/ironclaw_*, PROPOSAL §5) does not take this ratchet dark.
+# Both failure directions are gated below: an empty denominator and a zero-LOC
+# numerator are errors, never a 0.00% "pass" (docs/reborn/target-architecture/
+# CHECKLIST.md WS10, #6963).
+#
 # Test/override env vars (used by test-check-composition-budget.sh; unset in prod):
-#   COMPOSITION_SRC   numerator dir      (default: crates/ironclaw_reborn_composition/src)
-#   CRATES_ROOT       denominator root   (default: crates)  -> counts $CRATES_ROOT/*/src/**.rs
+#   COMPOSITION_SRC   numerator dir      (default: discovered from COMPOSITION_CRATE)
+#   COMPOSITION_CRATE numerator crate    (default: ironclaw_reborn_composition)
+#   CRATES_ROOT       crates directory   (default: crates) -> its parent is the
+#                     discovery root; the basename must be `crates`
 #   BUDGET_FILE       budget TOML path   (default: scripts/ci/composition-budget.toml)
 #
 # Exit codes: 0 = within budget (or dry-run) ; 1 = breach (enforcing) or schema error.
@@ -22,12 +33,43 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
-COMPOSITION_SRC="${COMPOSITION_SRC:-crates/ironclaw_reborn_composition/src}"
 CRATES_ROOT="${CRATES_ROOT:-crates}"
+COMPOSITION_CRATE="${COMPOSITION_CRATE:-ironclaw_reborn_composition}"
 BUDGET_FILE="${BUDGET_FILE:-scripts/ci/composition-budget.toml}"
 
 print_only=false
 [ "${1:-}" = "--print" ] && print_only=true
+
+fail_schema() { echo "composition-budget: $1" >&2; exit 1; }
+
+# --- crate inventory (tree-shape-agnostic, fail-closed) ----------------------
+# crate_tree.py emits crate directories relative to a REPO root, so the
+# discovery root is CRATES_ROOT's parent. Requiring the basename to be `crates`
+# keeps that derivation honest instead of silently discovering the wrong tree.
+if [ "$(basename "${CRATES_ROOT}")" != "crates" ]; then
+    fail_schema "CRATES_ROOT must be a directory named 'crates', got '${CRATES_ROOT}'"
+fi
+discovery_root="$(dirname "${CRATES_ROOT}")"
+
+# crate_tree.py exits non-zero (and explains itself) on a missing crates/ tree
+# or an inventory below its floor. Propagate that rather than measuring nothing.
+if ! CRATE_DIRS="$(python3 "${repo_root}/scripts/ci/lib/crate_tree.py" "${discovery_root}" 2>&1)"; then
+    fail_schema "crate discovery failed under '${discovery_root}': ${CRATE_DIRS}"
+fi
+[ -n "${CRATE_DIRS}" ] || fail_schema "crate inventory is empty under '${discovery_root}'"
+
+# --- resolve the numerator crate BY NAME, at any depth -----------------------
+if [ -z "${COMPOSITION_SRC:-}" ]; then
+    composition_matches="$(printf '%s\n' "${CRATE_DIRS}" \
+        | awk -F/ -v want="${COMPOSITION_CRATE}" '$NF == want')"
+    composition_count="$(printf '%s' "${composition_matches}" | grep -c . || true)"
+    if [ "${composition_count}" -ne 1 ]; then
+        fail_schema "expected exactly one crate directory named '${COMPOSITION_CRATE}' under \
+'${CRATES_ROOT}', found ${composition_count}. If the crate was renamed or moved, repoint this \
+gate (COMPOSITION_CRATE) in the same PR rather than letting the ratchet measure an empty tree."
+    fi
+    COMPOSITION_SRC="${discovery_root}/${composition_matches}/src"
+fi
 
 # Files that are test-only, excluded from the production-code metric. Matches
 # `tests.rs` / `test.rs`, `test_*.rs`, `*_test.rs`, `*_tests.rs`, and anything
@@ -46,14 +88,21 @@ count_loc() {
         | tr '\n' '\0' | xargs -0 cat 2>/dev/null | wc -l | tr -d ' '
 }
 
-# --- sum LOC of every crates/*/src tree (the denominator) --------------------
+# --- sum LOC of every discovered crate's src tree (the denominator) ----------
+# Keyed to the crate inventory rather than to `crates/*/src`, so a crate keeps
+# counting after it moves into a family directory. Equivalent on the flat tree:
+# every direct child of crates/ owns a Cargo.toml, and nested manifests
+# (ironclaw_safety/fuzz, the assets/*/wasm-src guests) are attributed to their
+# enclosing crate by the inventory exactly as `crates/*/src` skipped them.
 count_denominator() {
-    local total=0 d loc
-    for d in "${CRATES_ROOT}"/*/src; do
-        [ -d "${d}" ] || continue
-        loc="$(count_loc "${d}")"
+    local total=0 rel loc
+    while IFS= read -r rel; do
+        [ -n "${rel}" ] || continue
+        loc="$(count_loc "${discovery_root}/${rel}/src")"
         total=$((total + loc))
-    done
+    done <<EOF
+${CRATE_DIRS}
+EOF
     echo "${total}"
 }
 
@@ -89,8 +138,6 @@ toml_get() {
         | sed -E "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//; s/[[:space:]]*(#.*)?$//; s/^\"//; s/\"$//"
 }
 
-fail_schema() { echo "composition-budget: $1" >&2; exit 1; }
-
 [ -f "${BUDGET_FILE}" ] || fail_schema "budget file not found: ${BUDGET_FILE}"
 
 enforce="$(toml_get enforce)"
@@ -112,7 +159,18 @@ esac
 comp_loc="$(count_loc "${COMPOSITION_SRC}")"
 den_loc="$(count_denominator)"
 
-[ "${den_loc}" -gt 0 ] || fail_schema "denominator LOC is 0 — no crates/*/src trees found under '${CRATES_ROOT}'"
+[ "${den_loc}" -gt 0 ] || fail_schema "denominator LOC is 0 — no crate src trees found under '${CRATES_ROOT}'"
+
+# A zero numerator is the silent half of this gate's failure mode, and it is the
+# one a partial family move actually produces: move only the composition crate
+# and the denominator stays healthy, so the gate used to print
+# "0.00% (0 bp) ... OK: composition within mass + dispatch budget" and exit 0 —
+# a ratchet reporting perfect health while measuring nothing. Discovery makes
+# that unreachable by construction; this guard is the backstop that also covers
+# an explicit COMPOSITION_SRC override pointing somewhere empty.
+[ "${comp_loc}" -gt 0 ] || fail_schema "composition LOC is 0 — '${COMPOSITION_SRC}' holds no \
+production .rs files. The ratchet cannot pass by measuring nothing; repoint COMPOSITION_CRATE \
+(or COMPOSITION_SRC) in the same PR that moved or renamed the crate."
 
 # observed basis points, rounded to nearest (integer math via awk)
 observed_bp="$(awk -v c="${comp_loc}" -v d="${den_loc}" 'BEGIN { printf "%d", (10000*c/d)+0.5 }')"

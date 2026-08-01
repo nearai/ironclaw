@@ -121,7 +121,7 @@ def crate_directory(name: str, repo_root: str | pathlib.Path = ".") -> str:
 
     matches = [
         directory
-        for directory in crate_directories(repo_root)
+        for directory in _crate_directories_cached(repo_root)
         if directory.rsplit("/", 1)[-1] == name
     ]
     if len(matches) != 1:
@@ -189,6 +189,17 @@ def _crate_directories_cached(repo_root: str | pathlib.Path = ".") -> list[str]:
         cached = sorted(crate_directories(repo_root), key=len, reverse=True)
         _INVENTORY_CACHE[key] = cached
     return cached
+
+
+def reset_inventory_cache() -> None:
+    """Drop the memoized inventories.
+
+    Only in-process callers that mutate a crate tree between queries need this
+    — self-tests that build a fixture root, assert, then sabotage the same root.
+    Gates run once per process and never call it.
+    """
+
+    _INVENTORY_CACHE.clear()
 
 
 def main() -> int:

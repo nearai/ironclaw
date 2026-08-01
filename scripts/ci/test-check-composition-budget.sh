@@ -50,11 +50,38 @@ trap 'rm -rf "${tmp}"' EXIT
 # ---------------------------------------------------------------------------
 # Fixture builder: a crates root with composition + one other crate, sized to
 # an exact share. comp_lines / (comp_lines+other_lines) is the observed share.
+#
+# Every crate carries a real Cargo.toml because the gate now resolves both its
+# numerator and its denominator through the crate inventory
+# (scripts/ci/lib/crate_tree.py), whose fail-closed floor is
+# MIN_CRATE_DIRECTORIES=20. The padding crates exist only to clear that floor
+# and deliberately have NO src/ tree, so they contribute 0 LOC and every share
+# assertion below stays exact. Padding the fixture rather than exempting it from
+# the floor is the point: these tests drive the same discovery path production
+# uses, so there is no weaker mode for the gate to silently degrade into.
 # ---------------------------------------------------------------------------
+CRATE_FLOOR_PADDING=24
+
+write_manifest() {  # dir crate_name
+    mkdir -p "$1"
+    printf '[package]\nname = "%s"\nversion = "0.0.0"\nedition = "2021"\n' "$2" > "$1/Cargo.toml"
+}
+
+pad_inventory() {  # crates_dir
+    local i name
+    for i in $(seq 1 "${CRATE_FLOOR_PADDING}"); do
+        name="$(printf 'ironclaw_pad%02d' "${i}")"
+        write_manifest "$1/${name}" "${name}"
+    done
+}
+
 make_fixture() {
     local dir="$1" comp_lines="$2" other_lines="$3"
     rm -rf "${dir}"
     mkdir -p "${dir}/ironclaw_reborn_composition/src" "${dir}/other_crate/src"
+    write_manifest "${dir}/ironclaw_reborn_composition" ironclaw_reborn_composition
+    write_manifest "${dir}/other_crate" other_crate
+    pad_inventory "${dir}"
     # `|| true`: `yes | head` makes `yes` exit with SIGPIPE (141), which under
     # `set -e`+`pipefail` would abort the harness. The file is fully written.
     { yes 'let _ = 1;' | head -n "${comp_lines}";  } > "${dir}/ironclaw_reborn_composition/src/lib.rs" || true
@@ -217,6 +244,99 @@ assert_rc       "D5 missing arc_dyn_ceiling exits 1"  1 "${CAP_RC}"
 assert_contains "D5 reports arc schema error"         "${CAP_OUT}" "arc_dyn_ceiling must be an integer"
 
 rm -rf "${comp_src}/dispatch.rs" "${comp_src}/slack" "${comp_src}/extension_host"
+
+# ---------------------------------------------------------------------------
+# T. Tree-shape independence (WS10 / #6963).
+#
+# The gate used to key its numerator to the literal
+# crates/ironclaw_reborn_composition/src path and its denominator to
+# crates/*/src. Under the target-architecture family move both stop matching.
+# The denominator failure is loud (the den_loc guard); the NUMERATOR failure is
+# silent — a partial move leaves the denominator healthy, so the gate reported
+# "0.00% (0 bp) ... OK" and exited 0, a ratchet passing while measuring nothing.
+# These cases pin both directions.
+# ---------------------------------------------------------------------------
+
+# Discovery-mode runner: no COMPOSITION_SRC override, so the gate must find the
+# composition crate BY NAME through the inventory, wherever it sits.
+run_discovered() {  # crates_dir
+    CRATES_ROOT="$1" \
+    BUDGET_FILE="${tmp}/budget.toml" \
+    capture bash "${gate}"
+}
+
+# T1: flat tree, numerator DISCOVERED (not overridden) -> same 30.00% share.
+make_fixture "${tmp}/crates" 3000 7000
+budget true 3000 30; run_discovered "${tmp}/crates"
+assert_rc       "T1 flat discovery exits 0"        0 "${CAP_RC}"
+assert_contains "T1 flat discovery finds share"    "${CAP_OUT}" "30.00% (3000 bp)"
+
+# T2: POSITIVE — every crate nested one level under a family directory. Both the
+#     numerator (by name) and the denominator must still resolve, with the share
+#     byte-identical to the flat case. This is the case that is dark today.
+rm -rf "${tmp}/nested"
+mkdir -p "${tmp}/nested/crates/substrates"
+make_fixture "${tmp}/flatsrc" 3000 7000
+mv "${tmp}/flatsrc"/* "${tmp}/nested/crates/substrates/"
+budget true 3000 30; run_discovered "${tmp}/nested/crates"
+assert_rc       "T2 nested tree exits 0"           0 "${CAP_RC}"
+assert_contains "T2 nested share matches flat"     "${CAP_OUT}" "30.00% (3000 bp)"
+assert_contains "T2 nested denominator is real"    "${CAP_OUT}" "3000 LOC of 10000"
+
+# T3: POSITIVE — partial move (composition nested, everything else flat). The
+#     shape that silently reported 0.00% before: the denominator stays healthy
+#     so the old den_loc guard never fired.
+rm -rf "${tmp}/partial"
+make_fixture "${tmp}/partial/crates" 3000 7000
+mkdir -p "${tmp}/partial/crates/app"
+mv "${tmp}/partial/crates/ironclaw_reborn_composition" "${tmp}/partial/crates/app/"
+budget true 3000 30; run_discovered "${tmp}/partial/crates"
+assert_rc       "T3 partial move exits 0"          0 "${CAP_RC}"
+assert_contains "T3 partial move keeps measuring"  "${CAP_OUT}" "30.00% (3000 bp)"
+
+# T4: NEGATIVE — the composition crate is absent (renamed). Must be a loud
+#     repoint, not a 0.00% pass.
+rm -rf "${tmp}/renamed"
+make_fixture "${tmp}/renamed/crates" 3000 7000
+mv "${tmp}/renamed/crates/ironclaw_reborn_composition" "${tmp}/renamed/crates/ironclaw_composition"
+budget true 3000 30; run_discovered "${tmp}/renamed/crates"
+assert_rc       "T4 renamed crate exits 1"         1 "${CAP_RC}"
+assert_contains "T4 renamed crate names the crate" "${CAP_OUT}" "expected exactly one crate directory named 'ironclaw_reborn_composition'"
+
+# T5: NEGATIVE — an inventory below the discovery floor must refuse rather than
+#     measure a truncated tree.
+rm -rf "${tmp}/thin"
+mkdir -p "${tmp}/thin/crates/ironclaw_reborn_composition/src"
+write_manifest "${tmp}/thin/crates/ironclaw_reborn_composition" ironclaw_reborn_composition
+printf 'let _ = 1;\n' > "${tmp}/thin/crates/ironclaw_reborn_composition/src/lib.rs"
+budget true 3000 30; run_discovered "${tmp}/thin/crates"
+assert_rc       "T5 thin inventory exits 1"        1 "${CAP_RC}"
+assert_contains "T5 thin inventory refuses"        "${CAP_OUT}" "crate discovery failed"
+
+# T6: NEGATIVE — a zero-LOC numerator is an error even when it is reached
+#     through an explicit COMPOSITION_SRC override. This is the backstop for the
+#     silent 0.00% pass.
+make_fixture "${tmp}/crates" 3000 7000
+mkdir -p "${tmp}/empty_src"
+budget true 3000 30
+COMPOSITION_SRC="${tmp}/empty_src" \
+CRATES_ROOT="${tmp}/crates" \
+BUDGET_FILE="${tmp}/budget.toml" \
+capture bash "${gate}"
+assert_rc       "T6 zero numerator exits 1"        1 "${CAP_RC}"
+assert_contains "T6 zero numerator refuses"        "${CAP_OUT}" "composition LOC is 0"
+
+# T7: NEGATIVE — CRATES_ROOT that is not a `crates` directory must be refused
+#     rather than silently discovering the wrong tree.
+budget true 3000 30
+COMPOSITION_SRC="${tmp}/crates/ironclaw_reborn_composition/src" \
+CRATES_ROOT="${tmp}" \
+BUDGET_FILE="${tmp}/budget.toml" \
+capture bash "${gate}"
+assert_rc       "T7 bad CRATES_ROOT exits 1"       1 "${CAP_RC}"
+assert_contains "T7 bad CRATES_ROOT explains"      "${CAP_OUT}" "must be a directory named 'crates'"
+
+make_fixture "${tmp}/crates" 3000 7000  # restore clean fixture
 
 # C10: guard against committing a red gate — the REAL repo budget file must pass
 #      against the REAL tree right now.
