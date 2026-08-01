@@ -259,6 +259,16 @@ where
     Ok(())
 }
 
+/// The `count` oldest keys of an idempotency order deque.
+///
+/// A group commit inserting N new keys can evict N old ones once the deque is
+/// at its cap. Loading only the single oldest row left the rest of the evicted
+/// keys untombstoned in storage, where a later retry could still read one and
+/// replay its stale outcome.
+fn oldest_keys(order: &std::collections::VecDeque<String>, count: usize) -> Vec<String> {
+    order.iter().take(count).cloned().collect()
+}
+
 pub(super) async fn load<F>(
     filesystem: &ScopedFilesystem<F>,
     references: &LoadReferences,
@@ -276,7 +286,7 @@ where
         .collect::<Vec<_>>();
     let order_path = scoped_path(&format!("{MATERIALIZED_PREFIX}/idempotency-order"))?;
     push_if_present(filesystem, &mut records, &order_path).await?;
-    let (oldest_control_key, oldest_submission_key) = records
+    let (oldest_control_keys, oldest_submission_keys) = records
         .iter()
         .map(decode)
         .collect::<Result<Vec<_>, _>>()?
@@ -286,8 +296,11 @@ where
                 control_order,
                 submission_order,
             } => Some((
-                control_order.front().cloned(),
-                submission_order.front().cloned(),
+                oldest_keys(&control_order, references.control_idempotency_keys.len()),
+                oldest_keys(
+                    &submission_order,
+                    references.submission_idempotency_keys.len(),
+                ),
             )),
             _ => None,
         })
@@ -301,8 +314,11 @@ where
                         submission_order,
                         ..
                     } => Some((
-                        control_order.front().cloned(),
-                        submission_order.front().cloned(),
+                        oldest_keys(&control_order, references.control_idempotency_keys.len()),
+                        oldest_keys(
+                            &submission_order,
+                            references.submission_idempotency_keys.len(),
+                        ),
                     )),
                     _ => None,
                 })
@@ -312,14 +328,14 @@ where
         .control_idempotency_keys
         .iter()
         .map(|key| ("control", key))
-        .chain(oldest_control_key.iter().map(|key| ("control", key)))
+        .chain(oldest_control_keys.iter().map(|key| ("control", key)))
         .chain(
             references
                 .submission_idempotency_keys
                 .iter()
                 .map(|key| ("submission", key)),
         )
-        .chain(oldest_submission_key.iter().map(|key| ("submission", key)))
+        .chain(oldest_submission_keys.iter().map(|key| ("submission", key)))
         .collect::<Vec<_>>();
     for (collection, key) in idempotency_keys {
         let path = hashed_scoped_path(collection, key)?;

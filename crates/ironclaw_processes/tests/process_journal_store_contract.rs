@@ -1702,6 +1702,55 @@ async fn observer_registration_replays_commits_durably_after_restart() {
 /// The newer position is written directly here so the stale-cache window is
 /// deterministic — the contiguity check hides it whenever the other instance's
 /// entries also land in this instance's journal view.
+/// Delivery fans out across observers so one slow observer does not add its
+/// latency to every other observer's foreground response. Every other contract
+/// test registers a single observer, so a regression back to sequential
+/// delivery would stay correct and pass the suite while restoring the
+/// write-amplified latency this change targets. Two observers rendezvous on a
+/// barrier: if delivery were sequential, neither could pass it.
+#[tokio::test]
+async fn observer_delivery_runs_registered_observers_concurrently() {
+    struct BarrierObserver {
+        id: &'static str,
+        barrier: Arc<tokio::sync::Barrier>,
+    }
+
+    #[async_trait]
+    impl ProcessJournalCommitObserver for BarrierObserver {
+        fn process_observer_id(&self) -> &'static str {
+            self.id
+        }
+
+        async fn observe_process_commit(
+            &self,
+            _commit: ProcessJournalCommit,
+        ) -> Result<(), String> {
+            self.barrier.wait().await;
+            Ok(())
+        }
+    }
+
+    let filesystem = in_memory_backed_processes_filesystem();
+    let store = ProcessJournalStore::new(filesystem);
+    let resource_scope = scope();
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    for id in ["barrier-observer-a", "barrier-observer-b"] {
+        store
+            .subscribe_process_observer(Arc::new(BarrierObserver {
+                id,
+                barrier: Arc::clone(&barrier),
+            }))
+            .expect("subscribe barrier observer");
+    }
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        submit_internal_process(&store, &resource_scope, ProcessId::new()),
+    )
+    .await
+    .expect("observers must be delivered concurrently; serial delivery cannot clear the barrier");
+}
+
 /// Observer callbacks legitimately re-enter the store: the sub-agent
 /// await-edge resolver settles dependencies and resumes the parent from inside
 /// `observe_process_commit`. The task-local marker is the only thing stopping

@@ -2068,12 +2068,13 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
 }
 
 /// PR #6696 declared the transcript and listing projections under each thread,
-/// so every thread create paid an index-DDL transaction and — on the SQL
-/// backends, where a declaration installs projection triggers whose match
-/// clause embeds the declared prefix — permanently added three more triggers
-/// per spec to the shared entries table. The specs are now declared once per
-/// mount at the `/threads` alias root, so only a mount's first thread create
-/// issues DDL and listing still resolves the spec from a deeper path.
+/// so every thread create paid redundant index-declaration work and left a
+/// catalog row per thread behind forever — rows the SQL projection then has to
+/// consider on every entry write. (Under the per-declaration trigger design
+/// that PR shipped, each also added three triggers per spec to the shared
+/// entries table.) The specs are now declared once per mount at the `/threads`
+/// alias root, so only a mount's first thread create declares anything and
+/// listing still resolves the spec from a deeper path.
 #[tokio::test]
 async fn filesystem_thread_create_declares_indexes_once_per_mount() {
     let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));

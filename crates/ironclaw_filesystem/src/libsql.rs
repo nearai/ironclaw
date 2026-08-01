@@ -2551,8 +2551,9 @@ async fn ensure_libsql_static_ordered_projection(
         let name: String = row.get(0).map_err(|error| {
             infrastructure_libsql_error(FilesystemOperation::EnsureIndex, error)
         })?;
-        // Trigger names come from sql_index_name (ASCII alphanumerics and
-        // underscores only), but quote defensively anyway.
+        // The name is interpolated into DDL unquoted, so the ASCII
+        // alphanumeric/underscore check below is the whole safeguard, not a
+        // belt-and-braces extra: relaxing it would admit injection.
         if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             drops.push_str(&format!("DROP TRIGGER IF EXISTS {name};"));
         }

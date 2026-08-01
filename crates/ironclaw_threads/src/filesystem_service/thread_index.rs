@@ -15,8 +15,8 @@ use crate::{
 };
 
 use super::{
-    StoredThreadRecord, deserialize, invalid_path, is_not_found, map_cas_error, messages_root,
-    scope_axes_string, scoped_path, serialize_pretty, summaries_root,
+    IndexDeclarationPolicy, StoredThreadRecord, deserialize, invalid_path, is_not_found,
+    map_cas_error, messages_root, scope_axes_string, scoped_path, serialize_pretty, summaries_root,
 };
 
 const THREAD_INDEX_KIND: &str = "thread_index";
@@ -144,10 +144,18 @@ where
         // The listing projection is declared once per mount at the `/threads`
         // alias root, not per scope. Ancestor-prefix resolution lets the
         // per-scope `thread_index_root` query below still find it.
-        self.declare_root_indexes(scope, !required).await?;
+        self.declare_root_indexes(
+            scope,
+            if required {
+                IndexDeclarationPolicy::Required
+            } else {
+                IndexDeclarationPolicy::Optional
+            },
+        )
+        .await?;
         if let Ok(mut ready) = self.ready_thread_index_scopes.lock() {
             ready.insert(scope_key.clone());
-            evict_hash_set_entry_over_limit(&mut ready, 128, &scope_key);
+            evict_entry_over_limit(&mut ready, 128, &scope_key);
         }
         if required {
             let marker = thread_index_migration_marker_path(scope)?;
@@ -231,7 +239,7 @@ where
         if let Ok(mut known) = self.known_thread_index_rows.lock() {
             let key = thread_index_record_cache_key(scope, thread_id);
             known.insert(key.clone());
-            evict_hash_set_entry_over_limit(&mut known, THREAD_INDEX_KNOWN_ROW_MAX, &key);
+            evict_entry_over_limit(&mut known, THREAD_INDEX_KNOWN_ROW_MAX, &key);
         }
     }
 
@@ -665,7 +673,8 @@ where
             .map(|entry| ThreadId::new(entry.name).map_err(invalid_path))
             .collect::<Result<Vec<_>, _>>()?;
         let mut migrated = 0usize;
-        self.declare_root_indexes(scope, false).await?;
+        self.declare_root_indexes(scope, IndexDeclarationPolicy::Required)
+            .await?;
         for thread_id in thread_ids {
             for (prefix, messages) in [
                 (messages_root(scope, &thread_id)?, true),
@@ -988,17 +997,18 @@ fn thread_activity_sort_key(record: &SessionThreadRecord) -> String {
     format!("{descending_rank:020}")
 }
 
-pub(super) fn evict_hash_set_entry_over_limit(
-    set: &mut HashSet<String>,
-    max_entries: usize,
-    keep: &str,
-) {
+/// Generic over the key so typed cache keys (a `(TenantId, UserId)` mount
+/// pair) do not have to be flattened into a string to be evicted.
+pub(super) fn evict_entry_over_limit<K>(set: &mut HashSet<K>, max_entries: usize, keep: &K)
+where
+    K: std::hash::Hash + Eq + Clone,
+{
     if set.len() <= max_entries {
         return;
     }
     let mut keys = set.iter();
     let victim = match keys.next() {
-        Some(first) if first.as_str() == keep => keys.next().cloned(),
+        Some(first) if first == keep => keys.next().cloned(),
         Some(first) => Some(first.clone()),
         None => None,
     };

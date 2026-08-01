@@ -52,7 +52,7 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{
     error::HostApiError,
-    ids::{InvocationId, ThreadId},
+    ids::{InvocationId, TenantId, ThreadId, UserId},
     path::ScopedPath,
     resource::ResourceScope,
 };
@@ -163,9 +163,23 @@ where
     /// Mounts whose `/threads`-root index specs are already declared, keyed by
     /// `tenant:user` — the pair the alias resolves through. Keeps thread create
     /// off the index-DDL path after a mount's first thread.
-    ready_index_mounts: Mutex<HashSet<String>>,
+    ready_index_mounts: Mutex<HashSet<(TenantId, UserId)>>,
     thread_index_declaration_lock: tokio::sync::Mutex<()>,
     one_shot_context_windows: Mutex<HashMap<String, ContextWindow>>,
+}
+
+/// Whether a mount that cannot serve ordered indexes is a hard failure.
+///
+/// A named mode rather than a boolean: one caller derives it from `!required`,
+/// and an inverted argument there would silently downgrade a required
+/// declaration to a skipped one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum IndexDeclarationPolicy {
+    /// Propagate `Unsupported` — the caller needs the projection.
+    Required,
+    /// Tolerate `Unsupported` — the caller only wants the projection if the
+    /// mount can serve it.
+    Optional,
 }
 
 impl<F> FilesystemSessionThreadService<F>
@@ -301,11 +315,13 @@ where
     /// Declare every ordered-index spec this crate queries, once per mount.
     ///
     /// These are declared at the `/threads` alias root rather than under each
-    /// thread. An ordered-index declaration installs write-maintained
-    /// projection triggers whose match clause embeds the declared prefix, so
-    /// declaring per thread both cost a DDL transaction on every thread create
-    /// and accumulated triggers without bound (three per spec per thread) on
-    /// the shared entries table. Every spec leads with its partition key
+    /// thread. A declaration is catalog work — a spec row, and on first use the
+    /// static projection trigger set — so declaring per thread paid that cost
+    /// on every thread create and left a catalog row per thread behind
+    /// forever, which the projection then has to consider on each write.
+    /// (Under the per-declaration trigger design this branch replaced, it also
+    /// accumulated three triggers per spec per thread.) Every spec leads with
+    /// its partition key
     /// (`thread_id`, or `scope_key` for the listing projection), so a single
     /// declaration above the per-thread paths serves every thread under this
     /// mount; `query_ordered` resolves it by walking ancestor prefixes.
@@ -324,13 +340,15 @@ where
     pub(super) async fn declare_root_indexes(
         &self,
         scope: &ThreadScope,
-        fail_soft_unsupported: bool,
+        policy: IndexDeclarationPolicy,
     ) -> Result<(), SessionThreadError> {
         let resource_scope = scope.to_resource_scope();
-        let mount_key = format!(
-            "{}:{}",
-            resource_scope.tenant_id.as_str(),
-            resource_scope.user_id.as_str()
+        // The `/threads` alias resolves through tenant and user, so the mount
+        // identity is that pair. Kept typed rather than flattened into a
+        // delimited string (typed-internals rule).
+        let mount_key = (
+            resource_scope.tenant_id.clone(),
+            resource_scope.user_id.clone(),
         );
         if self
             .ready_index_mounts
@@ -348,7 +366,9 @@ where
                 .await
             {
                 Ok(()) => {}
-                Err(FilesystemError::Unsupported { .. }) if fail_soft_unsupported => {
+                Err(FilesystemError::Unsupported { .. })
+                    if policy == IndexDeclarationPolicy::Optional =>
+                {
                     return Ok(());
                 }
                 Err(error) => return Err(error.into()),
@@ -356,7 +376,7 @@ where
         }
         if let Ok(mut ready) = self.ready_index_mounts.lock() {
             ready.insert(mount_key.clone());
-            thread_index::evict_hash_set_entry_over_limit(&mut ready, 512, &mount_key);
+            thread_index::evict_entry_over_limit(&mut ready, 512, &mount_key);
         }
         Ok(())
     }
@@ -1373,7 +1393,8 @@ where
         .await
         .map_err(map_cas_error)?;
         if created {
-            self.declare_root_indexes(&record.scope, false).await?;
+            self.declare_root_indexes(&record.scope, IndexDeclarationPolicy::Required)
+                .await?;
         }
         if created || !self.is_thread_index_known(&record.scope, &record.thread_id) {
             self.refresh_thread_index_from_source(&record.scope, &record.thread_id)
