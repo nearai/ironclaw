@@ -151,6 +151,17 @@ fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
+            // Same skip list as the extension tier's scan: `target` is the build
+            // tree and `node_modules` is the WebUI frontend's vendored tree,
+            // which really is present under `crates/`. Neither can hold a
+            // governed definition, and descending them makes the walk's cost
+            // depend on local build state.
+            if matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some("target") | Some("node_modules")
+            ) {
+                continue;
+            }
             collect_rust_files(&path, out);
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
             out.push(path);

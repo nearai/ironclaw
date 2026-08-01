@@ -838,6 +838,10 @@ max_message_chars = 40000
             "injection = { type = \"path_placeholder\", placeholder = \"has space\" }",
             "injection = { type = \"query_param\", name = \" \" }",
             "injection = { type = \"header\", name = \"bad header\" }",
+            // `body_json_pointer` is an RFC 6901 pointer, so it must be rooted.
+            // Without this case the arm that enforces it never executes.
+            "injection = { type = \"body_json_pointer\", pointer = \"secret\" }",
+            "injection = { type = \"body_json_pointer\", pointer = \"\" }",
         ] {
             let toml = documented_channel_toml().replace(
                 "credential_handle = \"vendor_bot_token\"",
@@ -852,6 +856,19 @@ max_message_chars = 40000
                 "expected rejection for: {bad}"
             );
         }
+    }
+
+    #[test]
+    fn rooted_body_json_pointer_injection_is_accepted() {
+        let toml = documented_channel_toml().replace(
+            "credential_handle = \"vendor_bot_token\"",
+            "credential_handle = \"vendor_bot_token\"\n\
+             injection = { type = \"body_json_pointer\", pointer = \"/secret\" }",
+        );
+        let channel: ChannelDescriptor = toml::from_str(&toml).unwrap();
+        channel
+            .validate()
+            .expect("a rooted RFC 6901 pointer is a well-formed injection target");
     }
 
     #[test]

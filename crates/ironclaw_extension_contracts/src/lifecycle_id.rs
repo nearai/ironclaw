@@ -119,3 +119,52 @@ fn validate_lifecycle_string(
     }
     Ok(trimmed.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The accessor surface the two tiers reach these ids through — including
+    /// `Display`/`AsRef`, which `hosted_mcp_extension_id` and the lifecycle
+    /// projections both rely on.
+    #[test]
+    fn bounded_ids_expose_a_trimmed_value_through_every_accessor() {
+        let id = LifecyclePackageId::new("  calendar  ").expect("valid id");
+        assert_eq!(id.as_str(), "calendar");
+        assert_eq!(id.as_ref(), "calendar");
+        assert_eq!(id.to_string(), "calendar");
+        assert_eq!(format!("{id:?}"), "LifecyclePackageId(\"calendar\")");
+        assert_eq!(id.clone().into_inner(), "calendar");
+        assert_eq!(id, LifecyclePackageId::new("calendar").expect("valid id"));
+    }
+
+    /// All three rejection paths fail closed, and the wire path runs the same
+    /// validation — an id cannot enter through `Deserialize` unchecked.
+    #[test]
+    fn bounded_ids_reject_empty_oversized_and_control_characters() {
+        assert!(LifecyclePackageId::new("   ").is_err());
+        assert!(LifecyclePackageId::new("x".repeat(LIFECYCLE_ID_MAX_BYTES + 1)).is_err());
+        assert!(LifecyclePackageId::new(format!("bad{}id", '\u{0}')).is_err());
+        assert!(LifecyclePackageId::new(format!("bad{}id", '\u{7}')).is_err());
+
+        assert!(serde_json::from_str::<LifecyclePackageId>("\"\"").is_err());
+        assert_eq!(
+            serde_json::from_str::<LifecyclePackageId>("\"calendar\"").expect("valid"),
+            LifecyclePackageId::new("calendar").expect("valid id")
+        );
+        assert_eq!(
+            serde_json::to_string(&LifecyclePackageId::new("calendar").expect("valid id"))
+                .expect("serialize"),
+            "\"calendar\""
+        );
+    }
+
+    /// The blocker ref shares the template but carries its own, larger ceiling.
+    #[test]
+    fn blocker_ref_shares_the_template_with_its_own_ceiling() {
+        let blocker = LifecycleBlockerRef::new("credential:google").expect("valid ref");
+        assert_eq!(blocker.as_str(), "credential:google");
+        assert!(LifecycleBlockerRef::new("").is_err());
+        assert!(LifecycleBlockerRef::new("x".repeat(LIFECYCLE_ID_MAX_BYTES + 1)).is_ok());
+    }
+}

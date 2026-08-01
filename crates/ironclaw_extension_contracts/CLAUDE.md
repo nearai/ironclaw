@@ -13,9 +13,9 @@ A type is admitted iff all four hold (the contracts-family test, §6.1):
 3. two or more consumers need it without importing an owner;
 4. it carries no execution, persistence, policy engine, or workflow.
 
-Today that is seventeen modules (the count read "thirteen" before WS1.5 while
-the table already listed sixteen rows — a stale number carried over from WS1.3,
-corrected here against `src/lib.rs`):
+Today that is seventeen modules (WS1.4 corrected the stale "thirteen" carried
+over from WS1.3 to sixteen; WS1.5's `verified_inbound` makes seventeen — the
+number is checked against `src/lib.rs`, not incremented by hand):
 
 | Module | Owns |
 | --- | --- |
