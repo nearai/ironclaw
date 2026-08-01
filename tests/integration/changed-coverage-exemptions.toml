@@ -555,3 +555,43 @@ reason = "The else arm of a let-else that rejects a non-Oauth2Code vendor recipe
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
+
+# ---------------------------------------------------------------------------
+# WS1.4 product-contracts extraction + the adapter move (PR #6980).
+#
+# The two files this PR *created* — `extension_contracts::auth_prompt` and
+# `extension_contracts::lifecycle_id` — are deliberately NOT exempted. They
+# arrived carrying 134 uncovered lines and 22 uncovered branch arms, and that
+# was a real coverage regression rather than an attribution artifact: the code
+# moved out of `host_api::product_adapter::outbound` and
+# `host_api::package_lifecycle`, whose owning crates' unit suites did not move
+# with it. Eleven unit tests were added in the two modules instead, covering
+# `render_channel_auth_prompt` (the function both shipped channel packages call
+# from `deliver`), the `AuthPromptContextView` constructors and wire round-trip,
+# every nested validator's rejection path, and the bounded-id accessor and
+# rejection surface. What remains below is only what a test cannot reach.
+# ---------------------------------------------------------------------------
+
+[[exemption]]
+path = "crates/ironclaw_product_contracts/src/lib.rs"
+lines = [33]
+owner = "@nearai/reborn"
+reason = "Crate-root inner attribute `#![warn(unreachable_pub)]` on a declaration-only facade — the same shape already exempted for `ironclaw_loop_contracts/src/lib.rs`. rustc emits no LCOV record for this file at all (the gate reports it as 'absent from coverage or contains no DA records'), so every other line here is mechanically uninstrumentable; this attribute is the only line the classifier does not recognise, and exempting it lets the uninstrumentable-file path apply as intended."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_product/src/reborn_services.rs"
+lines = [4888]
+owner = "@nearai/reborn"
+reason = "Pre-existing `map_err` arm whose only change is a repointed type path (`ironclaw_host_api::product_surface::ProductSurfaceError::internal()` -> `ironclaw_product_contracts::surface::...`). It fires only if `serde_json::to_value` fails on a value a typed capability handler just produced, which no integration scenario can force; the line was equally unreached before this PR and is flagged solely because the path on it moved."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_telegram_v2_adapter/src/payload.rs"
+lines = [670, 671]
+owner = "@nearai/reborn"
+reason = "Body of a pre-existing `map_err` closure on the interaction-resolution parse, re-indented by rustfmt because the repointed call path (`ironclaw_product_contracts::interaction_commands::...`) is longer than the `ironclaw_host_api::product_adapter::...` one it replaced. No statement changed, the arm fires only on a parse rejection no Telegram fixture produces, and it was equally unreached before this PR."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
