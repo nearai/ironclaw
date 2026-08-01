@@ -31,13 +31,15 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 
 ## Ports that are no longer declared here
 
-WS2's `extension_host` port-inversion row (PROPOSAL §6.1.3) moved the eleven
-product-side ports this crate declared whose implementation sits outside it —
-nine implemented by `ironclaw_extension_host` (the set
+WS2 moved the twelve product-side ports this crate declared whose
+implementation sits outside it (PROPOSAL §6.1.3) — **ten** implemented by
+`ironclaw_extension_host` (the set
 `crates/ironclaw_architecture/tests/reborn_extension_host_port_inversion.rs`
-enumerates and pins as `INVERTED_PORTS`) and two by
-`ironclaw_reborn_composition` (`AdminUserService`, `RebornOperatorToolCatalog`).
-That test is the enforced inventory; this list is prose and defers to it.
+enumerates and pins as `INVERTED_PORTS`; WS2.1 moved nine and WS2.2 added
+`ProductConversationSubjectRouteResolver` once the boundary error made it
+declarable) and two by `ironclaw_reborn_composition` (`AdminUserService`,
+`RebornOperatorToolCatalog`). That test is the enforced inventory; this list is
+prose and defers to it.
 They now live in `ironclaw_product_contracts` and this crate imports them like
 any other consumer — there is deliberately **no re-export** (the port half of
 `reborn_product_contract_location_scan.rs` fails on one):
@@ -58,8 +60,10 @@ any other consumer — there is deliberately **no re-export** (the port half of
 What stayed, and why: the **implementations** (`DeliveryCoordinator`,
 `NoReplyContext`, `ExtensionAccountSetupRegistry`, `UnsupportedLifecycleProductService`,
 `RejectingAdminUserService`, `UnavailableRebornViewProvider`,
-`DirectConversationCommandAdmission`), the frozen wire DTOs
-(`RebornAdmin*`, `ProductView`), the ledger record and saga (`ProductInboundAction`),
+`DirectConversationCommandAdmission`), the frozen **operation inventory** — the
+concrete `*_COMMAND`/`*_VIEW`/`*_CAPABILITY` constants §6.1.3 keeps here, which
+is why `webui` and `openai_compat` still name this crate at all — the ledger
+record and saga (`ProductInboundAction`),
 and five ports whose signatures name `ironclaw_auth`/`ironclaw_conversations`
 types that a contracts crate may not depend on, or product-declared binding DTOs
 — see the residue list in

@@ -30,9 +30,11 @@ ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 # so the port cannot be implemented (or called) with a plain `String` that
 # `Debug`-prints itself. A value wrapper, not a framework or runtime client —
 # the contracts-purity denylist in `reborn_dependency_boundaries.rs` governs
-# the latter and this is deliberately not one. `serde` is on because
-# `RebornOperatorConfigSetRequest` and the LLM-provider upsert body carry
-# secret material on the wire and must not degrade to a `String` here.
+# the latter and this is deliberately not one. `serde` is on because the three
+# `Deserialize`-derived bodies that carry secret material on the wire —
+# `RebornOperatorSetupRequest` (`api_key`, `webui_access_token`),
+# `UpsertLlmProviderRequest` and `LlmProbeRequest` (`api_key`) — must not
+# degrade those fields to a `String` here.
 secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

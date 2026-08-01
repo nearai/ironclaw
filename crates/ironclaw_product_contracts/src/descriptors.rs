@@ -199,6 +199,14 @@ where
     Params: Serialize,
     Output: DeserializeOwned,
 {
+    /// Run this view on `surface` and decode its page.
+    ///
+    /// **One payload per page.** The view conduit carries a `RebornViewPage`,
+    /// which holds exactly one `payload`; `ProductSurfaceQueryPage::items` is
+    /// the transport envelope around it and product's single production
+    /// producer fills it with `vec![page.payload]`. This decoder reads the
+    /// first item and there is never a second — a provider that returns more
+    /// has broken the conduit contract, not this method.
     pub async fn query_on(
         &self,
         surface: &BoundProductSurface,

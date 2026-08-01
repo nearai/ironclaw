@@ -42,12 +42,29 @@ pub struct ProductCreateThreadRequest {
 /// against the shared attachment format registry. This is the only place raw
 /// upload bytes enter the workflow — they are decoded, budgeted, and landed in
 /// storage, never carried on the (serializable) inbound command.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ProductInboundAttachment {
     pub mime_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
     pub data_base64: String,
+}
+
+/// Renders the encoded length, never the bytes — the same redaction
+/// [`ProjectFsFile`](crate::workspace_views::ProjectFsFile) applies for the same
+/// reason. This is the only DTO in the family that carries a whole user upload,
+/// and it is a field of [`ProductSubmitTurnRequest`], so a derived `Debug`
+/// anywhere on that request's path writes the entire file into a diagnostic.
+/// `ProductSubmitTurnRequest` keeps its derive and inherits the redaction here.
+impl std::fmt::Debug for ProductInboundAttachment {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProductInboundAttachment")
+            .field("mime_type", &self.mime_type)
+            .field("filename", &self.filename)
+            .field("data_base64_len", &self.data_base64.len())
+            .finish()
+    }
 }
 
 /// Browser body for WebUI send-message mutation.
@@ -311,6 +328,42 @@ mod tests {
         assert_eq!(
             SanitizedCancelReason::from(ProductCancelReason::Superseded),
             SanitizedCancelReason::Superseded
+        );
+    }
+
+    /// `data_base64` is a whole user upload, and this DTO is a field of
+    /// `ProductSubmitTurnRequest` — the body every send-message route
+    /// deserializes. A derived `Debug` puts the entire file into any diagnostic
+    /// that formats the request, which is the leak `ProjectFsFile` in
+    /// `workspace_views` already hand-writes `Debug` to avoid. Two-sided: the
+    /// safe metadata must survive, the payload must not.
+    #[test]
+    fn inbound_attachment_debug_reports_the_length_and_never_the_payload() {
+        let attachment = ProductInboundAttachment {
+            mime_type: "text/plain".to_string(),
+            filename: Some("report.txt".to_string()),
+            data_base64: "U0VDUkVUUEFZTE9BRA==".to_string(),
+        };
+
+        let rendered = format!("{attachment:?}");
+        assert!(
+            !rendered.contains("U0VDUkVU"),
+            "the encoded upload must never reach a diagnostic: {rendered}"
+        );
+        assert!(
+            !rendered.contains("data_base64:"),
+            "the `data_base64` field itself must be absent; only its length may \
+             appear: {rendered}"
+        );
+        assert!(
+            rendered.contains("data_base64_len: 20"),
+            "the length is the whole point — it is what makes a truncated or \
+             oversized upload diagnosable: {rendered}"
+        );
+        assert!(
+            rendered.contains("text/plain") && rendered.contains("report.txt"),
+            "mime type and filename stay visible; they are not user content: \
+             {rendered}"
         );
     }
 }

@@ -310,11 +310,18 @@ fn items_defined_in(root: &Path, crate_name: &str) -> BTreeSet<String> {
     found.into_keys().collect()
 }
 
+/// Walk the crate's production `.rs` files.
+///
+/// Every I/O error panics rather than being skipped: a scan that silently drops
+/// an unreadable directory or entry reports a *smaller* residue than reality and
+/// passes. Same hardening as `reborn_extension_host_port_inversion.rs`.
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| {
+            panic!("cannot read an entry under {}: {error}", dir.display())
+        });
         let path = entry.path();
         if path.is_dir() {
             if matches!(
@@ -396,7 +403,12 @@ fn strip_cfg_test_blocks(source: &str) -> String {
 /// and rejects an identifier character there.
 fn product_symbols_in(source: &str) -> BTreeSet<String> {
     const CRATE: &str = "ironclaw_product";
-    let cleaned = strip_comments_and_strings(&strip_cfg_test_blocks(source));
+    // Comments and strings go first, so a brace inside either cannot
+    // desynchronise the `#[cfg(test)]` brace matching that runs next. Getting
+    // this backwards is a silent miscount — the depth walk overruns the gated
+    // block and truncates the rest of the file. (Same ordering, for the same
+    // reason, as `reborn_extension_host_port_inversion.rs`.)
+    let cleaned = strip_cfg_test_blocks(&strip_comments_and_strings(source));
     let bytes = cleaned.as_bytes();
     let mut names = BTreeSet::new();
     let mut search_from = 0usize;
@@ -448,9 +460,8 @@ fn product_symbols_named_by(root: &Path, crate_name: &str) -> (BTreeSet<String>,
     );
     let mut names = BTreeSet::new();
     for file in &files {
-        let Ok(source) = std::fs::read_to_string(file) else {
-            continue;
-        };
+        let source = std::fs::read_to_string(file)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", file.display()));
         names.extend(product_symbols_in(&source));
     }
     (names, files.len())
@@ -644,5 +655,35 @@ fn import_scanner_reads_symbols_out_of_real_use_shapes() {
     assert!(
         !found.contains("Renamed"),
         "the alias is local; the residue list is keyed by the exported name: {found:?}"
+    );
+}
+
+#[test]
+fn the_scan_strips_comments_before_matching_cfg_test_braces() {
+    // Ordering regression. `strip_cfg_test_blocks` counts braces byte by byte,
+    // so it must never see a comment or a string literal. Run the wrong way
+    // round, the stray `{` below pushes the depth to 2, the gated module's `}`
+    // only brings it back to 1, and the walk runs off the end of the file —
+    // dropping every production import that follows and shrinking the residue
+    // silently. The `files.len()` and non-empty guards cannot catch that: the
+    // sets stay non-empty, they just stop being complete.
+    let source = r#"
+        #[cfg(test)]
+        mod tests {
+            // an unbalanced brace in a comment: {
+            const PATTERN: &str = "and another unbalanced { in a literal";
+            use ironclaw_product::TestOnly;
+        }
+        use ironclaw_product::StillCounted;
+    "#;
+    let found = product_symbols_in(source);
+    assert!(
+        found.contains("StillCounted"),
+        "production code after a gated block whose comments/strings carry braces \
+         must still be scanned: {found:?}"
+    );
+    assert!(
+        !found.contains("TestOnly"),
+        "the gated import is still not a production edge: {found:?}"
     );
 }

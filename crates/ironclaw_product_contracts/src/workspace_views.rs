@@ -217,9 +217,11 @@ pub enum ProjectFsEntryKind {
 /// A single entry in a project directory listing.
 ///
 /// `path` is the scoped path (`/workspace/...`) the consumer passes back to
-/// [`ProjectFilesystemReader::read_file`] / [`ProjectFilesystemReader::stat`] —
-/// reconstructed by the implementation from the request directory plus the
-/// entry name so a host or virtual path is never serialized.
+/// `ProjectFilesystemReader::read_file` / `::stat` — the port stayed in
+/// `ironclaw_product::reborn_services::project_fs` because every method takes
+/// an `ironclaw_threads::ThreadScope`, so these are code spans, not links. The
+/// path is reconstructed by the implementation from the request directory plus
+/// the entry name so a host or virtual path is never serialized.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectFsEntry {
     pub name: String,
@@ -271,7 +273,7 @@ impl std::fmt::Debug for ProjectFsFile {
 /// Errors a project-filesystem read may produce.
 ///
 /// Deliberately coarse and free of host paths / backend strings: the service
-/// maps each variant to a sanitized [`ProductSurfaceError`](crate::ProductSurfaceError)
+/// maps each variant to a sanitized [`ProductSurfaceError`](crate::surface::ProductSurfaceError)
 /// at the boundary. Implementations outside this crate construct these instead
 /// of reaching for the service error's `pub(super)` constructors.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -349,8 +351,9 @@ pub enum FsMount {
 impl FsMount {
     /// All mounts known to the product layer, in display order. Which of these
     /// a given deployment actually serves is reported by
-    /// [`FilesystemBrowseReader::available_mounts`] — a mount may be known here
-    /// but unwired in a particular composition.
+    /// `FilesystemBrowseReader::available_mounts` (the port stayed in
+    /// `ironclaw_product::reborn_services::fs_browse`) — a mount may be known
+    /// here but unwired in a particular composition.
     pub const ALL: &'static [FsMount] = &[FsMount::Memory, FsMount::Workspace, FsMount::Skills];
 
     /// Stable, human-facing default label. The frontend may localize via its

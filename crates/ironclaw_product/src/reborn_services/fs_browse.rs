@@ -27,7 +27,9 @@
 use async_trait::async_trait;
 use ironclaw_host_api::resource::ResourceScope;
 
-use super::project_fs::{ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat};
+use ironclaw_product_contracts::workspace_views::{
+    ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat,
+};
 
 pub use ironclaw_product_contracts::workspace_views::{
     FsMount, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsRequest,

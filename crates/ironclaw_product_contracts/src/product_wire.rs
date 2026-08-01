@@ -25,8 +25,7 @@
 //!
 //! The three `From<ironclaw_turns::…>` conversions stayed too — with both sides
 //! outside product they would be orphan impls, so they are free functions there.
-// arch-exempt: large_file, the product wire DTO family is one contract surface; splitting it by
-// feature area would give the same names two import paths.
+// arch-exempt: large_file, one contract surface — splitting by feature area at move time would give the same names two import paths, plan #7008
 use chrono::{DateTime, Utc};
 use ironclaw_extension_contracts::state::LifecyclePublicState;
 use ironclaw_host_api::ids::ThreadId;
@@ -319,12 +318,12 @@ pub enum RebornSubmitTurnResponse {
 pub struct RebornTimelineRequest {
     pub thread_id: String,
     /// Maximum number of messages returned in one response. The service
-    /// clamps to the [`TIMELINE_DEFAULT_PAGE_SIZE`,
-    /// `TIMELINE_MAX_PAGE_SIZE`] range so callers cannot bypass the
-    /// per-response size bound by asking for an unbounded page. Falls
-    /// back to the default when absent.
-    ///
-    /// [`TIMELINE_DEFAULT_PAGE_SIZE`]: super::TIMELINE_DEFAULT_PAGE_SIZE
+    /// clamps it to `[1, TIMELINE_MAX_PAGE_SIZE]` so callers cannot bypass
+    /// the per-response size bound by asking for an unbounded page, and
+    /// substitutes `TIMELINE_DEFAULT_PAGE_SIZE` when absent. Both bounds are
+    /// the service's, not the wire's: they live beside the clamp in
+    /// `ironclaw_product::reborn_services` and are crate-private there, so
+    /// this is deliberately a description rather than a link.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
     /// Opaque pagination cursor returned in the previous response's
@@ -425,7 +424,8 @@ pub enum RebornResolveGateResponse {
 ///
 /// Pure read — no idempotency key. Caller authority is supplied separately by
 /// `ProductSurfaceCaller` and combined with `thread_id` to produce the
-/// canonical [`ironclaw_turns::TurnScope`] inside the service.
+/// canonical `ironclaw_turns::TurnScope` inside the service (the kernel
+/// type this crate may not name in a link).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornGetRunStateRequest {
     pub thread_id: String,
@@ -1200,8 +1200,9 @@ pub enum RebornExtensionSurface {
         /// The auth account this channel surface resolves to for its vendor,
         /// when the surface binds a caller-scoped account. `None` until an
         /// account exists. One account per vendor today (ADR 0001 keeps the
-        /// list shape); the id points into
-        /// [`RebornExtensionInfo::auth_accounts`].
+        /// list shape); the id points into the `auth_accounts` of
+        /// `ironclaw_product::reborn_services::types::RebornExtensionInfo`, which
+        /// stayed in product because it carries `ironclaw_auth` account state.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resolved_account_id: Option<String>,
         /// How the resolved account was chosen: the per-(user, vendor) default
@@ -1634,7 +1635,8 @@ pub struct RebornCommandRejection {
 /// Read-only Trace Commons credit summary scoped to one user.
 ///
 /// All aggregates are the contributor-local view as of the last credit
-/// sync (see [`TRACE_CREDITS_NOTE`]). A user with no local Trace
+/// sync (see `TRACE_CREDITS_NOTE`, the server-authoritative wording in
+/// `ironclaw_product::reborn_services::trace_credits`). A user with no local Trace
 /// Commons state gets the unenrolled zero-state, never an error.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RebornTraceCreditsResponse {
@@ -1663,7 +1665,8 @@ pub struct RebornTraceCreditsResponse {
     /// safe hold reason only — never raw trace content.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub holds: Vec<RebornTraceHold>,
-    /// Server-authoritative framing — always [`TRACE_CREDITS_NOTE`].
+    /// Server-authoritative framing — always `TRACE_CREDITS_NOTE`, defined
+    /// with the builder in `ironclaw_product::reborn_services::trace_credits`.
     pub note: String,
 }
 
@@ -1716,7 +1719,7 @@ pub struct RebornTraceHoldAuthorizeResponse {
 /// It is delivered ONLY over the authenticated WebUI response to the caller's
 /// own browser — it must never be logged, persisted, or placed on any
 /// model-visible surface.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct RebornAccountLoginLinkResponse {
     /// Whether a link was minted. `false` with `enrolled: false` is the
     /// unenrolled zero-state, not an error.
@@ -1726,6 +1729,20 @@ pub struct RebornAccountLoginLinkResponse {
     /// single-use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+}
+
+/// Reports whether a URL is present, never the URL. The doc above promises the
+/// code-bearing link "must never be logged"; a derived `Debug` is exactly how
+/// that promise breaks, so the type enforces it instead of asking callers to.
+impl std::fmt::Debug for RebornAccountLoginLinkResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RebornAccountLoginLinkResponse")
+            .field("minted", &self.minted)
+            .field("enrolled", &self.enrolled)
+            .field("url", &self.url.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 // --- Artifact export requests ------------------------------------------------
@@ -1918,6 +1935,40 @@ mod tests {
                 .get("redacted")
                 .and_then(serde_json::Value::as_bool),
             Some(true)
+        );
+    }
+
+    /// The login link is a code-bearing account-access credential whose own doc
+    /// comment says it "must never be logged". A derived `Debug` is precisely
+    /// how that promise breaks. Two-sided: the presence flag must still be
+    /// legible (the unenrolled zero-state is diagnosable from `minted`/
+    /// `enrolled` alone), and the absent case must not render a phantom secret.
+    #[test]
+    fn account_login_link_debug_reports_presence_and_never_the_url() {
+        let minted = RebornAccountLoginLinkResponse {
+            minted: true,
+            enrolled: true,
+            url: Some("https://traces.example/login?code=SUPERSECRET".to_string()),
+        };
+        let rendered = format!("{minted:?}");
+        assert!(
+            !rendered.contains("SUPERSECRET") && !rendered.contains("traces.example"),
+            "the one-time login URL must never reach a diagnostic: {rendered}"
+        );
+        assert!(
+            rendered.contains("minted: true") && rendered.contains("enrolled: true"),
+            "the presence flags stay legible: {rendered}"
+        );
+
+        let absent = RebornAccountLoginLinkResponse {
+            minted: false,
+            enrolled: false,
+            url: None,
+        };
+        let rendered = format!("{absent:?}");
+        assert!(
+            rendered.contains("url: None"),
+            "an absent link renders as absent, not as a redacted one: {rendered}"
         );
     }
 }

@@ -251,10 +251,25 @@ pub struct RebornAdminCreateUserRequest {
 
 /// Response for `POST /admin/users` — carries the one-time API token in
 /// plaintext. This is the ONLY response that ever exposes it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RebornAdminUserCreatedResponse {
     pub user: AdminUserRecord,
     pub api_token: String,
+}
+
+/// Redacts the token. The port that mints it (`AdminUserService::create_user`)
+/// hands back an [`AdminCreatedUser`] whose `api_token` is a `SecretString`
+/// precisely so it cannot `Debug`-print itself; this DTO is the wire form that
+/// unwraps it for the one response allowed to carry it, so it has to re-state
+/// the guarantee rather than inherit it.
+impl std::fmt::Debug for RebornAdminUserCreatedResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RebornAdminUserCreatedResponse")
+            .field("user", &self.user)
+            .field("api_token", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Body for `PATCH /admin/users/{id}` — partial profile update.
@@ -322,17 +337,43 @@ pub struct RebornAdminUserSecretsListResponse {
 }
 
 /// Body for `PUT /admin/users/{id}/secrets/{handle}` (handle is in the path).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RebornAdminPutSecretRequest {
     pub value: String,
 }
 
+/// Redacts `value`: it is the raw secret material an operator just typed, and
+/// [`AdminUserService::put_secret`] takes it as a `SecretString` for exactly
+/// this reason. These two DTOs are the plaintext wire hop in front of that
+/// port, so the redaction has to be re-stated here.
+impl std::fmt::Debug for RebornAdminPutSecretRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RebornAdminPutSecretRequest")
+            .field("value", &"<redacted>")
+            .finish()
+    }
+}
+
 /// ProductSurface mutation input for `PUT /admin/users/{id}/secrets/{handle}`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RebornAdminPutSecretProductRequest {
     pub user_id: UserId,
     pub handle: String,
     pub value: String,
+}
+
+/// Redacts `value` while keeping `user_id` and `handle` — the two fields that
+/// make a failed secret write diagnosable without disclosing the material.
+impl std::fmt::Debug for RebornAdminPutSecretProductRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RebornAdminPutSecretProductRequest")
+            .field("user_id", &self.user_id)
+            .field("handle", &self.handle)
+            .field("value", &"<redacted>")
+            .finish()
+    }
 }
 
 /// ProductSurface mutation input for `DELETE /admin/users/{id}/secrets/{handle}`.
@@ -375,6 +416,69 @@ mod tests {
         assert_eq!(
             serde_json::to_value(AdminUserStatus::Suspended).expect("serialize"),
             serde_json::json!("suspended")
+        );
+    }
+
+    fn user_record() -> AdminUserRecord {
+        AdminUserRecord {
+            user_id: UserId::new("user-1").expect("user id"),
+            email: Some("ops@example.com".to_string()),
+            display_name: Some("Ops".to_string()),
+            status: AdminUserStatus::Active,
+            role: AdminUserRole::Admin,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            created_by: None,
+            last_login_at: None,
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    /// The three credential-bearing DTOs on the admin wire. The ports behind
+    /// them take `SecretString` so the material cannot `Debug`-print itself;
+    /// these are the plaintext hop in front of those ports, so each must
+    /// restate the redaction or the guarantee ends at the boundary. Every
+    /// assertion is two-sided — the identifying fields must survive, or a
+    /// redacted `Debug` would be useless for diagnosis.
+    #[test]
+    fn credential_bearing_admin_dtos_redact_their_secret_in_debug() {
+        let created = RebornAdminUserCreatedResponse {
+            user: user_record(),
+            api_token: "tok_SUPERSECRET".to_string(),
+        };
+        let rendered = format!("{created:?}");
+        assert!(
+            !rendered.contains("SUPERSECRET"),
+            "the one-time API token must never reach a diagnostic: {rendered}"
+        );
+        assert!(
+            rendered.contains("user-1"),
+            "the user the token belongs to stays visible: {rendered}"
+        );
+
+        let body = RebornAdminPutSecretRequest {
+            value: "hunter2-SUPERSECRET".to_string(),
+        };
+        let rendered = format!("{body:?}");
+        assert!(
+            !rendered.contains("SUPERSECRET"),
+            "the submitted secret must never reach a diagnostic: {rendered}"
+        );
+
+        let product = RebornAdminPutSecretProductRequest {
+            user_id: UserId::new("user-1").expect("user id"),
+            handle: "slack_bot_token".to_string(),
+            value: "xoxb-SUPERSECRET".to_string(),
+        };
+        let rendered = format!("{product:?}");
+        assert!(
+            !rendered.contains("SUPERSECRET"),
+            "the submitted secret must never reach a diagnostic: {rendered}"
+        );
+        assert!(
+            rendered.contains("slack_bot_token") && rendered.contains("user-1"),
+            "the handle and user stay visible — they are what makes a failed \
+             secret write diagnosable: {rendered}"
         );
     }
 }
