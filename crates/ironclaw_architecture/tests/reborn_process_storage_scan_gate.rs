@@ -16,24 +16,25 @@ fn process_and_thread_request_storage_paths_do_not_enumerate_collections() {
     ));
     // The transcript rebuild moved out of `thread_index` into its own module;
     // the enumeration it performs is still migration-only and is gated below.
-    let transcript_migration =
-        read(&root.join("crates/ironclaw_threads/src/filesystem_service/transcript_migration.rs"));
+    let transcript_migration = scannable(&read(
+        &root.join("crates/ironclaw_threads/src/filesystem_service/transcript_migration.rs"),
+    ));
 
     assert_calls_are_confined_to(
         &process_store,
-        ".query(",
+        "query",
         "pub async fn migrate_row_native_indexes",
         "async fn initialize_materialized",
     );
     assert_calls_are_confined_to(
         &process_store,
-        ".tail_bounded(",
+        "tail_bounded",
         "async fn initialize_materialized",
         "\n}\n\n#[async_trait]",
     );
     assert_calls_are_confined_to(
         &thread_index,
-        ".list_dir(",
+        "list_dir",
         "pub async fn migrate_thread_index_for_scope",
         "pub(super) async fn thread_record_with_index_overlay",
     );
@@ -41,18 +42,18 @@ fn process_and_thread_request_storage_paths_do_not_enumerate_collections() {
     // `.query(` it had belonged to the transcript rebuild, which now lives in
     // its own module. Assert the absence directly rather than bounding it.
     assert!(
-        !thread_index.contains(".query("),
+        call_offsets(&thread_index, "query").is_empty(),
         "thread_index must not enumerate collections; the transcript rebuild owns that call"
     );
     assert_calls_are_confined_to(
         &transcript_migration,
-        ".query(",
+        "query",
         "pub async fn migrate_transcript_indexes_for_scope",
         "async fn migrate_transcript_page",
     );
     assert_calls_are_confined_to(
         &transcript_migration,
-        ".list_dir(",
+        "list_dir",
         "pub async fn migrate_transcript_indexes_for_scope",
         "async fn migrate_transcript_page",
     );
@@ -67,7 +68,32 @@ fn scannable(source: &str) -> String {
     ratchet_support::strip_comments_and_strings(source)
 }
 
-fn assert_calls_are_confined_to(source: &str, call: &str, start: &str, end: &str) {
+/// Offsets of `.<method>` calls, tolerating whitespace before the paren.
+///
+/// `.query(`, `.query (` and `.query\n(` are the same call to rustc, so a
+/// literal-substring scan lets a reformat walk straight through the gate. The
+/// trailing check also keeps `.query_ordered(` from matching `query`.
+fn call_offsets(source: &str, method: &str) -> Vec<usize> {
+    let needle = format!(".{method}");
+    let mut offsets = Vec::new();
+    let mut from = 0;
+    while let Some(relative) = source[from..].find(&needle) {
+        let start = from + relative;
+        let after = start + needle.len();
+        let rest = &source[after..];
+        let continues_identifier = rest
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        if !continues_identifier && rest.trim_start().starts_with('(') {
+            offsets.push(start);
+        }
+        from = after;
+    }
+    offsets
+}
+
+fn assert_calls_are_confined_to(source: &str, method: &str, start: &str, end: &str) {
     let start_offset = source
         .find(start)
         .unwrap_or_else(|| panic!("migration boundary `{start}` must exist"));
@@ -76,14 +102,14 @@ fn assert_calls_are_confined_to(source: &str, call: &str, start: &str, end: &str
         .map(|offset| start_offset + offset)
         .unwrap_or_else(|| panic!("migration boundary `{end}` must exist after `{start}`"));
 
-    let violations = source
-        .match_indices(call)
-        .filter(|(offset, _)| *offset < start_offset || *offset >= end_offset)
-        .map(|(offset, _)| line_number(source, offset))
+    let violations = call_offsets(source, method)
+        .into_iter()
+        .filter(|offset| *offset < start_offset || *offset >= end_offset)
+        .map(|offset| line_number(source, offset))
         .collect::<Vec<_>>();
     assert!(
         violations.is_empty(),
-        "`{call}` may only appear in the explicit offline migration boundary \
+        "`.{method}(` may only appear in the explicit offline migration boundary \
          `{start}`..`{end}`; found request/startup uses on lines {violations:?}"
     );
 }
@@ -115,7 +141,7 @@ mod self_tests {
         let source = scannable(&format!("{MIGRATION}{BOUNDARY}"));
         assert_calls_are_confined_to(
             &source,
-            ".query(",
+            "query",
             "pub async fn migrate_x",
             "async fn after_migration",
         );
@@ -129,7 +155,37 @@ mod self_tests {
         ));
         assert_calls_are_confined_to(
             &source,
-            ".query(",
+            "query",
+            "pub async fn migrate_x",
+            "async fn after_migration",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "may only appear in the explicit offline migration")]
+    fn a_multiline_call_outside_the_migration_range_is_rejected() {
+        // Legal Rust that a literal-substring scan walks straight past.
+        let source = scannable(&format!(
+            "async fn request_path() {{\n    self.fs.query\n        ();\n}}\n{MIGRATION}{BOUNDARY}"
+        ));
+        assert_calls_are_confined_to(
+            &source,
+            "query",
+            "pub async fn migrate_x",
+            "async fn after_migration",
+        );
+    }
+
+    #[test]
+    fn a_longer_method_name_is_not_the_scanned_call() {
+        // `.query_ordered(` is a different, bounded call and must not trip the
+        // gate for `query`.
+        let source = scannable(&format!(
+            "async fn request_path() {{\n    self.fs.query_ordered();\n}}\n{MIGRATION}{BOUNDARY}"
+        ));
+        assert_calls_are_confined_to(
+            &source,
+            "query",
             "pub async fn migrate_x",
             "async fn after_migration",
         );
@@ -145,7 +201,7 @@ mod self_tests {
         ));
         assert_calls_are_confined_to(
             &source,
-            ".query(",
+            "query",
             "pub async fn migrate_x",
             "async fn after_migration",
         );
