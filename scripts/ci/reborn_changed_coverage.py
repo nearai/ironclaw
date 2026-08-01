@@ -510,9 +510,49 @@ def cfg_test_only_lines(path: pathlib.Path) -> set[int]:
     return excluded
 
 
+def screen_unattributable(
+    repo_root: pathlib.Path, base: str, head: str, production: ProductionPaths
+) -> None:
+    """Refuse unattributable `crates/` Rust changes BEFORE the diff is narrowed.
+
+    `git_diff` narrows to per-crate `src/` pathspecs, so a Rust file under
+    `crates/` that belongs to no discovered crate is filtered out of the diff
+    text entirely and `parse_diff`'s `reject_unattributable` never sees it. The
+    assertion existed but could not fire in the mode CI actually runs
+    (`--base/--head`); only the `--diff-file` path reached it, because that
+    input is not narrowed. Screening the unfiltered changed-file list first is
+    what makes the rule reachable in both modes.
+
+    That gap is the same shape as the bug this whole sweep is about: a
+    fail-closed check that cannot fail is not a check
+    (docs/reborn/target-architecture/CHECKLIST.md WS10, #6963).
+    """
+
+    result = subprocess.run(
+        [
+            "git",
+            "diff",
+            "--name-only",
+            "--diff-filter=AMR",
+            f"{base}...{head}",
+            "--",
+            f"{CRATES_ROOT}/",
+        ],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise GateError(f"git diff failed: {result.stderr.strip()}")
+    for path in result.stdout.splitlines():
+        production.reject_unattributable(path.strip())
+
+
 def git_diff(
     repo_root: pathlib.Path, base: str, head: str, production: ProductionPaths
 ) -> str:
+    screen_unattributable(repo_root, base, head, production)
     command = [
         "git",
         "diff",

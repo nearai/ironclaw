@@ -703,6 +703,35 @@ run_gate
 check_rc "an unattributable crates/ Rust file fails closed" 1
 check_text "the unattributable path is named" "belongs to no discovered crate"
 
+# ...and the same refusal must reach the mode CI actually runs. `--diff-file`
+# hands the gate an un-narrowed diff, but `--base/--head` narrows to per-crate
+# `src/` pathspecs BEFORE `parse_diff` ever sees a path — so an unattributable
+# file was filtered out of the diff text and the check above could not fire at
+# all in production. Verified against this fixture: the gate printed
+# "no Reborn production lines added" and exited 0. `screen_unattributable`
+# closes that, and this case is the pin: a fail-closed check that cannot fail
+# in the mode that matters is not a check (#6963).
+orphan_path="crates/not_a_crate/src/lib.rs"
+mkdir -p "$(dirname "${case_root}/${orphan_path}")"
+printf '%s\n' 'pub fn orphan() {}' >"${case_root}/${orphan_path}"
+fixture_git add "${orphan_path}"
+fixture_git \
+  -c user.name=coverage-test -c user.email=coverage@example.invalid -c commit.gpgsign=false \
+  commit -qm orphan
+orphan_commit="$(fixture_git rev-parse HEAD)"
+capture python3 "${gate}" \
+  --lcov "${work}/coverage.lcov" \
+  --manifest "${work}/policy.toml" \
+  --base "${head_commit}" \
+  --head "${orphan_commit}" \
+  --repo-root "${case_root}"
+check_rc "an unattributable path is refused through --base/--head too" 1
+check_text "the --base/--head refusal names the path" "${orphan_path}"
+fixture_git rm -rq "$(dirname "${orphan_path}")"
+fixture_git \
+  -c user.name=coverage-test -c user.email=coverage@example.invalid -c commit.gpgsign=false \
+  commit -qm drop-orphan
+
 # A missing or truncated crate tree cannot read as "nothing changed".
 empty_root="${work}/no-crates"
 mkdir -p "${empty_root}"

@@ -53,8 +53,13 @@ discovery_root="$(dirname "${CRATES_ROOT}")"
 
 # crate_tree.py exits non-zero (and explains itself) on a missing crates/ tree
 # or an inventory below its floor. Propagate that rather than measuring nothing.
-if ! CRATE_DIRS="$(python3 "${repo_root}/scripts/ci/lib/crate_tree.py" "${discovery_root}" 2>&1)"; then
-    fail_schema "crate discovery failed under '${discovery_root}': ${CRATE_DIRS}"
+# stdout and stderr are captured separately: merging them with `2>&1` would fold
+# any Python warning into the inventory and turn a benign diagnostic into a
+# bogus crate directory in the denominator.
+discovery_error="$(mktemp)"
+trap 'rm -f "${discovery_error}"' EXIT
+if ! CRATE_DIRS="$(python3 "${repo_root}/scripts/ci/lib/crate_tree.py" "${discovery_root}" 2>"${discovery_error}")"; then
+    fail_schema "crate discovery failed under '${discovery_root}': $(cat "${discovery_error}")"
 fi
 [ -n "${CRATE_DIRS}" ] || fail_schema "crate inventory is empty under '${discovery_root}'"
 

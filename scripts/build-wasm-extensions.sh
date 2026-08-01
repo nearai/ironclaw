@@ -40,11 +40,17 @@ resolve_first_party_assets_root() {
         return 0
     fi
 
-    local inventory match count
-    if ! inventory=$(python3 scripts/ci/lib/crate_tree.py . 2>&1); then
-        echo "  FAIL first-party discovery (crate discovery failed: ${inventory})" >&2
+    local inventory match count discovery_error
+    # stdout and stderr are captured separately on purpose: merging them with
+    # `2>&1` would fold any Python warning into the inventory itself and turn a
+    # benign diagnostic into a bogus crate directory.
+    discovery_error="$(mktemp)"
+    if ! inventory=$(python3 scripts/ci/lib/crate_tree.py . 2>"${discovery_error}"); then
+        echo "  FAIL first-party discovery (crate discovery failed: $(cat "${discovery_error}"))" >&2
+        rm -f "${discovery_error}"
         return 1
     fi
+    rm -f "${discovery_error}"
     match=$(printf '%s\n' "${inventory}" | awk -F/ -v want="${FIRST_PARTY_CRATE}" '$NF == want')
     count=$(printf '%s' "${match}" | grep -c . || true)
     if [ "${count}" -ne 1 ]; then

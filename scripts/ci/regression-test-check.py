@@ -455,12 +455,12 @@ def main() -> int:
     # script's own location: in CI the script comes from the trusted base
     # checkout while --repo is the PR head (.github/workflows/regression-test-check.yml).
     touched = all_touched_paths(repo, args.base, args.head)
-    if is_workspace_checkout(repo):
-        high_risk_prefixes = resolve_prefixes(repo, HIGH_RISK_ENTRIES, touched) or []
-        static_asset_prefixes = (
-            resolve_prefixes(repo, STATIC_ASSET_ENTRIES, touched) or []
-        )
-    else:
+    # `resolve_prefixes` owns the workspace probe and returns None for a
+    # non-workspace checkout; `main` reads that result rather than re-probing,
+    # so there is exactly one place that decides "is this the IronClaw tree?".
+    high_risk_prefixes = resolve_prefixes(repo, HIGH_RISK_ENTRIES, touched)
+    static_asset_prefixes = resolve_prefixes(repo, STATIC_ASSET_ENTRIES, touched)
+    if high_risk_prefixes is None:
         print(
             f"No [workspace] manifest at {repo}; high-risk path detection is "
             "inactive for this checkout and only the fix-commit trigger applies.",

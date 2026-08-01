@@ -179,14 +179,15 @@ def _crate_directories_cached(repo_root: str | pathlib.Path = ".") -> list[str]:
     files). The cache is process-local and the tree does not change under a
     running gate. `crate_directories()` already prunes manifests nested inside a
     crate, so no entry is a prefix of another and lookup order cannot change the
-    answer; longest-first is kept only so the rule stays correct if that pruning
-    is ever relaxed.
+    answer; shortest-first is kept anyway so that if that pruning is ever
+    relaxed, the first match is still the *outermost* owner — the rule
+    `owning_crate_directory` documents.
     """
 
     key = str(pathlib.Path(repo_root).resolve())
     cached = _INVENTORY_CACHE.get(key)
     if cached is None:
-        cached = sorted(crate_directories(repo_root), key=len, reverse=True)
+        cached = sorted(crate_directories(repo_root), key=len)
         _INVENTORY_CACHE[key] = cached
     return cached
 
