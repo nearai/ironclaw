@@ -28,7 +28,6 @@ use ironclaw_auth::{
     CredentialAccountProjection, CredentialAccountStatus, CredentialAccountUpdateBinding,
     ProviderScope,
 };
-use ironclaw_common::{AutomationName, AutomationNameError};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, IdempotencyKey, SanitizedCancelReason, TurnActor, TurnGateRef, TurnRunId,
     TurnScope, TurnStatus,
@@ -56,6 +55,7 @@ use ironclaw_threads::{
     SessionThreadRecord, SessionThreadService, ThreadHistory, ThreadHistoryRequest,
     ThreadMessageId, ThreadScope,
 };
+use ironclaw_triggers::{AutomationName, AutomationNameError};
 use ironclaw_turns::{
     GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest, RetryTurnRequest,
     SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError,

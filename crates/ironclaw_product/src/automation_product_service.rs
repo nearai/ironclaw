@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::{
-    AutomationListRequest, AutomationName, AutomationProductService, ProductAgentBoundCaller,
+    AutomationListRequest, AutomationProductService, ProductAgentBoundCaller,
     RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
@@ -11,6 +11,7 @@ use ironclaw_host_api::{Timestamp, ids::ThreadId};
 use ironclaw_product_contracts::surface::{
     ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
+use ironclaw_triggers::AutomationName;
 use ironclaw_triggers::{
     ActiveHoldProjection, ActiveHoldReason, TriggerActiveRunLookup, TriggerError, TriggerId,
     TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,

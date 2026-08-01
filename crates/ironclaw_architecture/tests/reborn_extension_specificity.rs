@@ -423,11 +423,6 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "persisted credential-name / channel-id vocabulary in the shared identity crate (compat law: stored ids stay readable)",
     ),
     (
-        "crates/ironclaw_common/src/platform.rs",
-        "telegram",
-        "persisted credential-name / channel-id vocabulary in the shared identity crate (compat law: stored ids stay readable)",
-    ),
-    (
         "crates/ironclaw_reborn_identity/src/key.rs",
         "telegram",
         "credential-authority ProviderKind vocabulary (persisted identity keys), not the extensions vendor",

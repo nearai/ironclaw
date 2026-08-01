@@ -59,7 +59,7 @@ use ironclaw_product::{
     AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, AUTOMATIONS_VIEW,
     ActiveModelReader, ApprovalInteractionActionView, ApprovalInteractionDecision,
     ApprovalInteractionScope, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionService, AutomationListRequest, AutomationName, AutomationProductService,
+    AuthInteractionService, AutomationListRequest, AutomationProductService,
     ChannelAuthAccountState, ChannelConfigProductService, ChannelConnectionRequirement,
     ChannelConnectionService, CodexLoginStart, CommandResultView, EXTENSION_IMPORT_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
@@ -177,6 +177,7 @@ use ironclaw_threads::{
     ThreadMessageRange, ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
     UpdateToolResultReferenceRequest,
 };
+use ironclaw_triggers::AutomationName;
 use ironclaw_turns::test_support::in_memory_agent_turn_runtime;
 use ironclaw_turns::{
     AdmissionRejection, AdmissionRejectionReason, CancelRunRequest, CancelRunResponse,

@@ -2362,7 +2362,7 @@ fn reborn_openai_compat_routes_do_not_depend_on_v1_gateway_or_legacy_streams() {
         },
         ForbiddenUse {
             pattern: "AppEvent",
-            reason: "OpenAI-compatible Reborn streaming must translate ProductProjectionItem state, not raw legacy AppEvent streams",
+            reason: "OpenAI-compatible Reborn streaming must translate ProductProjectionItem state, not raw legacy AppEvent streams (the enum itself was deleted in WS1.6 — zero consumers; this entry stays as a reintroduction pin)",
             exempt: None,
         },
         ForbiddenUse {

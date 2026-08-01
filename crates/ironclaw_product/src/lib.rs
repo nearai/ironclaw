@@ -168,7 +168,6 @@ pub use in_memory_ledger::InMemoryIdempotencyLedger;
 pub use inbound_turn::{
     DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
 };
-pub use ironclaw_common::{AutomationName, AutomationNameError, MAX_AUTOMATION_NAME_BYTES};
 pub use ironclaw_extension_contracts::auth_prompt::{
     AuthPromptChallengeKind, AuthPromptContextView, AuthPromptView, ConnectionPromptContext,
 };

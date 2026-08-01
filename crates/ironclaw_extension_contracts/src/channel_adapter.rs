@@ -224,7 +224,7 @@ pub const MAX_REPLY_CONTEXT_BYTES: usize = 4 * 1024;
 /// fetched host-side through restricted egress with the channel credential
 /// only when a consumer needs them, keeping `inbound` pure.
 ///
-/// Named distinctly from `ironclaw_common::ChannelAttachmentRef`, which is the
+/// Named distinctly from `ironclaw_common::AttachmentRef`, which is the
 /// durable byte-free transcript reference — a different concept that used to
 /// share this name and forced import aliases wherever both appeared.
 #[derive(Clone, PartialEq, Eq)]
