@@ -54,6 +54,13 @@ pub(super) struct ThreadIndexRecord {
     pub(super) record: SessionThreadRecord,
     pub(super) next_sequence: u64,
     flags: ThreadIndexFlags,
+    /// Sidebar label derived from the thread's first user message, written at
+    /// message-accept time (and healed lazily for rows that predate it).
+    /// Without it every list request re-derived titles with per-thread
+    /// transcript probes — an N+1 that dominates listing once a user has many
+    /// threads. `record.title` (user-set) always wins over this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) derived_title: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +190,7 @@ where
         ThreadIndexRecord {
             record: stored.record.clone(),
             next_sequence: stored.next_sequence,
+            derived_title: None,
             flags: ThreadIndexFlags {
                 title_present: stored.record.title.is_some(),
                 metadata_present: stored.record.metadata_json.is_some(),
@@ -320,6 +328,11 @@ where
             source.record.goal = existing.record.goal;
             source.flags.goal_present = true;
         }
+        // The derived sidebar label lives only on the index row; a rebuild
+        // from the source record must not erase it.
+        if same_source_generation && source.derived_title.is_none() {
+            source.derived_title = existing.derived_title;
+        }
         Ok(source)
     }
 
@@ -329,11 +342,27 @@ where
         thread_id: &ThreadId,
         updated_at: DateTime<Utc>,
     ) -> Result<(), SessionThreadError> {
+        self.touch_thread_index_updated_at_with_derived_title(scope, thread_id, updated_at, None)
+            .await
+    }
+
+    /// Activity touch that can also seed the derived sidebar label in the
+    /// same index-row CAS — zero extra round trips on the message-accept
+    /// path. The candidate only lands when the thread has neither a user-set
+    /// title nor a previously derived one.
+    pub(super) async fn touch_thread_index_updated_at_with_derived_title(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        updated_at: DateTime<Utc>,
+        derived_title: Option<String>,
+    ) -> Result<(), SessionThreadError> {
         self.ensure_thread_index_query(scope, false).await?;
         let path = thread_index_record_path(scope, thread_id)?;
         let resource_scope = scope.to_resource_scope();
         let scope_for_retry = scope.clone();
         let thread_id_for_retry = thread_id.clone();
+        let derived_title = &derived_title;
         let row_known = cas_update(
             self.filesystem.as_ref(),
             &resource_scope,
@@ -365,6 +394,9 @@ where
                         }
                     };
                     index.record.updated_at = Some(updated_at);
+                    if index.record.title.is_none() && index.derived_title.is_none() {
+                        index.derived_title = derived_title.as_ref().cloned();
+                    }
                     Ok(CasApply::new(index, true))
                 }
             },
@@ -375,6 +407,54 @@ where
             self.mark_thread_index_known(scope, thread_id);
         }
         Ok(())
+    }
+
+    /// One-time heal for index rows that predate write-time title derivation:
+    /// persist the probed label (never bumping activity) so the thread stops
+    /// paying a transcript probe on every list request. Best-effort — listing
+    /// already has the label in hand for this response.
+    pub(super) async fn store_derived_title_best_effort(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        derived_title: String,
+    ) {
+        let path = match thread_index_record_path(scope, thread_id) {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::debug!(?error, "derived-title heal skipped: bad index path");
+                return;
+            }
+        };
+        let resource_scope = scope.to_resource_scope();
+        let derived_title = &derived_title;
+        let result = cas_update(
+            self.filesystem.as_ref(),
+            &resource_scope,
+            &path,
+            |bytes: &[u8]| deserialize::<ThreadIndexRecord>(bytes),
+            |record: &ThreadIndexRecord| Self::thread_index_entry(record),
+            |current: Option<ThreadIndexRecord>| async move {
+                let Some(mut index) = current else {
+                    return Err(SessionThreadError::UnknownThread {
+                        thread_id: thread_id.clone(),
+                    });
+                };
+                if index.record.title.is_some() || index.derived_title.is_some() {
+                    return Ok(CasApply::no_op(index, ()));
+                }
+                index.derived_title = Some(derived_title.clone());
+                Ok(CasApply::new(index, ()))
+            },
+        )
+        .await;
+        if let Err(error) = result {
+            tracing::debug!(
+                thread_id = %thread_id.as_str(),
+                ?error,
+                "derived-title heal failed; the next list request will probe again"
+            );
+        }
     }
 
     async fn read_thread_index_record(
@@ -866,6 +946,7 @@ pub(super) fn evict_hash_set_entry_over_limit(
 
 fn no_op_thread_index_record(scope: ThreadScope, thread_id: ThreadId) -> ThreadIndexRecord {
     ThreadIndexRecord {
+        derived_title: None,
         record: SessionThreadRecord {
             scope,
             thread_id,
@@ -917,6 +998,7 @@ mod tests {
                 updated_at: Some(created_at),
             },
             next_sequence: 3,
+            derived_title: None,
             flags: ThreadIndexFlags {
                 title_present: true,
                 metadata_present: true,
@@ -935,6 +1017,7 @@ mod tests {
                 updated_at: Some(created_at),
             },
             next_sequence: 7,
+            derived_title: None,
             flags: ThreadIndexFlags {
                 title_present: true,
                 metadata_present: true,

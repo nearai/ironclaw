@@ -1222,6 +1222,7 @@ fn test_args() -> Args {
         api_poll_interval_ms: 250,
         api_request_timeout_ms: 10_000,
         api_setup_concurrency: 16,
+        api_threads_per_user: 1,
         api_background_users: 0,
         api_background_concurrency: 0,
         api_background_operations: 1,

@@ -2137,6 +2137,179 @@ async fn filesystem_thread_create_declares_indexes_once_per_mount() {
     );
 }
 
+/// Sidebar titles for untitled threads used to be derived on EVERY list
+/// request with per-thread transcript probes — an N+1 that dominates listing
+/// once a user has many threads. The label is now seeded into the index row
+/// at message-accept time, so listing reads no transcripts at all; rows that
+/// predate the seeding probe once and heal.
+#[tokio::test]
+async fn filesystem_list_threads_derives_titles_without_transcript_probes() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-title-seed", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("title-seed");
+    for i in 0..3 {
+        let thread_id = ThreadId::new(format!("thread-title-{i}")).unwrap();
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(thread_id.clone()),
+                created_by_actor_id: "actor-a".into(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope.clone(),
+                thread_id: thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: Some("binding-title-seed".into()),
+                reply_target_binding_id: None,
+                external_event_id: Some(format!("event-title-seed-{i}")),
+                content: MessageContent::text(format!("hello sidebar label {i}")),
+            })
+            .await
+            .unwrap();
+    }
+
+    let reads_before = backend
+        .recorded_paths(FilesystemOperation::ReadFile)
+        .into_iter()
+        .filter(|path| path.as_str().contains("/messages/"))
+        .count();
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(listed.threads.len(), 3);
+    for thread in &listed.threads {
+        let title = thread.title.as_deref().expect("derived title present");
+        assert!(
+            title.starts_with("hello sidebar label"),
+            "derived from the first user message: {title}"
+        );
+    }
+    let reads_after = backend
+        .recorded_paths(FilesystemOperation::ReadFile)
+        .into_iter()
+        .filter(|path| path.as_str().contains("/messages/"))
+        .count();
+    assert_eq!(
+        reads_after, reads_before,
+        "listing must not probe transcripts when titles are seeded at accept time"
+    );
+}
+
+/// Rows written before write-time seeding existed carry no derived label:
+/// the first list probes the transcript once and persists the label; the
+/// second list must be probe-free.
+#[tokio::test]
+async fn filesystem_list_threads_heals_legacy_rows_after_one_probe() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-title-heal", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("title-heal");
+    let thread_id = ThreadId::new("thread-title-heal").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: Some("binding-title-heal".into()),
+            reply_target_binding_id: None,
+            external_event_id: Some("event-title-heal".into()),
+            content: MessageContent::text("legacy row message"),
+        })
+        .await
+        .unwrap();
+
+    // Simulate a row written before write-time seeding: strip the derived
+    // label out of the index row through the raw backend.
+    let index_path = backend
+        .recorded_paths(FilesystemOperation::WriteFile)
+        .into_iter()
+        .rev()
+        .find(|path| path.as_str().contains("/thread_index/"))
+        .expect("index row written during accept");
+    let versioned = backend.get(&index_path).await.unwrap().unwrap();
+    let mut row: serde_json::Value = serde_json::from_slice(&versioned.entry.body).unwrap();
+    assert!(
+        row.as_object_mut()
+            .unwrap()
+            .remove("derived_title")
+            .is_some(),
+        "accept seeded the derived title"
+    );
+    let mut entry = versioned.entry.clone();
+    entry.body = serde_json::to_vec(&row).unwrap();
+    backend
+        .put(&index_path, entry, CasExpectation::Any)
+        .await
+        .unwrap();
+
+    let probes = |backend: &FaultInjecting<InMemoryBackend>| {
+        backend
+            .recorded_paths(FilesystemOperation::ReadFile)
+            .into_iter()
+            .filter(|path| path.as_str().contains("/messages/"))
+            .count()
+    };
+    let before_first = probes(&backend);
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.threads[0].title.as_deref(),
+        Some("legacy row message"),
+        "legacy row derives via the one-time probe"
+    );
+    assert!(
+        probes(&backend) > before_first,
+        "the first list after the strip must probe the transcript"
+    );
+
+    let before_second = probes(&backend);
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.threads[0].title.as_deref(),
+        Some("legacy row message"),
+        "healed label serves from the index row"
+    );
+    assert_eq!(
+        probes(&backend),
+        before_second,
+        "the heal must make subsequent lists probe-free"
+    );
+}
+
 /// The one-time transcript-index migration runs on a scope's first transcript
 /// read and rewrites message rows under CAS expectations. When that first read
 /// overlaps a live turn's message writes, the migration can lose the race; the

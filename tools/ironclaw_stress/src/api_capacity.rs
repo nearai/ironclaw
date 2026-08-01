@@ -1224,23 +1224,36 @@ async fn setup_users(
             let identity = identities[next_index % identities.len()].clone();
             let thread_id = format!("stress-{run_id}-{thread_label}-{next_index}");
             let user_index = next_index;
+            let threads_per_user = args.api_threads_per_user.max(1);
             join_set.spawn(async move {
                 let create = harness.create_thread(&identity, &thread_id).await;
-                match create.value {
-                    Ok(value) => {
-                        let thread_id = extract_thread_id(&value).unwrap_or(thread_id);
-                        Ok(ApiUser {
-                            index: user_index,
-                            label: identity.label,
-                            bearer_token: identity.bearer_token,
-                            thread_id,
-                        })
+                let primary = match create.value {
+                    Ok(value) => extract_thread_id(&value).unwrap_or(thread_id),
+                    Err(failure) => {
+                        return Err(format!(
+                            "create thread for api user {user_index}: {}: {}",
+                            failure.bucket, failure.detail
+                        ));
                     }
-                    Err(failure) => Err(format!(
-                        "create thread for api user {user_index}: {}: {}",
-                        failure.bucket, failure.detail
-                    )),
+                };
+                // Extra threads exist purely to grow the user's sidebar; sends
+                // keep targeting the primary thread.
+                for extra in 1..threads_per_user {
+                    let extra_id = format!("{primary}-extra-{extra}");
+                    let create = harness.create_thread(&identity, &extra_id).await;
+                    if let Err(failure) = create.value {
+                        return Err(format!(
+                            "create extra thread {extra} for api user {user_index}: {}: {}",
+                            failure.bucket, failure.detail
+                        ));
+                    }
                 }
+                Ok(ApiUser {
+                    index: user_index,
+                    label: identity.label,
+                    bearer_token: identity.bearer_token,
+                    thread_id: primary,
+                })
             });
             next_index += 1;
         }

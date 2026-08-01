@@ -852,13 +852,15 @@ where
             .transpose()
     }
 
+    /// Caller must have run `ensure_transcript_indexes_migrated` for the
+    /// scope; hoisted out so a list page pays the marker check once, not once
+    /// per untitled thread.
     async fn first_user_message_for_title(
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
         _next_sequence: u64,
     ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
-        self.ensure_transcript_indexes_migrated(scope).await?;
         let Some(message_id) = MessageLookupIndexStore::new(self.filesystem.as_ref())
             .read_first_user(scope, thread_id)
             .await?
@@ -1423,6 +1425,9 @@ where
 
         let message_id = ThreadMessageId::new();
         let (content_text, attachments) = content.into_parts();
+        // Derived before `content_text` moves into the message record; seeds
+        // the sidebar label in the post-accept activity touch below.
+        let derived_title_candidate = derive_title_from_message(&content_text);
         crate::contract::validate_attachment_refs(&attachments)?;
         // Sequence assignment happens only after payload validation. On
         // transactional backends the thread counter, message, sequence index,
@@ -1522,11 +1527,26 @@ where
         }
 
         // Inbound user message is thread activity — stamp recency so the
-        // sidebar surfaces this thread first. Best-effort: the message is
+        // sidebar surfaces this thread first, and seed the derived sidebar
+        // label from this message in the same index-row write (the label only
+        // lands when the thread has no title yet). Best-effort: the message is
         // already durable, so a touch failure must not fail (and retry) the
         // accept.
-        self.touch_thread_updated_at_best_effort_at(&scope, &thread_id, now)
-            .await;
+        if let Err(error) = self
+            .touch_thread_index_updated_at_with_derived_title(
+                &scope,
+                &thread_id,
+                now,
+                derived_title_candidate,
+            )
+            .await
+        {
+            tracing::debug!(
+                thread_id = %thread_id.as_str(),
+                ?error,
+                "skipping thread recency/title touch after inbound accept"
+            );
+        }
 
         Ok(AcceptedInboundMessage {
             thread_id,
@@ -2605,9 +2625,16 @@ where
         let mut needs_title: Vec<(usize, ThreadId, u64)> = Vec::new();
         for index in &listed {
             let idx = page.len();
-            let record = index.record.clone();
+            let mut record = index.record.clone();
             if record.title.is_none() {
-                needs_title.push((idx, record.thread_id.clone(), index.next_sequence));
+                match &index.derived_title {
+                    // The write path seeded the label into the index row; the
+                    // sidebar entry costs no extra reads.
+                    Some(derived) => record.title = Some(derived.clone()),
+                    // Row predates write-time derivation: probe once below and
+                    // heal the index row so this thread never probes again.
+                    None => needs_title.push((idx, record.thread_id.clone(), index.next_sequence)),
+                }
             }
             page.push(record);
         }
@@ -2619,6 +2646,8 @@ where
         // are silent-ok — the sidebar entry simply falls back to its
         // thread-id label, matching the WebUI fallback path.
         if !needs_title.is_empty() {
+            self.ensure_transcript_indexes_migrated(&request.scope)
+                .await?;
             let title_results: Vec<(
                 usize,
                 ThreadId,
@@ -2644,7 +2673,11 @@ where
                             .and_then(|message| message.content.as_deref())
                             .and_then(derive_title_from_message)
                         {
-                            page[idx].title = Some(title);
+                            page[idx].title = Some(title.clone());
+                            // One-time heal: persist the label so this row
+                            // stops paying the probe on every list request.
+                            self.store_derived_title_best_effort(&request.scope, &thread_id, title)
+                                .await;
                         }
                     }
                     Err(error) => {

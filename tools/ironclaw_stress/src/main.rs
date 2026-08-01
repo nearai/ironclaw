@@ -226,6 +226,12 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 16)]
     pub(crate) api_setup_concurrency: usize,
 
+    /// Threads created per API user during setup. Values above 1 exercise
+    /// listing/read paths against large sidebars; sends still target each
+    /// user's first thread.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) api_threads_per_user: usize,
+
     /// Background long-running API users to run alongside foreground api-user-capacity sends.
     #[arg(long, default_value_t = 0)]
     pub(crate) api_background_users: usize,
