@@ -11,6 +11,10 @@ fn process_and_thread_request_storage_paths_do_not_enumerate_collections() {
     let process_store = read(&root.join("crates/ironclaw_processes/src/journal_store.rs"));
     let thread_index =
         read(&root.join("crates/ironclaw_threads/src/filesystem_service/thread_index.rs"));
+    // The transcript rebuild moved out of `thread_index` into its own module;
+    // the enumeration it performs is still migration-only and is gated below.
+    let transcript_migration =
+        read(&root.join("crates/ironclaw_threads/src/filesystem_service/transcript_migration.rs"));
 
     assert_calls_are_confined_to(
         &process_store,
@@ -30,11 +34,24 @@ fn process_and_thread_request_storage_paths_do_not_enumerate_collections() {
         "pub async fn migrate_thread_index_for_scope",
         "pub(super) async fn thread_record_with_index_overlay",
     );
+    // The listing projection module no longer enumerates at all: the only
+    // `.query(` it had belonged to the transcript rebuild, which now lives in
+    // its own module. Assert the absence directly rather than bounding it.
+    assert!(
+        !thread_index.contains(".query("),
+        "thread_index must not enumerate collections; the transcript rebuild owns that call"
+    );
     assert_calls_are_confined_to(
-        &thread_index,
+        &transcript_migration,
         ".query(",
         "pub async fn migrate_transcript_indexes_for_scope",
-        "pub(super) async fn thread_record_with_index_overlay",
+        "async fn migrate_transcript_page",
+    );
+    assert_calls_are_confined_to(
+        &transcript_migration,
+        ".list_dir(",
+        "pub async fn migrate_transcript_indexes_for_scope",
+        "async fn migrate_transcript_page",
     );
 }
 
