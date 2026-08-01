@@ -424,11 +424,17 @@ const EXTENSION_HOST_FILES_STILL_NAMING_THE_WORKFLOW_ERROR: &[(&str, &str)] = &[
 /// Production files in `crate_name` whose *code* names `type_name`, as paths
 /// relative to the crate's `src/`.
 ///
-/// `#[cfg(test)]` blocks are stripped for the same reason the impl scan strips
-/// them (a test double may reach product through a dev-dependency without the
-/// shipped artifact doing so), and comments and string literals are stripped so
-/// prose about the migration — including this file's own vocabulary — never
-/// registers as a dependency.
+/// Comments and string literals are stripped **first**, so prose about the
+/// migration — including this file's own vocabulary — never registers as a
+/// dependency, and so a brace inside a comment or literal cannot desynchronise
+/// the `#[cfg(test)]` brace matching that runs next. (Same ordering as
+/// `implemented_trait_names`; getting it backwards is a silent miscount.)
+/// `#[cfg(test)]` blocks then go for the same reason the impl scan drops them:
+/// a test double may reach product through a dev-dependency without the shipped
+/// artifact doing so.
+///
+/// An unreadable file is fatal, not skipped — a silent skip is how this scan
+/// would go quietly vacuous.
 fn production_files_naming(root: &Path, crate_name: &str, type_name: &str) -> BTreeSet<String> {
     let src = crate_src(root, crate_name);
     let mut files = Vec::new();
@@ -440,13 +446,12 @@ fn production_files_naming(root: &Path, crate_name: &str, type_name: &str) -> BT
     );
     let mut named = BTreeSet::new();
     for file in files {
-        let Ok(source) = std::fs::read_to_string(&file) else {
-            continue;
-        };
-        if strip_comments_and_strings(&strip_cfg_test_blocks(&source)).contains(type_name) {
-            let Ok(relative) = file.strip_prefix(&src) else {
-                continue;
-            };
+        let source = std::fs::read_to_string(&file)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", file.display()));
+        if strip_cfg_test_blocks(&strip_comments_and_strings(&source)).contains(type_name) {
+            let relative = file.strip_prefix(&src).unwrap_or_else(|error| {
+                panic!("{} is not under {}: {error}", file.display(), src.display())
+            });
             named.insert(relative.to_string_lossy().replace('\\', "/"));
         }
     }
