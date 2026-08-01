@@ -68,27 +68,35 @@ fn scannable(source: &str) -> String {
     ratchet_support::strip_comments_and_strings(source)
 }
 
-/// Offsets of `.<method>` calls, tolerating whitespace before the paren.
+/// Offsets of `.<method>(` calls, tolerating whitespace anywhere rustc does.
 ///
-/// `.query(`, `.query (` and `.query\n(` are the same call to rustc, so a
-/// literal-substring scan lets a reformat walk straight through the gate. The
-/// trailing check also keeps `.query_ordered(` from matching `query`.
+/// `.query(`, `.query (`, `.query\n(` and `.\nquery()` are all the same call,
+/// so the scan walks from each `.`, skips whitespace on both sides of the
+/// method name, and requires a call paren. Matching literal text instead lets
+/// a reformat carry an unbounded call straight through the gate. The
+/// identifier-boundary check keeps `.query_ordered(` from matching `query`.
 fn call_offsets(source: &str, method: &str) -> Vec<usize> {
-    let needle = format!(".{method}");
+    let bytes = source.as_bytes();
     let mut offsets = Vec::new();
-    let mut from = 0;
-    while let Some(relative) = source[from..].find(&needle) {
-        let start = from + relative;
-        let after = start + needle.len();
-        let rest = &source[after..];
-        let continues_identifier = rest
+    for (dot, _) in source.match_indices('.') {
+        let mut cursor = dot + 1;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if !source[cursor..].starts_with(method) {
+            continue;
+        }
+        let after_name = cursor + method.len();
+        if source[after_name..]
             .chars()
             .next()
-            .is_some_and(|c| c.is_alphanumeric() || c == '_');
-        if !continues_identifier && rest.trim_start().starts_with('(') {
-            offsets.push(start);
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        {
+            continue;
         }
-        from = after;
+        if source[after_name..].trim_start().starts_with('(') {
+            offsets.push(dot);
+        }
     }
     offsets
 }
@@ -167,6 +175,22 @@ mod self_tests {
         // Legal Rust that a literal-substring scan walks straight past.
         let source = scannable(&format!(
             "async fn request_path() {{\n    self.fs.query\n        ();\n}}\n{MIGRATION}{BOUNDARY}"
+        ));
+        assert_calls_are_confined_to(
+            &source,
+            "query",
+            "pub async fn migrate_x",
+            "async fn after_migration",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "may only appear in the explicit offline migration")]
+    fn a_call_split_after_the_dot_is_rejected() {
+        // `self.fs.\nquery()` is legal Rust that a scan anchored on `.query`
+        // never sees.
+        let source = scannable(&format!(
+            "async fn request_path() {{\n    self.fs.\n        query();\n}}\n{MIGRATION}{BOUNDARY}"
         ));
         assert_calls_are_confined_to(
             &source,
