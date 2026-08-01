@@ -4061,9 +4061,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         }
     }
 
-    let ironhub_link_state = Arc::new(ironclaw_ironhub::IronhubLinkStateStore::new(
-        services.extension_filesystem.clone(),
-    ));
+    let ironhub_link_state = Arc::clone(&services.ironhub_link_state);
     let ironhub_link_service = match ironhub_agent_shared_key {
         Some(shared_key) => {
             let egress = services.runtime_http_egress.clone().ok_or_else(|| {

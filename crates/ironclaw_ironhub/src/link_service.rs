@@ -86,7 +86,7 @@ impl RebornIronhubLinkService {
             shared_key,
             install_capability,
             manifest_url: crate::IronhubManifestUrl::default(),
-            manifest_verify_keys: super::model::MANIFEST_VERIFY_KEYS,
+            manifest_verify_keys: crate::model::MANIFEST_VERIFY_KEYS,
         })
     }
 
