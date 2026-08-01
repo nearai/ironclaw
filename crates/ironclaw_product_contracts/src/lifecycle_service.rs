@@ -62,7 +62,9 @@ pub trait LifecycleProductService: Send + Sync {
     /// caller's fault. Changing it changes an HTTP status on a live route, so
     /// it belongs in its own change with the WebUI path re-checked;
     /// `bundle_import_defaults_to_an_invalid_request_rather_than_silently_succeeding`
-    /// pins today's behavior so the flip cannot happen silently.
+    /// pins today's behavior so the flip cannot happen silently. The flip —
+    /// and this test's assertion with it — is owned by the CHECKLIST WS2 row
+    /// "Narrow `ProductSurfaceFailure` off `ironclaw_turns`".
     async fn import_extension_bundle(
         &self,
         _context: LifecycleProductContext,
@@ -86,6 +88,14 @@ pub trait LifecycleProductService: Send + Sync {
     /// errors reports no reason and the wire's `activation_error` stays absent;
     /// the production extension-host service overrides this to read the
     /// installation records' `last_error`.
+    ///
+    /// ✎ **Known stringly-typed signature, carried verbatim by the WS2.1
+    /// move.** The key should be `ExtensionId`, not `String` — the host
+    /// implementation already holds a typed `ExtensionId` and stringifies only
+    /// to satisfy this signature. Retyping it changes the contract for every
+    /// implementor, which PLAN operating principle 2 keeps out of a move-shaped
+    /// PR; it is owned by the CHECKLIST WS2 row "Narrow `ProductSurfaceFailure`
+    /// off `ironclaw_turns`", alongside the other three deferred signatures.
     async fn installed_activation_errors(
         &self,
         _context: LifecycleProductContext,
