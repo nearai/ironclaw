@@ -54,17 +54,9 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_product/src/reborn_services/types.rs"
-lines = [483]
-owner = "@nearai/reborn"
-reason = "Struct field declaration; only the GateRef -> TurnGateRef type name changed. Not executable, so the file contributes no instrumented lines."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-10-31"
-
-[[exemption]]
 path = "crates/ironclaw_extension_host/src/product_lifecycle.rs"
-lines = [257]
-branch_lines = [223, 255]
+lines = [263]
+branch_lines = [229, 261]
 owner = "@serrrfirat"
 reason = "Concurrent install tests execute both permit acquisition states and waiter notification; rustc assigns zero-hit synthetic counters to the Arc identity guard and async await continuation that cannot be selected independently."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
@@ -72,7 +64,7 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_extension_host/src/available_extension_import.rs"
-lines = [190, 191, 192, 193, 194, 195, 196, 197, 198, 199]
+lines = [191, 192, 193, 194, 195, 196, 197, 198, 199, 200]
 owner = "@serrrfirat"
 reason = "Import tests execute both static registry constructors through successful and rejected manifests; their error closures require duplicate entries in the compile-time host-port or contract definitions, which cannot be injected while the same definitions remain valid for the test process."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
@@ -140,9 +132,9 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_ironhub/src/service.rs"
-lines = [284, 285, 286, 287, 288]
+lines = [285, 286, 287, 288, 289]
 owner = "@serrrfirat"
-reason = "Private URL validation constructs private_origin through Option::map(...).transpose(), so the two Options are correlated and the mixed Some/None match arm is structurally unreachable; lines 284 and 288 are tuple/expression closers LLVM groups with that arm."
+reason = "Private URL validation constructs private_origin through Option::map(...).transpose(), so the two Options are correlated and the mixed Some/None match arm is structurally unreachable; lines 285 and 289 are tuple/expression closers LLVM groups with that arm."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
@@ -174,7 +166,7 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_reborn_composition/src/ironhub_link_serve.rs"
-lines = [59, 64, 65, 67, 68, 70, 71, 91]
+lines = [61, 66, 67, 69, 70, 72, 73, 93]
 owner = "@serrrfirat"
 reason = "Route tests execute mount creation, policy inspection, valid/invalid JSON, success, and service failure; the error arms construct NonZero values from fixed nonzero literals and the other records are nested Result closing lines."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
@@ -182,7 +174,7 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_reborn_composition/src/runtime.rs"
-lines = [4064, 4065, 4066, 4067, 4068, 4069, 4078, 4079]
+lines = [4070, 4071, 4072, 4073, 4074, 4075, 4084, 4085]
 owner = "@serrrfirat"
 reason = "The runtime integration test executes shared-key wiring with mediated egress; normal assembly always supplies that egress, and the fixed host capability identifier is compile-time-valid, leaving only defensive impossible error mappings."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
