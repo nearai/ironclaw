@@ -627,7 +627,7 @@ async fn local_dev_extension_host_reserves_runner_bridge_capabilities() {
     assert!(
         matches!(
             &error,
-            ironclaw_product::ProductSurfaceFailure::InvalidBindingRequest { reason }
+            ironclaw_product_contracts::error::ProductOperationFailure::InvalidBindingRequest { reason }
                 if reason.contains(BRIDGE_CAPABILITY_ID)
                     && reason.contains("collides with a host built-in")
         ),

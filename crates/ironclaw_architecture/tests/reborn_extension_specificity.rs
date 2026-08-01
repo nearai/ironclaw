@@ -1088,10 +1088,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "telegram",
     ),
     ("crates/ironclaw_product/Cargo.toml", "telegram"),
-    (
-        "crates/ironclaw_product/src/conversation_binding.rs",
-        "slack",
-    ),
+    // `conversation_binding.rs` was carved for a vendor example in
+    // `ProductConversationRouteKey`'s doc. WS2.2 moved that type to
+    // `ironclaw_product_contracts::subject_route`, where a vendor name is
+    // forbidden outright, so the example was rewritten generically rather than
+    // re-carved. The entry is deleted, not repointed — the allowlist shrinks.
     ("crates/ironclaw_product/src/lib.rs", "telegram"),
     ("crates/ironclaw_product/src/reborn_services.rs", "slack"),
     // WS5 port inversion: these three wire-DTO sites moved to the contracts
@@ -1431,7 +1432,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// the gate above (an entry that no longer matches fails); this ceiling is the
 /// other half — the list cannot *grow* untracked either. Lower it in the same
 /// PR that deletes entries so the new floor is locked in.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 130;
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 129;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 #[test]

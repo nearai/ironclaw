@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use ironclaw_product::ProductSurfaceFailure;
+use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::package_lifecycle::LifecycleProductResponse;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -288,7 +288,7 @@ pub enum IronHubCommandError {
     #[error("IronHub install failed: {reason}")]
     Install { reason: String },
     #[error("IronHub lifecycle failed: {0}")]
-    Product(#[from] ProductSurfaceFailure),
+    Product(#[from] ProductOperationFailure),
 }
 
 #[derive(Debug, Deserialize)]

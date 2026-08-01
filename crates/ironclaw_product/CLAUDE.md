@@ -18,7 +18,7 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 | `ConversationBindingService` | Resolves external adapter refs → canonical Reborn identifiers |
 | `ProductConversationBindingService` | Adapter from product workflow bindings to `ironclaw_conversations` with trusted installation→tenant mapping |
 | `StaticProductInstallationResolver` / `ProductInstallationScope` | Host-owned installation registry used by local-dev/tests to select tenant and default agent/project scope |
-| `ProductConversationSubjectRouteResolver` | Host-owned dynamic shared-route subject resolver; product workflow consults it before static per-installation subject routes |
+| `ProductConversationSubjectRouteResolver` | Host-owned dynamic shared-route subject resolver; product workflow consults it before static per-installation subject routes. **Declared in `ironclaw_product_contracts::subject_route`** since WS2.2 — product consumes it, `ironclaw_extension_host` implements it |
 | `IdempotencyLedger` | Durable action deduplication port |
 | `InMemoryIdempotencyLedger` | Local-dev/test ledger with in-flight lease recovery semantics |
 | `ProductInboundAction` | Durable ledger record for inbound actions |
@@ -51,19 +51,42 @@ any other consumer — there is deliberately **no re-export** (the port half of
 `prompt_source::{ApprovalPromptContextSource, BlockedAuthPromptSource, BlockedAuthPromptRequest}` ·
 `lifecycle_service::{LifecycleProductService, LifecycleProductContext, LifecycleProductSurfaceContext}` ·
 `admin_users::{AdminUserService, AdminUser*, AdminCreate*}` ·
-`operator_tools::{RebornOperatorToolCatalog, RebornOperatorToolInfo}`.
+`operator_tools::{RebornOperatorToolCatalog, RebornOperatorToolInfo}` ·
+`subject_route::{ProductConversationSubjectRouteResolver, ProductConversationSubjectRouteResolutionRequest, ProductConversationRouteKey}` (WS2.2) ·
+`error::ProductOperationFailure` (WS2.2 — the boundary error, not a port).
 
 What stayed, and why: the **implementations** (`DeliveryCoordinator`,
 `NoReplyContext`, `ExtensionAccountSetupRegistry`, `UnsupportedLifecycleProductService`,
 `RejectingAdminUserService`, `UnavailableRebornViewProvider`,
 `DirectConversationCommandAdmission`), the frozen wire DTOs
 (`RebornAdmin*`, `ProductView`), the ledger record and saga (`ProductInboundAction`),
-and six ports whose signatures name `ironclaw_auth`/`ironclaw_turns`/`ironclaw_conversations`
-types that a contracts crate may not depend on — see the residue list in
+and five ports whose signatures name `ironclaw_auth`/`ironclaw_conversations`
+types that a contracts crate may not depend on, or product-declared binding DTOs
+— see the residue list in
 `crates/ironclaw_architecture/tests/reborn_extension_host_port_inversion.rs`.
-`ProductSurfaceFailure` is the crate's *internal* workflow error and stays here;
-that it is also `ironclaw_extension_host`'s lifecycle error vocabulary is the
-single largest remaining blocker to that crate's layer flip.
+
+`ProductSurfaceFailure` is the crate's *internal* workflow error and stays here —
+and since WS2.2 that description is **true** rather than aspirational. The
+boundary half it used to double as is
+`ironclaw_product_contracts::error::ProductOperationFailure`: six variants whose
+payloads are a plain `String` or nothing, which is what `ironclaw_extension_host`
+constructs and all it ever needed. What stays here is what only this crate
+produces and reads — the turn-coordinator variants carrying
+`ironclaw_turns::TurnError`, the approval/auth interaction rejection kinds, the
+idempotency replay, and the inbound-attachment and policy failures. Two rules:
+
+- **Absorb, never narrow.** `From<ProductOperationFailure>` is total and
+  payload-preserving, so `?` over a `product_contracts` port keeps its exact
+  discriminant. There is deliberately no conversion the other way: the
+  kernel-typed variants have no boundary image, and inventing one would flatten
+  them into `Transient`. `auth_continuation.rs` is why — it matches all eight
+  `TurnErrorCategory` values structurally and distinguishes two that the
+  sanitized projection collapses.
+- **`lifecycle_product_surface_error` delegates.** Its six shared arms call the
+  contract's projection instead of repeating the status choices; only the
+  `Transient` warning is local, because a contracts crate may not log.
+  `lifecycle_projection_agrees_with_the_contract_projection_on_shared_variants`
+  pins the agreement.
 
 ## Dependencies
 

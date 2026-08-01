@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 
 use ironclaw_extensions::{ExtensionInstallation, InstallationOwner};
 use ironclaw_host_api::ids::UserId;
-use ironclaw_product::ProductSurfaceFailure;
+use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::package_lifecycle::LifecycleInstallScope;
 
 /// Derive who a NEW install belongs to (#6520): every lifecycle install,
@@ -34,11 +34,11 @@ pub fn derive_owner(caller: &UserId, _tenant_operator: &UserId) -> InstallationO
 pub fn ensure_caller_may_operate(
     installation: &ExtensionInstallation,
     caller: &UserId,
-) -> Result<(), ProductSurfaceFailure> {
+) -> Result<(), ProductOperationFailure> {
     if installation.owner().visible_to(caller) {
         return Ok(());
     }
-    Err(ProductSurfaceFailure::InvalidBindingRequest {
+    Err(ProductOperationFailure::InvalidBindingRequest {
         reason: format!(
             "extension {} is not installed",
             installation.extension_id().as_str()
@@ -56,8 +56,8 @@ pub fn decide_install_on_existing(
     existing_owner: &InstallationOwner,
     caller: &UserId,
     _tenant_operator: &UserId,
-) -> Result<InstallationOwner, ProductSurfaceFailure> {
-    let already_installed = || ProductSurfaceFailure::InvalidBindingRequest {
+) -> Result<InstallationOwner, ProductOperationFailure> {
+    let already_installed = || ProductOperationFailure::InvalidBindingRequest {
         reason: format!("extension {} is already installed", extension_id.as_str()),
     };
     match existing_owner {
@@ -71,7 +71,7 @@ pub fn decide_install_on_existing(
                 let mut user_ids = user_ids.clone();
                 user_ids.insert(caller.clone());
                 Ok(InstallationOwner::users(user_ids).map_err(|error| {
-                    ProductSurfaceFailure::InvalidBindingRequest {
+                    ProductOperationFailure::InvalidBindingRequest {
                         reason: format!("installation owner update failed: {error}"),
                     }
                 })?)
@@ -96,7 +96,7 @@ pub enum RemoveDecision {
 pub fn decide_remove(
     existing_owner: &InstallationOwner,
     caller: &UserId,
-) -> Result<RemoveDecision, ProductSurfaceFailure> {
+) -> Result<RemoveDecision, ProductOperationFailure> {
     match existing_owner {
         InstallationOwner::Tenant => Ok(RemoveDecision::TearDown),
         InstallationOwner::Users { user_ids } => {
@@ -110,7 +110,7 @@ pub fn decide_remove(
             } else {
                 Ok(RemoveDecision::LeaveMembers(
                     InstallationOwner::users(remaining).map_err(|error| {
-                        ProductSurfaceFailure::InvalidBindingRequest {
+                        ProductOperationFailure::InvalidBindingRequest {
                             reason: format!("installation owner update failed: {error}"),
                         }
                     })?,

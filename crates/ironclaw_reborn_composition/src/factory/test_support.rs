@@ -630,7 +630,8 @@ impl RebornRuntimeStores {
         Some(
             extension_management
                 .publish_bundled_package_for_test(package, resolved)
-                .await,
+                .await
+                .map_err(ironclaw_product::ProductSurfaceFailure::from),
         )
     }
 

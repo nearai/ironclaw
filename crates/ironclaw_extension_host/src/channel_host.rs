@@ -47,10 +47,9 @@ use ironclaw_product::{
     ApprovalInteractionService, AuthInteractionService, BlockedAuthFlowCanceller,
     ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
     DeliveryCoordinator, IdempotencyLedger, InboundAttachmentLander,
-    ProductActorUserResolutionRequest, ProductActorUserResolver,
-    ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
-    ProductSurfaceFailure, RebornFilesystemIdempotencyLedger, ResolvedProductActorUser,
-    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
+    ProductActorUserResolutionRequest, ProductActorUserResolver, ProductInstallationKey,
+    ProductInstallationScope, ProductSurfaceFailure, RebornFilesystemIdempotencyLedger,
+    ResolvedProductActorUser, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
     StaticProductInstallationResolver,
 };
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
@@ -58,6 +57,7 @@ use ironclaw_product_contracts::inbound::{ProductInboundAck, ProductInboundEnvel
 use ironclaw_product_contracts::prompt_source::{
     ApprovalPromptContextSource, BlockedAuthPromptSource,
 };
+use ironclaw_product_contracts::subject_route::ProductConversationSubjectRouteResolver;
 use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::{TurnCoordinator, TurnScope};

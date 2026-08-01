@@ -3,7 +3,7 @@ use std::sync::Arc;
 use ironclaw_auth::RuntimeCredentialAccountSelectionService;
 use ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest;
 use ironclaw_extension_contracts::state::InstallationState;
-use ironclaw_product::ProductSurfaceFailure;
+use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::lifecycle_service::{
     LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
 };
@@ -32,7 +32,7 @@ pub enum RebornExtensionLifecycleCommandError {
     #[error("extension lifecycle is available only for standalone Reborn services")]
     LocalRuntimeUnavailable,
     #[error("extension lifecycle command is invalid: {0}")]
-    ProductCommand(#[from] ProductSurfaceFailure),
+    ProductCommand(#[from] ProductOperationFailure),
     #[error("extension lifecycle failed: {0}")]
     ProductSurface(#[from] ProductSurfaceError),
 }
@@ -168,7 +168,7 @@ pub fn render_reborn_extension_lifecycle_response(
 }
 
 impl RebornExtensionLifecycleCommand {
-    fn into_action(self) -> Result<LifecycleProductAction, ProductSurfaceFailure> {
+    fn into_action(self) -> Result<LifecycleProductAction, ProductOperationFailure> {
         Ok(match self {
             Self::RegisterHostedMcp { request } => {
                 LifecycleProductAction::ExtensionRegisterHostedMcp { request }
@@ -189,7 +189,7 @@ impl RebornExtensionLifecycleCommand {
 
 fn extension_package_ref(
     id: impl Into<String>,
-) -> Result<LifecyclePackageRef, ProductSurfaceFailure> {
+) -> Result<LifecyclePackageRef, ProductOperationFailure> {
     Ok(LifecyclePackageRef::new(
         LifecyclePackageKind::Extension,
         id,

@@ -29,9 +29,9 @@ use async_trait::async_trait;
 use ironclaw_extension_contracts::recipe::RecipeSecretField;
 use ironclaw_host_api::ids::{ExtensionId, TenantId, UserId};
 use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
-use ironclaw_product::{
+use ironclaw_product_contracts::error::ProductOperationFailure;
+use ironclaw_product_contracts::subject_route::{
     ProductConversationSubjectRouteResolutionRequest, ProductConversationSubjectRouteResolver,
-    ProductSurfaceFailure,
 };
 use sha2::{Digest, Sha256};
 
@@ -143,11 +143,11 @@ impl ChannelConfigSubjectRouteResolver {
         }
     }
 
-    async fn config_value(&self, handle: &str) -> Result<Option<String>, ProductSurfaceFailure> {
+    async fn config_value(&self, handle: &str) -> Result<Option<String>, ProductOperationFailure> {
         self.channel_config
             .non_secret_value(&self.extension_id, handle)
             .await
-            .map_err(|error| ProductSurfaceFailure::Transient {
+            .map_err(|error| ProductOperationFailure::Transient {
                 reason: format!("channel admission config unavailable: {error}"),
             })
     }
@@ -168,7 +168,7 @@ impl ProductConversationSubjectRouteResolver for ChannelConfigSubjectRouteResolv
     async fn resolve_product_conversation_subject_route(
         &self,
         request: ProductConversationSubjectRouteResolutionRequest,
-    ) -> Result<Option<UserId>, ProductSurfaceFailure> {
+    ) -> Result<Option<UserId>, ProductOperationFailure> {
         if request.adapter_id != self.adapter_id || request.installation_id != self.installation_id
         {
             return Ok(None);
@@ -181,7 +181,7 @@ impl ProductConversationSubjectRouteResolver for ChannelConfigSubjectRouteResolv
                 Ok(routes) => {
                     if let Some(subject) = routes.get(conversation_id) {
                         return UserId::new(subject.clone()).map(Some).map_err(|error| {
-                            ProductSurfaceFailure::InvalidBindingRequest {
+                            ProductOperationFailure::InvalidBindingRequest {
                                 reason: format!("configured subject route is invalid: {error}"),
                             }
                         });
@@ -214,7 +214,9 @@ impl ProductConversationSubjectRouteResolver for ChannelConfigSubjectRouteResolv
                             conversation_id,
                         )
                         .map(Some)
-                        .map_err(|reason| ProductSurfaceFailure::InvalidBindingRequest { reason });
+                        .map_err(|reason| {
+                            ProductOperationFailure::InvalidBindingRequest { reason }
+                        });
                     }
                 }
                 Err(error) => {
@@ -247,7 +249,7 @@ mod tests {
         path::{MountAlias, VirtualPath},
         resource::ResourceScope,
     };
-    use ironclaw_product::ProductConversationRouteKey;
+    use ironclaw_product_contracts::subject_route::ProductConversationRouteKey;
     use ironclaw_secrets::{SecretStore, SecretStorePort};
 
     use super::*;

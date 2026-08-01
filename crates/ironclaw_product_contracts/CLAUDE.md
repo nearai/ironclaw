@@ -16,7 +16,7 @@ A type is admitted iff all four hold (the contracts-family test, §6.1):
 3. two or more consumers need it without importing an owner;
 4. it carries no execution, persistence, policy engine, or workflow.
 
-Today that is seventeen shipped modules (plus the dev-only `test_support`, gated behind `#[cfg(any(test, feature = "test-support"))]`; `src/lib.rs` is the source of truth for the list):
+Today that is twenty-three shipped modules (plus the dev-only `test_support`, gated behind `#[cfg(any(test, feature = "test-support"))]`; `src/lib.rs` is the source of truth for the list):
 
 | Module | Owns |
 | --- | --- |
@@ -34,9 +34,15 @@ Today that is seventeen shipped modules (plus the dev-only `test_support`, gated
 | `prompt_source` | Gate-prompt enrichment ports: `ApprovalPromptContextSource`, `BlockedAuthPromptSource`, `BlockedAuthPromptRequest`. Rendering stays in product. |
 | `command` | `ProductCommandContext` (the authority-bearing dispatch context) and the `CommandActorRoleResolver` admission port. |
 | `action` | Inbound-action identity (`ProductActionId`), the bounded product tokens, and `ActionFingerprintKey`. The ledger record and saga are product's. |
-| `admin_users` | The `AdminUserService` port, its records, and its error taxonomy. The `Reborn*` HTTP wire DTOs stay with product's frozen surface. |
+| `admin_users` | The `AdminUserService` port, its records, its error taxonomy, and the `Reborn*` HTTP wire DTOs that wrap them (moved here by the WS5 inversion — §6.1.3's frozen inventory is the concrete *constants*, not the request/response bodies). |
 | `operator_tools` | `RebornOperatorToolCatalog` + `RebornOperatorToolInfo`. |
-| `views` | The generic product-view conduit's `RebornViewDescriptor`/`Query`/`Page` and the `RebornViewProvider` port. `ProductView` (the typed declaration wrapper) stays with product's frozen inventory. |
+| `views` | The generic product-view conduit's `RebornViewDescriptor`/`Query`/`Page` and the `RebornViewProvider` port. The typed `ProductView` wrapper sits in `descriptors` with the other two operation shapes. |
+| `descriptors` | The three `ProductSurface` operation shapes — `ProductSurfaceCommandDescriptor`, `ProductCapabilityDescriptor`, `ProductView`, `EmptyProductCommandInput` — plus their encode/decode glue. The *types*; product keeps the concrete constants as its frozen inventory. |
+| `inbound_requests` | The browser/API request bodies a transport hands to `ProductSurface` (`ProductSubmitTurnRequest`, `ProductCreateThreadRequest`, the cancel/gate/retry/setup/list bodies, `ProductInboundAttachment`). Field shapes and the `serde` contract only — normalization stays in product. |
+| `product_wire` | The `Reborn*` product wire DTO family every product transport serializes across the boundary. Payload vocabulary only: no service, handler, or projection reducer. |
+| `workspace_views` | Project and filesystem-browse wire vocabulary for the Projects page and the Workspace/Files explorer. The read ports that serve them stayed in product. |
+| `error` | `ProductOperationFailure` — the error a product-side port fails with, and its projection onto `ProductSurfaceError`. Product's `ProductSurfaceFailure` is the superset and absorbs it; see the ruling below. |
+| `subject_route` | `ProductConversationSubjectRouteResolver` + `ProductConversationRouteKey` and its request. Shared-route subject resolution, implemented by `ironclaw_extension_host` over `[channel.config]`. |
 
 ## What must never be here
 
@@ -117,21 +123,23 @@ packages call `render_channel_auth_prompt` from `deliver`. It lives in
 (`ApprovalPrompt*View`), which only product and WebUI reach, stayed in
 `outbound` here.
 
-**The eleven ports WS2's first row relocated, and the six it could not.** The
+**The twelve ports WS2 relocated, and the five it could not.** The
 `extension_host` port-inversion row moved every product-declared port the
-extension host reaches whose signature this crate may legally name. **Nine of
+extension host reaches whose signature this crate may legally name. **Ten of
 them `extension_host` itself implements** — those are the ones
 `reborn_extension_host_port_inversion.rs::INVERTED_PORTS` enumerates and pins:
 `AccountConnectionStatusSource`, `ApprovalPromptContextSource`,
 `BlockedAuthPromptSource`, `ChannelConfigProductService`,
 `ChannelDeliveryResolver`, `CommandActorRoleResolver`,
-`DeliveryReplyContextSource`, `LifecycleProductService`, `RebornViewProvider`.
+`DeliveryReplyContextSource`, `LifecycleProductService`,
+`ProductConversationSubjectRouteResolver` (WS2.2, once the boundary error made
+it declarable), `RebornViewProvider`.
 **Two more it only consumes**, implemented in `ironclaw_reborn_composition`, and
 they moved for the same reason — a port whose implementation sits outside
 product does not belong inside it: `AdminUserService`,
 `RebornOperatorToolCatalog`. Quote that test rather than this list when the
 count matters; the list here is prose and the test is the enforced inventory.
-Six stayed, and each for
+Five stayed, and each for
 the same mechanical reason rather than a judgement call — **this crate's
 dependency allowlist is `ironclaw_host_api` + `ironclaw_extension_contracts`
 and nothing else internal**, so a port whose signature names a type from
@@ -139,13 +147,34 @@ and nothing else internal**, so a port whose signature names a type from
 `ironclaw_conversations` cannot be declared here until that type is narrowed
 out of it: `AuthChallengeProvider` and `ChannelConnectionService` and
 `ExtensionCredentialSetupService` (auth credential vocabulary),
-`ConversationBindingService` and `ProductActorUserResolver` and
-`ProductConversationSubjectRouteResolver` (they error with
-`ironclaw_product::ProductSurfaceFailure`, which carries `ironclaw_turns::TurnError`
-on two variants). The residue is enumerated with its reasons and held
+`ConversationBindingService` (its `ResolveBindingRequest`/`ResolvedBinding` sit
+in product beside the route-kind grammar that derives them), and
+`ProductActorUserResolver` (`ResolvedProductActorUser` carries
+`ironclaw_conversations::ExternalActorBindingEpoch`). *WS2.2 corrected the last
+two reasons: they named `ProductSurfaceFailure`, which no longer blocks
+anything.* The residue is enumerated with its reasons and held
 shrink-only by
 `crates/ironclaw_architecture/tests/reborn_extension_host_port_inversion.rs`;
 **do not add a row there** — narrow the signature or move the type instead.
+
+**The error a port fails with lives here too** (`error::ProductOperationFailure`,
+WS2.2). It is the boundary vocabulary — six variants whose payloads are a plain
+`String` or nothing — so a crate below product can describe its own failure
+without naming product's workflow error. `ironclaw_product::ProductSurfaceFailure`
+is the strict superset carrying the turn-kernel and interaction payloads only
+the workflow crate produces, and it absorbs this type with a total `From`.
+Two rules follow, both pinned by tests:
+
+- **Do not add a kernel-typed variant here.** `ProductSurfaceFailure` could not
+  move precisely because two of its variants carry `ironclaw_turns::TurnError`;
+  reintroducing one re-creates the blocker, and the port-inversion scan fails on
+  any mention of `TurnError`/`ironclaw_turns`/`ironclaw_auth`/`ironclaw_threads`/
+  `ironclaw_conversations`/`ironclaw_product` in `src/error.rs`.
+- **The projection to `ProductSurfaceError` is defined here once.** Product's
+  `lifecycle_product_surface_error` delegates its matching arms to it rather than
+  repeating the status choices, so the WebUI cannot get one answer through
+  product's lifecycle service and a different one through the extension host's.
+  Only the logging stays with each caller — this crate may not log.
 
 ## Deferred by design (not missing)
 

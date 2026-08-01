@@ -22,6 +22,13 @@
 //!   a silent re-inversion. (`reborn_product_contract_location_scan.rs` already
 //!   pins that no *other* crate defines or re-exports them; this pins that the
 //!   implementation stayed below the contract, which that scan cannot see.)
+//! - **The error vocabulary is pinned too** (WS2.2). A trait is not the only
+//!   way to depend upward: `ProductSurfaceFailure` was product's *internal*
+//!   workflow error and simultaneously the extension host's own lifecycle error
+//!   in 19 production files, which no trait-shaped rule can see. The boundary
+//!   half now lives in `ironclaw_product_contracts::error`, and the files still
+//!   naming product's type are frozen exact-match and shrink-only, exactly like
+//!   the trait residue.
 
 // The shared walker is compiled per test binary; each binary uses a subset.
 #[allow(dead_code)]
@@ -50,6 +57,14 @@ const EXTENSION_HOST: &str = "ironclaw_extension_host";
 /// from `ironclaw_auth`, `ironclaw_threads`, `ironclaw_turns`, or
 /// `ironclaw_conversations` cannot be declared there until that type is
 /// narrowed out of the signature.
+///
+/// **WS2.2 rewrote three of these reasons and deleted a fourth.** The row that
+/// froze this list named `ProductSurfaceFailure` as the blocker on three ports;
+/// that is no longer true of any of them. The boundary error moved to
+/// `ironclaw_product_contracts::error::ProductOperationFailure`, so what
+/// actually blocks the survivors is their *request/response* vocabulary, which
+/// is what each reason now states. `ProductConversationSubjectRouteResolver`
+/// had no other blocker and was inverted.
 const PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS: &[(&str, &str)] = &[
     (
         "AuthChallengeProvider",
@@ -64,8 +79,10 @@ const PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS: &[(&str, &str)] = 
     ),
     (
         "ConversationBindingService",
-        "errors with ironclaw_product::ProductSurfaceFailure, which carries \
-         ironclaw_turns::TurnError on two variants",
+        "takes ironclaw_product::ResolveBindingRequest and returns \
+         ironclaw_product::ResolvedBinding; both are declared in product beside \
+         the route-kind grammar that derives them. The error no longer blocks it \
+         (WS2.2) — the DTOs do, and they move with the channel_host row",
     ),
     (
         "ExtensionCredentialSetupService",
@@ -73,12 +90,10 @@ const PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS: &[(&str, &str)] = 
     ),
     (
         "ProductActorUserResolver",
-        "errors with ProductSurfaceFailure and resolves to ResolvedProductActorUser, \
-         which carries ironclaw_conversations::ExternalActorBindingEpoch",
-    ),
-    (
-        "ProductConversationSubjectRouteResolver",
-        "errors with ProductSurfaceFailure (see ConversationBindingService)",
+        "resolves to ResolvedProductActorUser, which carries \
+         ironclaw_conversations::ExternalActorBindingEpoch. The error no longer \
+         blocks it (WS2.2); the conversations dep is the whole blocker and needs \
+         that epoch narrowed out of the response first",
     ),
 ];
 
@@ -94,11 +109,15 @@ const INVERTED_PORTS: &[&str] = &[
     "CommandActorRoleResolver",
     "DeliveryReplyContextSource",
     "LifecycleProductService",
+    // WS2.2: inverted once `ProductOperationFailure` gave it a contracts-legal
+    // error. Its request type and route key moved with it.
+    "ProductConversationSubjectRouteResolver",
     "RebornViewProvider",
 ];
 
-/// Ceiling on the residue. Only ever moves down.
-const WS2_PRODUCT_DEFINED_TRAIT_RESIDUE_BASELINE: usize = 6;
+/// Ceiling on the residue. Only ever moves down. (WS2.1 froze it at 6; WS2.2
+/// inverted `ProductConversationSubjectRouteResolver`.)
+const WS2_PRODUCT_DEFINED_TRAIT_RESIDUE_BASELINE: usize = 5;
 
 fn crate_src(root: &Path, name: &str) -> PathBuf {
     root.join("crates").join(name).join("src")
@@ -378,6 +397,130 @@ fn inverted_ports_are_declared_in_contracts_and_implemented_below_product() {
         "WS2 inverted-port placement violated (PROPOSAL §6.1.3):\n{}",
         violations.join("\n")
     );
+}
+
+/// The only `ironclaw_extension_host` production files still allowed to name
+/// product's workflow error, each with the residue port that forces it.
+///
+/// **Shrink-only, exact-match.** These two are exactly the files implementing a
+/// port whose *signature* still names `ProductSurfaceFailure` because the port
+/// itself has not been inverted (see the trait residue above). Every other
+/// production file — 17 of the 19 the WS2.1 finding counted — now speaks
+/// `ironclaw_product_contracts::error::ProductOperationFailure`. A third file
+/// appearing here means the boundary error was bypassed; a stale entry means a
+/// port was inverted without deleting its row.
+const EXTENSION_HOST_FILES_STILL_NAMING_THE_WORKFLOW_ERROR: &[(&str, &str)] = &[
+    (
+        "channel_host.rs",
+        "implements ConversationBindingService and ProductActorUserResolver, both \
+         still declared in ironclaw_product",
+    ),
+    (
+        "provider_identity.rs",
+        "implements ProductActorUserResolver, still declared in ironclaw_product",
+    ),
+];
+
+/// Production files in `crate_name` whose *code* names `type_name`, as paths
+/// relative to the crate's `src/`.
+///
+/// `#[cfg(test)]` blocks are stripped for the same reason the impl scan strips
+/// them (a test double may reach product through a dev-dependency without the
+/// shipped artifact doing so), and comments and string literals are stripped so
+/// prose about the migration — including this file's own vocabulary — never
+/// registers as a dependency.
+fn production_files_naming(root: &Path, crate_name: &str, type_name: &str) -> BTreeSet<String> {
+    let src = crate_src(root, crate_name);
+    let mut files = Vec::new();
+    rust_files(&src, &mut files);
+    assert!(
+        files.len() > 20,
+        "expected to walk {crate_name}'s source tree; found {} files",
+        files.len()
+    );
+    let mut named = BTreeSet::new();
+    for file in files {
+        let Ok(source) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        if strip_comments_and_strings(&strip_cfg_test_blocks(&source)).contains(type_name) {
+            let Ok(relative) = file.strip_prefix(&src) else {
+                continue;
+            };
+            named.insert(relative.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    named
+}
+
+#[test]
+fn extension_host_speaks_the_contract_error_everywhere_but_the_frozen_residue_files() {
+    let root = workspace_root();
+    let found = production_files_naming(&root, EXTENSION_HOST, "ProductSurfaceFailure");
+    let frozen: BTreeSet<String> = EXTENSION_HOST_FILES_STILL_NAMING_THE_WORKFLOW_ERROR
+        .iter()
+        .map(|(file, _)| (*file).to_string())
+        .collect();
+
+    let mut violations = Vec::new();
+    for file in found.difference(&frozen) {
+        violations.push(format!(
+            "{EXTENSION_HOST}/src/{file} names {PRODUCT}::ProductSurfaceFailure. Use \
+             {PRODUCT_CONTRACTS}::error::ProductOperationFailure — product absorbs it \
+             with a total From, so nothing is lost at a product call site"
+        ));
+    }
+    for file in frozen.difference(&found) {
+        violations.push(format!(
+            "{file} is listed as still naming the workflow error but no longer does — \
+             delete its row in the same change"
+        ));
+    }
+    assert!(
+        violations.is_empty(),
+        "WS2.2 error-vocabulary rule violated:\n{}",
+        violations.join("\n")
+    );
+
+    // The other half of the claim: the contract error is actually the one in
+    // use, so the scan above cannot pass by the crate simply not having errors.
+    let contract_users = production_files_naming(&root, EXTENSION_HOST, "ProductOperationFailure");
+    assert!(
+        contract_users.len() >= 15,
+        "expected the contract error across the extension host's lifecycle surface; \
+         found only {} files: {contract_users:?}",
+        contract_users.len()
+    );
+}
+
+#[test]
+fn the_boundary_error_names_no_type_the_contracts_crate_may_not_depend_on() {
+    let root = workspace_root();
+    let path = crate_src(&root, PRODUCT_CONTRACTS).join("error.rs");
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let code = strip_comments_and_strings(&source);
+    assert!(
+        code.contains("ProductOperationFailure"),
+        "the boundary error must live in {PRODUCT_CONTRACTS}/src/error.rs"
+    );
+    // The whole reason the type exists: it is declarable in a crate whose
+    // dependency ceiling is host_api + extension_contracts. `TurnError` is the
+    // exact payload that kept `ProductSurfaceFailure` out.
+    for forbidden in [
+        "TurnError",
+        "ironclaw_turns",
+        "ironclaw_auth",
+        "ironclaw_threads",
+        "ironclaw_conversations",
+        "ironclaw_product",
+    ] {
+        assert!(
+            !code.contains(forbidden),
+            "{PRODUCT_CONTRACTS}/src/error.rs names {forbidden}, which re-creates the \
+             blocker WS2.2 removed"
+        );
+    }
 }
 
 #[test]

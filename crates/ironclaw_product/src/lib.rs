@@ -126,12 +126,14 @@ pub use commands::{
     required_audience, validate_declared_product_command,
 };
 pub use communication_context::RuntimeCommunicationContextProvider;
+// `ProductConversationRouteKey`, `ProductConversationSubjectRouteResolutionRequest`,
+// and `ProductConversationSubjectRouteResolver` are deliberately absent: they
+// moved to `ironclaw_product_contracts::subject_route` (WS2.2), and that crate
+// grants no second import path (`reborn_product_contract_location_scan.rs`).
 pub use conversation_binding::{
     ProductActorBindingPolicy, ProductActorUserResolutionRequest, ProductActorUserResolver,
-    ProductConversationBindingService, ProductConversationRouteKey,
-    ProductConversationSubjectRouteResolutionRequest, ProductConversationSubjectRouteResolver,
-    ProductInstallationKey, ProductInstallationScope, ResolvedProductActorUser,
-    StaticProductActorUserResolver, StaticProductInstallationResolver,
+    ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
+    ResolvedProductActorUser, StaticProductActorUserResolver, StaticProductInstallationResolver,
 };
 pub use error::{
     AuthContinuationRejectionKind, ProductSurfaceFailure, lifecycle_product_surface_error,

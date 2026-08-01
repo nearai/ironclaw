@@ -21,7 +21,8 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
-use ironclaw_product::{ProductSurfaceFailure, RebornChannelConnectStrategy};
+use ironclaw_product::RebornChannelConnectStrategy;
+use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::package_lifecycle::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
 };
@@ -495,9 +496,9 @@ fn activation_response_has_credential_blocker(response: &LifecycleProductRespons
     )
 }
 
-fn install_activation_readiness_error(error: ProductSurfaceFailure) -> FirstPartyCapabilityError {
+fn install_activation_readiness_error(error: ProductOperationFailure) -> FirstPartyCapabilityError {
     match error {
-        ProductSurfaceFailure::ProviderInstanceNotConfigured { .. } => {
+        ProductOperationFailure::ProviderInstanceNotConfigured { .. } => {
             provider_instance_unavailable_error()
         }
         error => lifecycle_error(error),
@@ -505,14 +506,14 @@ fn install_activation_readiness_error(error: ProductSurfaceFailure) -> FirstPart
 }
 
 fn install_activation_error(
-    error: ProductSurfaceFailure,
+    error: ProductOperationFailure,
     install_response: LifecycleProductResponse,
 ) -> Result<LifecycleProductResponse, FirstPartyCapabilityError> {
     match error {
-        ProductSurfaceFailure::ProviderInstanceNotConfigured { .. } => {
+        ProductOperationFailure::ProviderInstanceNotConfigured { .. } => {
             Err(provider_instance_unavailable_error())
         }
-        ProductSurfaceFailure::Transient { reason } => {
+        ProductOperationFailure::Transient { reason } => {
             tracing::debug!(
                 target: "ironclaw::reborn::extension_lifecycle",
                 %reason,
@@ -520,7 +521,7 @@ fn install_activation_error(
             );
             Ok(install_response)
         }
-        ProductSurfaceFailure::InvalidBindingRequest { reason }
+        ProductOperationFailure::InvalidBindingRequest { reason }
             if reason.starts_with("hosted MCP catalog preparation failed:")
                 || reason
                     == "generic extension host rejected the activation: hosted MCP discovery published no callable tools" =>
@@ -631,7 +632,7 @@ fn provider_instance_unavailable_error() -> FirstPartyCapabilityError {
     )
 }
 
-fn lifecycle_error(error: ProductSurfaceFailure) -> FirstPartyCapabilityError {
+fn lifecycle_error(error: ProductOperationFailure) -> FirstPartyCapabilityError {
     match error {
         // UNTRUSTED on purpose. `InvalidBindingRequest` has ~40 construction
         // sites and several interpolate externally-influenced text: a hosted
@@ -647,7 +648,7 @@ fn lifecycle_error(error: ProductSurfaceFailure) -> FirstPartyCapabilityError {
         // `ironclaw_threads` applies to untrusted output. The trusted channel
         // is reserved for reasons built entirely from host-authored constants
         // (the `ProviderInstanceNotConfigured` arm below).
-        ProductSurfaceFailure::InvalidBindingRequest { reason } => {
+        ProductOperationFailure::InvalidBindingRequest { reason } => {
             FirstPartyCapabilityError::dispatch_with_diagnostic(
                 RuntimeDispatchErrorKind::InputEncode,
                 None,
@@ -666,17 +667,17 @@ fn lifecycle_error(error: ProductSurfaceFailure) -> FirstPartyCapabilityError {
         // arm is the one exception routed onto the TRUSTED channel
         // (`dispatch_with_host_remediation`), because its `reason` is built
         // entirely from host-authored constants.
-        ProductSurfaceFailure::ProviderInstanceNotConfigured { reason } => {
+        ProductOperationFailure::ProviderInstanceNotConfigured { reason } => {
             FirstPartyCapabilityError::dispatch_with_host_remediation(
                 RuntimeDispatchErrorKind::OperationFailed,
                 Some(PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY.to_string()),
                 reason,
             )
         }
-        ProductSurfaceFailure::UnsupportedActionKind { .. } => {
+        ProductOperationFailure::UnsupportedActionKind { .. } => {
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
         }
-        ProductSurfaceFailure::Transient { .. } => {
+        ProductOperationFailure::Transient { .. } => {
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
         }
         _ => FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed),
@@ -2120,7 +2121,7 @@ mod tests {
             ironclaw_reborn_config::google_remediation_text(),
             ironclaw_reborn_config::apply_step_text()
         );
-        let mapped = lifecycle_error(ProductSurfaceFailure::ProviderInstanceNotConfigured {
+        let mapped = lifecycle_error(ProductOperationFailure::ProviderInstanceNotConfigured {
             reason: reason.clone(),
         });
 
@@ -2158,7 +2159,7 @@ mod tests {
     /// entirely from host-authored constants may ride the trusted channel.
     #[test]
     fn invalid_binding_request_carries_reason_on_the_untrusted_diagnostic_channel() {
-        let mapped = lifecycle_error(ProductSurfaceFailure::InvalidBindingRequest {
+        let mapped = lifecycle_error(ProductOperationFailure::InvalidBindingRequest {
             reason: "telegram account setup was declared without a mounted host".to_string(),
         });
 
@@ -2176,7 +2177,7 @@ mod tests {
 
     #[test]
     fn transient_lifecycle_errors_map_to_retryable_backend_failure() {
-        let mapped = lifecycle_error(ProductSurfaceFailure::Transient {
+        let mapped = lifecycle_error(ProductOperationFailure::Transient {
             reason: "temporary lifecycle store outage".to_string(),
         });
 
@@ -2193,7 +2194,7 @@ mod tests {
     /// credential-vocabulary scan.
     #[test]
     fn model_influenced_invalid_binding_reason_never_reaches_the_trusted_channel() {
-        let mapped = lifecycle_error(ProductSurfaceFailure::InvalidBindingRequest {
+        let mapped = lifecycle_error(ProductOperationFailure::InvalidBindingRequest {
             reason: "extension api_key is not installed".to_string(),
         });
 

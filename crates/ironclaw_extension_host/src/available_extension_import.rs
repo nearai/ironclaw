@@ -6,7 +6,7 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{ids::ExtensionId, path::VirtualPath, runtime::RuntimeKind};
-use ironclaw_product::ProductSurfaceFailure;
+use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::package_lifecycle::{LifecyclePackageKind, LifecyclePackageRef};
 
 use crate::product_extension_host_api_contract_registry;
@@ -24,7 +24,7 @@ use crate::{MAX_EXTENSION_BUNDLE_FILES, MAX_EXTENSION_BUNDLE_UNCOMPRESSED_BYTES}
 pub async fn materialize_available_extension<F>(
     fs: &F,
     extension: &AvailableExtensionPackage,
-) -> Result<(), ProductSurfaceFailure>
+) -> Result<(), ProductOperationFailure>
 where
     F: RootFilesystem + ?Sized,
 {
@@ -45,7 +45,7 @@ where
                     );
                 }
             }
-            return Err(ProductSurfaceFailure::Transient {
+            return Err(ProductOperationFailure::Transient {
                 reason: format!(
                     "failed to materialize extension asset {}: {error}",
                     asset.path
@@ -71,7 +71,7 @@ where
 pub fn extension_asset_path(
     extension_id: &ExtensionId,
     asset_path: &str,
-) -> Result<VirtualPath, ProductSurfaceFailure> {
+) -> Result<VirtualPath, ProductOperationFailure> {
     let root = VirtualPath::new(format!("/system/extensions/{}", extension_id.as_str()))
         .map_err(map_binding_error)?;
     ExtensionAssetPath::new(asset_path.to_string())
@@ -87,7 +87,7 @@ pub fn extension_asset_path(
 pub async fn inline_extension_dir_assets<F>(
     fs: &F,
     root: &VirtualPath,
-) -> Result<Vec<AvailableExtensionAsset>, ProductSurfaceFailure>
+) -> Result<Vec<AvailableExtensionAsset>, ProductOperationFailure>
 where
     F: RootFilesystem + ?Sized,
 {
@@ -99,7 +99,7 @@ where
         let entries =
             fs.list_dir(&dir)
                 .await
-                .map_err(|error| ProductSurfaceFailure::Transient {
+                .map_err(|error| ProductOperationFailure::Transient {
                     reason: format!("failed to list available extension assets: {error}"),
                 })?;
         for child in entries {
@@ -115,7 +115,7 @@ where
                 )));
             }
             let bytes = fs.read_file(&child.path).await.map_err(|error| {
-                ProductSurfaceFailure::Transient {
+                ProductOperationFailure::Transient {
                     reason: format!(
                         "failed to read available extension asset {}: {error}",
                         child.path.as_str()
@@ -153,7 +153,7 @@ where
 pub fn imported_extension_package(
     files: Vec<(String, Vec<u8>)>,
     reserved_bundled_ids: &[String],
-) -> Result<AvailableExtensionPackage, ProductSurfaceFailure> {
+) -> Result<AvailableExtensionPackage, ProductOperationFailure> {
     extension_package_from_files(files, reserved_bundled_ids, ManifestSource::InstalledLocal)
 }
 
@@ -166,7 +166,7 @@ pub fn imported_extension_package(
 pub fn registry_extension_package(
     files: Vec<(String, Vec<u8>)>,
     reserved_bundled_ids: &[String],
-) -> Result<AvailableExtensionPackage, ProductSurfaceFailure> {
+) -> Result<AvailableExtensionPackage, ProductOperationFailure> {
     extension_package_from_files(
         files,
         reserved_bundled_ids,
@@ -178,7 +178,7 @@ fn extension_package_from_files(
     files: Vec<(String, Vec<u8>)>,
     reserved_bundled_ids: &[String],
     source: ManifestSource,
-) -> Result<AvailableExtensionPackage, ProductSurfaceFailure> {
+) -> Result<AvailableExtensionPackage, ProductOperationFailure> {
     let manifest_toml = files
         .iter()
         .find(|(path, _)| path == "manifest.toml")
@@ -189,12 +189,12 @@ fn extension_package_from_files(
             })
         })?;
     let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        ProductSurfaceFailure::InvalidBindingRequest {
+        ProductOperationFailure::InvalidBindingRequest {
             reason: format!("host port catalog rejected imported extension: {error}"),
         }
     })?;
     let contracts = product_extension_host_api_contract_registry().map_err(|error| {
-        ProductSurfaceFailure::InvalidBindingRequest {
+        ProductOperationFailure::InvalidBindingRequest {
             reason: format!("host API contract registry rejected imported extension: {error}"),
         }
     })?;
@@ -436,7 +436,7 @@ output_schema_ref = "schemas/search.output.json"
         let error = inline_extension_dir_assets(&MismatchedAssetPathFilesystem, &root)
             .await
             .expect_err("asset paths outside the extension root must fail discovery");
-        let ProductSurfaceFailure::InvalidBindingRequest { reason } = error else {
+        let ProductOperationFailure::InvalidBindingRequest { reason } = error else {
             panic!("expected invalid binding request, got {error:?}");
         };
         assert!(reason.contains("/system/extensions/other/asset.txt"));
@@ -551,7 +551,7 @@ output_schema_ref = "schemas/search.output.json"
         )
         .await
         .expect_err("transient manifest read error must abort the catalog load");
-        assert!(matches!(error, ProductSurfaceFailure::Transient { .. }));
+        assert!(matches!(error, ProductOperationFailure::Transient { .. }));
     }
 
     struct UnreadableManifestFilesystem;

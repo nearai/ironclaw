@@ -8,7 +8,7 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{approval::sha256_digest_token, ids::UserId};
-use ironclaw_product::ProductSurfaceFailure;
+use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_product_contracts::package_lifecycle::{LifecyclePackageKind, LifecyclePackageRef};
 use tokio::sync::Mutex;
 
@@ -26,7 +26,7 @@ pub async fn restore_extension_lifecycle_state(
     lifecycle_service: &Arc<Mutex<ExtensionLifecycleService>>,
     active_extensions: &ActiveExtensionPublisher,
     legacy_tenant_owner: &UserId,
-) -> Result<(), ProductSurfaceFailure> {
+) -> Result<(), ProductOperationFailure> {
     let mut catalog_registered_user_extension_ids: BTreeSet<String> = BTreeSet::new();
     for installation in
         canonicalize_persisted_installation_rows(installation_store, legacy_tenant_owner).await?
@@ -131,7 +131,7 @@ async fn restore_registered_only_definitions(
     catalog: &mut AvailableExtensionCatalog,
     installation_store: &Arc<dyn ExtensionInstallationStorePort>,
     already_contributed: &BTreeSet<String>,
-) -> Result<(), ProductSurfaceFailure> {
+) -> Result<(), ProductOperationFailure> {
     let registered_definitions = installation_store
         .list_registered_package_definitions()
         .await
@@ -163,7 +163,7 @@ async fn restore_registered_only_definitions(
 async fn canonicalize_persisted_installation_rows(
     installation_store: &Arc<dyn ExtensionInstallationStorePort>,
     legacy_tenant_owner: &UserId,
-) -> Result<Vec<ExtensionInstallation>, ProductSurfaceFailure> {
+) -> Result<Vec<ExtensionInstallation>, ProductOperationFailure> {
     let persisted = installation_store
         .list_installations()
         .await
@@ -212,7 +212,7 @@ async fn canonicalize_persisted_installation_rows(
 async fn remove_retired_internal_installation(
     installation_store: &Arc<dyn ExtensionInstallationStorePort>,
     installation: &ExtensionInstallation,
-) -> Result<bool, ProductSurfaceFailure> {
+) -> Result<bool, ProductOperationFailure> {
     if installation.extension_id().as_str() != RETIRED_SLACK_USER_EXTENSION_ID {
         return Ok(false);
     }
@@ -245,15 +245,15 @@ pub fn prepare_install(
     available: &AvailableExtensionPackage,
     owner: InstallationOwner,
     retained_definition: Option<ExtensionManifestRecord>,
-) -> Result<ExtensionInstallPlan, ProductSurfaceFailure> {
+) -> Result<ExtensionInstallPlan, ProductOperationFailure> {
     let manifest_hash = available_manifest_hash(available)?;
     let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        ProductSurfaceFailure::InvalidBindingRequest {
+        ProductOperationFailure::InvalidBindingRequest {
             reason: format!("host port catalog rejected extension install: {error}"),
         }
     })?;
     let contracts = product_extension_host_api_contract_registry().map_err(|error| {
-        ProductSurfaceFailure::InvalidBindingRequest {
+        ProductOperationFailure::InvalidBindingRequest {
             reason: format!("host API contract registry rejected extension install: {error}"),
         }
     })?;
@@ -279,7 +279,7 @@ pub fn prepare_install(
             retained
         }
         Some(_) => {
-            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
                 reason: format!(
                     "extension {} has a conflicting registered definition",
                     available.package.id.as_str()
@@ -310,7 +310,7 @@ fn manifest_record_for_available(
     host_ports: &ironclaw_host_api::host_port::HostPortCatalog,
     contracts: &ironclaw_extensions::HostApiContractRegistry,
     manifest_hash: Option<ironclaw_extensions::ManifestHash>,
-) -> Result<ExtensionManifestRecord, ProductSurfaceFailure> {
+) -> Result<ExtensionManifestRecord, ProductOperationFailure> {
     let _ = (host_ports, contracts);
     let mut resolved = available.resolved_manifest.as_ref().clone();
     resolved.root_binding = available.package.root_binding.clone();
@@ -326,15 +326,15 @@ fn manifest_record_for_available(
 fn prepare_manifest_migration(
     available: &AvailableExtensionPackage,
     existing: &ExtensionInstallation,
-) -> Result<ExtensionInstallPlan, ProductSurfaceFailure> {
+) -> Result<ExtensionInstallPlan, ProductOperationFailure> {
     let manifest_hash = available_manifest_hash(available)?;
     let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-        ProductSurfaceFailure::InvalidBindingRequest {
+        ProductOperationFailure::InvalidBindingRequest {
             reason: format!("host port catalog rejected manifest migration: {error}"),
         }
     })?;
     let contracts = product_extension_host_api_contract_registry().map_err(|error| {
-        ProductSurfaceFailure::InvalidBindingRequest {
+        ProductOperationFailure::InvalidBindingRequest {
             reason: format!("host API contract registry rejected manifest migration: {error}"),
         }
     })?;
@@ -364,8 +364,8 @@ async fn migrate_host_bundled_manifest_hash(
     installation_store: &Arc<dyn ExtensionInstallationStorePort>,
     available: &AvailableExtensionPackage,
     installation: &ExtensionInstallation,
-    hash_error: ProductSurfaceFailure,
-) -> Result<(), ProductSurfaceFailure> {
+    hash_error: ProductOperationFailure,
+) -> Result<(), ProductOperationFailure> {
     let stored_manifest = match installation_store
         .get_manifest(installation.extension_id())
         .await
@@ -395,7 +395,7 @@ async fn migrate_host_bundled_manifest_hash(
 fn validate_restored_manifest_hash(
     installation: &ExtensionInstallation,
     available: &AvailableExtensionPackage,
-) -> Result<(), ProductSurfaceFailure> {
+) -> Result<(), ProductOperationFailure> {
     let manifest_hash = available_manifest_hash(available)?;
     match installation.manifest_ref().manifest_hash() {
         Some(installed_hash) if installed_hash == &manifest_hash => Ok(()),
@@ -409,7 +409,7 @@ fn validate_restored_manifest_hash(
 
 pub fn available_manifest_hash(
     available: &AvailableExtensionPackage,
-) -> Result<ManifestHash, ProductSurfaceFailure> {
+) -> Result<ManifestHash, ProductOperationFailure> {
     ManifestHash::new(sha256_digest_token(available.manifest_toml.as_bytes()))
         .map_err(map_extension_installation_error)
 }
@@ -424,27 +424,27 @@ pub fn package_visible_capability_ids(package: &ExtensionPackage) -> Vec<String>
         .collect()
 }
 
-fn map_extension_error(error: ExtensionError) -> ProductSurfaceFailure {
+fn map_extension_error(error: ExtensionError) -> ProductOperationFailure {
     match error {
         ExtensionError::Filesystem(_) | ExtensionError::LifecycleEventSink { .. } => {
-            ProductSurfaceFailure::Transient {
+            ProductOperationFailure::Transient {
                 reason: error.to_string(),
             }
         }
-        _ => ProductSurfaceFailure::InvalidBindingRequest {
+        _ => ProductOperationFailure::InvalidBindingRequest {
             reason: error.to_string(),
         },
     }
 }
 
-fn map_extension_installation_error(error: ExtensionInstallationError) -> ProductSurfaceFailure {
+fn map_extension_installation_error(error: ExtensionInstallationError) -> ProductOperationFailure {
     match error {
         error @ ExtensionInstallationError::StoreUnavailable { .. } => {
-            ProductSurfaceFailure::Transient {
+            ProductOperationFailure::Transient {
                 reason: error.to_string(),
             }
         }
-        error => ProductSurfaceFailure::InvalidBindingRequest {
+        error => ProductOperationFailure::InvalidBindingRequest {
             reason: error.to_string(),
         },
     }

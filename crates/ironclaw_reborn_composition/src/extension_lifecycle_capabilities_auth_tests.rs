@@ -285,7 +285,7 @@ async fn install_inactive_for_user(
     services: &RebornRuntimeStores,
     extension_id: &str,
     caller: &UserId,
-) -> Result<(), ironclaw_product::ProductSurfaceFailure> {
+) -> Result<(), ironclaw_product_contracts::error::ProductOperationFailure> {
     let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
         .expect("valid extension package ref"); // safety: test helper callers pass static extension ids.
     services
