@@ -97,6 +97,7 @@ function renderChatInput({
   const components = {
     Button() {},
     Icon() {},
+    ModeSelector() {},
   };
   let stateIndex = 0;
   const context = {
@@ -124,6 +125,7 @@ function renderChatInput({
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     useT: () => (key) => key,
+    useAgentMode: () => ["suggest", () => {}],
     authScope: authScopeFn,
     stageFiles: async () => ({ staged: [], errors: [] }),
     commandMenuMatches,
@@ -671,13 +673,14 @@ function createChatInputHookHost() {
 
 function renderChatInputStateful({ getDraftByKey = {} } = {}) {
   const host = createChatInputHookHost();
-  const components = { Button() {}, Icon() {} };
+  const components = { Button() {}, Icon() {}, ModeSelector() {} };
   const context = {
     ...components,
     React: host.React,
     globalThis: {},
     html: (strings, ...values) => ({ strings: Array.from(strings), values }),
     useT: () => (key) => key,
+    useAgentMode: () => ["suggest", () => {}],
     authScope: () => "test-scope",
     stageFiles: async () => ({ staged: [], errors: [] }),
     commandMenuMatches,

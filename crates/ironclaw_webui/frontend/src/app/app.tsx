@@ -62,6 +62,11 @@ const AdminPage = React.lazy(() =>
 const LogsPage = React.lazy(() =>
   import("../pages/logs/logs-page").then(({ LogsPage }) => ({ default: LogsPage }))
 );
+const DesignPreviewPage = React.lazy(() =>
+  import("../pages/design-preview/design-preview-page").then(({ DesignPreviewPage }) => ({
+    default: DesignPreviewPage,
+  }))
+);
 
 function LazyRoute({ children }) {
   return (<RouteLoadBoundary>{children}</RouteLoadBoundary>);
@@ -217,6 +222,11 @@ export function App() {
   return (
     <BrowserRouter>
       <Routes>
+        {/* DEV-only design harness for the OOBE/automations concepts — mounted
+            outside the auth-gated layout so it renders with no backend. Never
+            included in a production build. */}
+        {import.meta.env.DEV &&
+          (<Route path="/design-preview" element={(<LazyRoute><DesignPreviewPage /></LazyRoute>)} />)}
         <Route path="/login" element={(<LoginPage auth={auth} />)} />
         <Route path="/" element={(<AuthenticatedLayout auth={auth} />)}>
           <Route index element={(<Navigate to={defaultRoute} replace />)} />

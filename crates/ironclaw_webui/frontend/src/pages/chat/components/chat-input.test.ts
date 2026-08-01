@@ -16,6 +16,7 @@ function renderChatInput({ sendDisabled = true, statusText = "" } = {}) {
     globalThis: {},
     Icon() {},
     Button() {},
+    ModeSelector() {},
     React: {
       useCallback: (callback) => callback,
       useEffect: () => {},
@@ -33,6 +34,7 @@ function renderChatInput({ sendDisabled = true, statusText = "" } = {}) {
     INITIAL_COMMAND_MENU_SELECTION: { index: 0, dismissed: false },
     NEW_DRAFT_KEY: "new",
     useAttachmentConfig: () => ({ accept: [] }),
+    useAgentMode: () => ["suggest", () => {}],
     useT: () => (key) => key,
   };
 

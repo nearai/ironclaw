@@ -12,6 +12,8 @@ import {
   commandMenuToken,
 } from "../lib/chat-commands";
 import { useAttachmentConfig } from "../hooks/useAttachmentConfig";
+import { ModeSelector } from "./mode-selector";
+import { useAgentMode } from "../lib/agent-mode";
 import {
   NEW_DRAFT_KEY,
   clearDraft,
@@ -35,10 +37,12 @@ export function ChatInput({
   variant = "dock",
   context = {},
   statusText = "",
+  onFocusChange = (_focused) => {},
 }) {
   const t = useT();
   const storageScope = authScope();
   const isHero = variant === "hero";
+  const [agentMode, setAgentMode] = useAgentMode();
   const limits = useAttachmentConfig();
   const [text, setText] = React.useState(() => getDraft(draftKey));
   const [attachments, setAttachments] = React.useState(() =>
@@ -798,6 +802,8 @@ export function ChatInput({
           onChange={handleChange}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
+          onFocus={() => onFocusChange?.(true)}
+          onBlur={() => onFocusChange?.(false)}
           data-send-disabled={isSubmitDisabled ? "true" : "false"}
           placeholder={placeholder}
           rows={1}
@@ -830,6 +836,11 @@ export function ChatInput({
         />
 
         <div className="mt-2 flex items-center gap-2">
+          <ModeSelector
+            mode={agentMode}
+            onChange={setAgentMode}
+            disabled={disabled}
+          />
           {isSubmitDisabled && statusText &&
           (
             <span className="inline-flex items-center gap-2 text-xs text-[var(--v2-text-muted)]">
