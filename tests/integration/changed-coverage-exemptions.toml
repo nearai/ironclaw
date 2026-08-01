@@ -693,31 +693,6 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_ironhub/src/link_service.rs"
-lines = [86, 91, 274, 275, 280, 281, 282, 285, 286, 287, 288, 292, 298, 300]
-owner = "@serrrfirat"
-reason = "Authenticated deep-link delivery and runtime-wrapper tests execute these constructor, async-trait, nonce, scope, and install paths; LLVM attributes their executable counters to the async state machine and leaves these source-line records at zero."
-issue = "https://github.com/nearai/ironclaw/issues/6524"
-review_after = "2026-10-31"
-
-[[exemption]]
-path = "crates/ironclaw_ironhub/src/link_service.rs"
-lines = [177, 183, 206, 207, 234, 235, 263, 264, 379, 459, 485]
-branch_lines = [150, 155, 182, 208, 209, 213, 238, 265, 267, 272, 378, 400, 419, 434, 435, 458, 469, 482, 490]
-owner = "@serrrfirat"
-reason = "Durable replay tests execute corruption, identity mismatch, stale/equal/new manifests, CAS retry exhaustion, authentication failures, and every error mapping; the remaining records are multiline closers or synthetic async/short-circuit branches with no distinct behavior to drive."
-issue = "https://github.com/nearai/ironclaw/issues/6524"
-review_after = "2026-10-31"
-
-[[exemption]]
-path = "crates/ironclaw_ironhub/src/link_service.rs"
-lines = [130, 131, 132, 194, 195, 196, 253, 254, 255]
-owner = "@serrrfirat"
-reason = "ConsumedNonce, PrivateManifestState, and PublicManifestState contain only infallibly serializable primitives; serde_json::to_vec cannot reach these defensive error closures for any value of the fixed structs."
-issue = "https://github.com/nearai/ironclaw/issues/6524"
-review_after = "2026-10-31"
-
-[[exemption]]
 path = "crates/ironclaw_ironhub/src/package.rs"
 lines = [55, 74]
 branch_lines = [52, 70]
@@ -727,27 +702,35 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_ironhub/src/service.rs"
-lines = [283, 284, 285]
+path = "crates/ironclaw_ironhub/src/link_service.rs"
+lines = [143, 144]
 owner = "@serrrfirat"
-reason = "Private URL validation constructs private_origin through Option::map(...).transpose(), so the two Options are correlated and the mixed Some/None match arm is structurally unreachable."
+reason = "ConsumedNonce contains only an infallibly serializable DateTime; serde_json::to_vec cannot reach this defensive error closure for any value of the fixed record."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_ironhub/src/link_service.rs"
+lines = [196, 253]
+branch_lines = [155, 182, 238]
+owner = "@serrrfirat"
+reason = "Durable replay tests execute nonce success/replay/backend failure and private/public absent, idempotent, conflict, stale, and newer CAS outcomes; rustc leaves zero-hit records on the let-else/call closers and synthetic expression branches with no additional observable outcome."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_ironhub/src/service.rs"
-lines = [385, 782, 784]
-branch_lines = [781, 782]
+lines = [284, 285, 286, 287]
 owner = "@serrrfirat"
-reason = "Real tool installation and runtime accessors execute the package call and IronhubManifestUrl method body; these records belong to multiline/impl scaffolding and closing lines rather than separately executable statements."
+reason = "Private URL validation constructs private_origin through Option::map(...).transpose(), so the two Options are correlated and the mixed Some/None match arm is structurally unreachable; line 284 is the preceding tuple closer LLVM groups with that arm."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_ironhub/src/service.rs"
-branch_lines = [655]
+branch_lines = [487, 506, 733]
 owner = "@serrrfirat"
-reason = "This counter is the false arm of a cfg(test)-only catalog helper; production construction is covered separately and the helper intentionally initializes missing replay state only."
+reason = "Public/private manifest tests execute both fetch functions through valid, invalid, replay, and retry paths, and runtime wrapper tests execute IronhubManifestUrl::into_inner; these remaining BRDA records are rustc async-entry or return-expression bookkeeping without an independent input outcome."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 review_after = "2026-10-31"
 

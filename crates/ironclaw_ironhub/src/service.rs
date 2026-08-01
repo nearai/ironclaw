@@ -21,7 +21,6 @@ use ironclaw_product::{
 use ironclaw_skills::{
     ScopedSkillManagementError, ScopedSkillManagementPort, SkillManagementErrorKind,
 };
-use tokio::sync::Mutex as AsyncMutex;
 
 use ironclaw_extension_host::ExtensionLifecycleManager;
 
@@ -47,8 +46,6 @@ struct CachedManifest {
 }
 
 static MANIFEST_CACHE: LazyLock<std::sync::Mutex<HashMap<String, CachedManifest>>> =
-    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
-static MANIFEST_FETCH_LOCKS: LazyLock<std::sync::Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 pub trait RebornIronHubRuntime {
@@ -83,9 +80,9 @@ pub async fn execute_reborn_ironhub_command(
         egress,
         scope,
         ironhub_command_capability_id(&command)?,
+        runtime.ironhub_link_state(),
     )
-    .with_manifest_url(runtime.ironhub_manifest_url().into_inner())
-    .with_link_state(runtime.ironhub_link_state());
+    .with_manifest_url(runtime.ironhub_manifest_url().into_inner());
     service.execute(command).await
 }
 
@@ -105,8 +102,8 @@ pub async fn execute_reborn_ironhub_service_command(
         runtime_http_egress,
         scope,
         capability_id,
+        link_state,
     )
-    .with_link_state(link_state)
     .with_manifest_url(manifest_url.into_inner())
     .execute(command)
     .await
@@ -137,7 +134,7 @@ pub(crate) struct IronHubService {
     scope: ResourceScope,
     manifest_url: String,
     verify_keys: &'static [(&'static str, &'static str)],
-    link_state: Option<Arc<IronhubLinkStateStore>>,
+    link_state: Arc<IronhubLinkStateStore>,
 }
 
 impl IronHubService {
@@ -146,6 +143,7 @@ impl IronHubService {
         extension_management: Arc<ExtensionLifecycleManager>,
         egress: IronHubEgress,
         scope: ResourceScope,
+        link_state: Arc<IronhubLinkStateStore>,
     ) -> Self {
         Self {
             skill_management,
@@ -154,7 +152,7 @@ impl IronHubService {
             scope,
             manifest_url: DEFAULT_IRONHUB_MANIFEST_URL.to_string(),
             verify_keys: super::model::MANIFEST_VERIFY_KEYS,
-            link_state: None,
+            link_state,
         }
     }
 
@@ -164,6 +162,7 @@ impl IronHubService {
         egress: Arc<dyn RuntimeHttpEgress>,
         scope: ResourceScope,
         capability_id: CapabilityId,
+        link_state: Arc<IronhubLinkStateStore>,
     ) -> Self {
         Self::new(
             skill_management,
@@ -173,11 +172,15 @@ impl IronHubService {
                 capability_id,
             },
             scope,
+            link_state,
         )
     }
 
-    pub(super) fn with_link_state(mut self, link_state: Arc<IronhubLinkStateStore>) -> Self {
-        self.link_state = Some(link_state);
+    pub(super) fn with_verify_keys(
+        mut self,
+        verify_keys: &'static [(&'static str, &'static str)],
+    ) -> Self {
+        self.verify_keys = verify_keys;
         self
     }
 
@@ -287,143 +290,131 @@ impl IronHubService {
         };
         let (kind, provenance, artifact_digest) =
             classify_gate_and_digest(&manifest, name, options.kind, &options, source)?;
-        async {
-            let lifecycle = match kind {
-                IronHubEntryKind::Skill => {
-                    let entry = manifest
-                        .find_skill(name)
-                        .ok_or_else(|| catalog("skill not found"))?;
-                    let content = self
-                        .download_verified(
-                            &entry.skill_md,
-                            MAX_METADATA_BYTES,
-                            private_origin.as_ref(),
-                        )
-                        .await?;
-                    let content = String::from_utf8(content).map_err(|error| {
-                        IronHubCommandError::Install {
-                            reason: format!("skill markdown is not UTF-8: {error}"),
-                        }
+        let lifecycle = match kind {
+            IronHubEntryKind::Skill => {
+                let entry = manifest
+                    .find_skill(name)
+                    .ok_or_else(|| catalog("skill not found"))?;
+                let content = self
+                    .download_verified(&entry.skill_md, MAX_METADATA_BYTES, private_origin.as_ref())
+                    .await?;
+                let content =
+                    String::from_utf8(content).map_err(|error| IronHubCommandError::Install {
+                        reason: format!("skill markdown is not UTF-8: {error}"),
                     })?;
-                    let source_url = private_origin
-                        .as_ref()
-                        .map(CatalogOrigin::redacted_source_url)
-                        .unwrap_or_else(|| entry.skill_md.url.clone());
-                    let installed = self
-                        .install_skill(entry.name.as_str(), &content, &source_url, options.force)
-                        .await?;
-                    LifecycleProductResponse {
-                        package_ref: Some(
-                            LifecyclePackageRef::new(
-                                LifecyclePackageKind::Skill,
-                                installed.name.as_str(),
-                            )
+                let source_url = private_origin
+                    .as_ref()
+                    .map(CatalogOrigin::redacted_source_url)
+                    .unwrap_or_else(|| entry.skill_md.url.clone());
+                let installed = self
+                    .install_skill(entry.name.as_str(), &content, &source_url, options.force)
+                    .await?;
+                LifecycleProductResponse {
+                    package_ref: Some(
+                        LifecyclePackageRef::new(
+                            LifecyclePackageKind::Skill,
+                            installed.name.as_str(),
+                        )
+                        .map_err(|error| invalid(error.to_string()))?,
+                    ),
+                    phase: InstallationState::Installed,
+                    blockers: Vec::new(),
+                    message: None,
+                    payload: Some(LifecycleProductPayload::SkillInstall {
+                        installed: true,
+                        name: LifecyclePackageId::new(installed.name)
                             .map_err(|error| invalid(error.to_string()))?,
-                        ),
-                        phase: InstallationState::Installed,
-                        blockers: Vec::new(),
-                        message: None,
-                        payload: Some(LifecycleProductPayload::SkillInstall {
-                            installed: true,
-                            name: LifecyclePackageId::new(installed.name)
-                                .map_err(|error| invalid(error.to_string()))?,
-                        }),
-                    }
+                    }),
                 }
-                IronHubEntryKind::Tool => {
-                    let entry = manifest
-                        .find_tool(name)
-                        .ok_or_else(|| catalog("tool not found"))?;
-                    // Digest-verified like every other artifact, and covered by
-                    // the same catalog signature.
-                    let manifest_artifact = entry.manifest.as_ref().ok_or_else(|| {
-                        catalog(format!(
-                            "'{}' publishes no extension manifest; its catalog entry predates \
+            }
+            IronHubEntryKind::Tool => {
+                let entry = manifest
+                    .find_tool(name)
+                    .ok_or_else(|| catalog("tool not found"))?;
+                // Digest-verified like every other artifact, and covered by
+                // the same catalog signature.
+                let manifest_artifact = entry.manifest.as_ref().ok_or_else(|| {
+                    catalog(format!(
+                        "'{}' publishes no extension manifest; its catalog entry predates \
                              published manifests, so refresh the catalog",
-                            entry.name
-                        ))
-                    })?;
-                    let tool_manifest = self
-                        .download_verified(
-                            manifest_artifact,
-                            MAX_METADATA_BYTES,
-                            private_origin.as_ref(),
-                        )
+                        entry.name
+                    ))
+                })?;
+                let tool_manifest = self
+                    .download_verified(
+                        manifest_artifact,
+                        MAX_METADATA_BYTES,
+                        private_origin.as_ref(),
+                    )
+                    .await?;
+                let wasm = self
+                    .download_verified(&entry.wasm, MAX_WASM_BYTES, private_origin.as_ref())
+                    .await?;
+                let capabilities = self
+                    .download_verified(
+                        &entry.capabilities,
+                        MAX_METADATA_BYTES,
+                        private_origin.as_ref(),
+                    )
+                    .await?;
+                let mut schemas = Vec::with_capacity(entry.schemas.len());
+                for (path, artifact) in &entry.schemas {
+                    let content = self
+                        .download_verified(artifact, MAX_METADATA_BYTES, private_origin.as_ref())
                         .await?;
-                    let wasm = self
-                        .download_verified(&entry.wasm, MAX_WASM_BYTES, private_origin.as_ref())
-                        .await?;
-                    let capabilities = self
-                        .download_verified(
-                            &entry.capabilities,
-                            MAX_METADATA_BYTES,
-                            private_origin.as_ref(),
-                        )
-                        .await?;
-                    let mut schemas = Vec::with_capacity(entry.schemas.len());
-                    for (path, artifact) in &entry.schemas {
-                        let content = self
-                            .download_verified(
-                                artifact,
-                                MAX_METADATA_BYTES,
-                                private_origin.as_ref(),
-                            )
-                            .await?;
-                        schemas.push((path.clone(), content));
-                    }
-                    let reserved = self
-                        .extension_management
-                        .reserved_bundled_extension_ids()
-                        .await;
-                    let package = ironhub_tool_package(
-                        entry,
-                        tool_manifest,
-                        wasm,
-                        capabilities,
-                        schemas,
-                        &reserved,
-                    )?;
-                    self.extension_management
-                        .install_registry_package(
-                            package,
-                            options.force,
-                            &self.scope.user_id,
-                            &self.scope,
-                        )
-                        .await?
+                    schemas.push((path.clone(), content));
                 }
-            };
-            let mut entry = match kind {
-                IronHubEntryKind::Tool => tool_summary(
-                    manifest
-                        .find_tool(name)
-                        .ok_or_else(|| catalog("tool not found"))?,
-                ),
-                IronHubEntryKind::Skill => skill_summary(
-                    manifest
-                        .find_skill(name)
-                        .ok_or_else(|| catalog("skill not found"))?,
-                ),
-            };
-            entry.provenance = provenance;
-            Ok(IronHubResponse {
-                phase: IronHubPhase::Installed,
-                total_entries: 1,
-                returned_entries: 1,
-                truncated: false,
-                catalog_total: None,
-                message: Some(install_message(
-                    kind,
-                    name,
-                    &entry_version(&manifest, kind, name)?,
-                    provenance,
-                    &artifact_digest,
-                )),
-                entries: vec![entry],
-                lifecycle: Some(lifecycle),
-            })
-        }
-        .await
+                let reserved = self
+                    .extension_management
+                    .reserved_bundled_extension_ids()
+                    .await;
+                let package = ironhub_tool_package(
+                    entry,
+                    tool_manifest,
+                    wasm,
+                    capabilities,
+                    schemas,
+                    &reserved,
+                )?;
+                self.extension_management
+                    .install_registry_package(
+                        package,
+                        options.force,
+                        &self.scope.user_id,
+                        &self.scope,
+                    )
+                    .await?
+            }
+        };
+        let mut entry = match kind {
+            IronHubEntryKind::Tool => tool_summary(
+                manifest
+                    .find_tool(name)
+                    .ok_or_else(|| catalog("tool not found"))?,
+            ),
+            IronHubEntryKind::Skill => skill_summary(
+                manifest
+                    .find_skill(name)
+                    .ok_or_else(|| catalog("skill not found"))?,
+            ),
+        };
+        entry.provenance = provenance;
+        Ok(IronHubResponse {
+            phase: IronHubPhase::Installed,
+            total_entries: 1,
+            returned_entries: 1,
+            truncated: false,
+            catalog_total: None,
+            message: Some(install_message(
+                kind,
+                name,
+                &entry_version(&manifest, kind, name)?,
+                provenance,
+                &artifact_digest,
+            )),
+            entries: vec![entry],
+            lifecycle: Some(lifecycle),
+        })
     }
 
     async fn install_skill(
@@ -480,21 +471,12 @@ impl IronHubService {
         if let Some(hit) = manifest_cache_get(&self.manifest_url, now) {
             return Ok(hit);
         }
-        let lock = manifest_fetch_lock(&self.manifest_url);
-        let result = async {
-            let _guard = lock.lock().await;
-            let now = Instant::now();
-            if let Some(hit) = manifest_cache_get(&self.manifest_url, now) {
-                return Ok(hit);
-            }
-            let manifest = Arc::new(self.fetch_manifest().await?);
-            manifest_cache_put(&self.manifest_url, Arc::clone(&manifest), now);
-            Ok(manifest)
-        }
-        .await;
-        drop(lock);
-        evict_idle_async_locks(&MANIFEST_FETCH_LOCKS);
-        result
+        // Duplicate cache misses may fetch concurrently. Durable manifest CAS
+        // makes identical fetches idempotent, so no process-local mutex is held
+        // across network or filesystem I/O.
+        let manifest = Arc::new(self.fetch_manifest().await?);
+        manifest_cache_put(&self.manifest_url, Arc::clone(&manifest), now);
+        Ok(manifest)
     }
 
     async fn fetch_manifest(&self) -> Result<IronHubManifest, IronHubCommandError> {
@@ -515,8 +497,6 @@ impl IronHubService {
             .map_err(|error| catalog(format!("manifest generated_at is not RFC3339: {error}")))?
             .with_timezone(&Utc);
         self.link_state
-            .as_ref()
-            .ok_or_else(|| catalog("public manifest fetch requires durable replay protection"))?
             .record_public_manifest(&self.manifest_url, generated_at, &sha256_hex(&bytes))
             .await
             .map_err(map_link_state_error)?;
@@ -547,10 +527,7 @@ impl IronHubService {
                 ))
             })?
             .with_timezone(&Utc);
-        let state = self.link_state.as_ref().ok_or_else(|| {
-            catalog("private manifest installation requires durable replay protection")
-        })?;
-        state
+        self.link_state
             .record_private_manifest(
                 origin.host(),
                 &manifest.repo,
@@ -652,31 +629,6 @@ pub(crate) fn configure_test_catalog(
 ) -> IronHubService {
     service.manifest_url = manifest_url.into();
     service.verify_keys = verify_keys;
-    if service.link_state.is_none() {
-        service.link_state = Some(Arc::new(IronhubLinkStateStore::new(Arc::new(
-            ironclaw_filesystem::InMemoryBackend::new(),
-        ))));
-    }
-    service
-}
-
-#[cfg(test)]
-pub(crate) fn configure_test_catalog_without_link_state(
-    mut service: IronHubService,
-    manifest_url: impl Into<String>,
-    verify_keys: &'static [(&'static str, &'static str)],
-) -> IronHubService {
-    service.manifest_url = manifest_url.into();
-    service.verify_keys = verify_keys;
-    service
-}
-
-#[cfg(test)]
-pub(crate) fn configure_test_link_state(
-    mut service: IronHubService,
-    link_state: Arc<IronhubLinkStateStore>,
-) -> IronHubService {
-    service.link_state = Some(link_state);
     service
 }
 
@@ -686,14 +638,6 @@ pub(crate) fn clear_test_manifest_cache(url: &str) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .remove(url);
-}
-
-#[cfg(test)]
-pub(crate) fn test_manifest_fetch_lock_exists(url: &str) -> bool {
-    MANIFEST_FETCH_LOCKS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .contains_key(url)
 }
 
 fn ironhub_command_capability_id(
@@ -826,26 +770,6 @@ fn manifest_cache_put(url: &str, manifest: Arc<IronHubManifest>, now: Instant) {
             fetched_at: now,
         },
     );
-}
-
-fn manifest_fetch_lock(url: &str) -> Arc<AsyncMutex<()>> {
-    let mut guard = MANIFEST_FETCH_LOCKS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    guard
-        .entry(url.to_string())
-        .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-        .clone()
-}
-
-fn evict_idle_async_locks(locks: &std::sync::Mutex<HashMap<String, Arc<AsyncMutex<()>>>>) {
-    let mut guard = locks
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    // Once an operation releases its async guard and drops its local Arc,
-    // the map is the sole owner. Remove those idle entries; live/waiting
-    // operations retain an Arc and therefore keep their shared lock.
-    guard.retain(|_, lock| Arc::strong_count(lock) > 1);
 }
 
 fn install_message(

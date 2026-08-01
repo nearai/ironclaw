@@ -151,9 +151,10 @@ pub struct ProviderToolDefinition {
     pub description: String,
     /// Host-only provenance used when the description is projected back into prompts.
     ///
-    /// Unknown and legacy sources default to the fully checked path. This is
-    /// deliberately omitted from the provider wire representation.
-    #[serde(default, skip)]
+    /// Unknown and legacy sources fail closed to `Untrusted`. The field is
+    /// omitted from the provider wire representation; only host-owned
+    /// snapshots may set `VerifiedCatalog`.
+    #[serde(skip)]
     pub description_trust: CapabilityDescriptionTrust,
     /// JSON object schema for provider tool arguments.
     pub parameters: serde_json::Value,
