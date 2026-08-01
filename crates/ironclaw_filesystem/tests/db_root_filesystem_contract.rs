@@ -2272,9 +2272,17 @@ mod postgres_tests {
     }
 
     impl IsolatedDatabase {
-        /// Drop the database, so a run against a developer's own server does
-        /// not leak one per execution. `FORCE` closes the pool's connections,
-        /// which are not guaranteed to have gone away when the handles drop.
+        /// Drop the database on the way out of a passing test.
+        ///
+        /// This is the tidy path, not a guarantee: a failing assertion unwinds
+        /// straight past it, so a red run can leave its database behind. That
+        /// is what the sweep in `postgres_isolated_root` collects, rather than
+        /// wrapping the test body in `catch_unwind` — the cleanup is a courtesy
+        /// to whoever points these tests at their own server, and it is not
+        /// worth contorting the test to make it absolute.
+        ///
+        /// `FORCE` closes the pool's connections, which are not guaranteed to
+        /// have gone away by the time the handles drop.
         async fn cleanup(self) {
             let Self {
                 filesystem,
@@ -2292,6 +2300,12 @@ mod postgres_tests {
     }
 
     async fn postgres_isolated_root() -> Option<IsolatedDatabase> {
+        // Same opt-out every other PostgreSQL case honours through
+        // `postgres_pool`, checked before anything provisions a container or
+        // issues DDL.
+        if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
+            return None;
+        }
         let config = postgres_url()
             .await?
             .parse::<tokio_postgres::Config>()
@@ -2300,7 +2314,28 @@ mod postgres_tests {
         tokio::spawn(async move {
             let _ = connection.await;
         });
-        // `uuid::simple` is hex, so the identifier needs no quoting.
+
+        // Collect databases a previously failed run unwound past. No `FORCE`:
+        // a database another run still holds open refuses to drop, which is
+        // exactly the outcome we want when two binaries share a server.
+        if let Ok(stale) = admin
+            .query(
+                "SELECT datname FROM pg_database WHERE datname LIKE 'rfs_isolated_%'",
+                &[],
+            )
+            .await
+        {
+            for row in stale {
+                let name = row.get::<_, String>(0);
+                let _ = admin
+                    .execute(&format!("DROP DATABASE IF EXISTS {name}"), &[])
+                    .await;
+            }
+        }
+
+        // Identifiers cannot be bind parameters in DDL. `uuid::simple` is hex
+        // and the swept names come from `pg_database`, so both interpolations
+        // are server-supplied or generated, never caller input.
         let name = format!("rfs_isolated_{}", uuid::Uuid::new_v4().simple());
         admin
             .execute(&format!("CREATE DATABASE {name}"), &[])
