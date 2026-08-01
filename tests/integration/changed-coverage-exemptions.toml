@@ -595,3 +595,47 @@ owner = "@nearai/reborn"
 reason = "Body of a pre-existing `map_err` closure on the interaction-resolution parse, re-indented by rustfmt because the repointed call path (`ironclaw_product_contracts::interaction_commands::...`) is longer than the `ironclaw_host_api::product_adapter::...` one it replaced. No statement changed, the arm fires only on a parse rejection no Telegram fixture produces, and it was equally unreached before this PR."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
+
+# The four entries below are all the same shape and all one line each: a
+# **type position** whose only change is the repointed path for a moved
+# contract. LLVM emits no coverage region for a type annotation, so none of
+# these can ever carry a DA record; they are flagged only because rustfmt wrapped
+# the longer path onto its own line, which the classifier's
+# `mechanically_uninstrumentable_lines()` does not yet recognise as a type
+# position. Each was confirmed by replaying the gate against this PR's own
+# merged lcov: with these four removed, the file's changed lines are entirely
+# outside the instrumented set and the "contributed no instrumented lines"
+# branch stops firing. Executable behavior in all four files is unchanged and
+# remains covered.
+
+[[exemption]]
+path = "crates/ironclaw_extension_contracts/src/channel_adapter.rs"
+lines = [294]
+owner = "@nearai/reborn"
+reason = "Type position only: the `OutboundPart::AuthPrompt` variant's `view: Box<crate::auth_prompt::AuthPromptView>` field, repointed when the auth-prompt family moved into this crate. An enum variant field type carries no LLVM coverage region."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_host/src/channel_pairing.rs"
+lines = [1117]
+owner = "@nearai/reborn"
+reason = "Type position only: a function parameter's `&ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage` type, repointed from `ironclaw_product`'s deleted re-export. A parameter type carries no LLVM coverage region."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/input.rs"
+lines = [239]
+owner = "@nearai/reborn"
+reason = "Type position only: `ChannelExtensionBinding::adapter`'s `Arc<dyn ironclaw_extension_contracts::channel_adapter::ChannelAdapter>` field type, repointed from `ironclaw_product`'s deleted re-export. A struct field type carries no LLVM coverage region."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_slack_extension/src/channel.rs"
+lines = [74]
+owner = "@nearai/reborn"
+reason = "Type position only: a function parameter's `&ironclaw_extension_contracts::channel_adapter::ChannelAttachmentRef` type, repointed when the channel-adapter DTO family left `ironclaw_host_api`. A parameter type carries no LLVM coverage region."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
