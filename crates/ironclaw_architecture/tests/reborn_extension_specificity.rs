@@ -1094,16 +1094,19 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     ("crates/ironclaw_product/src/lib.rs", "telegram"),
     ("crates/ironclaw_product/src/reborn_services.rs", "slack"),
+    // WS5 port inversion: these three wire-DTO sites moved to the contracts
+    // crate with their code (`NearAiAuthProvider`'s OAuth identity providers and
+    // the project-metadata doc example). Same terms, same debt, new file.
     (
-        "crates/ironclaw_product/src/reborn_services/llm_config.rs",
+        "crates/ironclaw_product_contracts/src/operator_llm.rs",
         "github",
     ),
     (
-        "crates/ironclaw_product/src/reborn_services/llm_config.rs",
+        "crates/ironclaw_product_contracts/src/operator_llm.rs",
         "google",
     ),
     (
-        "crates/ironclaw_product/src/reborn_services/projects.rs",
+        "crates/ironclaw_product_contracts/src/workspace_views.rs",
         "github",
     ),
     ("crates/ironclaw_product/src/workflow.rs", "slack"),

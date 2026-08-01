@@ -1,6 +1,12 @@
+//! Operator LLM-administration vocabulary (PROPOSAL §6.1.3): the provider
+//! menu the CLI renders and the request/response bodies the WebUI LLM settings
+//! surface serializes. The service ports that produce them (`LlmConfigService`,
+//! `ActiveModelReader`) stay with their product-side implementation until the
+//! WS5 `operator` row inverts them.
 use std::{fmt, path::PathBuf};
 
-use serde::Serialize;
+use secrecy::SecretString;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RebornProviderList {
@@ -137,4 +143,181 @@ impl fmt::Display for RebornModelRoutesState {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
     }
+}
+
+/// OAuth identity provider for NEAR AI session login.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NearAiAuthProvider {
+    Github,
+    Google,
+}
+
+impl NearAiAuthProvider {
+    /// Path segment used in the NEAR AI auth URL (`/v1/auth/<segment>`).
+    pub fn as_path(self) -> &'static str {
+        match self {
+            Self::Github => "github",
+            Self::Google => "google",
+        }
+    }
+}
+
+/// Start a NEAR AI login with the chosen identity provider.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NearAiLoginRequest {
+    pub provider: NearAiAuthProvider,
+    /// The browser's own origin (`window.location.origin`), used to build the
+    /// NEAR AI `frontend_callback` back to this server's public callback route.
+    /// Validated server-side to a bare `scheme://host[:port]`.
+    pub origin: String,
+}
+
+/// The authorization URL the frontend opens to complete NEAR AI login.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NearAiLoginStart {
+    pub auth_url: String,
+}
+
+/// A NEP-413 wallet signature plus the payload it covers, posted by the browser
+/// after it connects a NEAR wallet and signs the fixed login message. The server
+/// relays this to NEAR AI's `/v1/auth/near` to obtain a session token.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NearAiWalletLoginRequest {
+    pub account_id: String,
+    pub public_key: String,
+    /// base64-standard encoding of the 64 raw ed25519 signature bytes.
+    pub signature: String,
+    /// The exact message string the wallet signed.
+    pub message: String,
+    /// The NEP-413 recipient the wallet signed.
+    pub recipient: String,
+    /// The 32-byte nonce the wallet signed (first 8 bytes are big-endian epoch
+    /// millis).
+    pub nonce: Vec<u8>,
+    #[serde(default)]
+    pub callback_url: Option<String>,
+}
+
+/// Result of a completed NEAR AI wallet login. `active` is true once NEAR AI is
+/// the live provider; the frontend can then proceed to chat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NearAiWalletLoginResult {
+    pub active: bool,
+}
+
+/// The device code + verification URL the frontend displays for Codex login.
+/// The user enters `user_code` at `verification_uri`; the backend polls for
+/// completion in the background.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexLoginStart {
+    pub user_code: String,
+    pub verification_uri: String,
+}
+
+/// Merged catalog plus the active selection. Keys are masked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmConfigSnapshot {
+    pub providers: Vec<LlmProviderView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<LlmActiveSelection>,
+}
+
+/// One provider in the merged catalog, annotated for the settings UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmProviderView {
+    pub id: String,
+    pub description: String,
+    /// Protocol/adapter wire name (e.g. `open_ai_completions`, `anthropic`).
+    pub adapter: String,
+    pub default_model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// `true` for compiled-in providers, `false` for operator-defined ones.
+    pub builtin: bool,
+    /// Whether this provider is the active selection.
+    pub active: bool,
+    /// The active model, present only when `active` is `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_model: Option<String>,
+    pub api_key_required: bool,
+    /// Whether this provider supports API-key auth at all. This can be true
+    /// even when `api_key_required` is false for dual-auth providers.
+    pub accepts_api_key: bool,
+    /// Whether an API-key value is stored for this provider (never the value).
+    pub api_key_set: bool,
+    pub can_list_models: bool,
+}
+
+/// The active provider + model selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmActiveSelection {
+    pub provider_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+/// Add or update a custom provider. Deserialize-only (carries a secret).
+#[derive(Deserialize)]
+pub struct UpsertLlmProviderRequest {
+    pub id: String,
+    #[serde(default)]
+    pub client_action_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Protocol/adapter wire name.
+    pub adapter: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub default_model: Option<String>,
+    /// New key value. Absent leaves any stored key untouched; the UI sends the
+    /// `••••••••` sentinel for "unchanged" which the impl treats as absent.
+    #[serde(default)]
+    pub api_key: Option<SecretString>,
+    /// When `true`, also make this the active provider.
+    #[serde(default)]
+    pub set_active: bool,
+    /// Model to activate when `set_active` is `true`.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// Select the active provider + model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetActiveLlmRequest {
+    pub provider_id: String,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// Probe a provider. Deserialize-only (may carry a secret).
+#[derive(Deserialize)]
+pub struct LlmProbeRequest {
+    pub adapter: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    pub provider_id: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Optional override key for the probe; when absent the impl falls back to
+    /// the provider's stored key or env var.
+    #[serde(default)]
+    pub api_key: Option<SecretString>,
+}
+
+/// Result of a connection probe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmProbeResult {
+    pub ok: bool,
+    pub message: String,
+}
+
+/// Result of a model-listing probe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmModelsResult {
+    pub ok: bool,
+    #[serde(default)]
+    pub models: Vec<String>,
+    pub message: String,
 }

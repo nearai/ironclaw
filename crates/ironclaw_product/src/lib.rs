@@ -434,11 +434,14 @@ pub use reborn_services::{
     set_outbound_delivery_target_for_model,
 };
 
+pub use ironclaw_product_contracts::inbound_requests::{
+    ProductCancelReason, ProductCancelRunRequest, ProductCreateThreadRequest,
+    ProductGateResolution, ProductInboundAttachment, ProductListAutomationsRequest,
+    ProductListThreadsRequest, ProductRenameAutomationRequest, ProductResolveGateRequest,
+    ProductRetryRunRequest, ProductSetupExtensionRequest, ProductSubmitTurnRequest,
+};
 pub use product_surface_inbound::{
-    ProductAttachmentCapabilities, ProductCancelReason, ProductCancelRunRequest,
-    ProductCreateThreadRequest, ProductGateResolution, ProductInboundAttachment,
-    ProductInboundCommand, ProductListAutomationsRequest, ProductListThreadsRequest,
-    ProductRenameAutomationRequest, ProductResolveGateRequest, ProductRetryRunRequest,
-    ProductSetupExtensionRequest, ProductSubmitTurnRequest, product_attachment_capabilities,
+    DecodeInboundAttachments, IntoProductInboundCommand, ProductAttachmentCapabilities,
+    ProductInboundCommand, product_attachment_capabilities,
 };
 pub use workflow::DefaultProductSurface;

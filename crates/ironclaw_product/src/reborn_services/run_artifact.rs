@@ -29,18 +29,14 @@ use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
 };
 
+pub use ironclaw_product_contracts::product_wire::RebornRunArtifactRequest;
+
 pub const RUN_ARTIFACT_SCHEMA: &str = "ironclaw.run_artifact.v1";
 pub const RUN_ARTIFACT_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "run_artifact",
     paginated: false,
 };
 pub(super) const ARTIFACT_REDACTION_PIPELINE: &str = "deterministic-trace-redactor-v1";
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornRunArtifactRequest {
-    pub thread_id: String,
-    pub run_id: String,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornRunArtifact {

@@ -8,7 +8,6 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    marker::PhantomData,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::{Arc, Mutex as StdMutex, Weak},
     time::Duration,
@@ -73,7 +72,7 @@ use ironclaw_turns::{
     SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError,
 };
 use secrecy::{ExposeSecret as _, SecretString};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
 use url::Url;
 use uuid::Uuid;
@@ -81,17 +80,14 @@ use uuid::Uuid;
 use crate::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
     AuthInteractionRejectionKind, AuthInteractionService, CommandAudience, CommandResultField,
-    CommandResultView, ListPendingApprovalsRequest, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
-    PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID,
-    ProductCancelRunRequest, ProductCommand, ProductCommandDescriptor, ProductCreateThreadRequest,
-    ProductGateResolution, ProductInboundCommand, ProductLifecycleCommandInput,
-    ProductListAutomationsRequest, ProductListThreadsRequest, ProductModelCommand,
-    ProductModelCommandInput, ProductRejectionKind, ProductRenameAutomationRequest,
-    ProductResolveGateRequest, ProductRetryRunRequest, ProductStatusCommandInput,
-    ProductSubmitTurnRequest, ProductSurfaceFailure, ProductTriggerReason,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
-    UnsupportedLifecycleProductService,
+    CommandResultView, DecodeInboundAttachments, IntoProductInboundCommand,
+    ListPendingApprovalsRequest, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
+    PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand,
+    ProductCommandDescriptor, ProductInboundCommand, ProductLifecycleCommandInput,
+    ProductModelCommand, ProductModelCommandInput, ProductRejectionKind, ProductStatusCommandInput,
+    ProductSurfaceFailure, ProductTriggerReason, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, UnsupportedLifecycleProductService,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -101,6 +97,11 @@ use crate::{
     declared_command_help_text, is_approval_gate_ref, is_auth_gate_ref,
     parse_product_slash_command, product_command_descriptors, required_audience,
     thread_metadata_is_automation_trigger,
+};
+use ironclaw_product_contracts::inbound_requests::{
+    ProductCancelRunRequest, ProductCreateThreadRequest, ProductGateResolution,
+    ProductListAutomationsRequest, ProductListThreadsRequest, ProductRenameAutomationRequest,
+    ProductResolveGateRequest, ProductRetryRunRequest, ProductSubmitTurnRequest,
 };
 
 mod admin_configuration;
@@ -168,7 +169,50 @@ pub use fs_browse::{
     RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
     RebornFsStatResponse,
 };
+pub use ironclaw_product_contracts::descriptors::{
+    EmptyProductCommandInput, ProductCapabilityDescriptor, ProductSurfaceCommandDescriptor,
+    ProductView,
+};
 pub use ironclaw_product_contracts::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
+pub use ironclaw_product_contracts::product_wire::SettingsToolPermissionState;
+pub use ironclaw_product_contracts::product_wire::{
+    RebornAccountBindingSource, RebornAttachmentBytes, RebornAttachmentRequest,
+    RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
+    RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
+    RebornChannelConnectAction, RebornCommandRejection, RebornDeleteThreadRequest,
+    RebornDeleteThreadResponse, RebornExecuteProductCommandRequest, RebornExtensionActionResponse,
+    RebornExtensionCredentialSetup, RebornExtensionOnboardingPayload,
+    RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
+    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornExtensionSurface,
+    RebornGetRunStateRequest, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
+    RebornListAutomationsResponse, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
+    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
+    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
+    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
+    RebornOperatorSetupStatus, RebornOperatorSetupStep, RebornOperatorSetupStepStatus,
+    RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
+    RebornOperatorStatusState, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
+    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetChannel,
+    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetDisplayName,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+    RebornProductCommandInfo, RebornProductCommandListResponse,
+    RebornRenameAutomationProductRequest, RebornResolveGateResponse, RebornResumeGateResponse,
+    RebornRetryRunResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
+    RebornServiceLifecycleResponse, RebornServiceLifecycleState,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTraceHoldAuthorizeProductRequest,
+};
 pub use lifecycle_setup::EXTENSION_SETUP_VIEW;
 pub use llm_config::{
     ActiveModelReader, CodexLoginStart, LLM_CONFIG_VIEW, LlmActiveSelection, LlmConfigService,
@@ -219,47 +263,11 @@ pub use thread_artifact::{
     THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW,
 };
 pub use types::{
-    RebornAccountBindingSource, RebornAttachmentBytes, RebornAttachmentRequest, RebornAuthAccount,
-    RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
-    RebornChannelConnectAction, RebornCommandRejection, RebornCreateThreadResponse,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExecuteProductCommandRequest,
-    RebornExecuteProductCommandResponse, RebornExtensionActionResponse,
-    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
-    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
-    RebornExtensionSurface, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
-    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
-    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
-    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
-    RebornOperatorSetupStatus, RebornOperatorSetupStep, RebornOperatorSetupStepStatus,
-    RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
-    RebornOperatorStatusState, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetChannel,
-    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetDisplayName,
-    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornProductCommandInfo, RebornProductCommandListResponse,
-    RebornRenameAutomationProductRequest, RebornResolveGateResponse, RebornResumeGateResponse,
-    RebornRetryRunResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
-    RebornServiceLifecycleResponse, RebornServiceLifecycleState,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, RebornTraceHoldAuthorizeProductRequest,
-    RebornVendorAuthAccounts,
+    RebornAuthAccount, RebornCreateThreadResponse, RebornExecuteProductCommandResponse,
+    RebornExtensionInfo, RebornExtensionListResponse, RebornGetRunStateResponse,
+    RebornListThreadsResponse, RebornTimelineResponse, RebornVendorAuthAccounts,
 };
-pub use views::{ProductView, UnavailableRebornViewProvider};
+pub use views::UnavailableRebornViewProvider;
 
 type SkillActivationRecorder =
     dyn Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), ProductSurfaceError> + Send + Sync;
@@ -1755,24 +1763,6 @@ fn tool_permission_state_wire(state: ToolPermissionState) -> &'static str {
     }
 }
 
-/// Wire enum for the WebUI settings/tools permission request body.
-///
-/// Request-side vocabulary on the ProductSurface contract surface: the
-/// three resolved [`ToolPermissionState`] values plus `default`, which clears
-/// the stored per-capability override. The serialized strings must stay
-/// byte-identical to what [`parse_tool_permission_state`] accepts and
-/// [`tool_permission_state_wire`] emits — the
-/// `settings_tool_permission_state_wire_strings_stay_linked` test pins that
-/// link so the request enum cannot drift from the storage vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SettingsToolPermissionState {
-    Default,
-    AlwaysAllow,
-    AskEachTime,
-    Disabled,
-}
-
 enum ToolPermissionUpdate {
     Default,
     State(ToolPermissionState),
@@ -2175,101 +2165,6 @@ fn operator_diagnostics_surface_status(
         RebornOperatorSurfaceStatus::Unavailable
     } else {
         RebornOperatorSurfaceStatus::Available
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EmptyProductCommandInput {}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProductSurfaceCommandDescriptor<Input, Output> {
-    pub id: &'static str,
-    _types: PhantomData<fn(Input) -> Output>,
-}
-
-impl<Input, Output> ProductSurfaceCommandDescriptor<Input, Output> {
-    pub const fn new(id: &'static str) -> Self {
-        Self {
-            id,
-            _types: PhantomData,
-        }
-    }
-
-    pub fn capability_id(&self) -> Result<CapabilityId, ProductSurfaceError> {
-        CapabilityId::new(self.id).map_err(ProductSurfaceError::internal_from)
-    }
-}
-
-impl<Input, Output> ProductSurfaceCommandDescriptor<Input, Output>
-where
-    Input: Serialize,
-    Output: DeserializeOwned,
-{
-    pub async fn invoke_on(
-        &self,
-        surface: &ironclaw_product_contracts::surface::BoundProductSurface,
-        input: Input,
-        activity_id: ActivityId,
-    ) -> Result<Output, ProductSurfaceError> {
-        let input = serde_json::to_value(input).map_err(ProductSurfaceError::internal_from)?;
-        let response = surface
-            .invoke(
-                ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
-                    operation_id: self.capability_id()?,
-                    input,
-                    activity_id,
-                },
-            )
-            .await?;
-        serde_json::from_value(response.output).map_err(ProductSurfaceError::internal_from)
-    }
-}
-
-/// ProductSurface operation descriptor.
-///
-/// Capability declarations stay as one stable id plus origin/policy metadata
-/// elsewhere. Product-workflow-owned ids are backed by the
-/// [`product_capability_handlers`] registry; runtime-backed ids delegate to the wired
-/// first-party capability invoker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProductCapabilityDescriptor {
-    pub id: &'static str,
-}
-
-impl ProductCapabilityDescriptor {
-    pub const fn product_operation(id: &'static str) -> Self {
-        Self { id }
-    }
-
-    pub const fn api_only(id: &'static str) -> Self {
-        Self::product_operation(id)
-    }
-
-    pub fn capability_id(&self) -> Result<CapabilityId, ProductSurfaceError> {
-        CapabilityId::new(self.id).map_err(ProductSurfaceError::internal_from)
-    }
-
-    pub async fn invoke_on<T>(
-        &self,
-        surface: &ironclaw_product_contracts::surface::BoundProductSurface,
-        input: T,
-        activity_id: ActivityId,
-    ) -> Result<Resolution, ProductSurfaceError>
-    where
-        T: Serialize,
-    {
-        let input = serde_json::to_value(input).map_err(ProductSurfaceError::internal_from)?;
-        let response = surface
-            .invoke(
-                ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
-                    operation_id: self.capability_id()?,
-                    input,
-                    activity_id,
-                },
-            )
-            .await?;
-        serde_json::from_value(response.output).map_err(ProductSurfaceError::internal_from)
     }
 }
 
@@ -4457,7 +4352,7 @@ where
             .cancel_run(request)
             .await
             .map_err(map_turn_error)?;
-        Ok(response.into())
+        Ok(types::reborn_cancel_run_response(response))
     }
 
     pub async fn resolve_gate(
@@ -4577,7 +4472,7 @@ where
             })
             .await
             .map_err(map_turn_error)?;
-        Ok(response.into())
+        Ok(types::reborn_retry_run_response(response))
     }
 
     pub async fn get_run_state(
@@ -6090,9 +5985,9 @@ where
             .map_err(|error| map_adapter_error(error.into()))?;
         match response {
             ResolveApprovalInteractionResponse::Approved(response)
-            | ResolveApprovalInteractionResponse::Resumed(response) => {
-                Ok(RebornResolveGateResponse::Resumed(response.into()))
-            }
+            | ResolveApprovalInteractionResponse::Resumed(response) => Ok(
+                RebornResolveGateResponse::Resumed(types::reborn_resume_gate_response(response)),
+            ),
         }
     }
 
@@ -6167,12 +6062,12 @@ where
             .await
             .map_err(map_auth_interaction_error)?;
         match response {
-            ResolveAuthInteractionResponse::Resumed(response) => {
-                Ok(RebornResolveGateResponse::Resumed(response.into()))
-            }
-            ResolveAuthInteractionResponse::Canceled(response) => {
-                Ok(RebornResolveGateResponse::Cancelled(response.into()))
-            }
+            ResolveAuthInteractionResponse::Resumed(response) => Ok(
+                RebornResolveGateResponse::Resumed(types::reborn_resume_gate_response(response)),
+            ),
+            ResolveAuthInteractionResponse::Canceled(response) => Ok(
+                RebornResolveGateResponse::Cancelled(types::reborn_cancel_run_response(response)),
+            ),
         }
     }
 
@@ -6216,7 +6111,9 @@ where
                     })
                     .await
                     .map_err(map_turn_error)?;
-                Ok(RebornResolveGateResponse::Resumed(response.into()))
+                Ok(RebornResolveGateResponse::Resumed(
+                    types::reborn_resume_gate_response(response),
+                ))
             }
             ProductGateResolution::CredentialProvided { .. } => {
                 Err(blocked_authentication_unavailable())
@@ -6243,7 +6140,9 @@ where
                     })
                     .await
                     .map_err(map_turn_error)?;
-                Ok(RebornResolveGateResponse::Cancelled(response.into()))
+                Ok(RebornResolveGateResponse::Cancelled(
+                    types::reborn_cancel_run_response(response),
+                ))
             }
         }
     }

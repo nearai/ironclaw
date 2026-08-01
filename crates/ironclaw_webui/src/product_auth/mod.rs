@@ -54,9 +54,10 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_host_ingress::SplitRouteMount;
-use ironclaw_product::{
-    EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, LifecyclePackageKind, RebornExtensionCredentialSetup,
-    RebornExtensionListResponse, RebornSetupExtensionResponse,
+use ironclaw_product::{EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, RebornExtensionListResponse};
+use ironclaw_product_contracts::package_lifecycle::LifecyclePackageKind;
+use ironclaw_product_contracts::product_wire::{
+    RebornExtensionCredentialSetup, RebornSetupExtensionResponse,
 };
 use ironclaw_product_contracts::surface::{
     BoundProductSurface, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,

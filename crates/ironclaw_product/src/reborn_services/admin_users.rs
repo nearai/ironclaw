@@ -18,7 +18,17 @@ use ironclaw_product_contracts::admin_users::{
     AdminUserSecretMeta, AdminUserService, AdminUserStatus,
 };
 use secrecy::SecretString;
-use serde::{Deserialize, Serialize};
+
+pub use ironclaw_product_contracts::admin_users::{
+    RebornAdminCreateUserRequest, RebornAdminDeleteSecretProductRequest,
+    RebornAdminPutSecretProductRequest, RebornAdminPutSecretRequest,
+    RebornAdminSecretDeletedResponse, RebornAdminSecretResponse, RebornAdminSetRoleProductRequest,
+    RebornAdminSetRoleRequest, RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
+    RebornAdminUpdateUserProductRequest, RebornAdminUpdateUserRequest,
+    RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
+    RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
+    RebornAdminUserSecretsListResponse,
+};
 
 /// Fail-closed default wired into `RebornServices` before composition installs
 /// the real adapter. Every operation reports the service unavailable, so a
@@ -122,153 +132,4 @@ impl AdminUserService for RejectingAdminUserService {
     ) -> Result<bool, AdminUserError> {
         Err(AdminUserError::Unavailable)
     }
-}
-
-// --- Wire contract (WebChat v2 admin routes) ---------------------------------
-
-/// Query params for `GET /admin/users`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RebornAdminUserListQuery {
-    #[serde(default)]
-    pub status: Option<AdminUserStatus>,
-    /// Page size. Clamped to `[1, ADMIN_USER_LIST_MAX_LIMIT]`; omitted means
-    /// `ADMIN_USER_LIST_DEFAULT_LIMIT`.
-    #[serde(default)]
-    pub limit: Option<u32>,
-    /// Opaque forward cursor: the `next_cursor` echoed from a prior response
-    /// (a `user_id`). The browser never interprets it.
-    #[serde(default)]
-    pub cursor: Option<String>,
-}
-
-/// Request for routes addressing one admin-managed user.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornAdminUserRequest {
-    pub user_id: UserId,
-}
-
-/// Response for `GET /admin/users`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RebornAdminUserListResponse {
-    pub users: Vec<AdminUserRecord>,
-    /// Cursor to pass as `?cursor=` for the next page, or `None` when the
-    /// caller has reached the end of the tenant's users.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_cursor: Option<String>,
-}
-
-/// Body for `POST /admin/users`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RebornAdminCreateUserRequest {
-    #[serde(default)]
-    pub email: Option<String>,
-    #[serde(default)]
-    pub display_name: Option<String>,
-    pub role: AdminUserRole,
-}
-
-/// Response for `POST /admin/users` — carries the one-time API token in
-/// plaintext. This is the ONLY response that ever exposes it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RebornAdminUserCreatedResponse {
-    pub user: AdminUserRecord,
-    pub api_token: String,
-}
-
-/// Body for `PATCH /admin/users/{id}` — partial profile update.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RebornAdminUpdateUserRequest {
-    #[serde(default)]
-    pub display_name: Option<String>,
-    #[serde(default)]
-    pub metadata: Option<BTreeMap<String, String>>,
-}
-
-/// ProductSurface mutation input for `PATCH /admin/users/{id}`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RebornAdminUpdateUserProductRequest {
-    pub user_id: UserId,
-    #[serde(default)]
-    pub display_name: Option<String>,
-    #[serde(default)]
-    pub metadata: Option<BTreeMap<String, String>>,
-}
-
-/// Body for `POST /admin/users/{id}/status`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RebornAdminSetStatusRequest {
-    pub status: AdminUserStatus,
-}
-
-/// ProductSurface mutation input for `POST /admin/users/{id}/status`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RebornAdminSetStatusProductRequest {
-    pub user_id: UserId,
-    pub status: AdminUserStatus,
-}
-
-/// Body for `POST /admin/users/{id}/role`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RebornAdminSetRoleRequest {
-    pub role: AdminUserRole,
-}
-
-/// ProductSurface mutation input for `POST /admin/users/{id}/role`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RebornAdminSetRoleProductRequest {
-    pub user_id: UserId,
-    pub role: AdminUserRole,
-}
-
-/// Response for the single-user reads/mutations (get, update, status, role).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RebornAdminUserResponse {
-    pub user: AdminUserRecord,
-}
-
-/// Response for `DELETE /admin/users/{id}`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RebornAdminUserDeletedResponse {
-    pub user_id: UserId,
-    pub deleted: bool,
-}
-
-/// Response for `GET /admin/users/{id}/secrets`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RebornAdminUserSecretsListResponse {
-    pub secrets: Vec<AdminUserSecretMeta>,
-}
-
-/// Body for `PUT /admin/users/{id}/secrets/{handle}` (handle is in the path).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RebornAdminPutSecretRequest {
-    pub value: String,
-}
-
-/// ProductSurface mutation input for `PUT /admin/users/{id}/secrets/{handle}`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RebornAdminPutSecretProductRequest {
-    pub user_id: UserId,
-    pub handle: String,
-    pub value: String,
-}
-
-/// ProductSurface mutation input for `DELETE /admin/users/{id}/secrets/{handle}`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RebornAdminDeleteSecretProductRequest {
-    pub user_id: UserId,
-    pub handle: String,
-}
-
-/// Response for `PUT /admin/users/{id}/secrets/{handle}`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RebornAdminSecretResponse {
-    pub secret: AdminUserSecretMeta,
-}
-
-/// Response for `DELETE /admin/users/{id}/secrets/{handle}`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RebornAdminSecretDeletedResponse {
-    pub handle: String,
-    pub deleted: bool,
 }

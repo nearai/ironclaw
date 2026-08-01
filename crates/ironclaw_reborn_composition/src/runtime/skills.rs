@@ -53,7 +53,7 @@ pub struct RebornSkillExecutionResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebornSkillActivation {
     pub name: String,
-    pub source: Option<RebornSkillSourceKind>,
+    pub source: Option<RebornSkillActivationSource>,
     pub mode: RebornSkillActivationMode,
     bundle_id: Option<SkillBundleId>,
 }
@@ -71,18 +71,26 @@ impl RebornSkillActivation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebornSkillBundle {
-    pub source: RebornSkillSourceKind,
+    pub source: RebornSkillActivationSource,
     pub skill_name: String,
 }
 
+/// Where an activated skill came from, as the skill-activation seam reports it.
+///
+/// Deliberately **not** `product_wire::RebornSkillSourceKind`, the WebUI skill
+/// catalogue's `{User, Installed, Workspace, System}` taxonomy: this one mirrors
+/// `ironclaw_skills::SkillSourceKind`'s `{System, TenantShared, User}` trust
+/// scopes. The two carried the same name until the WS5 port inversion moved the
+/// wire enum into `ironclaw_product_contracts` and the §11.2.4 location scan
+/// caught the collision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RebornSkillSourceKind {
+pub enum RebornSkillActivationSource {
     System,
     TenantShared,
     User,
 }
 
-impl From<SkillSourceKind> for RebornSkillSourceKind {
+impl From<SkillSourceKind> for RebornSkillActivationSource {
     fn from(value: SkillSourceKind) -> Self {
         match value {
             SkillSourceKind::System => Self::System,
@@ -92,12 +100,12 @@ impl From<SkillSourceKind> for RebornSkillSourceKind {
     }
 }
 
-impl From<RebornSkillSourceKind> for SkillSourceKind {
-    fn from(value: RebornSkillSourceKind) -> Self {
+impl From<RebornSkillActivationSource> for SkillSourceKind {
+    fn from(value: RebornSkillActivationSource) -> Self {
         match value {
-            RebornSkillSourceKind::System => Self::System,
-            RebornSkillSourceKind::TenantShared => Self::TenantShared,
-            RebornSkillSourceKind::User => Self::User,
+            RebornSkillActivationSource::System => Self::System,
+            RebornSkillActivationSource::TenantShared => Self::TenantShared,
+            RebornSkillActivationSource::User => Self::User,
         }
     }
 }
@@ -131,7 +139,7 @@ impl From<RebornSkillActivationMode> for FirstPartySkillActivationMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebornSkillAsset {
-    pub source: RebornSkillSourceKind,
+    pub source: RebornSkillActivationSource,
     pub skill_name: String,
     pub path: String,
     pub bytes: Vec<u8>,
@@ -175,7 +183,7 @@ impl From<FirstPartySkillActivationRequest> for RebornSkillActivation {
     fn from(value: FirstPartySkillActivationRequest) -> Self {
         Self {
             name: value.name,
-            source: value.source.map(RebornSkillSourceKind::from),
+            source: value.source.map(RebornSkillActivationSource::from),
             mode: RebornSkillActivationMode::from(value.mode),
             bundle_id: value.bundle_id,
         }
@@ -185,7 +193,7 @@ impl From<FirstPartySkillActivationRequest> for RebornSkillActivation {
 impl From<&SkillBundleId> for RebornSkillBundle {
     fn from(value: &SkillBundleId) -> Self {
         Self {
-            source: RebornSkillSourceKind::from(value.source_kind()),
+            source: RebornSkillActivationSource::from(value.source_kind()),
             skill_name: value.name().to_string(),
         }
     }
@@ -194,7 +202,7 @@ impl From<&SkillBundleId> for RebornSkillBundle {
 impl From<FirstPartySkillBundleAsset> for RebornSkillAsset {
     fn from(value: FirstPartySkillBundleAsset) -> Self {
         Self {
-            source: RebornSkillSourceKind::from(value.bundle_id.source_kind()),
+            source: RebornSkillActivationSource::from(value.bundle_id.source_kind()),
             skill_name: value.bundle_id.name().to_string(),
             path: value.path.as_str().to_string(),
             bytes: value.bytes,

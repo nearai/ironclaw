@@ -579,7 +579,7 @@ use crate::runtime_input::{
 use crate::{RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError};
 use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
 
-use super::{RebornSkillSourceKind, build_reborn_runtime};
+use super::{RebornSkillActivationSource, build_reborn_runtime};
 
 const RUNTIME_POLL_TIMEOUT: Duration = Duration::from_secs(10);
 const RUNTIME_SEND_TIMEOUT: Duration = Duration::from_secs(15);
@@ -4510,7 +4510,7 @@ async fn execute_skill_message_returns_plan_and_reads_active_bundle_assets() {
     assert_eq!(result.plan.activations()[0].name, "asset-helper");
     assert_eq!(
         result.plan.activations()[0].source,
-        Some(RebornSkillSourceKind::User)
+        Some(RebornSkillActivationSource::User)
     );
     assert_eq!(result.plan.active_bundles().len(), 1);
     assert_eq!(result.plan.active_bundles()[0].skill_name, "asset-helper");
