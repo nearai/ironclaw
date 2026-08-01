@@ -6,7 +6,7 @@
 //!   checkpoint (the host-derived `retryable` signal: a `Failed` run that has a
 //!   resumable checkpoint).
 //! - [`FailureLane::Explainable`] — terminal, but carries a specific
-//!   user-facing sentence (see [`crate::reborn_failure_summary_for_category`]).
+//!   user-facing sentence (see [`ironclaw_host_api::failure::summary::reborn_failure_summary_for_category`]).
 //! - [`FailureLane::Security`] — reserved for the ingress safety/leak refusal
 //!   path (`ironclaw_safety`); the run-boundary classifier never produces it,
 //!   because injection/leak are caught before the run starts (minimal
@@ -19,7 +19,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::failure_categories::{
+use ironclaw_host_api::failure::categories::{
     BUDGET_ACCOUNTING_FAILED_CATEGORY, TRANSCRIPT_WRITE_FAILED_CATEGORY,
 };
 
@@ -66,9 +66,9 @@ pub fn failure_lane(category: &str, retryable: bool) -> FailureLane {
 ///
 /// Sources: `LoopFailureKind::as_str()` (ironclaw_turns), the reborn driver /
 /// scheduler / model / capability / compaction / host-stage categories
-/// (`failure_categories.rs` + `planned_driver` / `turn_runner` / recovery
+/// (`ironclaw_host_api::failure::categories` + `planned_driver` / `turn_runner` / recovery
 /// mapping), and the pinned provider categories. Keep this in lockstep with
-/// `reborn_failure_summary_for_category`: a new producer category MUST be added
+/// `host_api::failure::summary::reborn_failure_summary_for_category`: a new producer category MUST be added
 /// here (the enforcement test asserts each has a specific explanation + lane).
 ///
 /// `unknown_failure` is deliberately excluded — it IS the generic fallback.
@@ -86,7 +86,7 @@ pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
     "lease_expired",
     // LoopFailureKind (ironclaw_turns)
     "model_error",
-    // Permanent model-stage failures (see `failure_categories.rs`): named
+    // Permanent model-stage failures (see `host_api::failure::categories`): named
     // separately so they are not auto-retried as generic host outages.
     "model_stage_request_invalid",
     "model_stage_policy_denied",
@@ -128,7 +128,7 @@ pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
     "compaction_inference_failed",
     "compaction_cancelled",
     "compaction_persistence_failed",
-    // Host-stage-unavailable categories (failure_categories.rs)
+    // Host-stage-unavailable categories (host_api::failure::categories)
     "host_stage_unavailable_prompt",
     "host_stage_unavailable_model",
     "host_stage_unavailable_capability",
@@ -136,7 +136,7 @@ pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
     "host_stage_unavailable_checkpoint",
     "host_stage_unavailable_input",
     "host_stage_unavailable_unknown",
-    // Pinned provider categories (failure_categories.rs)
+    // Pinned provider categories (host_api::failure::categories)
     "model_credits_exhausted",
     "model_credentials_unavailable",
     "model_spend_budget_exhausted",
@@ -146,7 +146,7 @@ pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::failure_summary::reborn_failure_summary_for_category;
+    use ironclaw_host_api::failure::summary::reborn_failure_summary_for_category;
 
     #[test]
     fn failure_lane_is_retriable_when_retryable_else_explainable() {

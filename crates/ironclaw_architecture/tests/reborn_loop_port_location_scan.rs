@@ -246,7 +246,19 @@ fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
         let entry = entry.unwrap_or_else(|err| panic!("failed to read dir entry: {err}"));
         let path = entry.path();
         if path.is_dir() {
-            if path.file_name().and_then(|name| name.to_str()) == Some("target") {
+            // `target` alone is not enough: this walk is rooted at `crates/`,
+            // which contains `ironclaw_webui/frontend`, so on any checkout
+            // where the frontend has been installed the scan descends the whole
+            // npm tree. Measured on this worktree: `crates/` holds 516
+            // directories with the frontend *uninstalled*, and the frontend
+            // declares 23 direct dependencies whose transitive closure is what
+            // gets walked once `npm install` has run — pure cost, since no
+            // `Loop*Port` is ever defined there. Matches the exclusion the
+            // sibling scanners already use (`reborn_cross_crate_include_scan`,
+            // `reborn_sealed_evidence_mint_ratchet`, …); `.git` comes along for
+            // the same reason should this helper ever be rooted higher.
+            let name = path.file_name().and_then(|name| name.to_str());
+            if matches!(name, Some("target" | ".git" | "node_modules")) {
                 continue;
             }
             collect_rust_files(&path, out);

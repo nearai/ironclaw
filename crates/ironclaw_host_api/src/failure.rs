@@ -19,6 +19,18 @@
 //! model-correctable error stays a recoverable outcome (`capability-access.md`), never a
 //! `HostFailure`.
 
+//! ## Failure-summary data (WS1.7)
+//!
+//! Beside the `HostFailure` channel this module also owns the **category
+//! vocabulary** ([`categories`]) and the **category→summary tables**
+//! ([`summary`]) that turn a failed run into a user-facing sentence. Both moved
+//! here from `ironclaw_turn_runner` under PROPOSAL §6.1.1 so the product
+//! projection can read them without depending on the runner. They are pure
+//! data; the classifiers that *assign* a category stay with the producer.
+
+pub mod categories;
+pub mod summary;
+
 use serde::{Deserialize, Serialize};
 
 use crate::ids::ErrRef;

@@ -283,12 +283,13 @@ fn loop_failure_kind_name(kind: LoopFailureKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::failure_categories::{
-        MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
-        MODEL_CREDITS_EXHAUSTED_REASON_KIND, TRANSCRIPT_WRITE_FAILED_CATEGORY,
-    };
+    use crate::failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND;
     use ironclaw_agent_loop::test_support::{
         MockAgentLoopDriverHost, MockHostCall, test_run_context,
+    };
+    use ironclaw_host_api::failure::categories::{
+        MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
+        TRANSCRIPT_WRITE_FAILED_CATEGORY,
     };
 
     fn text_only_context(
@@ -499,11 +500,11 @@ mod tests {
     /// permanently-failing call was silently re-driven.
     #[test]
     fn permanent_model_stage_kinds_reach_the_driver_as_non_retriable_categories() {
-        use crate::failure_categories::{
+        use crate::retry_disposition::is_auto_retriable_category;
+        use ironclaw_host_api::failure::categories::{
             MODEL_STAGE_POLICY_DENIED_CATEGORY, MODEL_STAGE_REQUEST_INVALID_CATEGORY,
             MODEL_STAGE_SCOPE_MISMATCH_CATEGORY,
         };
-        use crate::retry_disposition::is_auto_retriable_category;
 
         let cases = [
             (
