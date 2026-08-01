@@ -121,7 +121,7 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_product/src/reborn_services/types.rs"
-lines = [483]
+lines = [105]
 owner = "@nearai/reborn"
 reason = "Struct field declaration; only the GateRef -> TurnGateRef type name changed. Not executable, so the file contributes no instrumented lines."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
