@@ -34,7 +34,7 @@ use serde_json::json;
 async fn acme_channel_adapter_satisfies_the_conformance_contract() {
     use std::sync::Arc;
 
-    use ironclaw_product::test_support::conformance::{
+    use ironclaw_extension_contracts::test_support::conformance::{
         ChannelAdapterConformance, ConformanceInbound, run_channel_adapter_conformance,
     };
     use ironclaw_product::{
@@ -76,7 +76,7 @@ async fn acme_channel_adapter_satisfies_the_conformance_contract() {
             reply_context: None,
         },
         vendor_responses: Arc::new(|_request| {
-            ironclaw_host_api::tool_adapter::RestrictedEgressResponse {
+            ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
                 status: 200,
                 body: br#"{"ok":true}"#.to_vec(),
             }

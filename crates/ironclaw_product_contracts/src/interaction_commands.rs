@@ -16,12 +16,13 @@
 //! surface renders the advertised command in backticks, so users on any
 //! channel paste them back.
 
-use crate::product_adapter::error::ProductAdapterError;
-use crate::product_adapter::inbound::{
+use crate::inbound::{
     ApprovalDecision, ApprovalResolutionPayload, AuthResolutionPayload, AuthResolutionResult,
-    ProductInboundPayload, ProductTriggerReason, ScopedApprovalResolutionPayload,
+    ProductInboundPayload, ScopedApprovalResolutionPayload,
 };
-use crate::product_adapter::redaction::RedactedString;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_host_api::product_adapter_error::ProductAdapterError;
+use ironclaw_host_api::product_adapter_error::RedactedString;
 
 /// Strip symmetric wrapping backticks (repeatedly, with trimming) so a
 /// pasted `` `approve gate:x` `` parses like the bare command.

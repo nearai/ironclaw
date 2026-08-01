@@ -6,7 +6,7 @@ use super::{
     RebornServices, RebornViewDescriptor, RebornViewProvider, bounded_log_query,
     bounded_operator_logs_query, parse_thread_id_field, validate_log_query_modes,
 };
-use ironclaw_host_api::product_surface::{
+use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode,
 };
 

@@ -36,16 +36,20 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 # `test-support` exposes `FakeProtocolHttpEgress` / `FakeOutboundDeliverySink`
-# used by the `adapter::tests` mod. `host-auth-mint` exposes
-# `mark_shared_secret_header_verified` used by `payload::tests` to mint
-# verified evidence (sealed in production code; tests stand in for the
-# host). Both come from `ironclaw_host_api`, which owns them; the
-# `ironclaw_product` dev-dep that used to sit here supplied neither and went
-# with the crate's normal `ironclaw_product` edge (WS1.3). The integration
+# used by the `adapter::tests` mod; it comes from `ironclaw_host_api`, which
+# owns them. The `ironclaw_product` dev-dep that used to sit here supplied
+# neither and went with the crate's normal `ironclaw_product` edge (WS1.3).
+# The `host-auth-mint` opt-in that also sat here was stale — WS1.5 re-measured
+# it and this crate names no mint function and no `ProtocolAuthEvidence` at
+# all; `payload::tests`, which the comment claimed needed it, lives in
+# `ironclaw_telegram_v2_adapter`. The integration
 # contract suite that previously pulled in
 # `http`, `ironclaw_host_api`, and `ironclaw_wasm_product_adapters` has
 # been removed pending the post-#3352 fixture port — re-add those when
 # the contract suite returns.
-ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0", features = ["test-support", "host-auth-mint"] }
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0", features = ["test-support"] }
+# The exported channel-adapter conformance suite moved here with
+# `ChannelAdapter` (WS1.4); `tests/channel_conformance.rs` runs it.
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0", features = ["test-support"] }
 tokio = { version = "1", features = ["macros", "rt", "sync"] }
 uuid = { version = "1", features = ["v4", "serde"] }

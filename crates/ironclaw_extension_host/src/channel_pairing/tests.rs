@@ -12,14 +12,15 @@ use ironclaw_auth::{AuthProductError, RebornAuthContinuationDispatcher};
 use ironclaw_conversations::{
     ConditionalUnpairOutcome, ExternalActorRef as ConversationActorRef, InboundTurnError,
 };
+use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
 use ironclaw_extension_host::ingress::{InboundAdmission, InboundAdmissionAck, InboundSink};
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::user_identity::RebornUserIdentityLookupError;
 use ironclaw_product::{
     AuthPromptChallengeKind, BlockedAuthPromptRequest, BlockedAuthPromptSource,
     ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExternalActorRef,
-    ExternalConversationRef, ExternalEventId, NormalizedInboundMessage, ProductAdapterId,
-    ProductTriggerReason, RebornChannelConnectStrategy,
+    ExternalConversationRef, ExternalEventId, ProductAdapterId, ProductTriggerReason,
+    RebornChannelConnectStrategy,
 };
 use tokio::sync::Notify;
 
@@ -226,11 +227,11 @@ impl RebornAuthContinuationDispatcher for FailOnceIdempotentFanout {
 struct UnexpectedWorkflow;
 
 #[async_trait::async_trait]
-impl ironclaw_host_api::product_surface::ChannelInboundProductSurface for UnexpectedWorkflow {
+impl ironclaw_product_contracts::surface::ChannelInboundProductSurface for UnexpectedWorkflow {
     async fn admit_channel_inbound(
         &self,
-        _request: ironclaw_host_api::product_surface::ChannelInboundSurfaceRequest,
-    ) -> ironclaw_host_api::product_surface::ChannelInboundSurfaceOutcome {
+        _request: ironclaw_product_contracts::surface::ChannelInboundSurfaceRequest,
+    ) -> ironclaw_product_contracts::surface::ChannelInboundSurfaceOutcome {
         panic!("pairing tests must not reach channel admission");
     }
 }

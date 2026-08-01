@@ -8,7 +8,8 @@ use ironclaw_extension_contracts::channel_identity::{
     ChannelConnectionScope, ChannelConnectionScopeSource,
 };
 use ironclaw_extensions::ExtensionInstallationStorePort;
-use ironclaw_host_api::{ids::ExtensionId, product_adapter::AdapterInstallationId};
+use ironclaw_host_api::ids::ExtensionId;
+use ironclaw_host_api::product_adapter::AdapterInstallationId;
 
 use crate::ChannelConfigService;
 

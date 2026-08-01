@@ -6,7 +6,7 @@
 //! retry, crash recovery — identical for every channel, owned here,
 //! once) and **vendor mechanics** (rendering, splitting, API selection,
 //! error mapping — owned by each extension's
-//! [`ChannelAdapter::deliver`](crate::ChannelAdapter)).
+//! [`ChannelAdapter::deliver`](ironclaw_extension_contracts::channel_adapter::ChannelAdapter)).
 //!
 //! Rules this module owns:
 //! - Every user-visible channel output is a semantic [`DeliveryIntent`];
@@ -25,12 +25,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::{
-    ChannelAdapter, ExternalConversationRef, OutboundEnvelope, OutboundPart, OutboundTarget,
-    PartDeliveryOutcome,
+    ExternalConversationRef, OutboundEnvelope, OutboundPart, OutboundTarget, PartDeliveryOutcome,
 };
 use async_trait::async_trait;
 use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
-use ironclaw_host_api::{path::ScopedPath, tool_adapter::RestrictedEgress};
+use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
+use ironclaw_host_api::path::ScopedPath;
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveryFailureKind, OutboundDeliveryAttempt,
     OutboundDeliveryDecision, OutboundDeliveryStatus, OutboundPolicyService, OutboundPushCandidate,

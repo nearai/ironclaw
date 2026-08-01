@@ -236,7 +236,7 @@ pub struct ChannelExtensionBinding {
     /// The extension id the manifest declares (also the adapter id).
     pub extension_id: String,
     /// The channel adapter implementation linked into the deployment.
-    pub adapter: std::sync::Arc<dyn ironclaw_product::ChannelAdapter>,
+    pub adapter: std::sync::Arc<dyn ironclaw_extension_contracts::channel_adapter::ChannelAdapter>,
     /// The vendor half of the preference-target codec, consumed by the
     /// generic outbound-target provider and triggered-delivery hook.
     pub preference_target_codec: Option<

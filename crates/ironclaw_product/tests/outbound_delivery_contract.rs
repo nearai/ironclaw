@@ -251,28 +251,29 @@ fn preference_record(scope: &TurnScope) -> CommunicationPreferenceRecord {
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use ironclaw_product::{
-    ChannelAdapter, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope,
-    PartDeliveryOutcome, VerifiedInbound,
-};
+use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_product::{
     ChannelDeliveryResolver, CoordinatedDeliveryError, CoordinatedDeliveryOutcome,
     CoordinatedDeliveryRequest, DeliveryCoordinator, DeliveryIntent, DeliveryReplyContextSource,
     DeliveryRetryPolicy, NoticeDeliveryRequest, ResolvedChannelDelivery,
 };
+use ironclaw_product::{
+    ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, PartDeliveryOutcome,
+    VerifiedInbound,
+};
 
 struct CoordinatorDenyAllEgress;
 
 #[async_trait]
-impl ironclaw_host_api::tool_adapter::RestrictedEgress for CoordinatorDenyAllEgress {
+impl ironclaw_extension_contracts::tool_adapter::RestrictedEgress for CoordinatorDenyAllEgress {
     async fn send(
         &self,
-        _request: ironclaw_host_api::tool_adapter::RestrictedEgressRequest,
+        _request: ironclaw_extension_contracts::tool_adapter::RestrictedEgressRequest,
     ) -> Result<
-        ironclaw_host_api::tool_adapter::RestrictedEgressResponse,
-        ironclaw_host_api::tool_adapter::RestrictedEgressError,
+        ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse,
+        ironclaw_extension_contracts::tool_adapter::RestrictedEgressError,
     > {
-        Err(ironclaw_host_api::tool_adapter::RestrictedEgressError::PolicyDenied)
+        Err(ironclaw_extension_contracts::tool_adapter::RestrictedEgressError::PolicyDenied)
     }
 }
 
@@ -324,7 +325,7 @@ impl ChannelAdapter for ScriptedChannelAdapter {
     async fn deliver(
         &self,
         envelope: OutboundEnvelope,
-        _egress: &dyn ironclaw_host_api::tool_adapter::RestrictedEgress,
+        _egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError> {
         let attempts = self
             .store

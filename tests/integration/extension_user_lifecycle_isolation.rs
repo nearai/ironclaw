@@ -26,10 +26,8 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{Filter, Page};
 use ironclaw_host_api::ids::{AgentId, TenantId, UserId};
-use ironclaw_host_api::{
-    path::VirtualPath,
-    product_surface::{ProductSurface, ProductSurfaceCaller},
-};
+use ironclaw_host_api::path::VirtualPath;
+use ironclaw_product_contracts::surface::{ProductSurface, ProductSurfaceCaller};
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
     RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,

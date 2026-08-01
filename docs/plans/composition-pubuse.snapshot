@@ -40,7 +40,6 @@ pub use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
 };
-pub use ironclaw_product::{ChannelAdapter, NormalizedInboundMessage};
 pub use ironclaw_product::{
     ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
     RebornChannelConnectStrategy,
@@ -51,7 +50,6 @@ pub use ironclaw_product::{
 };
 pub use ironclaw_runner::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
-pub use ironclaw_runner::failure_summary::reborn_failure_summary_for_category;
 pub use ironclaw_runtime_policy::{
     ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
 };
@@ -82,7 +80,6 @@ pub use ironclaw_host_api::user_identity::{
     RebornUserIdentityBindingStore, RebornUserIdentityLookup, RebornUserIdentityLookupError,
     installation_scoped_provider_user_id,
 };
-pub use ironclaw_product::mark_bearer_token_verified_for_tenant;
 pub use observability::budget::build_default_budget_accountant;
 pub use observability::budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
 pub use observability::hooks::{

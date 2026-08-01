@@ -29,18 +29,11 @@ use ironclaw_extension_contracts::{
     state::{InstallationState, LifecyclePublicState},
     surface::CapabilitySurfaceKind,
 };
+use ironclaw_host_api::attachment::InboundAttachment;
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
     SanitizedFailure, SourceBindingRef, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope,
     TurnStatus,
-};
-use ironclaw_host_api::{
-    attachment::InboundAttachment,
-    product_surface::{
-        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-        ProductSurfaceErrorKind, ProductSurfaceInvokeRequest, ProductSurfaceStreamRequest,
-        ProductSurfaceValidationCode,
-    },
 };
 use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
@@ -66,7 +59,7 @@ use ironclaw_product::{
     AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, AUTOMATIONS_VIEW,
     ActiveModelReader, ApprovalInteractionActionView, ApprovalInteractionDecision,
     ApprovalInteractionScope, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionService, AutomationListRequest, AutomationName, AutomationProductService,
+    AuthInteractionService, AutomationListRequest, AutomationProductService,
     ChannelAuthAccountState, ChannelConfigProductService, ChannelConnectionRequirement,
     ChannelConnectionService, CodexLoginStart, CommandResultView, EXTENSION_IMPORT_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
@@ -152,7 +145,7 @@ use ironclaw_product::{
 use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, ProductAdapterError, ProductAdapterId,
     ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
-    ProductSurfaceRejectionKind, ProjectionCursor, ProjectionStream, ProjectionStreamSubscription,
+    ProductSurfaceRejectionKind, ProjectionCursor, ProjectionStreamSubscription,
     ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_product::{
@@ -164,6 +157,12 @@ use ironclaw_product::{
     RebornAdminUpdateUserProductRequest, RebornAdminUpdateUserRequest, RebornAdminUserListQuery,
     RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
     RebornAdminUserSecretsListResponse,
+};
+use ironclaw_product_contracts::projection::ProjectionStream;
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ProductSurfaceInvokeRequest, ProductSurfaceStreamRequest,
+    ProductSurfaceValidationCode,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -178,6 +177,7 @@ use ironclaw_threads::{
     ThreadMessageRange, ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
     UpdateToolResultReferenceRequest,
 };
+use ironclaw_triggers::AutomationName;
 use ironclaw_turns::test_support::in_memory_agent_turn_runtime;
 use ironclaw_turns::{
     AdmissionRejection, AdmissionRejectionReason, CancelRunRequest, CancelRunResponse,
@@ -2552,7 +2552,7 @@ async fn trace_hold_authorize_capability_decodes_typed_product_input() {
     let response = ProductSurface::invoke(
         &services,
         caller(),
-        ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
             operation_id: operation_id.clone(),
             input: serde_json::to_value(RebornTraceHoldAuthorizeProductRequest {
                 submission_id: uuid::Uuid::new_v4().to_string(),
@@ -2570,7 +2570,7 @@ async fn trace_hold_authorize_capability_decodes_typed_product_input() {
     let error = ProductSurface::invoke(
         &services,
         caller(),
-        ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
             operation_id,
             input: serde_json::to_value(RebornTraceHoldAuthorizeProductRequest {
                 submission_id: "not-a-submission-id".to_string(),
@@ -3755,7 +3755,7 @@ async fn submit_turn_returns_internal_when_skill_activation_recorder_fails() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(threads, coordinator.clone())
         .with_skill_activation_recorder(|_, _, _| {
-            Err(ironclaw_host_api::product_surface::ProductSurfaceError {
+            Err(ironclaw_product_contracts::surface::ProductSurfaceError {
                 code: ProductSurfaceErrorCode::Internal,
                 kind: ProductSurfaceErrorKind::Internal,
                 status_code: 500,
@@ -11286,7 +11286,7 @@ async fn query_product_surface_page<S: ProductSurface + ?Sized>(
     let page = services
         .query(
             caller,
-            ironclaw_host_api::product_surface::ProductSurfaceQueryRequest {
+            ironclaw_product_contracts::surface::ProductSurfaceQueryRequest {
                 view_id: query.view_id,
                 input: query.params,
                 cursor: query.cursor,
@@ -11363,7 +11363,7 @@ where
     let response = services
         .invoke(
             caller,
-            ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+            ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
                 operation_id: CapabilityId::new(capability_id).expect("capability id"),
                 input: serde_json::to_value(input).expect("capability input"),
                 activity_id: ActivityId::new(),
@@ -11436,7 +11436,7 @@ async fn invoke_extension_setup_submit<S: ProductSurface + ?Sized>(
     let response = services
         .invoke(
             caller,
-            ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+            ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
                 operation_id: CapabilityId::new(EXTENSION_SETUP_SUBMIT_CAPABILITY_ID)
                     .expect("capability id"),
                 input,

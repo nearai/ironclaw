@@ -14,12 +14,12 @@ mod tests {
         ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
     };
     use ironclaw_extension_contracts::recipe::VendorAuthRecipe;
-    use ironclaw_host_api::product_surface::ProductSurfaceCaller;
     use ironclaw_host_api::{
         http::{RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse},
         ids::{MissionId, SecretHandle, TenantId, ThreadId, UserId},
         resource::ResourceScope,
     };
+    use ironclaw_product_contracts::surface::ProductSurfaceCaller;
     use ironclaw_secrets::SecretStore;
     use serde_json::json;
     use std::sync::Arc;

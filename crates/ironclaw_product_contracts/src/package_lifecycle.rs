@@ -5,87 +5,18 @@
 //! themselves are host API vocabulary so generic extension services can share
 //! them without depending on product workflow.
 
-use std::fmt;
-
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use ironclaw_host_api::error::HostApiError;
 
-use crate::{
+use ironclaw_extension_contracts::{
     channel::ChannelPresentation,
     hosted_mcp::RegisterHostedMcpRequest,
+    lifecycle_id::{LifecycleBlockerRef, LifecyclePackageId},
     state::{InstallationState, LifecyclePublicState},
     surface::CapabilitySurfaceKind,
 };
-
-pub const LIFECYCLE_ID_MAX_BYTES: usize = 256;
-const LIFECYCLE_REF_MAX_BYTES: usize = 512;
-
-macro_rules! bounded_lifecycle_string {
-    ($name:ident, $kind:literal, $label:literal, $max:expr) => {
-        #[derive(Debug, Clone, PartialEq, Eq)]
-        pub struct $name(String);
-
-        impl $name {
-            pub fn new(value: impl Into<String>) -> Result<Self, HostApiError> {
-                validate_lifecycle_string(value.into(), $kind, $label, $max).map(Self)
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-
-            pub fn into_inner(self) -> String {
-                self.0
-            }
-        }
-
-        impl AsRef<str> for $name {
-            fn as_ref(&self) -> &str {
-                self.as_str()
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str(self.as_str())
-            }
-        }
-
-        impl Serialize for $name {
-            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-            where
-                S: Serializer,
-            {
-                serializer.serialize_str(self.as_str())
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                let value = String::deserialize(deserializer)?;
-                Self::new(value).map_err(de::Error::custom)
-            }
-        }
-    };
-}
-
-bounded_lifecycle_string!(
-    LifecyclePackageId,
-    "lifecycle_package",
-    "lifecycle package id",
-    LIFECYCLE_ID_MAX_BYTES
-);
-bounded_lifecycle_string!(
-    LifecycleBlockerRef,
-    "lifecycle_blocker",
-    "lifecycle blocker ref",
-    LIFECYCLE_REF_MAX_BYTES
-);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -589,37 +520,6 @@ impl LifecycleProductResponse {
             payload: None,
         }
     }
-}
-
-fn validate_lifecycle_string(
-    value: String,
-    kind: &'static str,
-    label: &'static str,
-    max_bytes: usize,
-) -> Result<String, HostApiError> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(HostApiError::invalid_id(
-            kind,
-            value,
-            format!("{label} must not be empty"),
-        ));
-    }
-    if value.len() > max_bytes {
-        return Err(HostApiError::invalid_id(
-            kind,
-            value,
-            format!("{label} must be at most {max_bytes} bytes"),
-        ));
-    }
-    if trimmed.chars().any(|c| c == '\0' || c.is_control()) {
-        return Err(HostApiError::invalid_id(
-            kind,
-            value,
-            format!("{label} must not contain NUL/control characters"),
-        ));
-    }
-    Ok(trimmed.to_string())
 }
 
 fn validate_optional_ref(

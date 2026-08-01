@@ -32,7 +32,7 @@ host-owned counterpart that binds the `TcpListener` and drives the serve loop.
 
 The "Native host surface" rules of `docs/reborn/how-to-port-channel-to-reborn.md`
 apply: host auth stays host-owned in this crate, and behavior is reached through
-`ironclaw_host_api::product_surface::ProductSurface`. The crate *does* carry a
+`ironclaw_product_contracts::surface::ProductSurface`. The crate *does* carry a
 direct `ironclaw_product` dependency (see `Cargo.toml`), but it is limited to
 wire DTOs and ProductSurface descriptors — never behavior. Enforced by
 `ironclaw_architecture` (`tests/reborn_dependency_boundaries.rs`).
@@ -81,7 +81,7 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 
 ## WebChat v2 route surface (folded from `ironclaw_webui_v2`)
 
-Handlers consume only `ironclaw_host_api::product_surface::ProductSurface`. The bearer
+Handlers consume only `ironclaw_product_contracts::surface::ProductSurface`. The bearer
 middleware (in this crate's `webui_v2_app`) constructs the
 `ProductSurfaceCaller`, carries the matched token's `WebUiV2Capabilities`,
 and injects both as axum `Extension`s before the handler runs; handlers fail

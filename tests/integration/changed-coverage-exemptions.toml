@@ -555,3 +555,87 @@ reason = "The else arm of a let-else that rejects a non-Oauth2Code vendor recipe
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
+
+# ---------------------------------------------------------------------------
+# WS1.4 product-contracts extraction + the adapter move (PR #6980).
+#
+# The two files this PR *created* — `extension_contracts::auth_prompt` and
+# `extension_contracts::lifecycle_id` — are deliberately NOT exempted. They
+# arrived carrying 134 uncovered lines and 22 uncovered branch arms, and that
+# was a real coverage regression rather than an attribution artifact: the code
+# moved out of `host_api::product_adapter::outbound` and
+# `host_api::package_lifecycle`, whose owning crates' unit suites did not move
+# with it. Eleven unit tests were added in the two modules instead, covering
+# `render_channel_auth_prompt` (the function both shipped channel packages call
+# from `deliver`), the `AuthPromptContextView` constructors and wire round-trip,
+# every nested validator's rejection path, and the bounded-id accessor and
+# rejection surface. What remains below is only what a test cannot reach.
+# ---------------------------------------------------------------------------
+
+[[exemption]]
+path = "crates/ironclaw_product_contracts/src/lib.rs"
+lines = [33]
+owner = "@nearai/reborn"
+reason = "Crate-root inner attribute `#![warn(unreachable_pub)]` on a declaration-only facade — the same shape already exempted for `ironclaw_loop_contracts/src/lib.rs`. rustc emits no LCOV record for this file at all (the gate reports it as 'absent from coverage or contains no DA records'), so every other line here is mechanically uninstrumentable; this attribute is the only line the classifier does not recognise, and exempting it lets the uninstrumentable-file path apply as intended."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_product/src/reborn_services.rs"
+lines = [4888]
+owner = "@nearai/reborn"
+reason = "Pre-existing `map_err` arm whose only change is a repointed type path (`ironclaw_host_api::product_surface::ProductSurfaceError::internal()` -> `ironclaw_product_contracts::surface::...`). It fires only if `serde_json::to_value` fails on a value a typed capability handler just produced, which no integration scenario can force; the line was equally unreached before this PR and is flagged solely because the path on it moved."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_telegram_v2_adapter/src/payload.rs"
+lines = [670, 671]
+owner = "@nearai/reborn"
+reason = "Body of a pre-existing `map_err` closure on the interaction-resolution parse, re-indented by rustfmt because the repointed call path (`ironclaw_product_contracts::interaction_commands::...`) is longer than the `ironclaw_host_api::product_adapter::...` one it replaced. No statement changed, the arm fires only on a parse rejection no Telegram fixture produces, and it was equally unreached before this PR."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+# The four entries below are all the same shape and all one line each: a
+# **type position** whose only change is the repointed path for a moved
+# contract. LLVM emits no coverage region for a type annotation, so none of
+# these can ever carry a DA record; they are flagged only because rustfmt wrapped
+# the longer path onto its own line, which the classifier's
+# `mechanically_uninstrumentable_lines()` does not yet recognise as a type
+# position. Each was confirmed by replaying the gate against this PR's own
+# merged lcov: with these four removed, the file's changed lines are entirely
+# outside the instrumented set and the "contributed no instrumented lines"
+# branch stops firing. Executable behavior in all four files is unchanged and
+# remains covered.
+
+[[exemption]]
+path = "crates/ironclaw_extension_contracts/src/channel_adapter.rs"
+lines = [294]
+owner = "@nearai/reborn"
+reason = "Type position only: the `OutboundPart::AuthPrompt` variant's `view: Box<crate::auth_prompt::AuthPromptView>` field, repointed when the auth-prompt family moved into this crate. An enum variant field type carries no LLVM coverage region."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_host/src/channel_pairing.rs"
+lines = [1117]
+owner = "@nearai/reborn"
+reason = "Type position only: a function parameter's `&ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage` type, repointed from `ironclaw_product`'s deleted re-export. A parameter type carries no LLVM coverage region."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/input.rs"
+lines = [239]
+owner = "@nearai/reborn"
+reason = "Type position only: `ChannelExtensionBinding::adapter`'s `Arc<dyn ironclaw_extension_contracts::channel_adapter::ChannelAdapter>` field type, repointed from `ironclaw_product`'s deleted re-export. A struct field type carries no LLVM coverage region."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_slack_extension/src/channel.rs"
+lines = [74]
+owner = "@nearai/reborn"
+reason = "Type position only: a function parameter's `&ironclaw_extension_contracts::channel_adapter::ChannelAttachmentRef` type, repointed when the channel-adapter DTO family left `ironclaw_host_api`. A parameter type carries no LLVM coverage region."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"

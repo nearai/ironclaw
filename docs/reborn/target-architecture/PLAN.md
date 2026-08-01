@@ -34,6 +34,7 @@
 - Order inside the wave: turn vocabulary → `loop_contracts` → `extension_contracts` → `product_contracts` → evidence-mint consolidation ⚠ (security-sensitive; its refute-tests land in the same PR) → `common` narrowing → the two single-symbol product edges (`runner`, `loop_host`).
 - Each new crate lands with its §11.2.3 allowlist + §11.2.4 port-location scan in the same PR (new-crate-adds-rule discipline).
 - **Milestone:** exceptions 20 → 12 (all W4.3 + `auth→turns` gone); `agent_loop` passes contracts-only with zero exceptions; webui/openai/channel crates *can* now compile against contracts (the flips happen in Wave 2).
+- ✎ **Wave 1 closed 2026-07-31** across seven PRs (turn vocabulary → `loop_contracts` → `extension_contracts` → `product_contracts` → evidence mint → `common` narrowing + the two product edges): all three contracts crates exist and `agent_loop` is contracts-only with zero exceptions, but **exceptions ended at 13, not 12** — `conversations → turns` is turn *admission authority*, not vocabulary, so it falls in WS5 and the 12 in this milestone was never reachable here. Two findings worth carrying: the `host-auth-mint` cargo feature was never a seal (feature unification compiled the mint gate on for the whole workspace), and every slot found its lead-sheet row partly stale — re-measure rows against your own base, never inherit a predecessor's count. Full end-state in CHECKLIST's WS1 verify row.
 
 ## Wave 2 — Extensions + product flips (WS2 + WS5)
 

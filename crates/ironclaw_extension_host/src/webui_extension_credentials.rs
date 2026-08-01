@@ -8,12 +8,12 @@ use ironclaw_auth::{
     RebornManualTokenSubmitRequest, RebornProductAuthServices,
     RuntimeCredentialAccountSelectionRequest,
 };
-use ironclaw_host_api::product_surface::{
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-};
 use ironclaw_product::{
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialSetup,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
 
 const EXTENSION_CREDENTIAL_SETUP_TTL_SECONDS: i64 = 300;

@@ -42,6 +42,7 @@ ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version = "0.1.0" }
 ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_host_ingress = { path = "../ironclaw_host_ingress" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
@@ -53,7 +54,7 @@ ironclaw_mcp = { path = "../ironclaw_mcp" }
 ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
-ironclaw_product = { path = "../ironclaw_product", features = ["host-auth-mint"] }
+ironclaw_product = { path = "../ironclaw_product" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_safety = { path = "../ironclaw_safety" }

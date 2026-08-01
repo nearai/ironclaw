@@ -30,7 +30,6 @@ use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
 use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
     ids::{AgentId, CapabilityId, ExtensionId, SecretHandle, TenantId, UserId},
-    product_surface::{ProductSurface, ProductSurfaceCaller, ProductSurfaceStreamRequest},
 };
 use ironclaw_product::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
@@ -38,6 +37,9 @@ use ironclaw_product::{
     RebornOperatorToolInfo, RebornServices, RebornStreamEventsRequest,
 };
 use ironclaw_product::{ProductOutboundEnvelope, ProductOutboundPayload};
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceStreamRequest,
+};
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
     RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,

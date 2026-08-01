@@ -10,7 +10,7 @@
 //! 3. Maps every error through [`WebUiV2HttpError`] so the wire shape stays
 //!    redacted and stable.
 //!
-//! [`ProductSurface`]: ironclaw_host_api::product_surface::ProductSurface
+//! [`ProductSurface`]: ironclaw_product_contracts::surface::ProductSurface
 
 // arch-exempt: large_file, ProductSurface service-collapse routes stay in the existing WebUI handler table until the WebUI route split lands, plan #5985
 
@@ -108,17 +108,17 @@ use serde::{Deserialize, Serialize};
 use ironclaw_extension_contracts::hosted_mcp::{
     HostedMcpAuthSelection, HostedMcpEndpoint, RegisterHostedMcpRequest, hosted_mcp_extension_id,
 };
-use ironclaw_extension_contracts::package_lifecycle::LifecyclePackageId;
+use ironclaw_extension_contracts::lifecycle_id::LifecyclePackageId;
 use ironclaw_extension_contracts::state::LifecyclePublicState;
 use ironclaw_host_api::turn::IdempotencyKey;
 use ironclaw_host_api::{
     ids::{ActivityId, SecretHandle, ThreadId, UserId},
-    product_surface::{
-        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-        ProductSurfaceErrorKind, ProductSurfaceValidationCode,
-    },
     resolution::{Blocked, Resolution},
     result_meta::FailureKind,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ProductSurfaceValidationCode,
 };
 use uuid::Uuid;
 
@@ -308,7 +308,7 @@ async fn read_admin_user_secret(
     user_id: UserId,
     handle: String,
 ) -> Result<ironclaw_product::AdminUserSecretMeta, WebUiV2HttpError> {
-    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
         std::sync::Arc::clone(services),
         caller,
     );
@@ -1034,7 +1034,7 @@ async fn read_project_member(
     project_id: String,
     user_id: String,
 ) -> Result<RebornProjectMemberInfo, WebUiV2HttpError> {
-    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
         std::sync::Arc::clone(services),
         caller,
     );
@@ -1177,7 +1177,7 @@ fn sse_poll_interval_for_idle_polls(idle_polls: u32) -> Duration {
 /// documented on [`ProductSurface::stream_events`].
 ///
 /// [`WebChatV2EventFrame`]: crate::webui_v2::schema::WebChatV2EventFrame
-/// [`ProductSurface::stream_events`]: ironclaw_host_api::product_surface::ProductSurface::stream_events
+/// [`ProductSurface::stream_events`]: ironclaw_product_contracts::surface::ProductSurface::stream_events
 /// [`SSE_MAX_LIFETIME`]: crate::webui_v2::sse_capacity::SSE_MAX_LIFETIME
 pub async fn stream_events(
     State(state): State<WebUiV2State>,
@@ -1343,7 +1343,7 @@ fn build_sse_stream(
         let mut slot_guard = slot;
         let started_at = tokio::time::Instant::now();
         let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
-        let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(services, caller);
+        let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(services, caller);
 
         let mut idle_polls = 0_u32;
         loop {
@@ -1361,7 +1361,7 @@ fn build_sse_stream(
                 _ = slot_guard.cancelled() => return,
                 result = tokio::time::timeout(
                     remaining,
-                    surface.stream_events(ironclaw_host_api::product_surface::ProductSurfaceStreamRequest {
+                    surface.stream_events(ironclaw_product_contracts::surface::ProductSurfaceStreamRequest {
                         stream_id: Some(thread_id.clone()),
                         after_cursor: after_cursor
                             .as_ref()
@@ -2819,7 +2819,7 @@ async fn invoke_product_capability_with_activity_id<T>(
 where
     T: Serialize,
 {
-    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
         std::sync::Arc::clone(services),
         caller,
     );
@@ -2838,7 +2838,7 @@ where
 {
     let input_value = serde_json::to_value(&input).map_err(ProductSurfaceError::internal_from)?;
     let activity_id = product_surface_activity_id(&caller, command.id, &input_value)?;
-    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
         std::sync::Arc::clone(services),
         caller,
     );
@@ -2993,13 +2993,13 @@ async fn query_product_page(
     caller: ProductSurfaceCaller,
     query: RebornViewQuery,
 ) -> Result<RebornViewPage, ProductSurfaceError> {
-    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
         std::sync::Arc::clone(services),
         caller,
     );
     let page = surface
         .query(
-            ironclaw_host_api::product_surface::ProductSurfaceQueryRequest {
+            ironclaw_product_contracts::surface::ProductSurfaceQueryRequest {
                 view_id: query.view_id,
                 input: query.params,
                 cursor: query.cursor,
@@ -4041,7 +4041,7 @@ async fn ws_drain_loop(
     let mut slot_guard = slot;
     let started_at = tokio::time::Instant::now();
     let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
-    let surface = ironclaw_host_api::product_surface::BoundProductSurface::new(services, caller);
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(services, caller);
 
     let mut idle_polls = 0_u32;
     loop {
@@ -4052,7 +4052,7 @@ async fn ws_drain_loop(
             return;
         }
         let service_call = surface.stream_events(
-            ironclaw_host_api::product_surface::ProductSurfaceStreamRequest {
+            ironclaw_product_contracts::surface::ProductSurfaceStreamRequest {
                 stream_id: Some(thread_id.clone()),
                 after_cursor: after_cursor
                     .as_ref()

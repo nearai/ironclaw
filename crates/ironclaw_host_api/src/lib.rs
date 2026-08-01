@@ -54,7 +54,6 @@ pub mod ingress;
 pub mod invocation;
 pub mod lane;
 pub mod mount;
-pub mod operator_llm;
 pub mod outbound;
 pub mod path;
 pub mod resolution;
@@ -64,7 +63,6 @@ pub mod runtime;
 pub mod runtime_policy;
 pub mod safe_summary;
 pub mod scope;
-pub mod tool_adapter;
 pub mod trust;
 pub mod turn;
 pub mod user_identity;
@@ -73,7 +71,6 @@ mod credential_redaction;
 pub mod model_result_preview;
 pub mod product_adapter;
 pub mod product_adapter_error;
-pub mod product_surface;
 
 // There is deliberately no flat re-export prelude here. Every contract is
 // reached through the module that owns it — `ironclaw_host_api::scope::

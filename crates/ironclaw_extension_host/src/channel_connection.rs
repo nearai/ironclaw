@@ -26,10 +26,10 @@ use ironclaw_auth::{
 };
 use ironclaw_host_api::{
     ids::{ExtensionId, InvocationId, TenantId},
-    product_surface::{ProductSurfaceCaller, ProductSurfaceError},
     resource::ResourceScope,
 };
 use ironclaw_product::{ChannelAuthAccountState, ChannelConnectionService};
+use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
 
 use ironclaw_extension_contracts::channel_identity::{
     ChannelConnectionScope, ChannelConnectionScopeSource,

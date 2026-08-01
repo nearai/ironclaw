@@ -423,11 +423,6 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "persisted credential-name / channel-id vocabulary in the shared identity crate (compat law: stored ids stay readable)",
     ),
     (
-        "crates/ironclaw_common/src/platform.rs",
-        "telegram",
-        "persisted credential-name / channel-id vocabulary in the shared identity crate (compat law: stored ids stay readable)",
-    ),
-    (
         "crates/ironclaw_reborn_identity/src/key.rs",
         "telegram",
         "credential-authority ProviderKind vocabulary (persisted identity keys), not the extensions vendor",
@@ -1080,19 +1075,19 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // shrink as the old composition-hosted tests become manifest-driven.
     ("crates/ironclaw_extension_host/Cargo.toml", "slack"),
     (
-        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
+        "crates/ironclaw_extension_contracts/src/auth_prompt.rs",
         "github",
     ),
     (
-        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
+        "crates/ironclaw_extension_contracts/src/auth_prompt.rs",
         "google",
     ),
     (
-        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
+        "crates/ironclaw_extension_contracts/src/auth_prompt.rs",
         "notion",
     ),
     (
-        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
+        "crates/ironclaw_extension_contracts/src/auth_prompt.rs",
         "telegram",
     ),
     ("crates/ironclaw_product/Cargo.toml", "telegram"),

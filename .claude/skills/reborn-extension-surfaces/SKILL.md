@@ -47,8 +47,8 @@ extension  (one manifest.toml, one installed identity, e.g. `slack`)
 Adapters implement **behavior only** (overview §4): they never report ids,
 schemas, effects, scopes, routes, or credentials — the resolved manifest is the
 sole authority. Trait homes:
-`ToolAdapter` — `crates/ironclaw_host_api/src/tool_adapter.rs`;
-`ChannelAdapter` — `crates/ironclaw_host_api/src/product_adapter/channel_adapter.rs`;
+`ToolAdapter` — `crates/ironclaw_extension_contracts/src/tool_adapter.rs`;
+`ChannelAdapter` — `crates/ironclaw_extension_contracts/src/channel_adapter.rs`;
 `ExtensionEntrypoint`/`ExtensionBindings` —
 `crates/ironclaw_extension_host/src/entrypoint.rs`. Auth has **no** adapter
 trait — it is one host engine driving manifest recipes (overview §4.3).

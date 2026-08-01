@@ -214,18 +214,16 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{
-        ids::TenantId,
-        tool_adapter::{
-            RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest,
-            RestrictedEgressResponse,
-        },
+    use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+    use ironclaw_extension_contracts::tool_adapter::{
+        RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
     };
+    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_host_api::ids::TenantId;
     use ironclaw_product::ResolvedChannelDelivery;
     use ironclaw_product::{
-        ChannelAdapter, ChannelError, DeliveryReport, ExternalConversationRef, InboundOutcome,
-        OutboundEnvelope, TargetCandidate, VerifiedInbound,
+        ChannelError, DeliveryReport, ExternalConversationRef, InboundOutcome, OutboundEnvelope,
+        TargetCandidate, VerifiedInbound,
     };
 
     use super::*;
