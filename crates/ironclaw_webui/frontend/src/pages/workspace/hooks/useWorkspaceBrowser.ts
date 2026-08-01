@@ -8,7 +8,7 @@ import { expandWorkspaceSelection } from "../lib/workspace-presenters";
 // at the mount list (empty path); selecting a file loads a preview, selecting a
 // folder loads its listing into the main pane. There is intentionally no
 // edit/save path — this surface is navigation + preview/download only.
-export function useWorkspaceBrowser(selectedPath) {
+export function useWorkspaceBrowser(selectedPath, projectId = null) {
   const t = useT();
   const queryClient = useQueryClient();
   const [expandedPaths, setExpandedPaths] = React.useState<Set<string>>(() =>
@@ -22,7 +22,7 @@ export function useWorkspaceBrowser(selectedPath) {
   }, [selectedPath]);
 
   const rootQuery = useQuery({
-    queryKey: ["workspace-list", ""],
+    queryKey: ["workspace-list", projectId, ""],
     queryFn: () => listWorkspace(""),
   });
 
@@ -30,8 +30,8 @@ export function useWorkspaceBrowser(selectedPath) {
   // `{ kind: "directory" }` (one stat); disabled at the root, which is always
   // a directory.
   const fileQuery = useQuery({
-    queryKey: ["workspace-file", selectedPath],
-    queryFn: () => readWorkspaceFile(selectedPath),
+    queryKey: ["workspace-file", projectId, selectedPath],
+    queryFn: () => readWorkspaceFile(selectedPath, projectId),
     enabled: Boolean(selectedPath),
   });
 
@@ -41,8 +41,8 @@ export function useWorkspaceBrowser(selectedPath) {
   // Contents of the selected directory for the main-pane listing. Shares the
   // tree's cache key so an already-expanded folder is served from cache.
   const listingQuery = useQuery({
-    queryKey: ["workspace-list", selectedPath],
-    queryFn: () => listWorkspace(selectedPath),
+    queryKey: ["workspace-list", projectId, selectedPath],
+    queryFn: () => listWorkspace(selectedPath, projectId),
     enabled: selectionIsDirectory,
   });
 
@@ -53,10 +53,10 @@ export function useWorkspaceBrowser(selectedPath) {
   const loadDirectory = React.useCallback(
     (path) =>
       queryClient.fetchQuery({
-        queryKey: ["workspace-list", path],
-        queryFn: () => listWorkspace(path),
+        queryKey: ["workspace-list", projectId, path],
+        queryFn: () => listWorkspace(path, projectId),
       }),
-    [queryClient]
+    [projectId, queryClient]
   );
 
   const toggleDirectory = React.useCallback(
@@ -100,8 +100,8 @@ export function useWorkspaceBrowser(selectedPath) {
     loadDirectory,
     toggleDirectory,
     refresh: () => {
-      queryClient.invalidateQueries({ queryKey: ["workspace-list"] });
-      queryClient.invalidateQueries({ queryKey: ["workspace-file", selectedPath] });
+      queryClient.invalidateQueries({ queryKey: ["workspace-list", projectId] });
+      queryClient.invalidateQueries({ queryKey: ["workspace-file", projectId, selectedPath] });
     },
   };
 }

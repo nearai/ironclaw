@@ -56,6 +56,7 @@ type MessageBubbleProps = {
   onRetry?: (message: ChatMessage) => void;
   threadId?: string | null;
   activeRunId?: string | null;
+  projectId?: string | null;
   regressionArtifactExportEnabled?: boolean;
   // The server command inventory (`useChatCommands()`, threaded down from
   // chat.tsx through MessageList) — only read for a SYSTEM message carrying a
@@ -121,6 +122,7 @@ function MessageBubbleImpl({
   onRetry,
   threadId,
   activeRunId,
+  projectId,
   regressionArtifactExportEnabled = false,
   commands,
 }: MessageBubbleProps) {
@@ -395,6 +397,7 @@ function MessageBubbleImpl({
           <AttachmentPreviewModal
             attachment={previewAttachment}
             onClose={() => setPreviewAttachment(null)}
+            projectId={projectId}
           />
 
         </div>

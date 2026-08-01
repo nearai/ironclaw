@@ -91,9 +91,13 @@ export function expandWorkspaceSelection(
   return new Set([...expandedPaths, ...parentPaths]);
 }
 
-export function routeForWorkspacePath(path) {
-  if (!path) return "/workspace";
-  return `/workspace/${pathSegments(path).map(encodeURIComponent).join("/")}`;
+export function routeForWorkspacePath(path, projectId = null) {
+  const route = path
+    ? `/workspace/${pathSegments(path).map(encodeURIComponent).join("/")}`
+    : "/workspace";
+  return projectId
+    ? `${route}?project_id=${encodeURIComponent(projectId)}`
+    : route;
 }
 
 export function parentPath(path) {

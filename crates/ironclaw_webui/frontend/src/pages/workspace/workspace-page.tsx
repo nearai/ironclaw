@@ -1,4 +1,4 @@
-import { useNavigate, useParams } from "react-router";
+import { useNavigate, useParams, useSearchParams } from "react-router";
 import { Button } from "../../design-system/button";
 import { StatusPill } from "../../design-system/primitives";
 import React from "react";
@@ -14,14 +14,16 @@ export function WorkspacePage() {
   const t = useT();
   const navigate = useNavigate();
   const params = useParams();
+  const [searchParams] = useSearchParams();
+  const projectId = searchParams.get("project_id");
   const selectedPath = params["*"] || DEFAULT_WORKSPACE_PATH;
-  const workspace = useWorkspaceBrowser(selectedPath);
+  const workspace = useWorkspaceBrowser(selectedPath, projectId);
 
   const handleSelectFile = React.useCallback(
     (path) => {
-      navigate(routeForWorkspacePath(path));
+      navigate(routeForWorkspacePath(path, projectId));
     },
-    [navigate]
+    [navigate, projectId]
   );
 
   return (
@@ -75,6 +77,7 @@ export function WorkspacePage() {
               isLoadingTree={workspace.isLoadingTree}
               onToggleDirectory={workspace.toggleDirectory}
               onSelectFile={handleSelectFile}
+              projectId={projectId}
             />
             {workspace.selectionIsDirectory
               ? (
@@ -84,7 +87,7 @@ export function WorkspacePage() {
                     isLoading={workspace.isLoadingListing}
                     filter={workspace.filter}
                     onOpen={handleSelectFile}
-                    onNavigate={navigate}
+                    onNavigate={(route) => navigate(`${route}${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""}`)}
                   />
                 )
               : (
@@ -92,7 +95,7 @@ export function WorkspacePage() {
                     path={selectedPath}
                     file={workspace.file}
                     isLoading={workspace.isLoadingFile}
-                    onNavigate={navigate}
+                    onNavigate={(route) => navigate(`${route}${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""}`)}
                   />
                 )}
           </div>

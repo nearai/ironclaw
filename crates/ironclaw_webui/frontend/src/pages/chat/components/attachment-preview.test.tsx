@@ -107,6 +107,7 @@ test("workspace attachments can open their selected file in the workspace viewer
           workspace_path:
             "/workspace/attachments/2026-07-30/message-1-test.txt",
         }}
+        projectId="project/non-default"
         onClose={onClose}
       />);
       await Promise.resolve();
@@ -121,7 +122,7 @@ test("workspace attachments can open their selected file in the workspace viewer
 
     assert.equal(onClose.mock.calls.length, 1);
     assert.deepEqual(navigateMock.mock.calls, [[
-      "/workspace/workspace/attachments/2026-07-30/message-1-test.txt",
+      "/workspace/workspace/attachments/2026-07-30/message-1-test.txt?project_id=project%2Fnon-default",
     ]]);
   } finally {
     act(() => root.unmount());

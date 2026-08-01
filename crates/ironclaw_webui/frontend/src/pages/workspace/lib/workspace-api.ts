@@ -83,10 +83,16 @@ function looksBinary(bytes) {
   }
 }
 
-function contentUrl(mount, relativePath) {
+function addProjectScope(url, projectId) {
+  if (projectId) url.searchParams.set("project_id", projectId);
+  return url;
+}
+
+function contentUrl(mount, relativePath, projectId) {
   const url = new URL(`${FS_BASE}/content`, window.location.origin);
   url.searchParams.set("mount", mount);
   url.searchParams.set("path", relativePath);
+  addProjectScope(url, projectId);
   return url.pathname + url.search;
 }
 
@@ -98,7 +104,7 @@ export async function listFsMounts() {
 
 // List a directory. An empty qualified path lists the mounts themselves; every
 // returned entry's `path` is qualified so the tree can recurse with it directly.
-export async function listWorkspace(qualifiedPath = "") {
+export async function listWorkspace(qualifiedPath = "", projectId = null) {
   if (!qualifiedPath) {
     // Keep the backend area id in the query cache. Presentation components
     // translate known areas at render time so changing languages updates the
@@ -117,6 +123,7 @@ export async function listWorkspace(qualifiedPath = "") {
   const url = new URL(`${FS_BASE}/list`, window.location.origin);
   url.searchParams.set("mount", mount);
   if (path) url.searchParams.set("path", path);
+  addProjectScope(url, projectId);
   const response = await apiFetch(url.pathname + url.search);
   const entries = (response?.entries || []).map((entry) => ({
     name: entry.name,
@@ -129,7 +136,7 @@ export async function listWorkspace(qualifiedPath = "") {
 // Read a file for preview. Returns a discriminated shape the viewer renders:
 // `{ kind: "text", content, ... }`, `{ kind: "image", image_data_url, ... }`,
 // `{ kind: "binary", download_path, ... }`, or `{ kind: "directory" }`.
-export async function readWorkspaceFile(qualifiedPath) {
+export async function readWorkspaceFile(qualifiedPath, projectId = null) {
   const { mount, path } = splitQualified(qualifiedPath);
   if (!mount || !path) {
     // A mount root is a directory, not a previewable file.
@@ -139,11 +146,12 @@ export async function readWorkspaceFile(qualifiedPath) {
   const statUrl = new URL(`${FS_BASE}/stat`, window.location.origin);
   statUrl.searchParams.set("mount", mount);
   statUrl.searchParams.set("path", path);
+  addProjectScope(statUrl, projectId);
   const statResponse = await apiFetch(statUrl.pathname + statUrl.search);
   const stat = statResponse?.stat || {};
   const mime = stat.mime_type || "application/octet-stream";
   const sizeBytes = Number(stat.size_bytes || 0);
-  const download = contentUrl(mount, path);
+  const download = contentUrl(mount, path, projectId);
   const base = { path: qualifiedPath, mime, size_bytes: sizeBytes, download_path: download };
 
   if (stat.kind && stat.kind !== "file") {

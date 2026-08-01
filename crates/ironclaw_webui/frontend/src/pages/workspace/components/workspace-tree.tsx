@@ -28,6 +28,7 @@ type TreeNodeProps = {
   ) => void;
   positionInSet: number;
   siblingCount: number;
+  projectId?: string | null;
 };
 
 type WorkspaceTreeProps = {
@@ -38,6 +39,7 @@ type WorkspaceTreeProps = {
   onToggleDirectory: (path: string) => void;
   onSelectFile: (path: string) => void;
   isLoading: boolean;
+  projectId?: string | null;
 };
 
 function isUiHiddenWorkspacePath(path = "") {
@@ -78,6 +80,7 @@ const TreeNode = React.memo(function WorkspaceTreeNode({
   onTreeItemKeyDown,
   positionInSet,
   siblingCount,
+  projectId,
 }: TreeNodeProps) {
   const t = useT();
   const treeItemRef = React.useCallback(
@@ -87,8 +90,8 @@ const TreeNode = React.memo(function WorkspaceTreeNode({
   const isExpanded = expandedPaths.has(entry.path);
   const displayName = depth === 0 ? areaDisplayName(entry.path, t) : entry.name;
   const childQuery = useQuery({
-    queryKey: ["workspace-list", entry.path],
-    queryFn: () => listWorkspace(entry.path),
+    queryKey: ["workspace-list", projectId, entry.path],
+    queryFn: () => listWorkspace(entry.path, projectId),
     enabled: entry.is_dir && isExpanded,
   });
 
@@ -161,6 +164,7 @@ const TreeNode = React.memo(function WorkspaceTreeNode({
                     onTreeItemKeyDown={onTreeItemKeyDown}
                     positionInSet={index + 1}
                     siblingCount={children.length}
+                    projectId={projectId}
                   />
                 ))}
           </div>
@@ -290,6 +294,7 @@ export function WorkspaceTree({
   onToggleDirectory,
   onSelectFile,
   isLoading,
+  projectId = null,
 }: WorkspaceTreeProps) {
   const t = useT();
   const rootEntries = sortEntries(
@@ -485,6 +490,7 @@ export function WorkspaceTree({
           onTreeItemKeyDown={onTreeItemKeyDown}
           positionInSet={index + 1}
           siblingCount={rootEntries.length}
+          projectId={projectId}
         />
       ))}
     </div>

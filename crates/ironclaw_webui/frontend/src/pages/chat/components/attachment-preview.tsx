@@ -26,7 +26,7 @@ import { attachmentPreviewMode } from "../lib/attachments";
 // can't jank the modal. The full file is still one Download away.
 const MAX_TEXT_PREVIEW_CHARS = 100_000;
 
-export function AttachmentPreviewModal({ attachment, onClose }) {
+export function AttachmentPreviewModal({ attachment, onClose, projectId }) {
   const t = useT();
   const open = Boolean(attachment);
   // `view` holds the resolved representation: { dataUrl?, frameUrl?, text?,
@@ -40,6 +40,7 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
   // this client-side helper only rejects malformed path syntax.
   const workspaceRoute = workspaceViewerRouteFromFilePath(
     attachment?.workspace_path,
+    projectId,
   );
 
   React.useEffect(() => {

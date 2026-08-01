@@ -80,7 +80,11 @@ export function workspaceFileHrefFromPath(path: unknown): string | null {
 
 export function workspaceViewerRouteFromFilePath(
   path: unknown,
+  projectId?: unknown,
 ): string | null {
   const fileHref = workspaceFileHrefFromPath(path);
-  return fileHref ? `/workspace${fileHref}` : null;
+  if (!fileHref) return null;
+  const route = `/workspace${fileHref}`;
+  if (typeof projectId !== "string" || !projectId) return route;
+  return `${route}?project_id=${encodeURIComponent(projectId)}`;
 }

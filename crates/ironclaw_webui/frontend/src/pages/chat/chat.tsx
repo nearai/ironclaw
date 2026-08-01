@@ -380,6 +380,7 @@ export function Chat({
             onRetryMessage={retryMessage}
             threadId={activeThreadId}
             activeRunId={activeRunId}
+            projectId={activeThread?.project_id || null}
             regressionArtifactExportEnabled={
               regressionArtifactExportEnabled
             }

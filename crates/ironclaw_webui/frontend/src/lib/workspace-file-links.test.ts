@@ -102,4 +102,11 @@ test("workspaceViewerRouteFromFilePath builds a selected-file SPA route", () => 
     workspaceViewerRouteFromFilePath("/workspace/../secret.txt"),
     null,
   );
+  assert.equal(
+    workspaceViewerRouteFromFilePath(
+      "/workspace/report.txt",
+      "project/non-default",
+    ),
+    "/workspace/workspace/report.txt?project_id=project%2Fnon-default",
+  );
 });

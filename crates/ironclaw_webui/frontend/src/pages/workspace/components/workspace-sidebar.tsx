@@ -14,6 +14,7 @@ export function WorkspaceSidebar({
   isLoadingTree,
   onToggleDirectory,
   onSelectFile,
+  projectId = null,
 }) {
   const t = useT();
 
@@ -37,6 +38,7 @@ export function WorkspaceSidebar({
           onToggleDirectory={onToggleDirectory}
           onSelectFile={onSelectFile}
           isLoading={isLoadingTree}
+          projectId={projectId}
         />
       </div>
     </Panel>
