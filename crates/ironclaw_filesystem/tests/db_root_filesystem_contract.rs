@@ -3251,12 +3251,21 @@ mod postgres_tests {
             !remaining.iter().any(|name| name.starts_with("idx_rfs_")),
             "legacy per-declaration triggers must be swept, saw {remaining:?}"
         );
-        assert!(
-            remaining
-                .iter()
-                .any(|name| name == "rfs_ordered_projection_v3_ai"),
-            "the static set must be installed, saw {remaining:?}"
-        );
+        // The whole set, not just the insert trigger: an install that dropped
+        // the update or delete trigger would still project new rows while
+        // silently leaving stale ones behind on replacement and deletion.
+        for required in [
+            "rfs_ordered_projection_v3_ai",
+            "rfs_ordered_projection_v3_au",
+            "rfs_ordered_projection_v3_ad",
+        ] {
+            assert!(
+                remaining.iter().any(|name| name == required),
+                "the static set must install {required}, saw {remaining:?}"
+            );
+        }
+        // And the behavior those triggers exist for, end to end.
+        super::static_projection_update_and_delete_contract(&filesystem, &prefix).await;
     }
 
     #[tokio::test]
