@@ -134,30 +134,6 @@ impl PostgresRootFilesystem {
         }
     }
 
-    /// Run raw SQL against the backend. Test-only: the projection's trigger
-    /// sweep is only observable through the catalog it manipulates, and a
-    /// contract test cannot seed a legacy trigger any other way.
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn execute_raw_for_test(&self, sql: &str) -> Result<(), FilesystemError> {
-        let client = self.client().await?;
-        client.batch_execute(sql).await.map_err(|error| {
-            crate::db::infrastructure_error(FilesystemOperation::EnsureIndex, error.to_string())
-        })
-    }
-
-    /// Collect the first text column of `sql`. Test-only, same rationale.
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn query_raw_names_for_test(
-        &self,
-        sql: &str,
-    ) -> Result<Vec<String>, FilesystemError> {
-        let client = self.client().await?;
-        let rows = client.query(sql, &[]).await.map_err(|error| {
-            crate::db::infrastructure_error(FilesystemOperation::Query, error.to_string())
-        })?;
-        Ok(rows.iter().map(|row| row.get::<_, String>(0)).collect())
-    }
-
     async fn client(&self) -> Result<deadpool_postgres::Object, FilesystemError> {
         self.pool.get().await.map_err(|error| {
             let reason = format!(

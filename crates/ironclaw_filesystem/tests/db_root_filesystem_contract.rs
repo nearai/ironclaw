@@ -2160,6 +2160,22 @@ mod postgres_tests {
     /// so the test passes in environments without a DB. Each test uses a
     /// unique path prefix so concurrent runs against a shared DB don't
     /// interfere.
+    /// A direct connection to the same database `postgres_root` uses. Seeding
+    /// a legacy trigger needs raw SQL, which belongs in the test rather than
+    /// as a test-only method on the production filesystem type.
+    async fn raw_postgres_client() -> tokio_postgres::Client {
+        let url = std::env::var("IRONCLAW_FILESYSTEM_POSTGRES_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .expect("postgres url present when postgres_root yielded a filesystem");
+        let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            .await
+            .expect("connect to postgres");
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        client
+    }
+
     async fn postgres_root() -> Option<(PostgresRootFilesystem, String)> {
         let pool = postgres_pool().await?;
         let fs = PostgresRootFilesystem::new(pool);
@@ -3141,9 +3157,11 @@ mod postgres_tests {
         let Some((filesystem, prefix)) = postgres_root().await else {
             return;
         };
-        // Seed a survivor shaped like the per-declaration generation.
-        filesystem
-            .execute_raw_for_test(
+        // Seed a survivor shaped like the per-declaration generation, over the
+        // test's own connection: production types must not carry test seams.
+        let client = raw_postgres_client().await;
+        client
+            .batch_execute(
                 "CREATE OR REPLACE FUNCTION idx_rfs_legacy_probe_fn() RETURNS trigger                  LANGUAGE plpgsql AS $legacy$ BEGIN                    DELETE FROM root_filesystem_ordered_index_rows WHERE path = NEW.path;                    RETURN NEW; END; $legacy$;                  DROP TRIGGER IF EXISTS idx_rfs_legacy_probe ON root_filesystem_entries;                  CREATE TRIGGER idx_rfs_legacy_probe AFTER INSERT ON root_filesystem_entries                    FOR EACH ROW EXECUTE FUNCTION idx_rfs_legacy_probe_fn();",
             )
             .await
@@ -3161,12 +3179,18 @@ mod postgres_tests {
             .await
             .expect("declaration installs the static set and sweeps legacy triggers");
 
-        let remaining = filesystem
-            .query_raw_names_for_test(
-                "SELECT t.tgname FROM pg_trigger t                  JOIN pg_class c ON c.oid = t.tgrelid                  WHERE c.relname = 'root_filesystem_entries' AND NOT t.tgisinternal                  ORDER BY t.tgname",
+        let remaining = client
+            .query(
+                "SELECT t.tgname FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid \
+                 WHERE c.relname = 'root_filesystem_entries' AND NOT t.tgisinternal \
+                 ORDER BY t.tgname",
+                &[],
             )
             .await
-            .expect("list triggers");
+            .expect("list triggers")
+            .iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect::<Vec<_>>();
         assert!(
             !remaining.iter().any(|name| name.starts_with("idx_rfs_")),
             "legacy per-declaration triggers must be swept, saw {remaining:?}"

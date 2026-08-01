@@ -262,7 +262,7 @@ pub(crate) fn build_cases(suite: StressSuite) -> Vec<SuiteCase> {
     }
 }
 
-fn apply_case(base_args: &Args, case: &SuiteCase, case_args: &mut Args, run_id: &str) {
+pub(crate) fn apply_case(base_args: &Args, case: &SuiteCase, case_args: &mut Args, run_id: &str) {
     case_args.run_id = Some(run_id.to_string());
     case_args.suite = None;
     case_args.preset = case.preset;

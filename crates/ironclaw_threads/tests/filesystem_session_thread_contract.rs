@@ -2175,6 +2175,18 @@ async fn filesystem_list_threads_derives_titles_without_transcript_probes() {
             .unwrap();
     }
 
+    // The first list for a scope also runs the one-time thread-index
+    // migration, which backfills labels for pre-seeding rows and does probe.
+    // Steady state is what write-time seeding is for, so measure the list
+    // after that migration has run.
+    service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
     let reads_before = backend
         .recorded_paths(FilesystemOperation::ReadFile)
         .into_iter()
@@ -2203,7 +2215,8 @@ async fn filesystem_list_threads_derives_titles_without_transcript_probes() {
         .count();
     assert_eq!(
         reads_after, reads_before,
-        "listing must not probe transcripts when titles are seeded at accept time"
+        "steady-state listing must not probe transcripts when titles are seeded \
+         at accept time"
     );
 }
 
@@ -2281,11 +2294,13 @@ async fn filesystem_redaction_clears_the_cached_sidebar_title() {
     );
 }
 
-/// Rows written before write-time seeding existed carry no derived label:
-/// the first list probes the transcript once and persists the label; the
-/// second list must be probe-free.
+/// Rows written before write-time seeding existed carry no derived label, so
+/// listing derives one per request (read-only — repairing the projection from
+/// a list request is what the threads guardrail forbids). The durable backfill
+/// belongs to the explicit thread-index migration, after which listing is
+/// probe-free.
 #[tokio::test]
-async fn filesystem_list_threads_heals_legacy_rows_after_one_probe() {
+async fn filesystem_migration_backfills_legacy_derived_titles() {
     let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
     let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-title-heal", "alice");
     let service = FilesystemSessionThreadService::new(scoped);
@@ -2364,6 +2379,12 @@ async fn filesystem_list_threads_heals_legacy_rows_after_one_probe() {
         "the first list after the strip must probe the transcript"
     );
 
+    // The explicit migration is what makes the label durable.
+    service
+        .migrate_thread_index_for_scope(&scope)
+        .await
+        .expect("thread index migration backfills derived titles");
+
     let before_second = probes(&backend);
     let listed = service
         .list_threads_for_scope(ListThreadsForScopeRequest {
@@ -2376,12 +2397,12 @@ async fn filesystem_list_threads_heals_legacy_rows_after_one_probe() {
     assert_eq!(
         listed.threads[0].title.as_deref(),
         Some("legacy row message"),
-        "healed label serves from the index row"
+        "the backfilled label serves from the index row"
     );
     assert_eq!(
         probes(&backend),
         before_second,
-        "the heal must make subsequent lists probe-free"
+        "after the migration, listing must be probe-free"
     );
 }
 

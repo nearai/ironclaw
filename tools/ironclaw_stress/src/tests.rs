@@ -248,6 +248,41 @@ fn bottleneck_finder_suite_includes_core_pressure_cases() {
     assert!(labels.contains("memory-churn"));
 }
 
+/// The suite regression fix depends on every non-API libSQL case getting its
+/// own database path: sharing the parent's path is what let earlier cases'
+/// still-running pollers contend on the file and invalidate the benchmark.
+/// Existing suite tests only assert case labels, so a regression here would be
+/// silent.
+#[test]
+fn libsql_cases_use_distinct_generated_database_paths() {
+    let mut base = test_args();
+    base.backend = crate::Backend::Libsql;
+    base.libsql_path = None;
+    let cases = suite::build_cases(StressSuite::BottleneckFinder);
+    let mut seen = std::collections::BTreeSet::new();
+    for case in &cases {
+        let mut case_args = base.clone();
+        suite::apply_case(&base, case, &mut case_args, "run-id");
+        if case_args.scenario.is_api_capacity() {
+            continue;
+        }
+        let path = case_args
+            .libsql_path
+            .clone()
+            .expect("every non-API libSQL case gets a generated database path");
+        assert!(
+            seen.insert(path.clone()),
+            "case {} reused database path {}",
+            case.label,
+            path.display()
+        );
+    }
+    assert!(
+        seen.len() > 1,
+        "the suite must exercise more than one isolated libSQL case"
+    );
+}
+
 #[test]
 fn postgres_pool_pressure_suite_includes_remote_pool_cases() {
     let cases = suite::build_cases(StressSuite::PostgresPoolPressure);

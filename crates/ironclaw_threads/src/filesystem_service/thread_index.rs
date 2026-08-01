@@ -457,56 +457,6 @@ where
         Ok(())
     }
 
-    /// One-time heal for index rows that predate write-time title derivation:
-    /// persist the probed label (never bumping activity) so the thread stops
-    /// paying a transcript probe on every list request. Best-effort — listing
-    /// already has the label in hand for this response.
-    pub(super) async fn store_derived_title_best_effort(
-        &self,
-        scope: &ThreadScope,
-        thread_id: &ThreadId,
-        derived_title: String,
-    ) {
-        let path = match thread_index_record_path(scope, thread_id) {
-            Ok(path) => path,
-            Err(error) => {
-                tracing::debug!(?error, "derived-title heal skipped: bad index path");
-                return;
-            }
-        };
-        let resource_scope = scope.to_resource_scope();
-        let derived_title = &derived_title;
-        let result = cas_update(
-            self.filesystem.as_ref(),
-            &resource_scope,
-            &path,
-            |bytes: &[u8]| deserialize::<ThreadIndexRecord>(bytes),
-            |record: &ThreadIndexRecord| Self::thread_index_entry(record),
-            |current: Option<ThreadIndexRecord>| async move {
-                let Some(mut index) = current else {
-                    return Err(SessionThreadError::UnknownThread {
-                        thread_id: thread_id.clone(),
-                    });
-                };
-                if index.record.title.is_some() || index.derived_title.is_some() {
-                    return Ok(CasApply::no_op(index, ()));
-                }
-                index.derived_title = Some(derived_title.clone());
-                Ok(CasApply::new(index, ()))
-            },
-        )
-        .await;
-        if let Err(error) = result {
-            // silent-ok: opportunistic heal; listing already holds the label
-            // for this response and the next request simply probes again.
-            tracing::debug!(
-                thread_id = %thread_id.as_str(),
-                ?error,
-                "derived-title heal failed; the next list request will probe again"
-            );
-        }
-    }
-
     async fn read_thread_index_record(
         &self,
         scope: &ThreadScope,
@@ -622,8 +572,21 @@ where
             .collect::<Result<Vec<_>, _>>()?;
         for thread_id in &thread_ids {
             if let Some((stored, _)) = self.read_thread_versioned(scope, thread_id).await? {
-                self.merge_thread_index_record_declared(Self::thread_index_record(&stored))
-                    .await?;
+                let mut index = Self::thread_index_record(&stored);
+                // Backfill the sidebar label here rather than from a list
+                // request: deriving it costs a transcript probe, and the
+                // listing projection must stay read-only (threads guardrail —
+                // projection backfill is explicit migration work).
+                if index.record.title.is_none() {
+                    index.derived_title = self
+                        .first_user_message_for_title(scope, thread_id, stored.next_sequence)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|message| message.content.as_deref().map(str::to_string))
+                        .and_then(|content| crate::title::derive_title_from_message(&content));
+                }
+                self.merge_thread_index_record_declared(index).await?;
             }
         }
         let source_ids = thread_ids

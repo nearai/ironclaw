@@ -2665,8 +2665,8 @@ where
                     // The write path seeded the label into the index row; the
                     // sidebar entry costs no extra reads.
                     Some(derived) => record.title = Some(derived.clone()),
-                    // Row predates write-time derivation: probe once below and
-                    // heal the index row so this thread never probes again.
+                    // Row predates write-time derivation: probe for this
+                    // response; the migration backfills the label durably.
                     None => needs_title.push((idx, record.thread_id.clone(), index.next_sequence)),
                 }
             }
@@ -2707,11 +2707,11 @@ where
                             .and_then(|message| message.content.as_deref())
                             .and_then(derive_title_from_message)
                         {
-                            page[idx].title = Some(title.clone());
-                            // One-time heal: persist the label so this row
-                            // stops paying the probe on every list request.
-                            self.store_derived_title_best_effort(&request.scope, &thread_id, title)
-                                .await;
+                            // Read-only: the label serves this response but is
+                            // not persisted here. Backfilling it durably is the
+                            // thread-index migration's job (threads guardrail —
+                            // a list request must not repair the projection).
+                            page[idx].title = Some(title);
                         }
                     }
                     Err(error) => {
