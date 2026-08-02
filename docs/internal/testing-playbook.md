@@ -360,9 +360,11 @@ The merged Reborn LCOV report enforces three complementary ratchets:
   baseline (which supersedes the historical 80.81% floor);
 - critical production crates have percentage and covered-line floors in
   [`tests/integration/coverage-floor.toml`](../../tests/integration/coverage-floor.toml);
-- added, instrumentable production lines and branch arms must be covered. The
-  denominator comes from the pull-request diff intersected with LLVM `DA` and
-  `BRDA` records, not from a hand-maintained file list.
+- added, instrumentable production code must meet the committed 95% changed-line
+  and 85% changed-branch floors. The denominator comes from the pull-request
+  diff intersected with LLVM `DA` and `BRDA` records, not from a hand-maintained
+  file list. Missing production coverage and changed files with no measured
+  instrumented lines remain hard failures regardless of the percentage floors.
 
 Changed-code exemptions live in
 [`tests/integration/changed-coverage-exemptions.toml`](../../tests/integration/changed-coverage-exemptions.toml).

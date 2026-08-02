@@ -123,6 +123,67 @@ check_text "line denominator is reported" "Changed line coverage: 100.00% (3/3)"
 check_text "branch denominator is reported" "Changed branch coverage: 100.00% (2/2)"
 check_report_text "machine report preserves the branch denominator" '"instrumented_branches": 2'
 
+echo "▶ committed-style percentage floors"
+cat >"${work}/policy.toml" <<'TOML'
+[policy]
+line_percent = 95.0
+branch_percent = 85.0
+TOML
+threshold_lines=20
+: >"${case_root}/${source_path}"
+: >"${work}/change.diff"
+printf '%s\n' \
+  "diff --git a/${source_path} b/${source_path}" \
+  "--- /dev/null" \
+  "+++ b/${source_path}" \
+  "@@ -0,0 +1,${threshold_lines} @@" >>"${work}/change.diff"
+for line in $(seq 1 "${threshold_lines}"); do
+  printf 'pub fn threshold_line_%s() {}\n' "${line}" >>"${case_root}/${source_path}"
+  printf '+pub fn threshold_line_%s() {}\n' "${line}" >>"${work}/change.diff"
+done
+write_threshold_lcov() {
+  local line_19_hits="$1" line_20_hits="$2" branch_17_hits="$3"
+  printf 'SF:%s\n' "${case_root}/${source_path}" >"${work}/coverage.lcov"
+  for line in $(seq 1 18); do
+    printf 'DA:%s,1\n' "${line}" >>"${work}/coverage.lcov"
+  done
+  printf 'DA:19,%s\nDA:20,%s\n' "${line_19_hits}" "${line_20_hits}" \
+    >>"${work}/coverage.lcov"
+  for line in $(seq 1 16); do
+    printf 'BRDA:%s,0,0,1\n' "${line}" >>"${work}/coverage.lcov"
+  done
+  printf 'BRDA:17,0,0,%s\n' "${branch_17_hits}" >>"${work}/coverage.lcov"
+  for line in 18 19 20; do
+    printf 'BRDA:%s,0,0,0\n' "${line}" >>"${work}/coverage.lcov"
+  done
+  printf 'LF:20\nBRF:20\nend_of_record\n' >>"${work}/coverage.lcov"
+}
+
+write_threshold_lcov 1 0 1
+run_gate
+check_rc "95% changed lines and 85% changed branches pass at the floors" 0
+check_text "line floor denominator is reported" "Changed line coverage: 95.00% (19/20)"
+check_text "branch floor denominator is reported" "Changed branch coverage: 85.00% (17/20)"
+check_report_text "machine report records the 95% line floor" '"threshold_percent": 95.0'
+check_report_text "machine report records the 85% branch floor" '"branch_threshold_percent": 85.0'
+
+write_threshold_lcov 0 0 1
+run_gate
+check_rc "changed-line coverage below 95% fails" 1
+check_text "line-floor failure names the committed threshold" "line coverage 90.00% is below 95.0%"
+
+write_threshold_lcov 1 0 0
+run_gate
+check_rc "changed-branch coverage below 85% fails" 1
+check_text "branch-floor failure names the committed threshold" "branch coverage 80.00% is below 85.0%"
+
+printf '%s\n' 'pub fn classify(value: bool) -> bool {' '    value' '}' >"${case_root}/${source_path}"
+cat >"${work}/policy.toml" <<'TOML'
+[policy]
+line_percent = 100.0
+branch_percent = 100.0
+TOML
+
 echo "▶ diff markers inside hunk content are parsed by their first byte"
 cat >"${work}/change.diff" <<'DIFF'
 diff --git a/crates/ironclaw_demo/src/lib.rs b/crates/ironclaw_demo/src/lib.rs
