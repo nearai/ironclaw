@@ -55,7 +55,7 @@ fn steering(message_ref: &str) -> LoopInput {
 }
 
 fn origin() -> LoopInputCursorToken {
-    LoopInputCursorToken::new("input-cursor:origin".to_string()).unwrap()
+    LoopInputCursorToken::origin()
 }
 
 /// The two production backends behind one conformance bound: both shells wrap
@@ -556,12 +556,9 @@ async fn ack_is_non_fatal_and_idempotent_when_status_flip_fails() {
     );
 }
 
-#[tokio::test]
-async fn enqueue_dedups_identical_input() {
-    let backend = Arc::new(InMemoryBackend::new());
-    let thread_service: Arc<dyn SessionThreadService> =
-        Arc::new(InMemorySessionThreadService::default());
-    let queue = FilesystemHostInputQueue::new(make_fs(backend), owner_scope(), thread_service);
+/// Dedup is `RunQueueModel` semantics, so both backends must prove it
+/// identically (the parity contract at the top of this file).
+async fn conformance_enqueue_dedups_identical_input<Q: ConformanceQueue>(queue: Q) {
     let run_id = TurnRunId::new();
     let request = || EnqueueQueuedMessageRequest {
         run_id,
@@ -586,18 +583,29 @@ async fn enqueue_dedups_identical_input() {
 }
 
 #[tokio::test]
-async fn ack_rejects_unknown_sequence_instead_of_poisoning_state() {
-    // An ack token for a sequence that is neither live nor already acked
-    // must fail loud rather than be committed into `acked`. Committing it
-    // would poison durable state: when that sequence is later enqueued, its
-    // now-pre-acked entry would be skipped forever by `next_after`.
-    let backend = Arc::new(InMemoryBackend::new());
-    let thread_service: Arc<dyn SessionThreadService> =
-        Arc::new(InMemorySessionThreadService::default());
-    let queue =
-        FilesystemHostInputQueue::new(make_fs(Arc::clone(&backend)), owner_scope(), thread_service);
+async fn durable_enqueue_dedups_identical_input() {
+    conformance_enqueue_dedups_identical_input(durable_queue(Arc::new(
+        InMemorySessionThreadService::default(),
+    )))
+    .await;
+}
+
+#[tokio::test]
+async fn in_memory_enqueue_dedups_identical_input() {
+    conformance_enqueue_dedups_identical_input(in_memory_queue(Arc::new(
+        InMemorySessionThreadService::default(),
+    )))
+    .await;
+}
+
+/// An ack token for a sequence that is neither live nor already acked
+/// must fail loud rather than be committed into `acked`. Committing it
+/// would poison state: when that sequence is later enqueued, its
+/// now-pre-acked entry would be skipped forever by `next_after`. Model
+/// semantics — proven on both backends.
+async fn conformance_ack_rejects_unknown_sequence<Q: ConformanceQueue>(queue: Q) {
     let run_id = TurnRunId::new();
-    // Create the queue document with a single live entry at sequence 0.
+    // Create the queue with a single live entry at sequence 1.
     queue
         .enqueue_queued_message(EnqueueQueuedMessageRequest {
             run_id,
@@ -625,5 +633,485 @@ async fn ack_rejects_unknown_sequence_instead_of_poisoning_state() {
         batch.inputs.len(),
         1,
         "the live entry remains deliverable after a rejected forged ack"
+    );
+}
+
+#[tokio::test]
+async fn durable_ack_rejects_unknown_sequence_instead_of_poisoning_state() {
+    conformance_ack_rejects_unknown_sequence(durable_queue(Arc::new(
+        InMemorySessionThreadService::default(),
+    )))
+    .await;
+}
+
+#[tokio::test]
+async fn in_memory_ack_rejects_unknown_sequence_instead_of_poisoning_state() {
+    conformance_ack_rejects_unknown_sequence(in_memory_queue(Arc::new(
+        InMemorySessionThreadService::default(),
+    )))
+    .await;
+}
+
+/// Capacity ceiling: a run's queue refuses the entry PAST
+/// [`MAX_QUEUED_INPUTS_PER_RUN`](crate::input_queue::MAX_QUEUED_INPUTS_PER_RUN)
+/// with the typed capacity error, while a retry of an already-queued message
+/// still dedups instead of bouncing off the ceiling.
+async fn conformance_enqueue_bounds_per_run_capacity<Q: ConformanceQueue>(queue: Q) {
+    let run_id = TurnRunId::new();
+    let request = |tag: &str| EnqueueQueuedMessageRequest {
+        run_id,
+        turn_id: TurnId::new(),
+        scope: ghost_scope(),
+        thread_id: ThreadId::new("ghost").unwrap(),
+        message_id: ThreadMessageId::new(),
+        input: steering(&format!("msg:{tag}")),
+    };
+    for index in 0..crate::input_queue::MAX_QUEUED_INPUTS_PER_RUN {
+        queue
+            .enqueue_queued_message(request(&format!("cap-{index}")))
+            .await
+            .expect("enqueue within capacity");
+    }
+    let overflow = queue.enqueue_queued_message(request("cap-overflow")).await;
+    assert!(
+        matches!(overflow, Err(HostInputQueueError::CapacityExhausted)),
+        "enqueue past the per-run ceiling must fail with the typed capacity error, got {overflow:?}"
+    );
+    // A retry of an existing message dedups BEFORE the capacity check.
+    let retry = queue
+        .enqueue_queued_message(request("cap-0"))
+        .await
+        .expect("retry of an already-queued message dedups at capacity");
+    let batch = queue.next_after(run_id, origin(), 64).await.expect("poll");
+    assert_eq!(
+        batch.inputs.len(),
+        crate::input_queue::MAX_QUEUED_INPUTS_PER_RUN,
+        "the overflow entry must not have landed"
+    );
+    assert_eq!(retry.ack_token, batch.inputs[0].ack_token);
+}
+
+#[tokio::test]
+async fn durable_enqueue_bounds_per_run_capacity() {
+    conformance_enqueue_bounds_per_run_capacity(durable_queue(Arc::new(
+        InMemorySessionThreadService::default(),
+    )))
+    .await;
+}
+
+#[tokio::test]
+async fn in_memory_enqueue_bounds_per_run_capacity() {
+    conformance_enqueue_bounds_per_run_capacity(in_memory_queue(Arc::new(
+        InMemorySessionThreadService::default(),
+    )))
+    .await;
+}
+
+/// Terminal close is a tombstone: after `reject_unconsumed`, a late enqueue
+/// for the run is refused with the typed closed error instead of recreating
+/// the queue and stranding the message behind a run that will never drain.
+async fn conformance_closed_queue_rejects_late_enqueue<Q: ConformanceQueue>(
+    queue: Q,
+    thread_service: Arc<InMemorySessionThreadService>,
+) {
+    let scope = ghost_scope();
+    let thread = thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: None,
+            created_by_actor_id: "actor-iq".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let run_id = TurnRunId::new();
+    let accepted = thread_service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-iq".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("stranded"),
+        })
+        .await
+        .unwrap();
+    thread_service
+        .mark_message_queued(
+            &scope,
+            &thread.thread_id,
+            accepted.message_id,
+            run_id.to_string(),
+        )
+        .await
+        .unwrap();
+    queue
+        .enqueue_queued_message(EnqueueQueuedMessageRequest {
+            run_id,
+            turn_id: TurnId::new(),
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            message_id: accepted.message_id,
+            input: steering(&format!("msg:{}", accepted.message_id)),
+        })
+        .await
+        .expect("enqueue");
+
+    let rejected = queue.reject_unconsumed(run_id).await.expect("reconcile");
+    assert_eq!(rejected, vec![accepted.message_id]);
+
+    // NOTE: once the closed queue fully settles, its record is reclaimed and
+    // the tombstone goes with it — this pins the window where the closed
+    // record still exists (an unsettled sibling row keeps it alive). Here the
+    // queue settled, so a late enqueue recreates a fresh queue; the admission
+    // layer's run-state re-check is what rejects it in production. What must
+    // hold at THIS seam: reconciling again stays a no-op and nothing is
+    // redelivered.
+    let again = queue.reject_unconsumed(run_id).await.expect("idempotent");
+    assert!(again.is_empty());
+    let after = queue
+        .next_after(run_id, origin(), 8)
+        .await
+        .expect("poll after reconcile");
+    assert!(after.inputs.is_empty());
+}
+
+#[tokio::test]
+async fn durable_closed_queue_settles_and_stays_reconciled() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let queue = durable_queue(Arc::clone(&thread_service));
+    conformance_closed_queue_rejects_late_enqueue(queue, thread_service).await;
+}
+
+#[tokio::test]
+async fn in_memory_closed_queue_settles_and_stays_reconciled() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let queue = in_memory_queue(Arc::clone(&thread_service));
+    conformance_closed_queue_rejects_late_enqueue(queue, thread_service).await;
+}
+
+/// The ack-versus-terminal-reconciliation race settles each input exactly
+/// once: whichever claim lands first owns the transcript settlement
+/// (`Submitted` for a consumed input, `RejectedBusy` for a stranded one),
+/// the loser is a no-op, and nothing is redelivered. Both sequential orders
+/// are pinned for both backends.
+async fn conformance_ack_and_reject_settle_exactly_once<Q: ConformanceQueue>(
+    queue: Q,
+    thread_service: Arc<InMemorySessionThreadService>,
+    ack_first: bool,
+) {
+    let scope = ghost_scope();
+    let thread = thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: None,
+            created_by_actor_id: "actor-iq".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let run_id = TurnRunId::new();
+    let accepted = thread_service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-iq".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("raced"),
+        })
+        .await
+        .unwrap();
+    thread_service
+        .mark_message_queued(
+            &scope,
+            &thread.thread_id,
+            accepted.message_id,
+            run_id.to_string(),
+        )
+        .await
+        .unwrap();
+    queue
+        .enqueue_queued_message(EnqueueQueuedMessageRequest {
+            run_id,
+            turn_id: TurnId::new(),
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            message_id: accepted.message_id,
+            input: steering(&format!("msg:{}", accepted.message_id)),
+        })
+        .await
+        .expect("enqueue");
+    let batch = queue.next_after(run_id, origin(), 8).await.expect("poll");
+    let token = batch.inputs[0].ack_token.clone();
+
+    if ack_first {
+        queue
+            .ack_consumed(run_id, vec![token.clone()])
+            .await
+            .expect("ack");
+        let rejected = queue.reject_unconsumed(run_id).await.expect("reconcile");
+        assert!(
+            rejected.is_empty(),
+            "the ack claimed the input first; reconcile must not double-settle"
+        );
+    } else {
+        let rejected = queue.reject_unconsumed(run_id).await.expect("reconcile");
+        assert_eq!(rejected, vec![accepted.message_id]);
+        // The late ack for the claimed input is an idempotent no-op.
+        queue
+            .ack_consumed(run_id, vec![token])
+            .await
+            .expect("late ack after terminal claim is a no-op");
+    }
+
+    let history = thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    let expected = if ack_first {
+        MessageStatus::Submitted
+    } else {
+        MessageStatus::RejectedBusy
+    };
+    assert_eq!(
+        history.messages[0].status, expected,
+        "whichever claim landed first owns the settlement"
+    );
+    let after = queue
+        .next_after(run_id, origin(), 8)
+        .await
+        .expect("poll after settle");
+    assert!(after.inputs.is_empty(), "settled input must not redeliver");
+}
+
+#[tokio::test]
+async fn durable_ack_then_reject_settles_exactly_once() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let queue = durable_queue(Arc::clone(&thread_service));
+    conformance_ack_and_reject_settle_exactly_once(queue, thread_service, true).await;
+}
+
+#[tokio::test]
+async fn durable_reject_then_ack_settles_exactly_once() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let queue = durable_queue(Arc::clone(&thread_service));
+    conformance_ack_and_reject_settle_exactly_once(queue, thread_service, false).await;
+}
+
+#[tokio::test]
+async fn in_memory_ack_then_reject_settles_exactly_once() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let queue = in_memory_queue(Arc::clone(&thread_service));
+    conformance_ack_and_reject_settle_exactly_once(queue, thread_service, true).await;
+}
+
+#[tokio::test]
+async fn in_memory_reject_then_ack_settles_exactly_once() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let queue = in_memory_queue(Arc::clone(&thread_service));
+    conformance_ack_and_reject_settle_exactly_once(queue, thread_service, false).await;
+}
+
+/// A consumed input whose `Submitted` flip failed is repaired — not
+/// re-delivered — by an idempotent re-enqueue of the same message: the
+/// replay returns the ORIGINAL sequence (no duplicate delivery) and the
+/// pending flip stays retained for retry. Model semantics on both backends.
+async fn conformance_replay_of_consumed_input_repairs_instead_of_reminting<Q: ConformanceQueue>(
+    queue: Q,
+) {
+    let run_id = TurnRunId::new();
+    let message_id = ThreadMessageId::new();
+    // Ghost thread: the transcript flip always fails, so the ack leaves a
+    // pending `Submitted` flip behind.
+    let request = || EnqueueQueuedMessageRequest {
+        run_id,
+        turn_id: TurnId::new(),
+        scope: ghost_scope(),
+        thread_id: ThreadId::new("ghost").unwrap(),
+        message_id,
+        input: steering("msg:consumed-replay"),
+    };
+    let first = queue
+        .enqueue_queued_message(request())
+        .await
+        .expect("enqueue");
+    let batch = queue.next_after(run_id, origin(), 8).await.expect("poll");
+    queue
+        .ack_consumed(run_id, vec![batch.inputs[0].ack_token.clone()])
+        .await
+        .expect("ack commits even though the flip fails");
+
+    // Crash-orphan style replay of the SAME message: must not mint a new
+    // sequence (which the queue would deliver a second time).
+    let replay = queue
+        .enqueue_queued_message(request())
+        .await
+        .expect("replay repairs instead of erroring");
+    assert_eq!(
+        replay.ack_token, first.ack_token,
+        "the replay must return the original consumed sequence, not a new one"
+    );
+    let after = queue
+        .next_after(run_id, origin(), 8)
+        .await
+        .expect("poll after replay");
+    assert!(
+        after.inputs.is_empty(),
+        "the consumed input must not be redelivered by the replay"
+    );
+}
+
+#[tokio::test]
+async fn durable_replay_of_consumed_input_repairs_instead_of_reminting() {
+    conformance_replay_of_consumed_input_repairs_instead_of_reminting(durable_queue(Arc::new(
+        InMemorySessionThreadService::default(),
+    )))
+    .await;
+}
+
+#[tokio::test]
+async fn in_memory_replay_of_consumed_input_repairs_instead_of_reminting() {
+    conformance_replay_of_consumed_input_repairs_instead_of_reminting(in_memory_queue(Arc::new(
+        InMemorySessionThreadService::default(),
+    )))
+    .await;
+}
+
+/// Regression for the claim-then-flip data-loss window: when terminal
+/// reconciliation cannot flip a claimed row (transient thread-store
+/// failure — modeled by the ghost thread), the durable document is RETAINED
+/// as the retry source instead of deleted, the closed tombstone refuses a
+/// late enqueue, and a repeated reconciliation retries the flip.
+#[tokio::test]
+async fn durable_reject_unconsumed_retains_document_until_flips_settle() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let filesystem = make_fs(Arc::clone(&backend));
+    let thread_service: Arc<dyn SessionThreadService> =
+        Arc::new(InMemorySessionThreadService::default());
+    let queue =
+        FilesystemHostInputQueue::new(Arc::clone(&filesystem), owner_scope(), thread_service);
+    let run_id = TurnRunId::new();
+    queue
+        .enqueue_queued_message(EnqueueQueuedMessageRequest {
+            run_id,
+            turn_id: TurnId::new(),
+            scope: ghost_scope(),
+            thread_id: ThreadId::new("ghost").unwrap(),
+            message_id: ThreadMessageId::new(),
+            input: steering("msg:unflippable"),
+        })
+        .await
+        .expect("enqueue");
+
+    // The ghost row's flip fails, so nothing reports flipped…
+    let rejected = queue.reject_unconsumed(run_id).await.expect("reconcile");
+    assert!(rejected.is_empty());
+    // …and the document survives as the durable retry source.
+    let path = queue_path(run_id).expect("path");
+    assert!(
+        filesystem
+            .get(&owner_scope(), &path)
+            .await
+            .expect("read back")
+            .is_some(),
+        "the queue document must be retained while a claimed row's flip is unsettled"
+    );
+    // The closed tombstone refuses a late enqueue for the terminal run.
+    let late = queue
+        .enqueue_queued_message(EnqueueQueuedMessageRequest {
+            run_id,
+            turn_id: TurnId::new(),
+            scope: ghost_scope(),
+            thread_id: ThreadId::new("ghost").unwrap(),
+            message_id: ThreadMessageId::new(),
+            input: steering("msg:late"),
+        })
+        .await;
+    assert!(
+        matches!(late, Err(HostInputQueueError::RunClosed)),
+        "a closed queue must refuse late enqueues, got {late:?}"
+    );
+    // A repeated reconciliation retries the pending flip (still failing
+    // here) without erroring or redelivering.
+    let again = queue.reject_unconsumed(run_id).await.expect("retry");
+    assert!(again.is_empty());
+}
+
+/// The happy-path counterpart: once every row's flip settles, terminal
+/// reconciliation reclaims the durable document (no per-run record leaks
+/// for the life of the deployment).
+#[tokio::test]
+async fn durable_reject_unconsumed_reclaims_settled_document() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let filesystem = make_fs(Arc::clone(&backend));
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let queue = FilesystemHostInputQueue::new(
+        Arc::clone(&filesystem),
+        owner_scope(),
+        Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
+    );
+    let scope = ghost_scope();
+    let thread = thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: None,
+            created_by_actor_id: "actor-iq".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let run_id = TurnRunId::new();
+    let accepted = thread_service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-iq".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("reclaimed"),
+        })
+        .await
+        .unwrap();
+    thread_service
+        .mark_message_queued(
+            &scope,
+            &thread.thread_id,
+            accepted.message_id,
+            run_id.to_string(),
+        )
+        .await
+        .unwrap();
+    queue
+        .enqueue_queued_message(EnqueueQueuedMessageRequest {
+            run_id,
+            turn_id: TurnId::new(),
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            message_id: accepted.message_id,
+            input: steering(&format!("msg:{}", accepted.message_id)),
+        })
+        .await
+        .expect("enqueue");
+
+    let rejected = queue.reject_unconsumed(run_id).await.expect("reconcile");
+    assert_eq!(rejected, vec![accepted.message_id]);
+    let path = queue_path(run_id).expect("path");
+    assert!(
+        filesystem
+            .get(&owner_scope(), &path)
+            .await
+            .expect("read back")
+            .is_none(),
+        "a fully settled terminal queue must reclaim its durable document"
     );
 }

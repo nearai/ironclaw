@@ -40,9 +40,10 @@ use ironclaw_threads::{SessionThreadService, ThreadMessageId};
 use ironclaw_turns::TurnRunId;
 
 use crate::input_queue::{
-    EnqueueQueuedMessageRequest, HostInputBatch, HostInputEnqueuePort, HostInputEnvelope,
-    HostInputQueue, HostInputQueueError, HostInputQueueReconcile, QueuedMessageStatusUpdate,
-    RunQueueModel, cursor_sequence, envelope_for, flip_rejected_busy, flip_submitted,
+    EnqueueDisposition, EnqueueQueuedMessageRequest, HostInputBatch, HostInputEnqueuePort,
+    HostInputEnvelope, HostInputQueue, HostInputQueueError, HostInputQueueReconcile,
+    QueuedMessageStatusUpdate, RunQueueModel, cursor_sequence, envelope_for, flip_rejected_busy,
+    flip_submitted,
 };
 
 /// Bounds the CAS retry loop so persistent contention surfaces as a host error
@@ -146,6 +147,80 @@ where
             Err(error) => Err(StorePutError::Fatal(fs_error(error))),
         }
     }
+
+    /// Record the flips that succeeded, reclaiming the document once the
+    /// model is settled (closed with nothing left to flip). Best-effort: the
+    /// flips themselves already landed, so a failure here only means the
+    /// pending-flip state is retried once more by a later operation.
+    async fn confirm_flips(
+        &self,
+        run_id: TurnRunId,
+        submitted: &[u64],
+        rejected: &[ThreadMessageId],
+    ) {
+        if submitted.is_empty() && rejected.is_empty() {
+            return;
+        }
+        for _ in 0..MAX_CAS_RETRIES {
+            let (mut model, version) = match self.load(run_id).await {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    tracing::debug!(
+                        component = "host_input_queue",
+                        operation = "confirm_flips",
+                        %run_id,
+                        %error,
+                        "failed to reload durable queue to confirm status flips; \
+                         confirmed flips will be retried once more by a later operation"
+                    );
+                    return;
+                }
+            };
+            let Some(version) = version else {
+                return;
+            };
+            model.confirm_submit_flips(submitted);
+            model.confirm_reject_flips(rejected);
+            let result = if model.is_settled() {
+                let path = match queue_path(run_id) {
+                    Ok(path) => path,
+                    // silent-ok: the path was already valid for `load` above;
+                    // this arm is unreachable in practice.
+                    Err(_) => return,
+                };
+                self.filesystem
+                    .delete_if_version(&self.owner_scope, &path, version)
+                    .await
+                    .map_err(|error| match error {
+                        FilesystemError::VersionMismatch { .. } => StorePutError::Conflict,
+                        other => StorePutError::Fatal(fs_error(other)),
+                    })
+            } else {
+                self.store(run_id, &model, Some(version)).await
+            };
+            match result {
+                Ok(()) => return,
+                Err(StorePutError::Conflict) => continue,
+                Err(StorePutError::Fatal(error)) => {
+                    tracing::debug!(
+                        component = "host_input_queue",
+                        operation = "confirm_flips",
+                        %run_id,
+                        %error,
+                        "failed to persist status-flip confirmation; \
+                         confirmed flips will be retried once more by a later operation"
+                    );
+                    return;
+                }
+            }
+        }
+        tracing::debug!(
+            component = "host_input_queue",
+            operation = "confirm_flips",
+            %run_id,
+            "durable queue flip confirmation exhausted CAS retries"
+        );
+    }
 }
 
 #[async_trait]
@@ -165,14 +240,29 @@ where
         };
         for _ in 0..MAX_CAS_RETRIES {
             let (mut model, version) = self.load(request.run_id).await?;
-            let enqueued = model.enqueue_dedup(request.input.clone(), status.clone());
-            if !enqueued.inserted {
-                return envelope_for(enqueued.sequence, request.input);
-            }
-            match self.store(request.run_id, &model, version).await {
-                Ok(()) => return envelope_for(enqueued.sequence, request.input),
-                Err(StorePutError::Conflict) => continue,
-                Err(StorePutError::Fatal(error)) => return Err(error),
+            match model.enqueue_dedup(request.input.clone(), status.clone())? {
+                EnqueueDisposition::Inserted { sequence } => {
+                    match self.store(request.run_id, &model, version).await {
+                        Ok(()) => return envelope_for(sequence, request.input),
+                        Err(StorePutError::Conflict) => continue,
+                        Err(StorePutError::Fatal(error)) => return Err(error),
+                    }
+                }
+                EnqueueDisposition::Duplicate { sequence } => {
+                    // Nothing changed: no write, no CAS.
+                    return envelope_for(sequence, request.input);
+                }
+                EnqueueDisposition::AlreadyConsumed { flip } => {
+                    // Idempotent replay of a consumed message whose
+                    // `Submitted` flip is still pending: repair the stale row
+                    // instead of re-minting a sequence (duplicate delivery).
+                    let sequence = flip.sequence;
+                    let flipped =
+                        flip_submitted(self.thread_service.as_ref(), request.run_id, vec![flip])
+                            .await;
+                    self.confirm_flips(request.run_id, &flipped, &[]).await;
+                    return envelope_for(sequence, request.input);
+                }
             }
         }
         Err(cas_exhausted("enqueue"))
@@ -209,7 +299,7 @@ where
         // Phase 1: durably record the acks (CAS retry). The cursor ack is the
         // load-bearing transition — its failure is a genuine durable-IO fault
         // and is surfaced, so the run does not silently drop a consumed input.
-        let mut status_updates = Vec::new();
+        let mut due_flips = Vec::new();
         let mut committed = false;
         for _ in 0..MAX_CAS_RETRIES {
             let (mut model, version) = self.load(run_id).await?;
@@ -217,10 +307,14 @@ where
                 // No durable queue for this run: nothing to ack.
                 return Ok(());
             };
-            status_updates = model.validate_and_ack(&tokens)?;
-            if status_updates.is_empty() {
-                // Every token was a redelivered duplicate: idempotent no-op.
-                return Ok(());
+            let outcome = model.validate_and_ack(&tokens)?;
+            due_flips = outcome.due_flips;
+            if !outcome.newly_acked {
+                // Every token was a redelivered duplicate (or the queue is
+                // closed): the model is unchanged — nothing to persist, but
+                // stale pending flips from an earlier failure still retry.
+                committed = true;
+                break;
             }
             match self.store(run_id, &model, Some(version)).await {
                 Ok(()) => {
@@ -234,8 +328,13 @@ where
         if !committed {
             return Err(cas_exhausted("ack_consumed"));
         }
-        // Phase 2: best-effort transcript flip (see the shared helper's doc).
-        flip_submitted(self.thread_service.as_ref(), run_id, status_updates).await;
+        if due_flips.is_empty() {
+            return Ok(());
+        }
+        // Phase 2: best-effort transcript flip (see the shared helper's doc);
+        // confirmed flips are pruned from the pending-retry state.
+        let flipped = flip_submitted(self.thread_service.as_ref(), run_id, due_flips).await;
+        self.confirm_flips(run_id, &flipped, &[]).await;
         Ok(())
     }
 }
@@ -249,40 +348,61 @@ where
         &self,
         run_id: TurnRunId,
     ) -> Result<Vec<ThreadMessageId>, HostInputQueueError> {
-        // Phase 1: durably claim every live entry by DELETING the run's queue
-        // document under its CAS version — the run is terminal, so nothing may
-        // enqueue for it again, a racing drain can no longer load the claimed
-        // entries, and a late duplicate ack finds no document (a no-op). This
-        // is also the durable lifetime bound: terminal queues do not
-        // accumulate documents forever.
-        let mut status_updates = Vec::new();
+        // Phase 1: durably CLOSE the queue and claim every live entry (CAS).
+        // The closed document rejects late enqueues and no-ops late duplicate
+        // acks, while a racing drain can no longer load the claimed entries.
+        // The document is NOT deleted yet: it stays the durable retry source
+        // until every claimed row's transcript flip lands, so a transient
+        // thread-store failure here cannot strand rows `Queued` with nothing
+        // left to reconcile from.
+        let mut submit_flips = Vec::new();
+        let mut reject_flips = Vec::new();
         let mut committed = false;
         for _ in 0..MAX_CAS_RETRIES {
-            let (model, version) = self.load(run_id).await?;
+            let (mut model, version) = self.load(run_id).await?;
             let Some(version) = version else {
                 // No durable queue for this run: nothing to reconcile.
                 return Ok(Vec::new());
             };
-            status_updates = model.unacked_status_updates();
-            let path = queue_path(run_id)?;
-            match self
-                .filesystem
-                .delete_if_version(&self.owner_scope, &path, version)
-                .await
-            {
+            model.close_and_claim();
+            submit_flips = model.due_submit_flips();
+            reject_flips = model.due_reject_flips();
+            if model.is_settled() {
+                // Nothing left to flip: reclaim the document immediately.
+                let path = queue_path(run_id)?;
+                match self
+                    .filesystem
+                    .delete_if_version(&self.owner_scope, &path, version)
+                    .await
+                {
+                    Ok(()) => return Ok(Vec::new()),
+                    Err(FilesystemError::VersionMismatch { .. }) => continue,
+                    Err(error) => return Err(fs_error(error)),
+                }
+            }
+            match self.store(run_id, &model, Some(version)).await {
                 Ok(()) => {
                     committed = true;
                     break;
                 }
-                Err(FilesystemError::VersionMismatch { .. }) => continue,
-                Err(error) => return Err(fs_error(error)),
+                Err(StorePutError::Conflict) => continue,
+                Err(StorePutError::Fatal(error)) => return Err(error),
             }
         }
         if !committed {
             return Err(cas_exhausted("reject_unconsumed"));
         }
-        // Phase 2: best-effort transcript flip (see the shared helper's doc).
-        Ok(flip_rejected_busy(self.thread_service.as_ref(), run_id, status_updates).await)
+        // Phase 2: best-effort transcript flips (see the shared helpers'
+        // docs) — consumed-but-unflipped rows converge to `Submitted`,
+        // claimed rows to `RejectedBusy`. Confirmation reclaims the document
+        // once everything settled; anything unconfirmed is retried by a
+        // repeated reconciliation over the retained document.
+        let submitted = flip_submitted(self.thread_service.as_ref(), run_id, submit_flips).await;
+        let reject_outcome =
+            flip_rejected_busy(self.thread_service.as_ref(), run_id, reject_flips).await;
+        self.confirm_flips(run_id, &submitted, &reject_outcome.confirmable())
+            .await;
+        Ok(reject_outcome.flipped)
     }
 }
 

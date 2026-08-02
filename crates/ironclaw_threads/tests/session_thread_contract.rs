@@ -2999,15 +2999,19 @@ async fn append_finalized_assistant_message_is_finalized_and_idempotent_by_turn_
         })
         .await
         .unwrap();
-    // Idempotency baseline: a retry of the SAME finalized content reuses the
-    // existing record. (A DIFFERENT finalized reply in the same run appends a
-    // sibling instead — a steered run replies more than once; asserted below.)
+    // Idempotency baseline: a retry of the SAME finalized content — text AND
+    // attachment refs — reuses the existing record. (A DIFFERENT finalized
+    // reply in the same run appends a sibling instead — a steered run replies
+    // more than once; asserted below.)
     let duplicate = service
         .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
             scope: scope("a"),
             thread_id: thread.thread_id.clone(),
             turn_run_id: "run-finalized".into(),
-            content: MessageContent::text("final answer"),
+            content: MessageContent::with_attachments(
+                "final answer",
+                vec![sample_attachment_ref()],
+            ),
         })
         .await
         .unwrap();
@@ -3072,12 +3076,123 @@ async fn append_finalized_assistant_message_is_finalized_and_idempotent_by_turn_
     let history = service
         .list_thread_history(ThreadHistoryRequest {
             scope: scope("a"),
-            thread_id: thread.thread_id,
+            thread_id: thread.thread_id.clone(),
         })
         .await
         .unwrap();
     assert_eq!(history.messages.len(), 2);
     assert_eq!(history.messages[1].message_id, sibling.message_id);
+
+    // Attachment identity: the SAME text with a DIFFERENT attachment set is
+    // neither the same reply (reuse would silently drop the new attachment
+    // refs) nor a steered second reply (a sibling would duplicate the visible
+    // bubble). It is a mismatched replay and must fail loud — the loop
+    // transcript port pins the caller-visible rejection
+    // (`finalized_assistant_attachment_retry_rejects_mismatched_refs`).
+    let mismatch = service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-finalized".into(),
+            content: MessageContent::with_attachments(
+                "steered second answer",
+                vec![second_attachment_ref()],
+            ),
+        })
+        .await;
+    assert!(
+        matches!(
+            mismatch,
+            Err(SessionThreadError::InvalidMessageTransition { message_id, .. })
+                if message_id == sibling.message_id
+        ),
+        "attachment-mismatched finalized replay must fail loud, got {mismatch:?}"
+    );
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        history.messages.len(),
+        2,
+        "the mismatched replay must not append a duplicate visible reply"
+    );
+    assert!(
+        history.messages[1].attachments.is_empty(),
+        "the mismatched replay must not overwrite the finalized row's attachments"
+    );
+}
+
+#[tokio::test]
+async fn read_thread_message_reads_present_rows_and_maps_lookup_misses_to_none() {
+    let service = InMemorySessionThreadService::default();
+    let read_scope = scope("read-message");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: read_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-read-message").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: read_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: user_message("hello"),
+        })
+        .await
+        .unwrap();
+
+    let present = service
+        .read_thread_message(&read_scope, &thread.thread_id, accepted.message_id)
+        .await
+        .unwrap()
+        .expect("accepted message is point-readable");
+    assert_eq!(present.message_id, accepted.message_id);
+    assert_eq!(present.content.as_deref(), Some("hello"));
+
+    // Genuine lookup misses — unknown message, unknown thread, and a thread
+    // hidden by scope isolation — all read as absence, matching the
+    // filesystem backend's point-read contract.
+    assert!(
+        service
+            .read_thread_message(&read_scope, &thread.thread_id, ThreadMessageId::new())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        service
+            .read_thread_message(
+                &read_scope,
+                &ThreadId::new("thread-read-message-missing").unwrap(),
+                accepted.message_id,
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        service
+            .read_thread_message(
+                &scope("read-message-other"),
+                &thread.thread_id,
+                accepted.message_id,
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -3960,6 +4075,20 @@ fn sample_attachment_ref() -> AttachmentRef {
         // resolves through — not a raw host path.
         storage_key: Some("/workspace/attachments/2026-06-09/m1-report.pdf".into()),
         extracted_text: Some("quarterly numbers".into()),
+    }
+}
+
+/// A second, distinct attachment ref for reuse-identity cases: same shape as
+/// [`sample_attachment_ref`], different landed file.
+fn second_attachment_ref() -> AttachmentRef {
+    AttachmentRef {
+        id: "att-2".into(),
+        kind: AttachmentKind::Document,
+        mime_type: "application/pdf".into(),
+        filename: Some("addendum.pdf".into()),
+        size_bytes: Some(1024),
+        storage_key: Some("/workspace/attachments/2026-06-09/m2-addendum.pdf".into()),
+        extracted_text: Some("revised numbers".into()),
     }
 }
 

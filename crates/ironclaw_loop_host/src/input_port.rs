@@ -152,6 +152,16 @@ fn host_queue_error_into_host_error(error: HostInputQueueError) -> AgentLoopHost
             AgentLoopHostErrorKind::Unavailable,
             "input queue is not wired for this runtime",
         ),
+        // Enqueue-side refusals (`RunClosed`, `CapacityExhausted`) never
+        // reach the loop's drain/ack port either; mapped for exhaustiveness.
+        HostInputQueueError::RunClosed => AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "input queue for the run is closed",
+        ),
+        HostInputQueueError::CapacityExhausted => AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "input queue for the run is full",
+        ),
         HostInputQueueError::Internal => AgentLoopHostError::new(
             AgentLoopHostErrorKind::Internal,
             "input queue internal error",

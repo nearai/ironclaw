@@ -1261,6 +1261,9 @@ impl RebornIntegrationGroupBuilder {
             input_queue: Some(
                 host_input_queue.clone() as Arc<dyn ironclaw_loop_host::HostInputQueue>
             ),
+            input_queue_reconcile: Some(
+                host_input_queue.clone() as Arc<dyn ironclaw_loop_host::HostInputQueueReconcile>
+            ),
             identity_context_source: Arc::new(EmptyIdentityContextSource),
             // E-PROFILE / E-MEMORY: the ONE effective profile source (also
             // stashed on `GroupSharedStorage`, so

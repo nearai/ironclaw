@@ -6479,10 +6479,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
 ///      auto-resubmission as a separate run).
 ///  C – submitted after A is cancelled; thread is free → `Submitted`.
 ///
-/// arch-note: lives in runtime.rs (adds ~200 lines to an already >3000-line file) because
-/// it requires `build_reborn_runtime` + full turn-runner control that only the runtime test
-/// harness provides; moving it would require duplicating that harness. Decomposition of
-/// runtime.rs is tracked in plan #4471.
+// arch-exempt: large_file, requires `build_reborn_runtime` + full turn-runner control that only this runtime test harness provides — moving it would duplicate the harness, plan #4471
 #[tokio::test]
 async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
     let root = tempfile::tempdir().expect("tempdir");

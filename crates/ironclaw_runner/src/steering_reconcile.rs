@@ -10,19 +10,35 @@
 //! cancel, automation) inherits the reconciliation: after a successful
 //! `cancel_run`, the run's undrained queue entries are claimed and their rows
 //! flipped `Queued` → `RejectedBusy` (resend affordance, never auto-resubmit)
-//! via [`HostInputQueue::reject_unconsumed`].
+//! via [`HostInputQueueReconcile::reject_unconsumed`].
 //!
-//! The flip is best-effort by design — the cancel outcome must never be failed
-//! or delayed by transcript bookkeeping. A run that consumed an input first
-//! keeps its `Submitted` row (`reject_unconsumed` claims-then-flips, so the
-//! race resolves to whichever side acked first). Runs that reach `Failed`
-//! without a cancel are not reconciled here; their queued rows remain the
-//! documented stranded-terminal gap.
+//! [`SteeringReconcilingProcessTransitions`] applies the same reconciliation
+//! at the other choke point — the ONE composed
+//! [`ProcessTransitionPort`](ironclaw_processes::ProcessTransitionPort) every
+//! terminal run transition flows through (loop-exit completion, failure,
+//! cancellation, and the executor/scheduler failure fallbacks) — so a run
+//! that reaches `Completed` or `Failed` without a cancel also reclaims its
+//! queue record and settles any stranded rows, instead of leaking one queue
+//! record per steered run for the life of the deployment.
+//!
+//! The flip is best-effort by design — the terminal outcome must never be
+//! failed or delayed by transcript bookkeeping. A run that consumed an input
+//! first keeps its `Submitted` row (`reject_unconsumed` claims-then-flips, so
+//! the race resolves to whichever side claimed first, and a consumed row
+//! whose `Submitted` flip is still pending is repaired rather than
+//! rejected).
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_host_api::ids::ProcessId;
 use ironclaw_loop_host::HostInputQueueReconcile;
+use ironclaw_processes::{
+    ClaimProcessesRequest, ClaimedProcess, FailProcessRequest, JournaledProcessSnapshot,
+    ProcessJournalCursor, ProcessLeaseRequest, ProcessStateTransitionRequest,
+    ProcessTransitionPort, RecoverExpiredProcessLeasesRequest, RecoverExpiredProcessLeasesResponse,
+    SuspendProcessRequest,
+};
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
     RetryTurnRequest, RetryTurnResponse, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator,
@@ -107,6 +123,134 @@ impl TurnCoordinator for CancelReconcilingTurnCoordinator {
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         self.inner.get_run_state(request).await
+    }
+}
+
+/// [`ProcessTransitionPort`] decorator that reconciles the run's steering
+/// queue after every successful terminal transition (`complete_process`,
+/// `fail_process`, `cancel_process`). Non-terminal methods forward untouched.
+///
+/// This is the reclamation path for runs that end WITHOUT a cancel: the
+/// (idempotent) `reject_unconsumed` closes the run's queue, settles any rows
+/// still `Queued`, and reclaims the per-run queue record once settled — so
+/// normally-completed steered runs do not accumulate queue records. Process
+/// ids are the run uuid (`process_id_from_turn_run_id` in `ironclaw_turns`),
+/// so the run identity is recovered from the transition request.
+pub struct SteeringReconcilingProcessTransitions<E> {
+    inner: Arc<dyn ProcessTransitionPort<Error = E>>,
+    input_queue: Arc<dyn HostInputQueueReconcile>,
+}
+
+impl<E> SteeringReconcilingProcessTransitions<E> {
+    pub fn new(
+        inner: Arc<dyn ProcessTransitionPort<Error = E>>,
+        input_queue: Arc<dyn HostInputQueueReconcile>,
+    ) -> Self {
+        Self { inner, input_queue }
+    }
+
+    /// Best-effort post-terminal reconciliation: the terminal transition is
+    /// already committed and must not be failed or delayed by transcript
+    /// bookkeeping.
+    async fn reconcile(&self, process_id: &ProcessId, operation: &'static str) {
+        let run_id = TurnRunId::from_uuid(process_id.as_uuid());
+        match self.input_queue.reject_unconsumed(run_id).await {
+            Ok(rejected) if !rejected.is_empty() => {
+                debug!(
+                    %run_id,
+                    operation,
+                    rejected = rejected.len(),
+                    "flipped stranded queued messages to rejected-busy after terminal transition"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                // silent-ok: post-terminal best-effort reconciliation; the
+                // terminal outcome is already settled and must not be failed
+                // or delayed by transcript bookkeeping — the retained queue
+                // record keeps the rows reconcilable.
+                debug!(
+                    %run_id,
+                    operation,
+                    error = %error,
+                    "steering-queue reconciliation after terminal transition failed; \
+                     queued rows may lag"
+                );
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl<E> ProcessTransitionPort for SteeringReconcilingProcessTransitions<E>
+where
+    E: Send + Sync + 'static,
+{
+    type Error = E;
+
+    async fn claim_next_processes(
+        &self,
+        request: ClaimProcessesRequest,
+    ) -> Result<Vec<ClaimedProcess>, Self::Error> {
+        self.inner.claim_next_processes(request).await
+    }
+
+    async fn heartbeat_process(
+        &self,
+        request: ProcessLeaseRequest,
+    ) -> Result<ProcessJournalCursor, Self::Error> {
+        self.inner.heartbeat_process(request).await
+    }
+
+    async fn recover_expired_process_leases(
+        &self,
+        request: RecoverExpiredProcessLeasesRequest,
+    ) -> Result<RecoverExpiredProcessLeasesResponse, Self::Error> {
+        self.inner.recover_expired_process_leases(request).await
+    }
+
+    async fn suspend_process(
+        &self,
+        request: SuspendProcessRequest,
+    ) -> Result<JournaledProcessSnapshot, Self::Error> {
+        self.inner.suspend_process(request).await
+    }
+
+    async fn complete_process(
+        &self,
+        request: ProcessStateTransitionRequest,
+    ) -> Result<JournaledProcessSnapshot, Self::Error> {
+        let process_id = request.lease.process_id;
+        let snapshot = self.inner.complete_process(request).await?;
+        self.reconcile(&process_id, "complete_process").await;
+        Ok(snapshot)
+    }
+
+    async fn cancel_process(
+        &self,
+        request: ProcessStateTransitionRequest,
+    ) -> Result<JournaledProcessSnapshot, Self::Error> {
+        let process_id = request.lease.process_id;
+        let snapshot = self.inner.cancel_process(request).await?;
+        self.reconcile(&process_id, "cancel_process").await;
+        Ok(snapshot)
+    }
+
+    async fn fail_process(
+        &self,
+        request: FailProcessRequest,
+    ) -> Result<JournaledProcessSnapshot, Self::Error> {
+        let process_id = request.process_id;
+        let snapshot = self.inner.fail_process(request).await?;
+        self.reconcile(&process_id, "fail_process").await;
+        Ok(snapshot)
+    }
+
+    async fn relinquish_process(
+        &self,
+        request: ProcessLeaseRequest,
+    ) -> Result<JournaledProcessSnapshot, Self::Error> {
+        self.inner.relinquish_process(request).await
     }
 }
 
@@ -252,5 +396,330 @@ mod tests {
 
         assert!(matches!(result, Err(TurnError::Unauthorized)));
         assert_eq!(queue.calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// A queue that fails every reconciliation — the failure-isolation double
+    /// `RecordingQueue` (always `Ok`) cannot reach the decorators' `Err` arms.
+    struct FailingQueue {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl HostInputQueueReconcile for FailingQueue {
+        async fn reject_unconsumed(
+            &self,
+            _run_id: TurnRunId,
+        ) -> Result<Vec<ThreadMessageId>, HostInputQueueError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(HostInputQueueError::Unavailable {
+                reason: "scripted reconcile failure".to_string(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_reconciliation_does_not_fail_the_successful_cancel() {
+        // The decorator's contract: reconciliation is best-effort — a
+        // successful cancellation stays successful when the queue's
+        // reject_unconsumed fails.
+        let run_id = TurnRunId::new();
+        let queue = Arc::new(FailingQueue {
+            calls: AtomicUsize::new(0),
+        });
+        let coordinator = CancelReconcilingTurnCoordinator::new(
+            Arc::new(ScriptedCancelCoordinator {
+                cancel_result: StdMutex::new(Some(Ok(cancelled_response(run_id)))),
+            }),
+            queue.clone(),
+        );
+
+        let response = coordinator
+            .cancel_run(cancel_request(run_id))
+            .await
+            .expect("cancel outcome survives the failed reconciliation");
+
+        assert_eq!(response.status, TurnStatus::Cancelled);
+        assert_eq!(queue.calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod transition_decorator_tests {
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use ironclaw_host_api::{
+        ids::{InvocationId, TenantId, UserId},
+        resource::ResourceScope,
+        turn::SanitizedFailure,
+    };
+    use ironclaw_loop_host::HostInputQueueError;
+    use ironclaw_processes::{
+        ProcessJournalCursor, ProcessKind, ProcessLeaseToken, ProcessLifecycleStatus,
+        ProcessWorkerId,
+    };
+    use ironclaw_threads::ThreadMessageId;
+    use ironclaw_turns::{TurnError, TurnRunId};
+
+    use super::*;
+
+    fn scope() -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new("tenant-reconcile").expect("tenant"),
+            user_id: UserId::new("user-reconcile").expect("user"),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    fn snapshot(process_id: ProcessId, status: ProcessLifecycleStatus) -> JournaledProcessSnapshot {
+        JournaledProcessSnapshot {
+            process_id,
+            process_kind: ProcessKind::AgentTurn,
+            scope: scope(),
+            status,
+            suspension: None,
+            checkpoint_ref: None,
+            input_ref: None,
+            failure: None,
+            journal_cursor: ProcessJournalCursor(0),
+            lease: None,
+            crash_reclaim_count: 0,
+            created_at: chrono::Utc::now(),
+            owner_user_id: None,
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    fn lease(process_id: ProcessId) -> ProcessLeaseRequest {
+        ProcessLeaseRequest {
+            process_id,
+            worker_id: ProcessWorkerId::from_trusted("worker-reconcile"),
+            lease_token: ProcessLeaseToken::from_trusted("lease-reconcile"),
+        }
+    }
+
+    fn transition_request(process_id: ProcessId) -> ProcessStateTransitionRequest {
+        ProcessStateTransitionRequest {
+            lease: lease(process_id),
+            metadata: None,
+        }
+    }
+
+    /// Forwards terminal transitions with a scripted terminal status; panics
+    /// on the non-terminal methods the decorator must forward untouched
+    /// (exercised separately via `suspend`).
+    struct ScriptedTransitions;
+
+    #[async_trait]
+    impl ProcessTransitionPort for ScriptedTransitions {
+        type Error = TurnError;
+
+        async fn claim_next_processes(
+            &self,
+            _request: ClaimProcessesRequest,
+        ) -> Result<Vec<ClaimedProcess>, Self::Error> {
+            Ok(Vec::new())
+        }
+
+        async fn heartbeat_process(
+            &self,
+            request: ProcessLeaseRequest,
+        ) -> Result<ProcessJournalCursor, Self::Error> {
+            let _ = request;
+            Ok(ProcessJournalCursor(0))
+        }
+
+        async fn recover_expired_process_leases(
+            &self,
+            _request: RecoverExpiredProcessLeasesRequest,
+        ) -> Result<RecoverExpiredProcessLeasesResponse, Self::Error> {
+            panic!("recover_expired_process_leases is not used by these tests")
+        }
+
+        async fn suspend_process(
+            &self,
+            request: SuspendProcessRequest,
+        ) -> Result<JournaledProcessSnapshot, Self::Error> {
+            Ok(snapshot(
+                request.process_id,
+                ProcessLifecycleStatus::Suspended,
+            ))
+        }
+
+        async fn complete_process(
+            &self,
+            request: ProcessStateTransitionRequest,
+        ) -> Result<JournaledProcessSnapshot, Self::Error> {
+            Ok(snapshot(
+                request.lease.process_id,
+                ProcessLifecycleStatus::Completed,
+            ))
+        }
+
+        async fn cancel_process(
+            &self,
+            request: ProcessStateTransitionRequest,
+        ) -> Result<JournaledProcessSnapshot, Self::Error> {
+            Ok(snapshot(
+                request.lease.process_id,
+                ProcessLifecycleStatus::Cancelled,
+            ))
+        }
+
+        async fn fail_process(
+            &self,
+            request: FailProcessRequest,
+        ) -> Result<JournaledProcessSnapshot, Self::Error> {
+            Ok(snapshot(request.process_id, ProcessLifecycleStatus::Failed))
+        }
+
+        async fn relinquish_process(
+            &self,
+            request: ProcessLeaseRequest,
+        ) -> Result<JournaledProcessSnapshot, Self::Error> {
+            Ok(snapshot(request.process_id, ProcessLifecycleStatus::Queued))
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingQueue {
+        reconciled_runs: StdMutex<Vec<TurnRunId>>,
+    }
+
+    #[async_trait]
+    impl HostInputQueueReconcile for RecordingQueue {
+        async fn reject_unconsumed(
+            &self,
+            run_id: TurnRunId,
+        ) -> Result<Vec<ThreadMessageId>, HostInputQueueError> {
+            self.reconciled_runs.lock().expect("lock").push(run_id);
+            Ok(Vec::new())
+        }
+    }
+
+    fn decorated(
+        queue: Arc<dyn HostInputQueueReconcile>,
+    ) -> SteeringReconcilingProcessTransitions<TurnError> {
+        SteeringReconcilingProcessTransitions::new(Arc::new(ScriptedTransitions), queue)
+    }
+
+    #[tokio::test]
+    async fn every_terminal_transition_reconciles_the_run_queue() {
+        // The reclamation guarantee: Completed and Failed runs (not only
+        // cancels) close and reclaim their steering queue.
+        let queue = Arc::new(RecordingQueue::default());
+        let port = decorated(queue.clone());
+
+        let complete_run = TurnRunId::new();
+        port.complete_process(transition_request(ProcessId::from_uuid(
+            complete_run.as_uuid(),
+        )))
+        .await
+        .expect("complete forwards");
+
+        let failed_run = TurnRunId::new();
+        port.fail_process(FailProcessRequest {
+            process_id: ProcessId::from_uuid(failed_run.as_uuid()),
+            worker_id: ProcessWorkerId::from_trusted("worker-reconcile"),
+            lease_token: ProcessLeaseToken::from_trusted("lease-reconcile"),
+            failure: SanitizedFailure::from_trusted_static("unknown_failure"),
+            recovery: Default::default(),
+            checkpoint_ref: None,
+            metadata: None,
+        })
+        .await
+        .expect("fail forwards");
+
+        let cancelled_run = TurnRunId::new();
+        port.cancel_process(transition_request(ProcessId::from_uuid(
+            cancelled_run.as_uuid(),
+        )))
+        .await
+        .expect("cancel forwards");
+
+        assert_eq!(
+            *queue.reconciled_runs.lock().expect("lock"),
+            vec![complete_run, failed_run, cancelled_run],
+            "every terminal transition must reconcile the run's queue, keyed by the run id"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_terminal_transitions_do_not_touch_the_queue() {
+        let queue = Arc::new(RecordingQueue::default());
+        let port = decorated(queue.clone());
+        let run_id = TurnRunId::new();
+
+        port.suspend_process(SuspendProcessRequest {
+            process_id: ProcessId::from_uuid(run_id.as_uuid()),
+            worker_id: ProcessWorkerId::from_trusted("worker-reconcile"),
+            lease_token: ProcessLeaseToken::from_trusted("lease-reconcile"),
+            checkpoint_ref: ironclaw_processes::ProcessCheckpointRef::from_trusted(
+                "checkpoint-reconcile",
+            ),
+            suspension: suspension(),
+            metadata: None,
+        })
+        .await
+        .expect("suspend forwards");
+        port.heartbeat_process(lease(ProcessId::from_uuid(run_id.as_uuid())))
+            .await
+            .expect("heartbeat forwards");
+
+        assert!(
+            queue.reconciled_runs.lock().expect("lock").is_empty(),
+            "non-terminal transitions must not reconcile the queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_reconciliation_does_not_fail_the_terminal_transition() {
+        struct FailingQueue {
+            calls: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl HostInputQueueReconcile for FailingQueue {
+            async fn reject_unconsumed(
+                &self,
+                _run_id: TurnRunId,
+            ) -> Result<Vec<ThreadMessageId>, HostInputQueueError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(HostInputQueueError::Unavailable {
+                    reason: "scripted reconcile failure".to_string(),
+                })
+            }
+        }
+
+        let queue = Arc::new(FailingQueue {
+            calls: AtomicUsize::new(0),
+        });
+        let port = decorated(queue.clone());
+        let run_id = TurnRunId::new();
+
+        let snapshot = port
+            .complete_process(transition_request(ProcessId::from_uuid(run_id.as_uuid())))
+            .await
+            .expect("the committed terminal transition survives the failed reconciliation");
+
+        assert_eq!(snapshot.status, ProcessLifecycleStatus::Completed);
+        assert_eq!(queue.calls.load(Ordering::SeqCst), 1);
+    }
+
+    fn suspension() -> ironclaw_processes::ProcessSuspension {
+        ironclaw_processes::ProcessSuspension {
+            kind: ironclaw_processes::ProcessSuspensionKind::Approval,
+            gate_ref: None,
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        }
     }
 }

@@ -97,7 +97,7 @@ pub use input_port::HostQueueLoopInputPort;
 pub use input_queue::{
     EnqueueQueuedMessageRequest, HostInputBatch, HostInputEnqueuePort, HostInputEnvelope,
     HostInputQueue, HostInputQueueError, HostInputQueueReconcile, InMemoryHostInputQueue,
-    RejectingInputEnqueue,
+    MAX_QUEUED_INPUTS_PER_RUN, RejectingInputEnqueue,
 };
 pub use ironclaw_loop_contracts::PromptContextTokenBudget;
 pub use model_visible_scrub::scrub_model_visible_detail;
@@ -2279,7 +2279,16 @@ fn coalesced_user_message_ref(
     first.as_str().hash(&mut hasher);
     next.as_str().hash(&mut hasher);
     let hash = hasher.finish();
-    LoopMessageRef::new(format!("msg:coalesced.{hash:016x}")).map_err(|_| {
+    let candidate = format!("msg:coalesced.{hash:016x}");
+    LoopMessageRef::new(candidate.as_str()).map_err(|error| {
+        // Keep the concrete validation failure server-side; the candidate is a
+        // synthetic hash-derived ref, so logging it exposes no user content.
+        // The returned error stays sanitized.
+        tracing::debug!(
+            error = %error,
+            candidate = %candidate,
+            "coalesced user message ref failed loop-ref validation"
+        );
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::Internal,
             "coalesced user message reference could not be represented",

@@ -27,7 +27,7 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, GetRunStateRequest, LoopMessageRef, TurnCoordinator, TurnError, TurnRunId,
-    TurnRunState, TurnScope,
+    TurnRunState, TurnScope, TurnStatus,
 };
 
 /// One busy-thread message targeting one active run.
@@ -54,9 +54,10 @@ pub(crate) enum SteeringAdmission {
     /// active run, whose state snapshot rides along so callers never need a
     /// second `get_run_state` to build their response.
     Deferred { run: Box<TurnRunState> },
-    /// Steering cannot serve this message — the queue is disabled, the run's
-    /// profile disallows steering, or the run is terminal/gone — and the row
-    /// has been settled `RejectedBusy` (resend affordance).
+    /// Steering cannot serve this message — the queue is disabled, closed by
+    /// terminal reconciliation, or at capacity; the run's profile disallows
+    /// steering; or the run is terminal/cancelling/gone — and the row has
+    /// been settled `RejectedBusy` (resend affordance).
     Rejected,
 }
 
@@ -114,7 +115,7 @@ where
     }
     match try_enqueue(input_enqueue, &request, &run).await {
         Ok(()) => Ok(SteeringAdmission::Deferred { run: Box::new(run) }),
-        Err(EnqueueFailure::Disabled) => {
+        Err(EnqueueFailure::Unserviceable) => {
             settle_rejected(thread_service, &request).await?;
             Ok(SteeringAdmission::Rejected)
         }
@@ -159,7 +160,7 @@ where
     };
     match try_enqueue(input_enqueue, &request, &run).await {
         Ok(()) => Ok(SteeringAdmission::Deferred { run: Box::new(run) }),
-        Err(EnqueueFailure::Disabled) => {
+        Err(EnqueueFailure::Unserviceable) => {
             settle_rejected(thread_service, &request).await?;
             Ok(SteeringAdmission::Rejected)
         }
@@ -168,8 +169,12 @@ where
 }
 
 /// The active run's state when it can still consume steering input; `None`
-/// when the run is gone from scope, terminal, or its resolved profile
-/// disallows steering — every case where queueing would strand the message.
+/// when the run is gone from scope, terminal, already cancel-requested, or
+/// its resolved profile disallows steering — every case where queueing would
+/// strand the message. `CancelRequested` counts as unserviceable even though
+/// it is nonterminal: the caller was already told the run is cancelling, so
+/// its next drain (if any) exists only to wind down — queueing new input
+/// behind it races the cancel reconciler for a run that will never serve it.
 async fn serviceable_run<C>(
     turn_coordinator: &C,
     request: &SteeringAdmissionRequest,
@@ -188,7 +193,10 @@ where
         Err(TurnError::ScopeNotFound) => return Ok(None),
         Err(error) => return Err(SteeringAdmissionError::RunState(error)),
     };
-    if run.status.is_terminal() || !run.allow_steering {
+    if run.status.is_terminal()
+        || matches!(run.status, TurnStatus::CancelRequested)
+        || !run.allow_steering
+    {
         return Ok(None);
     }
     Ok(Some(run))
@@ -280,8 +288,12 @@ async fn settle_rejected(
 }
 
 enum EnqueueFailure {
-    /// Steering is deliberately not wired for this runtime.
-    Disabled,
+    /// The queue refused the message in a way that settles it as
+    /// rejected-busy: steering is deliberately not wired for this runtime,
+    /// the run's queue was closed by terminal reconciliation, or the run's
+    /// queue is at capacity. Never an operational failure — those stay
+    /// `Fatal` so they surface as retryable errors.
+    Unserviceable,
     Fatal(SteeringAdmissionError),
 }
 
@@ -306,9 +318,217 @@ async fn try_enqueue(
         .await
     {
         Ok(_) => Ok(()),
-        Err(HostInputQueueError::Disabled) => Err(EnqueueFailure::Disabled),
+        Err(
+            HostInputQueueError::Disabled
+            | HostInputQueueError::RunClosed
+            | HostInputQueueError::CapacityExhausted,
+        ) => Err(EnqueueFailure::Unserviceable),
         Err(error) => Err(EnqueueFailure::Fatal(SteeringAdmissionError::Enqueue(
             error,
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use ironclaw_host_api::ids::{AgentId, TenantId, UserId};
+    use ironclaw_loop_host::{EnqueueQueuedMessageRequest, HostInputEnvelope};
+    use ironclaw_threads::{
+        AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService,
+        MessageContent, ThreadHistoryRequest,
+    };
+    use ironclaw_turns::{
+        CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest,
+        ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, SubmitTurnRequest,
+        SubmitTurnResponse, TurnStatus,
+    };
+
+    use super::*;
+
+    /// Coordinator double returning one scripted run state; the admission
+    /// path only ever calls `get_run_state`.
+    struct ScriptedRunStateCoordinator {
+        state: TurnRunState,
+    }
+
+    #[async_trait]
+    impl TurnCoordinator for ScriptedRunStateCoordinator {
+        async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+            panic!("prepare_turn is not used by steering admission")
+        }
+
+        async fn submit_turn(
+            &self,
+            _request: SubmitTurnRequest,
+        ) -> Result<SubmitTurnResponse, TurnError> {
+            panic!("submit_turn is not used by steering admission")
+        }
+
+        async fn resume_turn(
+            &self,
+            _request: ResumeTurnRequest,
+        ) -> Result<ResumeTurnResponse, TurnError> {
+            panic!("resume_turn is not used by steering admission")
+        }
+
+        async fn retry_turn(
+            &self,
+            _request: RetryTurnRequest,
+        ) -> Result<RetryTurnResponse, TurnError> {
+            panic!("retry_turn is not used by steering admission")
+        }
+
+        async fn cancel_run(
+            &self,
+            _request: CancelRunRequest,
+        ) -> Result<CancelRunResponse, TurnError> {
+            panic!("cancel_run is not used by steering admission")
+        }
+
+        async fn get_run_state(
+            &self,
+            _request: GetRunStateRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Ok(self.state.clone())
+        }
+    }
+
+    /// Enqueue double that must never be reached by an unserviceable run.
+    #[derive(Default)]
+    struct CountingEnqueue {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl HostInputEnqueuePort for CountingEnqueue {
+        async fn enqueue_queued_message(
+            &self,
+            _request: EnqueueQueuedMessageRequest,
+        ) -> Result<HostInputEnvelope, HostInputQueueError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(HostInputQueueError::Disabled)
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_requested_run_is_not_serviceable_and_settles_rejected() {
+        // `CancelRequested` is nonterminal but the caller was already told
+        // the run is cancelling and the cancel reconciler will close its
+        // queue: admitting steering behind it would strand the message (or
+        // race the reconciler). Admission must settle `RejectedBusy` without
+        // touching the enqueue port.
+        let thread_service = InMemorySessionThreadService::default();
+        let thread_scope = ThreadScope {
+            tenant_id: TenantId::new("tenant-steer").expect("tenant"),
+            agent_id: AgentId::new("agent-steer").expect("agent"),
+            project_id: None,
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let thread = thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope.clone(),
+                thread_id: None,
+                created_by_actor_id: "actor-steer".into(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("thread");
+        let accepted = thread_service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: thread_scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-steer".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: None,
+                content: MessageContent::text("too late to steer"),
+            })
+            .await
+            .expect("accept");
+
+        let run_id = TurnRunId::new();
+        let turn_scope = TurnScope::new(
+            thread_scope.tenant_id.clone(),
+            Some(thread_scope.agent_id.clone()),
+            None,
+            thread.thread_id.clone(),
+        );
+        let accepted_message_ref =
+            AcceptedMessageRef::new(format!("msg:{}", accepted.message_id)).expect("message ref");
+        let mut state = sample_run_state(turn_scope.clone(), run_id, &accepted_message_ref);
+        state.status = TurnStatus::CancelRequested;
+        let coordinator = ScriptedRunStateCoordinator { state };
+        let enqueue = CountingEnqueue::default();
+
+        let admission = admit_busy_steering(
+            &coordinator,
+            &enqueue,
+            &thread_service,
+            SteeringAdmissionRequest {
+                turn_scope,
+                thread_scope: thread_scope.clone(),
+                message_id: accepted.message_id,
+                accepted_message_ref,
+                active_run_id: run_id,
+            },
+        )
+        .await
+        .expect("admission settles");
+
+        assert!(matches!(admission, SteeringAdmission::Rejected));
+        assert_eq!(
+            enqueue.calls.load(Ordering::SeqCst),
+            0,
+            "no steering input may be enqueued behind a cancel-requested run"
+        );
+        let history = thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope,
+                thread_id: thread.thread_id,
+            })
+            .await
+            .expect("history");
+        assert_eq!(history.messages[0].status, MessageStatus::RejectedBusy);
+    }
+
+    fn sample_run_state(
+        scope: TurnScope,
+        run_id: TurnRunId,
+        accepted_message_ref: &AcceptedMessageRef,
+    ) -> TurnRunState {
+        use ironclaw_turns::{
+            EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion, SourceBindingRef,
+            TurnActor, TurnId,
+        };
+        TurnRunState {
+            scope,
+            actor: Some(TurnActor::new(UserId::new("user-steer").expect("user"))),
+            turn_id: TurnId::new(),
+            run_id,
+            status: TurnStatus::Running,
+            accepted_message_ref: accepted_message_ref.clone(),
+            source_binding_ref: SourceBindingRef::new("binding:steer").expect("source binding"),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:steer")
+                .expect("reply binding"),
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            allow_steering: true,
+            resolved_model_route: None,
+            model_usage: None,
+            received_at: chrono::Utc::now(),
+            checkpoint_id: None,
+            gate_ref: None,
+            blocked_activity_id: None,
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor: EventCursor::default(),
+            product_context: None,
+            resume_disposition: None,
+        }
     }
 }

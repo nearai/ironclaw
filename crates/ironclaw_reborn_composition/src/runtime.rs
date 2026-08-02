@@ -3545,6 +3545,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
     let host_input_queue_for_cancel_reconcile: Arc<
         dyn ironclaw_loop_host::HostInputQueueReconcile,
     > = host_input_queue.clone();
+    let host_input_queue_for_terminal_reconcile: Arc<
+        dyn ironclaw_loop_host::HostInputQueueReconcile,
+    > = host_input_queue.clone();
     let host_input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort> = host_input_queue;
 
     #[cfg(feature = "test-support")]
@@ -3622,6 +3625,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         cancellation_factory: None,
         skill_context_source,
         input_queue: Some(host_input_queue_reader),
+        input_queue_reconcile: Some(host_input_queue_for_terminal_reconcile),
         identity_context_source: match (
             services.standalone_storage_root.clone(),
             services.default_system_prompt_path.clone(),

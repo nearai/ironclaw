@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use ironclaw_host_api::ids::ThreadId;
 use ironclaw_loop_contracts::{LoopInput, LoopInputAckToken, LoopInputCursorToken};
-use ironclaw_threads::{SessionThreadService, ThreadMessageId, ThreadScope};
+use ironclaw_threads::{MessageStatus, SessionThreadService, ThreadMessageId, ThreadScope};
 use ironclaw_turns::{TurnId, TurnRunId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -109,9 +109,29 @@ pub enum HostInputQueueError {
     /// errors instead of masquerading as successful rejections.
     #[error("input queue is not wired for this runtime")]
     Disabled,
+    /// The run's queue was closed by terminal reconciliation: the run will
+    /// never drain again, so accepting the input would strand it. Callers
+    /// settle the message as rejected-busy (resend affordance), like
+    /// [`Self::Disabled`] — and unlike [`Self::Unavailable`], which stays a
+    /// retryable operational failure.
+    #[error("input queue for the run is closed")]
+    RunClosed,
+    /// The run's queue is at [`MAX_QUEUED_INPUTS_PER_RUN`]. A run can sit
+    /// busy indefinitely (e.g. parked on an approval gate), so an unbounded
+    /// queue would grow durable state and rewrite amplification without
+    /// limit. Callers settle the message as rejected-busy (resend
+    /// affordance).
+    #[error("input queue for the run is full")]
+    CapacityExhausted,
     #[error("input queue internal error")]
     Internal,
 }
+
+/// Ceiling on live (unconsumed) queued inputs per run. Steering inputs are
+/// small fixed-shape refs (`LoopInput::Steering { message_ref }`), so an entry
+/// count bound also bounds serialized size; 32 is far beyond any interactive
+/// use while keeping the durable document's rewrite-per-enqueue cost trivial.
+pub const MAX_QUEUED_INPUTS_PER_RUN: usize = 32;
 
 #[async_trait]
 pub trait HostInputEnqueuePort: Send + Sync {
@@ -119,12 +139,20 @@ pub trait HostInputEnqueuePort: Send + Sync {
     ///
     /// The request carries the originating thread message identity so the queue
     /// can transition that message to `submitted` once the input is consumed.
-    /// That transition is BEST-EFFORT transcript bookkeeping: input
-    /// consumption/ack is never rolled back when the status write fails (a
-    /// stale `Queued` badge is reconcilable; a dead run is not), and the
-    /// failure is logged at debug level. There is deliberately no
-    /// metadata-free variant: every enqueued input is backed by a thread
-    /// message, so the transition can never be silently *omitted*.
+    /// That transition is BEST-EFFORT per attempt: input consumption/ack is
+    /// never rolled back when the status write fails (a stale `Queued` badge
+    /// is recoverable; a dead run is not) — the failure is logged at debug
+    /// level and the binding is RETAINED as a pending flip, retried by later
+    /// queue operations and by terminal reconciliation, so the row converges
+    /// to `Submitted` by run end rather than being silently dropped. There is
+    /// deliberately no metadata-free variant: every enqueued input is backed
+    /// by a thread message, so the transition attempt can never be omitted.
+    ///
+    /// An enqueue can be refused with [`HostInputQueueError::RunClosed`]
+    /// (terminal reconciliation already closed the run's queue) or
+    /// [`HostInputQueueError::CapacityExhausted`]
+    /// ([`MAX_QUEUED_INPUTS_PER_RUN`]); callers settle those messages as
+    /// rejected-busy, exactly like [`HostInputQueueError::Disabled`].
     async fn enqueue_queued_message(
         &self,
         request: EnqueueQueuedMessageRequest,
@@ -181,6 +209,16 @@ pub(crate) struct QueueEntry {
     pub(crate) status: QueuedMessageStatusUpdate,
 }
 
+/// A consumed (acked) entry whose `Queued` → `Submitted` transcript flip has
+/// not been confirmed yet. Retained so the flip can be retried by later queue
+/// operations — and so an idempotent re-enqueue of the same message repairs
+/// the stale row instead of minting a new sequence (duplicate delivery).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PendingSubmitFlip {
+    pub(crate) sequence: u64,
+    pub(crate) status: QueuedMessageStatusUpdate,
+}
+
 fn first_sequence() -> u64 {
     1
 }
@@ -206,6 +244,23 @@ pub(crate) struct RunQueueModel {
     acked_watermark: u64,
     #[serde(default)]
     acked_above: BTreeSet<u64>,
+    /// Consumed entries whose `Submitted` transcript flip failed and is
+    /// awaiting retry. Bounded by the flips that actually fail; drained by
+    /// every later ack, re-enqueue, and the terminal reconciliation.
+    #[serde(default)]
+    pending_submit_flips: Vec<PendingSubmitFlip>,
+    /// Terminal tombstone: set by [`Self::close_and_claim`]. A closed queue
+    /// rejects enqueues ([`HostInputQueueError::RunClosed`]) and treats late
+    /// acks as no-ops — terminal reconciliation owns settlement from then on.
+    #[serde(default)]
+    closed: bool,
+    /// Entries claimed at close whose `RejectedBusy` transcript flip has not
+    /// succeeded yet. Retained (durably: the document itself is retained)
+    /// until every flip lands, so a transient thread-store failure during
+    /// cancellation keeps a durable retry source instead of stranding the
+    /// rows `Queued` forever.
+    #[serde(default)]
+    pending_reject_flips: Vec<QueuedMessageStatusUpdate>,
 }
 
 impl Default for RunQueueModel {
@@ -215,15 +270,34 @@ impl Default for RunQueueModel {
             entries: Vec::new(),
             acked_watermark: 0,
             acked_above: BTreeSet::new(),
+            pending_submit_flips: Vec::new(),
+            closed: false,
+            pending_reject_flips: Vec::new(),
         }
     }
 }
 
 /// Outcome of [`RunQueueModel::enqueue_dedup`]: callers only persist when the
-/// model actually changed.
-pub(crate) struct Enqueued {
-    pub(crate) sequence: u64,
-    pub(crate) inserted: bool,
+/// model actually changed (`Inserted`).
+pub(crate) enum EnqueueDisposition {
+    /// A new entry was appended at `sequence`.
+    Inserted { sequence: u64 },
+    /// The identical input is already live at `sequence` (retried enqueue).
+    Duplicate { sequence: u64 },
+    /// The message was already consumed but its `Submitted` flip is still
+    /// pending: the caller retries the flip (repair) instead of re-minting a
+    /// sequence, which would deliver the same message twice.
+    AlreadyConsumed { flip: PendingSubmitFlip },
+}
+
+/// Result of [`RunQueueModel::validate_and_ack`].
+pub(crate) struct AckOutcome {
+    /// Whether any token was newly acked (the model changed and must be
+    /// persisted before the flips run).
+    pub(crate) newly_acked: bool,
+    /// Every `Submitted` flip now due — the newly acked bindings plus any
+    /// retained retries from earlier failed flips.
+    pub(crate) due_flips: Vec<PendingSubmitFlip>,
 }
 
 impl RunQueueModel {
@@ -244,16 +318,35 @@ impl RunQueueModel {
     /// Enqueue `input`, deduplicating a retried enqueue of the same message
     /// (steering refs derive from unique message ids, so distinct messages can
     /// never collide). The first status binding for an entry wins.
+    ///
+    /// Rejects a closed queue ([`HostInputQueueError::RunClosed`]) and a full
+    /// queue ([`HostInputQueueError::CapacityExhausted`]); dedup and repair
+    /// are checked first so retries of an already-accepted message never
+    /// bounce off the capacity ceiling.
     pub(crate) fn enqueue_dedup(
         &mut self,
         input: LoopInput,
         status: QueuedMessageStatusUpdate,
-    ) -> Enqueued {
+    ) -> Result<EnqueueDisposition, HostInputQueueError> {
+        if self.closed {
+            return Err(HostInputQueueError::RunClosed);
+        }
         if let Some(existing) = self.entries.iter().find(|entry| entry.input == input) {
-            return Enqueued {
+            return Ok(EnqueueDisposition::Duplicate {
                 sequence: existing.sequence,
-                inserted: false,
-            };
+            });
+        }
+        if let Some(pending) = self
+            .pending_submit_flips
+            .iter()
+            .find(|pending| pending.status.message_id == status.message_id)
+        {
+            return Ok(EnqueueDisposition::AlreadyConsumed {
+                flip: pending.clone(),
+            });
+        }
+        if self.entries.len() >= MAX_QUEUED_INPUTS_PER_RUN {
+            return Err(HostInputQueueError::CapacityExhausted);
         }
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.saturating_add(1);
@@ -264,10 +357,7 @@ impl RunQueueModel {
             input,
             status,
         });
-        Enqueued {
-            sequence,
-            inserted: true,
-        }
+        Ok(EnqueueDisposition::Inserted { sequence })
     }
 
     /// Strictly-after scan: an entry's own cursor is its sequence, so polling
@@ -314,8 +404,13 @@ impl RunQueueModel {
     }
 
     /// Validate `tokens` and record their acks, pruning the consumed entries'
-    /// payloads to bound state size. Returns the status bindings of the newly
-    /// acked entries (empty when every token was a redelivered duplicate).
+    /// payloads to bound state size. Each newly acked binding moves to
+    /// [`Self::pending_submit_flips`] until the caller confirms its
+    /// transcript flip via [`Self::confirm_submit_flips`].
+    ///
+    /// A closed queue treats every ack as a no-op: terminal reconciliation
+    /// already claimed the remaining entries, and whichever side claimed a
+    /// sequence first owns its transcript settlement.
     ///
     /// Fails loud on a token that matches no live entry and is not already
     /// acked: committing an unknown sequence would poison state — a later
@@ -325,8 +420,13 @@ impl RunQueueModel {
     pub(crate) fn validate_and_ack(
         &mut self,
         tokens: &[LoopInputAckToken],
-    ) -> Result<Vec<QueuedMessageStatusUpdate>, HostInputQueueError> {
-        let mut updates = Vec::new();
+    ) -> Result<AckOutcome, HostInputQueueError> {
+        if self.closed {
+            return Ok(AckOutcome {
+                newly_acked: false,
+                due_flips: Vec::new(),
+            });
+        }
         let mut newly_acked = Vec::new();
         for token in tokens {
             let sequence = ack_sequence(token)?;
@@ -341,7 +441,10 @@ impl RunQueueModel {
                     ),
                 });
             };
-            updates.push(entry.status.clone());
+            self.pending_submit_flips.push(PendingSubmitFlip {
+                sequence,
+                status: entry.status.clone(),
+            });
             newly_acked.push(sequence);
         }
         for sequence in &newly_acked {
@@ -349,19 +452,58 @@ impl RunQueueModel {
         }
         self.entries
             .retain(|entry| !newly_acked.contains(&entry.sequence));
-        Ok(updates)
+        Ok(AckOutcome {
+            newly_acked: !newly_acked.is_empty(),
+            due_flips: self.pending_submit_flips.clone(),
+        })
     }
 
-    /// The status bindings of every entry not yet acked — the set a terminal
-    /// reconciliation flips to `RejectedBusy`. Read-only: the caller claims
-    /// the whole queue (removes the map entry / deletes the document) rather
-    /// than acking piecemeal.
-    pub(crate) fn unacked_status_updates(&self) -> Vec<QueuedMessageStatusUpdate> {
-        self.entries
+    /// Drop the pending `Submitted` flips whose transcript writes succeeded.
+    pub(crate) fn confirm_submit_flips(&mut self, flipped: &[u64]) {
+        self.pending_submit_flips
+            .retain(|pending| !flipped.contains(&pending.sequence));
+    }
+
+    /// Terminal claim: close the queue (rejecting further enqueues) and move
+    /// every unacked entry to [`Self::pending_reject_flips`]. Idempotent — a
+    /// second call claims nothing new. The caller flips the claimed rows and
+    /// confirms via [`Self::confirm_reject_flips`]; the record is disposable
+    /// once [`Self::is_settled`].
+    pub(crate) fn close_and_claim(&mut self) {
+        self.closed = true;
+        let claimed: Vec<QueuedMessageStatusUpdate> = self
+            .entries
             .iter()
             .filter(|entry| !self.is_acked(entry.sequence))
             .map(|entry| entry.status.clone())
-            .collect()
+            .collect();
+        self.pending_reject_flips.extend(claimed);
+        self.entries.clear();
+    }
+
+    /// Drop the pending `RejectedBusy` flips whose transcript writes
+    /// succeeded.
+    pub(crate) fn confirm_reject_flips(&mut self, flipped: &[ThreadMessageId]) {
+        self.pending_reject_flips
+            .retain(|pending| !flipped.contains(&pending.message_id));
+    }
+
+    /// The `Submitted` flips currently awaiting (re)try.
+    pub(crate) fn due_submit_flips(&self) -> Vec<PendingSubmitFlip> {
+        self.pending_submit_flips.clone()
+    }
+
+    /// The `RejectedBusy` flips currently awaiting (re)try.
+    pub(crate) fn due_reject_flips(&self) -> Vec<QueuedMessageStatusUpdate> {
+        self.pending_reject_flips.clone()
+    }
+
+    /// Closed with nothing left to flip: the per-run record can be reclaimed.
+    pub(crate) fn is_settled(&self) -> bool {
+        self.closed
+            && self.entries.is_empty()
+            && self.pending_submit_flips.is_empty()
+            && self.pending_reject_flips.is_empty()
     }
 }
 
@@ -370,18 +512,25 @@ impl RunQueueModel {
 // `HostInputEnqueuePort::enqueue_queued_message`)
 // ---------------------------------------------------------------------------
 
-/// Flip each consumed row `Queued` → `Submitted`. Best-effort: the inputs are
-/// already durably acked by the time this runs; failing here would map to a
-/// terminal `HostUnavailable` and kill the whole run for a cosmetic status
-/// write (see `.claude/rules/agent-loop-capabilities.md`, Invariant 1). A
-/// stale "queued" badge is reconcilable; a dead run is not.
+/// Flip each consumed row `Queued` → `Submitted`. Best-effort per call: the
+/// inputs are already durably acked by the time this runs, and failing the
+/// ack here would kill the whole run for a transcript status write — a stale
+/// "queued" badge is recoverable; a dead run is not. A failed flip is NOT
+/// dropped, though: its binding stays in the model's pending-submit-flip
+/// state, retried by every later ack, idempotent re-enqueue, and the terminal
+/// reconciliation, so the row converges to `Submitted` by run end.
+///
+/// Returns the sequences whose flips succeeded, for
+/// [`RunQueueModel::confirm_submit_flips`].
 pub(crate) async fn flip_submitted(
     thread_service: &dyn SessionThreadService,
     run_id: TurnRunId,
-    updates: Vec<QueuedMessageStatusUpdate>,
-) {
-    for update in updates {
-        if let Err(error) = thread_service
+    flips: Vec<PendingSubmitFlip>,
+) -> Vec<u64> {
+    let mut flipped = Vec::new();
+    for flip in flips {
+        let update = flip.status;
+        match thread_service
             .mark_message_submitted(
                 &update.scope,
                 &update.thread_id,
@@ -391,51 +540,89 @@ pub(crate) async fn flip_submitted(
             )
             .await
         {
-            tracing::debug!(
-                component = "host_input_queue",
-                operation = "mark_message_submitted",
-                %run_id,
-                thread_id = %update.thread_id,
-                message_id = %update.message_id,
-                %error,
-                "queued-message status flip failed after the input was consumed; \
-                 already acked so the run continues (transcript badge may lag)"
-            );
+            Ok(_) => flipped.push(flip.sequence),
+            Err(error) => {
+                tracing::debug!(
+                    component = "host_input_queue",
+                    operation = "mark_message_submitted",
+                    %run_id,
+                    thread_id = %update.thread_id,
+                    message_id = %update.message_id,
+                    %error,
+                    "queued-message status flip failed after the input was consumed; \
+                     already acked so the run continues (flip retried by later queue \
+                     operations and terminal reconciliation)"
+                );
+            }
         }
+    }
+    flipped
+}
+
+/// Outcome of [`flip_rejected_busy`]: `flipped` rows actually transitioned to
+/// `RejectedBusy` (reported to the reconciler's caller); `settled` rows were
+/// found already settled by someone else (or gone) and can never be flipped —
+/// both sets are confirmed off the pending-retry state so a row settled
+/// elsewhere cannot pin the queue record forever.
+pub(crate) struct RejectFlipOutcome {
+    pub(crate) flipped: Vec<ThreadMessageId>,
+    pub(crate) settled: Vec<ThreadMessageId>,
+}
+
+impl RejectFlipOutcome {
+    pub(crate) fn confirmable(&self) -> Vec<ThreadMessageId> {
+        let mut ids = self.flipped.clone();
+        ids.extend(self.settled.iter().copied());
+        ids
     }
 }
 
 /// Flip each claimed row `Queued` → `RejectedBusy` during terminal
-/// reconciliation. Best-effort: a row the loop consumed first (`Submitted`)
-/// legitimately rejects this transition and is skipped, and any other failure
-/// must not fail the caller's terminal transition. Returns the ids that
-/// flipped.
+/// reconciliation. Best-effort: any failure must not fail the caller's
+/// terminal transition. A failed flip is re-examined with a point read — a
+/// row that is no longer `Queued` (settled by an admission rollback, a
+/// duplicate settle, or a racing consumer) is classified `settled` so its
+/// pending-retry entry is confirmed instead of retried forever; a genuinely
+/// transient failure stays pending for retry.
 pub(crate) async fn flip_rejected_busy(
     thread_service: &dyn SessionThreadService,
     run_id: TurnRunId,
     updates: Vec<QueuedMessageStatusUpdate>,
-) -> Vec<ThreadMessageId> {
-    let mut rejected = Vec::new();
+) -> RejectFlipOutcome {
+    let mut outcome = RejectFlipOutcome {
+        flipped: Vec::new(),
+        settled: Vec::new(),
+    };
     for update in updates {
         match thread_service
             .mark_message_rejected_busy(&update.scope, &update.thread_id, update.message_id)
             .await
         {
-            Ok(_) => rejected.push(update.message_id),
+            Ok(_) => outcome.flipped.push(update.message_id),
             Err(error) => {
+                let already_settled = matches!(
+                    thread_service
+                        .read_thread_message(&update.scope, &update.thread_id, update.message_id)
+                        .await,
+                    Ok(Some(row)) if row.status != MessageStatus::Queued
+                );
+                if already_settled {
+                    outcome.settled.push(update.message_id);
+                }
                 tracing::debug!(
                     component = "host_input_queue",
                     operation = "reject_unconsumed",
                     %run_id,
                     thread_id = %update.thread_id,
                     message_id = %update.message_id,
+                    already_settled,
                     %error,
                     "queued-message reject skipped during terminal reconciliation"
                 );
             }
         }
     }
-    rejected
+    outcome
 }
 
 fn poisoned_lock(operation: &'static str) -> HostInputQueueError {
@@ -481,17 +668,37 @@ impl HostInputEnqueuePort for InMemoryHostInputQueue {
         &self,
         request: EnqueueQueuedMessageRequest,
     ) -> Result<HostInputEnvelope, HostInputQueueError> {
-        let mut state = self.state.lock().map_err(|_| poisoned_lock("enqueue"))?;
-        let enqueued = state.entry(request.run_id).or_default().enqueue_dedup(
-            request.input.clone(),
-            QueuedMessageStatusUpdate {
-                turn_id: request.turn_id,
-                scope: request.scope,
-                thread_id: request.thread_id,
-                message_id: request.message_id,
-            },
-        );
-        envelope_for(enqueued.sequence, request.input)
+        let disposition = {
+            let mut state = self.state.lock().map_err(|_| poisoned_lock("enqueue"))?;
+            state.entry(request.run_id).or_default().enqueue_dedup(
+                request.input.clone(),
+                QueuedMessageStatusUpdate {
+                    turn_id: request.turn_id,
+                    scope: request.scope,
+                    thread_id: request.thread_id,
+                    message_id: request.message_id,
+                },
+            )?
+        };
+        match disposition {
+            EnqueueDisposition::Inserted { sequence }
+            | EnqueueDisposition::Duplicate { sequence } => envelope_for(sequence, request.input),
+            EnqueueDisposition::AlreadyConsumed { flip } => {
+                // Idempotent replay of a consumed message whose `Submitted`
+                // flip is still pending: repair the stale row instead of
+                // re-minting a sequence (which would deliver it twice).
+                let sequence = flip.sequence;
+                let flipped =
+                    flip_submitted(self.thread_service.as_ref(), request.run_id, vec![flip]).await;
+                if !flipped.is_empty() {
+                    let mut state = self.state.lock().map_err(|_| poisoned_lock("enqueue"))?;
+                    if let Some(model) = state.get_mut(&request.run_id) {
+                        model.confirm_submit_flips(&flipped);
+                    }
+                }
+                envelope_for(sequence, request.input)
+            }
+        }
     }
 }
 
@@ -523,7 +730,7 @@ impl HostInputQueue for InMemoryHostInputQueue {
         // await: a concurrent `next_after` must never observe a consumed input
         // as unacked and redeliver it while the (async) transcript flip below
         // is still in flight.
-        let updates = {
+        let due_flips = {
             let mut state = self
                 .state
                 .lock()
@@ -531,9 +738,21 @@ impl HostInputQueue for InMemoryHostInputQueue {
             let Some(model) = state.get_mut(&run_id) else {
                 return Ok(());
             };
-            model.validate_and_ack(&tokens)?
+            model.validate_and_ack(&tokens)?.due_flips
         };
-        flip_submitted(self.thread_service.as_ref(), run_id, updates).await;
+        if due_flips.is_empty() {
+            return Ok(());
+        }
+        let flipped = flip_submitted(self.thread_service.as_ref(), run_id, due_flips).await;
+        if !flipped.is_empty() {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| poisoned_lock("ack_consumed"))?;
+            if let Some(model) = state.get_mut(&run_id) {
+                model.confirm_submit_flips(&flipped);
+            }
+        }
         Ok(())
     }
 }
@@ -544,22 +763,40 @@ impl HostInputQueueReconcile for InMemoryHostInputQueue {
         &self,
         run_id: TurnRunId,
     ) -> Result<Vec<ThreadMessageId>, HostInputQueueError> {
-        // The run is terminal: remove its whole queue entry. A late duplicate
-        // ack for a claimed input finds no queue and is a no-op; nothing else
-        // may enqueue for a terminal run. This is also the in-memory lifetime
-        // bound — completed queues do not accumulate for the daemon's
-        // lifetime.
-        let updates = {
+        // The run is terminal: close the queue (rejecting late enqueues,
+        // no-oping late duplicate acks) and claim every unacked entry. The
+        // map entry is removed only once every claimed row's flip succeeded —
+        // a transient flip failure keeps the record so a repeated
+        // reconciliation retries it — which is also the in-memory lifetime
+        // bound: settled queues do not accumulate for the daemon's lifetime.
+        let (submit_flips, reject_flips) = {
             let mut state = self
                 .state
                 .lock()
                 .map_err(|_| poisoned_lock("reject_unconsumed"))?;
-            let Some(model) = state.remove(&run_id) else {
+            let Some(model) = state.get_mut(&run_id) else {
                 return Ok(Vec::new());
             };
-            model.unacked_status_updates()
+            model.close_and_claim();
+            (model.due_submit_flips(), model.due_reject_flips())
         };
-        Ok(flip_rejected_busy(self.thread_service.as_ref(), run_id, updates).await)
+        let submitted = flip_submitted(self.thread_service.as_ref(), run_id, submit_flips).await;
+        let reject_outcome =
+            flip_rejected_busy(self.thread_service.as_ref(), run_id, reject_flips).await;
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| poisoned_lock("reject_unconsumed"))?;
+            if let Some(model) = state.get_mut(&run_id) {
+                model.confirm_submit_flips(&submitted);
+                model.confirm_reject_flips(&reject_outcome.confirmable());
+                if model.is_settled() {
+                    state.remove(&run_id);
+                }
+            }
+        }
+        Ok(reject_outcome.flipped)
     }
 }
 
@@ -595,13 +832,35 @@ pub(crate) fn cursor_sequence(token: &LoopInputCursorToken) -> Result<u64, HostI
 }
 
 pub(crate) fn cursor_token(sequence: u64) -> Result<LoopInputCursorToken, HostInputQueueError> {
-    LoopInputCursorToken::new(format!("input-cursor:{sequence}"))
-        .map_err(|_| HostInputQueueError::Internal)
+    LoopInputCursorToken::new(format!("input-cursor:{sequence}")).map_err(|error| {
+        // Carry the validation cause to the log before collapsing to the
+        // sanitized variant (`.claude/rules/error-handling.md`: never a bare
+        // `map_err(|_|)`).
+        tracing::debug!(
+            component = "host_input_queue",
+            operation = "cursor_token",
+            sequence,
+            %error,
+            "cursor token construction failed"
+        );
+        HostInputQueueError::Internal
+    })
 }
 
 pub(crate) fn ack_token(sequence: u64) -> Result<LoopInputAckToken, HostInputQueueError> {
-    LoopInputAckToken::new(format!("input-ack:{sequence}"))
-        .map_err(|_| HostInputQueueError::Internal)
+    LoopInputAckToken::new(format!("input-ack:{sequence}")).map_err(|error| {
+        // Carry the validation cause to the log before collapsing to the
+        // sanitized variant (`.claude/rules/error-handling.md`: never a bare
+        // `map_err(|_|)`).
+        tracing::debug!(
+            component = "host_input_queue",
+            operation = "ack_token",
+            sequence,
+            %error,
+            "ack token construction failed"
+        );
+        HostInputQueueError::Internal
+    })
 }
 
 pub(crate) fn ack_sequence(token: &LoopInputAckToken) -> Result<u64, HostInputQueueError> {

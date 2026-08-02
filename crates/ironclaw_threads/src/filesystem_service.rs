@@ -1686,7 +1686,11 @@ where
                 None,
             )
             .await?
-            && crate::contract::should_reuse_assistant_run_message(&existing, &requested_content)
+            && crate::contract::should_reuse_assistant_run_message(
+                &existing,
+                &requested_content,
+                request.content.attachments(),
+            )
         {
             return Ok(existing);
         }
@@ -1739,10 +1743,29 @@ where
             .await?
         {
             if existing.status != MessageStatus::Draft {
-                if crate::contract::should_reuse_assistant_run_message(&existing, &content) {
+                if crate::contract::should_reuse_assistant_run_message(
+                    &existing,
+                    &content,
+                    &attachments,
+                ) {
                     // Retry of the same finalized reply (or a redacted/deleted
                     // row that must not be resurrected): idempotent return.
                     return Ok(existing);
+                }
+                if existing.status == MessageStatus::Finalized
+                    && existing.content.as_deref() == Some(content.as_str())
+                {
+                    // Same finalized text with a DIFFERENT attachment set is a
+                    // mismatched replay, not a steered second reply: appending
+                    // a sibling would duplicate the visible reply, and
+                    // returning the old row would silently drop the new
+                    // attachments. Fail loud instead (the loop transcript
+                    // port surfaces this as a transcript write failure).
+                    return Err(SessionThreadError::InvalidMessageTransition {
+                        message_id: existing.message_id,
+                        from: MessageStatus::Finalized,
+                        attempted: "append_finalized_assistant_message with mismatched attachments",
+                    });
                 }
                 // A DIFFERENT finalized reply in the same run — a steered run
                 // replying again. Skip the draft-finalize branch and append a

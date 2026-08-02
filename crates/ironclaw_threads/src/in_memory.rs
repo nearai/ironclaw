@@ -354,10 +354,17 @@ impl SessionThreadService for InMemorySessionThreadService {
         message_id: ThreadMessageId,
     ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
         let mut state = self.state.lock().await;
-        // silent-ok: point-read maps a lookup miss (thread or message) to absence
+        // Only genuine lookup misses read as absence — an unknown thread
+        // (including scope-hidden threads) or an unknown message, matching the
+        // filesystem backend's point-read contract. Every other error
+        // propagates instead of masquerading as a miss.
         match get_message_mut(&mut state, scope, thread_id, message_id) {
             Ok(message) => Ok(Some(message.clone())),
-            Err(_) => Ok(None),
+            Err(
+                SessionThreadError::UnknownThread { .. }
+                | SessionThreadError::UnknownMessage { .. },
+            ) => Ok(None),
+            Err(error) => Err(error),
         }
     }
 
@@ -371,7 +378,11 @@ impl SessionThreadService for InMemorySessionThreadService {
         if let Some(existing) = thread.messages.iter().rev().find(|message| {
             message.kind == MessageKind::Assistant
                 && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
-                && crate::contract::should_reuse_assistant_run_message(message, &requested_content)
+                && crate::contract::should_reuse_assistant_run_message(
+                    message,
+                    &requested_content,
+                    request.content.attachments(),
+                )
         }) {
             return Ok(existing.clone());
         }
@@ -438,10 +449,26 @@ impl SessionThreadService for InMemorySessionThreadService {
                 thread.record.updated_at = Some(now);
                 return Ok(existing.clone());
             }
-            if crate::contract::should_reuse_assistant_run_message(existing, &content) {
+            if crate::contract::should_reuse_assistant_run_message(existing, &content, &attachments)
+            {
                 // Retry of the same finalized reply (or a redacted/deleted
                 // row that must not be resurrected): idempotent return.
                 return Ok(existing.clone());
+            }
+            if existing.status == MessageStatus::Finalized
+                && existing.content.as_deref() == Some(content.as_str())
+            {
+                // Same finalized text with a DIFFERENT attachment set is a
+                // mismatched replay, not a steered second reply: appending a
+                // sibling would duplicate the visible reply, and returning
+                // the old row would silently drop the new attachments. Fail
+                // loud instead (the loop transcript port surfaces this as a
+                // transcript write failure).
+                return Err(SessionThreadError::InvalidMessageTransition {
+                    message_id: existing.message_id,
+                    from: MessageStatus::Finalized,
+                    attempted: "append_finalized_assistant_message with mismatched attachments",
+                });
             }
             // A DIFFERENT finalized reply in the same run — a steered run
             // replying again. Fall through and append a sibling.

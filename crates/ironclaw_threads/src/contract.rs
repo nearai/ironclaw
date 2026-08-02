@@ -709,15 +709,22 @@ pub struct UpdateThreadGoalRequest {
 /// should reuse an existing assistant row for the same run instead of starting
 /// a sibling. Retries of the same draft/final content reuse the record (and
 /// redacted/deleted rows are never resurrected); a DIFFERENT finalized reply
-/// starts a sibling — a steered run replies more than once. Shared by both
-/// backends so the dedup policy cannot drift.
+/// starts a sibling — a steered run replies more than once. Reuse identity for
+/// a finalized row is the full persisted payload — text AND attachment refs —
+/// because attachments are stored beside `content`; matching on text alone
+/// would return the old row and silently drop a retry's new attachment set.
+/// Shared by both backends so the dedup policy cannot drift.
 pub(crate) fn should_reuse_assistant_run_message(
     message: &ThreadMessageRecord,
     requested_content: &str,
+    requested_attachments: &[AttachmentRef],
 ) -> bool {
     match message.status {
         MessageStatus::Draft | MessageStatus::Redacted | MessageStatus::Deleted => true,
-        MessageStatus::Finalized => message.content.as_deref() == Some(requested_content),
+        MessageStatus::Finalized => {
+            message.content.as_deref() == Some(requested_content)
+                && message.attachments.as_slice() == requested_attachments
+        }
         _ => false,
     }
 }

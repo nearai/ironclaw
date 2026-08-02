@@ -4897,6 +4897,7 @@ test("useChat.send: created thread admits a follow-up send while its run is acti
   let createThreadCalls = 0;
   let sendCalls = 0;
   const seededByThread = new Map();
+  const stateSlots = new Map();
 
   const context = {
     AbortController,
@@ -4904,7 +4905,7 @@ test("useChat.send: created thread admits a follow-up send while its run is acti
     Error,
     Map,
     Math,
-    React: createReactStub(),
+    React: createReactStub({ stateSlots }),
     addPending,
     toRenderAttachment,
     toWireAttachment,
@@ -4927,12 +4928,21 @@ test("useChat.send: created thread admits a follow-up send while its run is acti
     resolveGateRequest: async () => {},
     sendMessage: async ({ content, threadId }) => {
       sendCalls += 1;
+      if (sendCalls === 1) {
+        return {
+          accepted_message_ref: "msg:created-1",
+          run_id: "run-1",
+          status: "queued",
+          thread_id: threadId,
+          content,
+        };
+      }
+      // The created thread's first run is still active, so Reborn queues the
+      // follow-up behind it instead of starting a new run.
       return {
-        accepted_message_ref: `msg:created-${sendCalls}`,
-        run_id: `run-${sendCalls}`,
-        status: "queued",
+        outcome: "deferred_busy",
         thread_id: threadId,
-        content,
+        accepted_message_ref: "msg:created-2",
       };
     },
     setInterval,
@@ -4971,16 +4981,25 @@ test("useChat.send: created thread admits a follow-up send while its run is acti
   assert.equal(first.run_id, "run-1");
   assert.equal(first.thread_id, createdThreadId);
 
-  context.chatEventsArgs.setIsProcessing(false);
-  context.chatEventsArgs.setActiveRun(null);
+  // The first run is deliberately left active: this is the state a
+  // reintroduced local busy rejection would trip over.
+  assert.equal(stateSlots.get(STATE_SLOT.isProcessing).value, true);
+  assert.equal(stateSlots.get(STATE_SLOT.activeRun).value?.runId, "run-1");
 
   // Queued-message UX: the still-active run on the just-created thread no
-  // longer blocks a follow-up — it reaches the backend to be queued.
+  // longer blocks a follow-up — it reaches the backend, which queues it
+  // (deferred_busy), and the optimistic bubble renders as "queued".
   const second = await chat.send("draft while the reply is still running", {
     threadId: createdThreadId,
   });
-  assert.equal(second.run_id, "run-2");
+  assert.equal(second.outcome, "deferred_busy");
   assert.equal(sendCalls, 2);
+  assert.equal(renderedMessages.length, 2);
+  assert.equal(renderedMessages[1].status, "queued");
+  const seededMessages = seededByThread.get(createdThreadId);
+  assert.equal(seededMessages[seededMessages.length - 1].status, "queued");
+  // deferred_busy keeps the active run processing — it was queued, not dropped.
+  assert.equal(stateSlots.get(STATE_SLOT.isProcessing).value, true);
 });
 
 test("useChat.send: clears local busy when run settles before send response", async () => {
