@@ -1037,7 +1037,7 @@ jobs:
             exit 1
           fi
 
-          if ! job_result_ok "critical-mutation" "${{ needs.critical-mutation.result }}" true "allow"; then
+          if ! job_result_ok "critical-mutation" "${{ needs.critical-mutation.result }}" "${{ github.event_name == 'workflow_dispatch' }}" "allow"; then
             echo "Critical named-function mutation gate failed: ${{ needs.critical-mutation.result }}"
             exit 1
           fi

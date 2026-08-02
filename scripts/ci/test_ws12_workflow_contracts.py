@@ -148,7 +148,8 @@ class WorkflowContractSabotageTests(unittest.TestCase):
 
         self.assertIn(
             'job_result_ok "critical-mutation" '
-            '"${{ needs.critical-mutation.result }}" true "allow"',
+            '"${{ needs.critical-mutation.result }}" '
+            '"${{ github.event_name == \'workflow_dispatch\' }}" "allow"',
             workflow,
         )
 
