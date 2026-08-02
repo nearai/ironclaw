@@ -1,0 +1,273 @@
+name: Main CI Checks
+
+on:
+  workflow_run:
+    # Keep this list aligned with the required/optional workflow lists in `jobs.fast-forward-staging-release.steps.ci`.
+    workflows:
+      - Code Style
+      - Tests (Reborn)
+      - Reborn E2E
+      - Platform & Compat
+      - Replay Snapshot Gate
+      - Code Coverage
+      - nearai-bench dispatcher tests
+      - Release-plz
+    branches:
+      - main
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  alert:
+    name: Post Slack alert
+    if: >-
+      github.event.workflow_run.event == 'push' &&
+      contains(fromJSON('["failure","timed_out","action_required","startup_failure"]'), github.event.workflow_run.conclusion)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post main CI failure to Slack
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          ACTOR: ${{ github.event.workflow_run.actor.login }}
+          MAIN_CI_SLACK_WEBHOOK_URLS: ${{ secrets.MAIN_CI_SLACK_WEBHOOK_URLS }}
+        run: |
+          set -euo pipefail
+
+          short_sha="${HEAD_SHA:0:10}"
+          failed_jobs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs?per_page=100" \
+            --jq '[.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "action_required" or .conclusion == "startup_failure") | "\(.name) (\(.conclusion))"] | .[0:12] | join(", ")' \
+            2>/dev/null || true)"
+          if [ -z "$failed_jobs" ]; then
+            failed_jobs="No failed jobs listed; inspect the workflow run for startup or workflow-level errors."
+          fi
+
+          text="Main branch CI failed: ${WORKFLOW_NAME} concluded ${CONCLUSION} on ${short_sha}"
+          payload="$(jq -n \
+            --arg text "$text" \
+            --arg workflow "$WORKFLOW_NAME" \
+            --arg conclusion "$CONCLUSION" \
+            --arg branch "$HEAD_BRANCH" \
+            --arg sha "$short_sha" \
+            --arg actor "$ACTOR" \
+            --arg failed_jobs "$failed_jobs" \
+            --arg url "$RUN_URL" \
+            '{
+              text: $text,
+              blocks: [
+                {
+                  type: "header",
+                  text: {type: "plain_text", text: "Main branch CI failed"}
+                },
+                {
+                  type: "section",
+                  text: {
+                    type: "mrkdwn",
+                    text: "*Workflow:* \($workflow)\n*Conclusion:* `\($conclusion)`\n*Branch:* `\($branch)`\n*Commit:* `\($sha)`\n*Actor:* `\($actor)`\n*Failed jobs:* \($failed_jobs)\n<\($url)|Open workflow run>"
+                  }
+                }
+              ]
+            }')"
+
+          webhooks="${MAIN_CI_SLACK_WEBHOOK_URLS:-}"
+          if [ -z "$webhooks" ]; then
+            echo "::error::Set MAIN_CI_SLACK_WEBHOOK_URLS to receive main CI failure alerts."
+            exit 1
+          fi
+
+          webhook_file="$(mktemp)"
+          trap 'rm -f "$webhook_file"' EXIT
+          printf '%s\n' "$webhooks" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;/^$/d' > "$webhook_file"
+
+          posted=0
+          while IFS= read -r webhook; do
+            if curl -fsS --max-time 30 -X POST -H 'Content-type: application/json' \
+              --data "$payload" "$webhook" > /dev/null; then
+              posted=$((posted + 1))
+            else
+              echo "::warning::Failed to post alert to webhook (HTTP error or timeout)."
+            fi
+          done < "$webhook_file"
+
+          if [ "$posted" -eq 0 ]; then
+            echo "::error::Failed to post alert to any Slack webhook."
+            exit 1
+          fi
+
+          echo "Posted main CI failure alert to ${posted} Slack webhook(s)."
+
+  fast-forward-staging-release:
+    name: Fast-forward staging-release to main
+    if: >-
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: main-ci-checks-staging-release
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+      # Dedicated branch used by staging deployment (`staging-release`).
+      STAGING_BRANCH: staging-release
+    steps:
+      - name: Check main CI run set
+        id: ci
+        run: |
+          set -euo pipefail
+
+          if [ "$HEAD_BRANCH" != "main" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Ignoring non-main workflow_run branch: ${HEAD_BRANCH}"
+            exit 0
+          fi
+
+          required_workflows=(
+            "Code Style"
+            "Tests (Reborn)"
+            "Platform & Compat"
+            "Replay Snapshot Gate"
+            "Code Coverage"
+            "Release-plz"
+          )
+          optional_workflows=(
+            "Reborn E2E"
+            "nearai-bench dispatcher tests"
+          )
+
+          missing=()
+          pending=()
+          failed=()
+
+          check_workflow() {
+            local workflow="$1"
+            local required="$2"
+            local run_json status conclusion url
+            local api_error=false
+
+            if ! run_json="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow "$workflow" \
+              --branch main \
+              --event push \
+              --commit "$HEAD_SHA" \
+              --limit 1 \
+              --json conclusion,status,url \
+              --jq '.[0] // {}' \
+              2>/dev/null)"; then
+              echo "::warning::Failed to query workflow status for ${workflow}; treating as missing."
+              api_error=true
+              run_json='{"status":"pending","conclusion":"pending","url":""}'
+            fi
+            status="$(jq -r '.status // "missing"' <<<"$run_json")"
+            conclusion="$(jq -r '.conclusion // "missing"' <<<"$run_json")"
+            url="$(jq -r '.url // ""' <<<"$run_json")"
+
+            if [ "$api_error" = true ]; then
+              pending+=("${workflow} (query error)")
+              return
+            fi
+
+            if [ "$status" = "missing" ]; then
+              if [ "$required" = "required" ]; then
+                missing+=("$workflow")
+              else
+                echo "Optional workflow did not run for this SHA: ${workflow}"
+              fi
+              return
+            fi
+
+            if [ "$status" != "completed" ]; then
+              pending+=("${workflow} (${status})")
+              return
+            fi
+
+            if [ "$conclusion" != "success" ]; then
+              failed+=("${workflow} (${conclusion}) ${url}")
+            fi
+          }
+
+          attempts=1
+          max_attempts=3
+          while true; do
+            missing=()
+            pending=()
+            failed=()
+
+            for workflow in "${required_workflows[@]}"; do
+              check_workflow "$workflow" required
+            done
+            for workflow in "${optional_workflows[@]}"; do
+              check_workflow "$workflow" optional
+            done
+
+            if [ "${#failed[@]}" -gt 0 ]; then
+              echo "::error::Main CI failed for ${HEAD_SHA}; refusing to fast-forward staging-release."
+              for workflow in "${failed[@]}"; do
+                printf 'Failed workflow: %s\n' "$workflow"
+              done
+              exit 1
+            fi
+
+            if [ "${#missing[@]}" -gt 0 ] || [ "${#pending[@]}" -gt 0 ]; then
+              if [ "$attempts" -lt "$max_attempts" ]; then
+                echo "::warning::Required workflow checks for ${HEAD_SHA} are incomplete (attempt ${attempts}/${max_attempts}). Retrying in 30 seconds."
+                attempts=$((attempts + 1))
+                sleep 30
+                continue
+              fi
+
+              echo "ready=false" >> "$GITHUB_OUTPUT"
+              if [ "${#missing[@]}" -gt 0 ]; then
+                printf 'Required workflow has not appeared yet: %s\n' "${missing[@]}"
+              fi
+              if [ "${#pending[@]}" -gt 0 ]; then
+                printf 'Workflow is still pending: %s\n' "${pending[@]}"
+              fi
+              exit 0
+            fi
+
+            break
+          done
+
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+          echo "All required main CI workflows passed for ${HEAD_SHA}."
+
+      - name: Checkout main commit
+        if: steps.ci.outputs.ready == 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Fast-forward staging-release
+        if: steps.ci.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          git fetch origin main "${STAGING_BRANCH}"
+
+          if ! git merge-base --is-ancestor "origin/${STAGING_BRANCH}" "origin/main"; then
+            echo "::error::${STAGING_BRANCH} has commits that are not in main; refusing to overwrite or merge automatically."
+            exit 1
+          fi
+
+          if git merge-base --is-ancestor "$HEAD_SHA" "origin/${STAGING_BRANCH}"; then
+            echo "::notice::${STAGING_BRANCH} already contains main ${HEAD_SHA}; nothing to sync."
+            exit 0
+          fi
+
+          git push origin "HEAD:refs/heads/${STAGING_BRANCH}"
