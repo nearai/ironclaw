@@ -31,6 +31,7 @@ async fn reqwest_transport_ignores_ambient_proxy_and_uses_pinned_address() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let pinned = RecordingServer::start(b"pinned");
+    let target_authority = format!("ambient-proxy.example.test:{}", pinned.addr().port());
     let proxy = RecordingServer::start(b"proxy");
     let _proxy_env = ProxyEnvGuard::set(&format!("http://{}", proxy.addr()));
 
@@ -38,10 +39,7 @@ async fn reqwest_transport_ignores_ambient_proxy_and_uses_pinned_address() {
     let response = transport
         .execute(NetworkTransportRequest {
             method: NetworkMethod::Get,
-            url: format!(
-                "http://ambient-proxy.example.test:{}/test",
-                pinned.addr().port()
-            ),
+            url: format!("http://{target_authority}/test"),
             headers: vec![],
             body: vec![],
             resolved_ips: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
@@ -59,11 +57,17 @@ async fn reqwest_transport_ignores_ambient_proxy_and_uses_pinned_address() {
         String::from_utf8_lossy(&proxy_request)
     );
     assert_eq!(response.body, b"pinned");
+    let pinned_request = String::from_utf8_lossy(&pinned_request);
+    let mut pinned_request_lines = pinned_request.lines();
+    assert_eq!(
+        pinned_request_lines.next(),
+        Some("GET /test HTTP/1.1"),
+        "approved pinned listener received the wrong request target: {pinned_request}"
+    );
+    let expected_host_header = format!("host: {target_authority}");
     assert!(
-        String::from_utf8_lossy(&pinned_request)
-            .starts_with("GET /test HTTP/1.1\r\nhost: ambient-proxy.example.test:"),
-        "approved pinned listener did not receive the request: {}",
-        String::from_utf8_lossy(&pinned_request)
+        pinned_request_lines.any(|line| line.eq_ignore_ascii_case(&expected_host_header)),
+        "approved pinned listener did not receive the original Host header: {pinned_request}"
     );
 }
 
