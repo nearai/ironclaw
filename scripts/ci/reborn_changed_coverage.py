@@ -14,6 +14,14 @@ An exact-line exemption is the only way to remove an otherwise-testable line
 or branch from the denominator. Exemptions are deliberately review-heavy:
 owner, reason, issue, review date, file, and explicit line numbers are
 required. Whole files and globs are not accepted.
+
+Which files count as Reborn production is resolved from the **crate inventory**
+(`scripts/ci/lib/crate_tree.py`), not from a `crates/ironclaw_*` path pattern.
+A pattern keyed to the flat tree shape matches nothing once crates move into
+family directories (`crates/<family>/ironclaw_*`,
+docs/reborn/target-architecture/PROPOSAL.md §5): the gate would then see zero
+changed production files, find nothing to enforce, and report success — the
+WS10 silent-dark failure mode (CHECKLIST.md, #6963).
 """
 
 from __future__ import annotations
@@ -28,7 +36,18 @@ import subprocess
 import sys
 import tomllib
 
-PRODUCTION_PATH = re.compile(r"^crates/ironclaw_[^/]+/src/.+\.rs$")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
+from crate_tree import CrateTreeError, crate_directories  # noqa: E402
+
+CRATES_ROOT = "crates"
+# A crate-relative Reborn production source: `src/` of the crate itself, at any
+# depth below it. Deliberately *not* anchored at the repo root — the crate's
+# position comes from the inventory, its identity from its own `Cargo.toml`.
+# This reproduces the old `^crates/ironclaw_[^/]+/src/.+\.rs$` exactly on the
+# flat tree, including its exclusions: `crates/ironclaw_safety/fuzz/src/main.rs`
+# is owned by `crates/ironclaw_safety` and its remainder is `fuzz/src/main.rs`,
+# which is not `src/…`, so it stays out of the denominator as before.
+CRATE_PRODUCTION_SOURCE = re.compile(r"^src/.+\.rs$")
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 RAW_STRING_START = re.compile(r'(?:b|c)?r(#{0,255})"')
 TEST_PATH_PARTS = {"/tests/", "/test_support/"}
@@ -36,6 +55,73 @@ TEST_PATH_PARTS = {"/tests/", "/test_support/"}
 
 class GateError(RuntimeError):
     pass
+
+
+class ProductionPaths:
+    """Inventory-backed "is this a Reborn production source?" predicate.
+
+    Built once per run from where `Cargo.toml` files actually are, so it is
+    independent of how deeply crates sit under `crates/`.
+    """
+
+    def __init__(self, repo_root: pathlib.Path) -> None:
+        try:
+            # Outermost-wins, and empty/short inventories raise rather than
+            # returning a short list. That raise is this gate's "it measured
+            # something" assertion: every path verdict below flows from this
+            # inventory, so a broken tree cannot read as "nothing changed".
+            self._crate_directories = crate_directories(repo_root)
+        except CrateTreeError as error:
+            raise GateError(
+                f"crate discovery failed, so no changed line can be attributed: {error}"
+            ) from error
+
+    def owner(self, path: str) -> str | None:
+        """The crate directory owning ``path``, or ``None`` if no crate does."""
+
+        for directory in self._crate_directories:
+            if path.startswith(f"{directory}/"):
+                return directory
+        return None
+
+    def is_production(self, path: str) -> bool:
+        owner = self.owner(path)
+        if owner is None:
+            return False
+        return CRATE_PRODUCTION_SOURCE.fullmatch(path[len(owner) + 1 :]) is not None
+
+    def reject_unattributable(self, path: str) -> None:
+        """Refuse a `crates/` Rust file that belongs to no discovered crate.
+
+        Falling through to "not production" is how a moved tree goes quiet: the
+        path is real, the change is real, and the gate declines to measure it.
+        Same fail-closed rule `scripts/ci/classify-test-scope.sh` gained in
+        #6946 for unattributable `crates/` paths.
+        """
+
+        if not path.startswith(f"{CRATES_ROOT}/") or not path.endswith(".rs"):
+            return
+        if self.owner(path) is not None:
+            return
+        raise GateError(
+            f"changed Rust file under {CRATES_ROOT}/ belongs to no discovered crate: "
+            f"{path}. Refusing to treat it as 'not production' — an unattributable "
+            "path means the crate inventory and the tree disagree "
+            "(docs/reborn/target-architecture/CHECKLIST.md WS10)."
+        )
+
+    def diff_pathspecs(self) -> list[str]:
+        """Per-crate `git diff` pathspecs covering every crate's own `src/`.
+
+        Both forms are needed: git's pathspec `**` does not match the
+        zero-directory case, so `src/*.rs` is not covered by `src/**/*.rs`.
+        """
+
+        pathspecs: list[str] = []
+        for directory in self._crate_directories:
+            pathspecs.append(f"{directory}/src/**/*.rs")
+            pathspecs.append(f"{directory}/src/*.rs")
+        return pathspecs
 
 
 @dataclasses.dataclass(frozen=True)
@@ -101,7 +187,9 @@ def positive_ints(value: object, field: str) -> frozenset[int]:
     return frozenset(value)
 
 
-def load_manifest(path: pathlib.Path, repo_root: pathlib.Path) -> tuple[dict, list[Exemption]]:
+def load_manifest(
+    path: pathlib.Path, repo_root: pathlib.Path, production: ProductionPaths
+) -> tuple[dict, list[Exemption]]:
     if not path.is_file():
         raise GateError(f"changed-coverage exemption manifest not found: {path}")
     with path.open("rb") as handle:
@@ -137,7 +225,7 @@ def load_manifest(path: pathlib.Path, repo_root: pathlib.Path) -> tuple[dict, li
                 f"exemption #{index + 1} has missing={sorted(missing)} unknown={sorted(unknown)}"
             )
         path_value = entry["path"]
-        if not isinstance(path_value, str) or not PRODUCTION_PATH.fullmatch(path_value):
+        if not isinstance(path_value, str) or not production.is_production(path_value):
             raise GateError(
                 f"exemption #{index + 1} path must name one Reborn production .rs file"
             )
@@ -185,7 +273,7 @@ def load_manifest(path: pathlib.Path, repo_root: pathlib.Path) -> tuple[dict, li
     return policy, exemptions
 
 
-def parse_diff(text: str) -> dict[str, set[int]]:
+def parse_diff(text: str, production: ProductionPaths) -> dict[str, set[int]]:
     added: dict[str, set[int]] = {}
     current: str | None = None
     new_line: int | None = None
@@ -195,7 +283,8 @@ def parse_diff(text: str) -> dict[str, set[int]]:
             new_line = None
         elif new_line is None and raw.startswith("+++ b/"):
             candidate = raw[6:]
-            current = candidate if PRODUCTION_PATH.fullmatch(candidate) else None
+            production.reject_unattributable(candidate)
+            current = candidate if production.is_production(candidate) else None
             if current is not None:
                 added.setdefault(current, set())
             new_line = None
@@ -421,7 +510,49 @@ def cfg_test_only_lines(path: pathlib.Path) -> set[int]:
     return excluded
 
 
-def git_diff(repo_root: pathlib.Path, base: str, head: str) -> str:
+def screen_unattributable(
+    repo_root: pathlib.Path, base: str, head: str, production: ProductionPaths
+) -> None:
+    """Refuse unattributable `crates/` Rust changes BEFORE the diff is narrowed.
+
+    `git_diff` narrows to per-crate `src/` pathspecs, so a Rust file under
+    `crates/` that belongs to no discovered crate is filtered out of the diff
+    text entirely and `parse_diff`'s `reject_unattributable` never sees it. The
+    assertion existed but could not fire in the mode CI actually runs
+    (`--base/--head`); only the `--diff-file` path reached it, because that
+    input is not narrowed. Screening the unfiltered changed-file list first is
+    what makes the rule reachable in both modes.
+
+    That gap is the same shape as the bug this whole sweep is about: a
+    fail-closed check that cannot fail is not a check
+    (docs/reborn/target-architecture/CHECKLIST.md WS10, #6963).
+    """
+
+    result = subprocess.run(
+        [
+            "git",
+            "diff",
+            "--name-only",
+            "--diff-filter=AMR",
+            f"{base}...{head}",
+            "--",
+            f"{CRATES_ROOT}/",
+        ],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise GateError(f"git diff failed: {result.stderr.strip()}")
+    for path in result.stdout.splitlines():
+        production.reject_unattributable(path.strip())
+
+
+def git_diff(
+    repo_root: pathlib.Path, base: str, head: str, production: ProductionPaths
+) -> str:
+    screen_unattributable(repo_root, base, head, production)
     command = [
         "git",
         "diff",
@@ -436,8 +567,11 @@ def git_diff(repo_root: pathlib.Path, base: str, head: str) -> str:
         "--diff-filter=AMR",
         f"{base}...{head}",
         "--",
-        "crates/ironclaw_*/src/**/*.rs",
-        "crates/ironclaw_*/src/*.rs",
+        # One pair of pathspecs per discovered crate rather than one glob over
+        # crate names: a `crates/ironclaw_*/src/…` glob selects nothing once a
+        # crate sits at `crates/<family>/ironclaw_*`, and `git diff` reports an
+        # empty diff — indistinguishable from "no production change".
+        *production.diff_pathspecs(),
     ]
     result = subprocess.run(
         command, cwd=repo_root, text=True, capture_output=True, check=False
@@ -479,16 +613,17 @@ def main() -> int:
         if not args.diff_file and (not args.base or not args.head):
             raise GateError("provide --diff-file or both --base and --head")
         repo_root = args.repo_root.resolve()
-        policy, exemptions = load_manifest(args.manifest, repo_root)
+        production = ProductionPaths(repo_root)
+        policy, exemptions = load_manifest(args.manifest, repo_root, production)
         coverage = parse_lcov(args.lcov, repo_root)
         diff_text = (
             args.diff_file.read_text(encoding="utf-8")
             if args.diff_file
-            else git_diff(repo_root, args.base, args.head)
+            else git_diff(repo_root, args.base, args.head, production)
         )
         changed = {
             path: lines
-            for path, lines in parse_diff(diff_text).items()
+            for path, lines in parse_diff(diff_text, production).items()
             if not test_only_path(path)
         }
         if not coverage.saw_branch_records:

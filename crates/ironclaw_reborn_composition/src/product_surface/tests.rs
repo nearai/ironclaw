@@ -28,7 +28,10 @@ use ironclaw_host_api::{
 };
 use ironclaw_product::{
     EXTENSION_INSTALL_CAPABILITY, EXTENSION_REMOVE_CAPABILITY, OPERATOR_SERVICE_LIFECYCLE_COMMAND,
-    ProductCapabilityDescriptor, RebornOperatorToolCatalog, RebornOperatorToolInfo,
+    ProductCapabilityDescriptor,
+};
+use ironclaw_product_contracts::operator_tools::{
+    RebornOperatorToolCatalog, RebornOperatorToolInfo,
 };
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceError,

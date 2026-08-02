@@ -27,6 +27,7 @@ use crate::Mem0ConnectionConfig;
 use crate::RebornBuildError;
 use crate::RebornCompositionProfile;
 use crate::deployment::DeploymentConfig;
+use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
 
 const DEFAULT_REBORN_POSTGRES_URL_ENV: &str = "IRONCLAW_REBORN_POSTGRES_URL";
 const DEFAULT_REBORN_SECRET_MASTER_KEY_ENV: &str = "IRONCLAW_REBORN_SECRET_MASTER_KEY";
@@ -773,7 +774,7 @@ impl RebornHostBindings {
     /// Binary-assembled account-setup descriptors (see the field doc).
     pub fn with_account_setup_descriptors(
         mut self,
-        descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
+        descriptors: Vec<ExtensionAccountSetupDescriptor>,
     ) -> Self {
         self.deployment.account_setup_descriptors = descriptors;
         self

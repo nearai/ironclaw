@@ -9,12 +9,12 @@ use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{ids::InvocationId, resource::ResourceScope};
 use ironclaw_product::{
     ADMIN_CONFIGURATION_VIEW, RebornAdminConfigurationField, RebornAdminConfigurationGroup,
-    RebornAdminConfigurationListResponse, RebornAdminConfigurationUse, RebornViewDescriptor,
-    RebornViewPage, RebornViewProvider,
+    RebornAdminConfigurationListResponse, RebornAdminConfigurationUse,
 };
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
+use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewPage, RebornViewProvider};
 
 use ironclaw_extension_host::AdminConfigurationCatalogUse;
 

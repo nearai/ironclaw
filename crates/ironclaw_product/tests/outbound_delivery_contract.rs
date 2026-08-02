@@ -253,13 +253,15 @@ use std::sync::Arc;
 
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_product::{
-    ChannelDeliveryResolver, CoordinatedDeliveryError, CoordinatedDeliveryOutcome,
-    CoordinatedDeliveryRequest, DeliveryCoordinator, DeliveryIntent, DeliveryReplyContextSource,
-    DeliveryRetryPolicy, NoticeDeliveryRequest, ResolvedChannelDelivery,
-};
-use ironclaw_product::{
     ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, PartDeliveryOutcome,
     VerifiedInbound,
+};
+use ironclaw_product::{
+    CoordinatedDeliveryError, CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest,
+    DeliveryCoordinator, DeliveryIntent, DeliveryRetryPolicy, NoticeDeliveryRequest,
+};
+use ironclaw_product_contracts::delivery::{
+    ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
 };
 
 struct CoordinatorDenyAllEgress;

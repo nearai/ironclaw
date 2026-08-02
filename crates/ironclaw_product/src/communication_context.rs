@@ -1,8 +1,10 @@
+use ironclaw_product_contracts::lifecycle_service::{
+    LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
+};
 use std::{sync::Arc, time::Duration};
 
 use crate::{
-    LifecycleProductAction, LifecycleProductContext, LifecycleProductPayload,
-    LifecycleProductService, LifecycleProductSurfaceContext, OutboundPreferencesProductService,
+    LifecycleProductAction, LifecycleProductPayload, OutboundPreferencesProductService,
     RebornOutboundDeliveryTargetStatus,
 };
 use ironclaw_extension_contracts::{state::InstallationState, surface::CapabilitySurfaceKind};
@@ -228,11 +230,11 @@ mod tests {
     use crate::{
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleExtensionSummary,
         LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
-        LifecycleProductAction, LifecycleProductContext, LifecycleProductPayload,
-        LifecycleProductResponse, LifecycleProductService, OutboundPreferencesProductService,
-        RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-        RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
-        RebornOutboundPreferencesResponse, RebornSetOutboundPreferencesRequest,
+        LifecycleProductAction, LifecycleProductPayload, LifecycleProductResponse,
+        OutboundPreferencesProductService, RebornOutboundDeliveryTargetId,
+        RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetStatus,
+        RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+        RebornSetOutboundPreferencesRequest,
     };
     use async_trait::async_trait;
     use ironclaw_extension_contracts::{state::InstallationState, surface::CapabilitySurfaceKind};
@@ -240,6 +242,9 @@ mod tests {
     use ironclaw_host_api::turn::{TurnActor, TurnScope};
     use ironclaw_loop_contracts::{
         CommunicationContextProvider, ConnectedChannelsState, DeliveryTargetState,
+    };
+    use ironclaw_product_contracts::lifecycle_service::{
+        LifecycleProductContext, LifecycleProductService,
     };
     use ironclaw_product_contracts::surface::{
         ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,

@@ -72,6 +72,9 @@
 //!   - bundled extensions — `ironclaw_reborn_composition` →
 //!     `bundled_extension_capabilities_carry_behavior_neutral_origin_gate_matrix`.
 
+#[allow(dead_code)]
+mod ratchet_support;
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -80,6 +83,8 @@ use ironclaw_host_api::{
     capability::{OriginGateMatrix, OriginGatePolicy, UNGATED_LOOP_RUN_CAPABILITIES},
     ids::CapabilityId,
 };
+
+use ratchet_support::workspace_root;
 
 /// The reviewed S5 seed of builtins the model may invoke UNGATED (§5.2.1/§10).
 /// Any drift from this list is a reviewed diff — see the module header. Adding an
@@ -108,15 +113,6 @@ const EXPECTED_UNGATED_SEED: &[&str] = &[
     "builtin.trigger_list",
     "builtin.extension_search",
 ];
-
-fn workspace_root() -> PathBuf {
-    // CARGO_MANIFEST_DIR = crates/ironclaw_architecture; up two to the workspace.
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("architecture crate must live under crates/ironclaw_architecture")
-        .to_path_buf()
-}
 
 fn first_party_assets_dir() -> PathBuf {
     workspace_root().join("crates/ironclaw_first_party_extensions/assets")

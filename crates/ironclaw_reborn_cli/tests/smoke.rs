@@ -7131,9 +7131,18 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
         wix_description, cli_description,
         "the checked-in WiX package description must match the Cargo package metadata"
     );
+    // Keyed to the crate NAME, not to `crates/<name>/`: the workflow's scope
+    // regex matches crate directories at any depth
+    // (`crates/([^/]+/)*ironclaw_reborn_cli/`) so it keeps working once crates
+    // move into family directories (#6963). A needle carrying the flat `crates/`
+    // prefix would stop finding this line the moment the regex was made
+    // depth-agnostic — and would then fail loudly here rather than silently, but
+    // only because this assertion exists. The authoritative pin on that regex,
+    // including the inventory cross-check that a named crate still exists, lives
+    // in `scripts/ci/ws12_workflow_contracts.py`.
     let reborn_cli_selector = code_style_workflow
         .lines()
-        .find(|line| line.contains("grep -Eq") && line.contains("crates/ironclaw_reborn_cli/"))
+        .find(|line| line.contains("grep -Eq") && line.contains("ironclaw_reborn_cli/"))
         .expect("code style workflow should classify Reborn CLI changes");
     assert!(
         reborn_cli_selector.contains(r"\.github/dist-build-setup\.yml$")

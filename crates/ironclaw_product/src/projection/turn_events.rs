@@ -1,3 +1,4 @@
+use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
@@ -34,7 +35,7 @@ use ironclaw_turns::{
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 use crate::AuthChallengeProvider;
-use crate::{BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth};
+use crate::auth_prompt_view_for_blocked_auth;
 use ironclaw_host_api::failure::categories::CHECKPOINT_REJECTED_CATEGORY;
 use ironclaw_host_api::failure::summary::{
     checkpoint_rejection_host_explanation_from_detail, pinned_failure_summary_for_category,

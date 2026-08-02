@@ -32,11 +32,17 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
+use ironclaw_extension_contracts::external::{
+    ExternalActorRef, ExternalConversationRef, ExternalEventId,
+};
 use ironclaw_extensions::{
     ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStorePort as _,
     ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
 };
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
+use ironclaw_host_api::product_adapter::{
+    AdapterInstallationId, AuthRequirement, ProductAdapterId, ProtocolAuthEvidence,
+};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
     TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
@@ -57,16 +63,6 @@ use ironclaw_outbound::{
     WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product::{
-    AdapterInstallationId, AuthRequirement, AuthResolutionPayload, AuthResolutionResult,
-    ExternalActorRef, ExternalConversationRef, ExternalEventId, ParsedProductInbound,
-    ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProtocolAuthEvidence, TrustedInboundContext,
-};
-use ironclaw_product::{
-    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
-    AdminUserSecretMeta, AdminUserService, AdminUserStatus,
-};
-use ironclaw_product::{
     ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
     ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
     ConversationBindingService, DeliveryCoordinator, DeliveryRetryPolicy,
@@ -76,6 +72,14 @@ use ironclaw_product::{
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
     ResolvedBinding, RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
     TriggeredRunDeliveryRequest,
+};
+use ironclaw_product_contracts::admin_users::{
+    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
+    AdminUserSecretMeta, AdminUserService, AdminUserStatus,
+};
+use ironclaw_product_contracts::inbound::{
+    AuthResolutionPayload, AuthResolutionResult, ParsedProductInbound, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, TrustedInboundContext,
 };
 use ironclaw_secrets::{SecretStore, SecretStorePort};
 use ironclaw_slack_extension::{
@@ -114,7 +118,7 @@ use ironclaw_extension_host::{IngressReplyContextSource, SnapshotChannelDelivery
 use ironclaw_host_api::user_identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
 use ironclaw_host_ingress::PublicRouteMount;
 use ironclaw_product::AuthChallengeProvider;
-use ironclaw_product::BlockedAuthPromptSource;
+use ironclaw_product_contracts::prompt_source::BlockedAuthPromptSource;
 
 #[path = "e2e_auth_challenge.rs"]
 mod e2e_auth_challenge;
@@ -2310,7 +2314,8 @@ async fn shared_channel_admission_follows_saved_channel_config() {
     let expected_managed_subject = ironclaw_extension_host::managed_channel_subject_user_id(
         ADAPTER,
         &TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
-        &ironclaw_product::AdapterInstallationId::new(INSTALLATION).expect("installation"), // safety: static test installation id is valid.
+        &ironclaw_host_api::product_adapter::AdapterInstallationId::new(INSTALLATION)
+            .expect("installation"), // safety: static test installation id is valid.
         Some(TEAM),
         "C777",
     )

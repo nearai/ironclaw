@@ -7,10 +7,10 @@ use ironclaw_host_api::{
     ids::{TenantId, UserId},
     user_identity::{RebornUserIdentityLookup, installation_scoped_provider_user_id},
 };
-use ironclaw_product::{
-    AdminUserError, AdminUserRole, AdminUserService, AdminUserStatus, CommandActorRoleResolver,
-    ProductCommandContext,
+use ironclaw_product_contracts::admin_users::{
+    AdminUserError, AdminUserRole, AdminUserService, AdminUserStatus,
 };
+use ironclaw_product_contracts::command::{CommandActorRoleResolver, ProductCommandContext};
 use ironclaw_product_contracts::surface::ProductSurfaceError;
 use std::sync::Arc;
 
@@ -120,18 +120,22 @@ impl CommandActorRoleResolver for ChannelActorRoleResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
     use ironclaw_extension_contracts::external::{
         ExternalActorRef, ExternalConversationRef, ExternalEventId,
     };
+    use ironclaw_host_api::product_adapter::AuthRequirement;
     use ironclaw_host_api::product_adapter::{
         AdapterInstallationId, ProductAdapterId, ProtocolAuthEvidence,
     };
     use ironclaw_host_api::user_identity::RebornUserIdentityLookupError;
-    use ironclaw_product::{
-        ActionFingerprintKey, AdminCreateUserFields, AdminCreatedUser, AdminUserRecord,
-        AdminUserSecretMeta, AuthRequirement, InboundCommandPayload, ProductActionId,
-        ProductTriggerReason, SourceBindingKey,
+    use ironclaw_product_contracts::action::{
+        ActionFingerprintKey, ProductActionId, SourceBindingKey,
     };
+    use ironclaw_product_contracts::admin_users::{
+        AdminCreateUserFields, AdminCreatedUser, AdminUserRecord, AdminUserSecretMeta,
+    };
+    use ironclaw_product_contracts::inbound::InboundCommandPayload;
     use ironclaw_product_contracts::inbound::{
         ParsedProductInbound, ProductInboundEnvelope, ProductInboundPayload, TrustedInboundContext,
     };

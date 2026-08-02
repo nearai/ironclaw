@@ -5,12 +5,14 @@
 //! metadata such as installation ids, reply binding refs, external conversation
 //! refs, or delivery attempt ids.
 
-use ironclaw_product::{
-    AuthPromptView, CapabilityActivityView, CapabilityDisplayPreviewView, FinalReplyView,
-    GatePromptView, ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionState,
-    ProgressKind, ProgressUpdateView, ProjectionCursor, RebornCancelRunResponse,
-    RebornGetRunStateResponse, RebornSubmitTurnResponse,
+use ironclaw_extension_contracts::auth_prompt::AuthPromptView;
+use ironclaw_product::RebornGetRunStateResponse;
+use ironclaw_product_contracts::outbound::{
+    CapabilityActivityView, CapabilityDisplayPreviewView, FinalReplyView, GatePromptView,
+    ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionState, ProgressKind,
+    ProgressUpdateView, ProjectionCursor,
 };
+use ironclaw_product_contracts::product_wire::{RebornCancelRunResponse, RebornSubmitTurnResponse};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

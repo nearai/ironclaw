@@ -120,14 +120,15 @@ pub use ironclaw_host_runtime::{
 /// The channel-adapter contract the assembling binary implements is reached at
 /// its owner, `ironclaw_extension_contracts::channel_adapter` — WS1.4 deleted
 /// the re-export chain that gave it a second import path through here.
-pub use ironclaw_product::{
-    ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
-    RebornChannelConnectStrategy,
-};
+pub use ironclaw_product::RebornChannelConnectStrategy;
 pub use ironclaw_product::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
+pub use ironclaw_product_contracts::account_setup::{
+    ChannelConnectionNoticePolicy, ExtensionAccountSetupDescriptor,
+};
+pub use ironclaw_product_contracts::package_lifecycle::ChannelConnectionRequirement;
 pub use ironclaw_runner::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
 pub use ironclaw_runtime_policy::{
@@ -193,8 +194,8 @@ pub use root::profile::{RebornCompositionProfile, RebornCompositionProfileParseE
 pub use runtime::RebornTurnDriveOutcome;
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
-    RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,
-    RebornSkillExecutionResult, RebornSkillSourceKind, blocked_auth_flow_canceller,
+    RebornSkillActivationMode, RebornSkillActivationSource, RebornSkillAsset, RebornSkillBundle,
+    RebornSkillExecutionPlan, RebornSkillExecutionResult, blocked_auth_flow_canceller,
     build_reborn_runtime, build_runtime, product_auth_challenge_provider,
 };
 pub use runtime_input::{

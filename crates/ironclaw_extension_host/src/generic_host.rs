@@ -28,6 +28,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelContext, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, VerifiedInbound,
+};
 use ironclaw_extension_contracts::extension::ExtensionHostAssemblyConfig;
 use ironclaw_extension_contracts::tool_adapter::{
     RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
@@ -39,9 +42,6 @@ use ironclaw_extensions::{
 };
 use ironclaw_host_api::path::VirtualPath;
 use ironclaw_host_runtime::{ExtensionLaneToolBinder, ExtensionToolBindError};
-use ironclaw_product::{
-    ChannelContext, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, VerifiedInbound,
-};
 use ironclaw_resources::ResourceGovernor;
 
 use crate::{

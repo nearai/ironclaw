@@ -627,7 +627,7 @@ async fn local_dev_extension_host_reserves_runner_bridge_capabilities() {
     assert!(
         matches!(
             &error,
-            ironclaw_product::ProductSurfaceFailure::InvalidBindingRequest { reason }
+            ironclaw_product_contracts::error::ProductOperationFailure::InvalidBindingRequest { reason }
                 if reason.contains(BRIDGE_CAPABILITY_ID)
                     && reason.contains("collides with a host built-in")
         ),
@@ -2726,6 +2726,9 @@ async fn enable_global_auto_approve_for_context(
 }
 
 use crate::approval_test_support::disable_global_auto_approve;
+use ironclaw_product_contracts::account_setup::{
+    ChannelConnectionNoticePolicy, ExtensionAccountSetupDescriptor,
+};
 
 fn web_access_context(capability_id: &str) -> ExecutionContext {
     let extension_id = ExtensionId::new("caller").expect("valid extension id");
@@ -3279,10 +3282,8 @@ async fn channel_pairing_completions_run_the_lifecycle_wrapped_continuation_disp
     );
 }
 
-fn pairing_account_setup_descriptor(
-    extension_id: &str,
-) -> ironclaw_product::ExtensionAccountSetupDescriptor {
-    ironclaw_product::ExtensionAccountSetupDescriptor {
+fn pairing_account_setup_descriptor(extension_id: &str) -> ExtensionAccountSetupDescriptor {
+    ExtensionAccountSetupDescriptor {
         extension_id: ExtensionId::new(extension_id).expect("extension id"),
         auth_requirement: ironclaw_host_api::decision::RuntimeCredentialAuthRequirement {
             provider: VendorId::new(extension_id).expect("provider id"),
@@ -3299,9 +3300,7 @@ fn pairing_account_setup_descriptor(
             submit_label: "Pair".to_string(),
             error_message: "Pairing failed.".to_string(),
         },
-        connection_notices: ironclaw_product::ChannelConnectionNoticePolicy::generic(
-            "Pairing Fixture",
-        ),
+        connection_notices: ChannelConnectionNoticePolicy::generic("Pairing Fixture"),
         activation_success_message: "Pairing fixture connected.".to_string(),
         pairing_deep_link_template: None,
         inbound_code_prefixes: Vec::new(),

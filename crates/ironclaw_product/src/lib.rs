@@ -70,10 +70,7 @@ pub use product_auth_prompt::{blocked_auth_flow_canceller, product_auth_challeng
 pub use project_create_capability::{PROJECT_CREATE_CAPABILITY_ID, project_create_capability};
 pub use project_service::RebornProjectService;
 
-pub use action::{
-    ActionDispatchKind, ActionFingerprintKey, ActionPhase, AuthRequestRef, LinkedThreadActionId,
-    ProductActionId, ProductCommandName, ProductInboundAction, SourceBindingKey,
-};
+pub use action::{ActionDispatchKind, ActionPhase, ProductInboundAction};
 pub use approval_interaction::{
     ApprovalBlockedTurnRun, ApprovalGateRecord, ApprovalInteractionActionView,
     ApprovalInteractionDecision, ApprovalInteractionReadModel, ApprovalInteractionRejectionKind,
@@ -104,8 +101,8 @@ pub use auth_interaction::{
     ResolveAuthInteractionResponse, is_auth_gate_ref,
 };
 pub use auth_prompt::{
-    AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller, BlockedAuthPromptRequest,
-    PairingAuthChallengeView, auth_prompt_view_for_blocked_auth,
+    AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller, PairingAuthChallengeView,
+    auth_prompt_view_for_blocked_auth,
 };
 pub use automation_product_service::RebornAutomationProductService;
 pub use automation_thread_metadata::{
@@ -116,9 +113,9 @@ pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding, route_kind_for_inbound_payload,
 };
-pub use command_admission::{CommandActorRoleResolver, DirectConversationCommandAdmission};
+pub use command_admission::DirectConversationCommandAdmission;
 pub use command_dispatch::{
-    ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
+    ProductCommandAdmission, ProductCommandAdmissionService,
     RejectingProductCommandAdmissionService,
 };
 pub use commands::{
@@ -130,20 +127,19 @@ pub use commands::{
     required_audience, validate_declared_product_command,
 };
 pub use communication_context::RuntimeCommunicationContextProvider;
+// `ProductConversationRouteKey`, `ProductConversationSubjectRouteResolutionRequest`,
+// and `ProductConversationSubjectRouteResolver` are deliberately absent: they
+// moved to `ironclaw_product_contracts::subject_route` (WS2.2), and that crate
+// grants no second import path (`reborn_product_contract_location_scan.rs`).
 pub use conversation_binding::{
     ProductActorBindingPolicy, ProductActorUserResolutionRequest, ProductActorUserResolver,
-    ProductConversationBindingService, ProductConversationRouteKey,
-    ProductConversationSubjectRouteResolutionRequest, ProductConversationSubjectRouteResolver,
-    ProductInstallationKey, ProductInstallationScope, ResolvedProductActorUser,
-    StaticProductActorUserResolver, StaticProductInstallationResolver,
+    ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
+    ResolvedProductActorUser, StaticProductActorUserResolver, StaticProductInstallationResolver,
 };
 pub use error::{
     AuthContinuationRejectionKind, ProductSurfaceFailure, lifecycle_product_surface_error,
 };
-pub use extension_account_setup::{
-    AccountConnectionStatusError, AccountConnectionStatusSource, ChannelConnectionNoticePolicy,
-    ExtensionAccountSetupDescriptor, ExtensionAccountSetupError, ExtensionAccountSetupRegistry,
-};
+pub use extension_account_setup::ExtensionAccountSetupRegistry;
 #[cfg(any(test, feature = "test-support"))]
 pub use fakes::{
     FakeBeforeInboundPolicy, FakeConversationBindingService, FakeIdempotencyLedger,
@@ -270,8 +266,7 @@ pub use lifecycle::{
     LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstallScope,
     LifecycleInstalledExtensionSummary, LifecyclePackageId, LifecyclePackageKind,
-    LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleProductService, LifecycleProductSurfaceContext,
+    LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload, LifecycleProductResponse,
     LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, LifecycleSkillSource,
     LifecycleSkillSummary, UnsupportedLifecycleProductService, project_public_lifecycle_states,
     public_lifecycle_response_json,
@@ -279,9 +274,9 @@ pub use lifecycle::{
 // Product hosts use this outbound orchestration seam to wire outbound policy
 // decisions to adapter rendering without reaching into module internals.
 pub use delivery_coordinator::{
-    ChannelDeliveryResolver, CoordinatedDeliveryError, CoordinatedDeliveryOutcome,
-    CoordinatedDeliveryRequest, DeliveryCoordinator, DeliveryIntent, DeliveryReplyContextSource,
-    DeliveryRetryPolicy, NoReplyContext, NoticeDeliveryRequest, ResolvedChannelDelivery,
+    CoordinatedDeliveryError, CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest,
+    DeliveryCoordinator, DeliveryIntent, DeliveryRetryPolicy, NoReplyContext,
+    NoticeDeliveryRequest,
 };
 pub use outbound_delivery::{ProductOutboundTargetResolver, VerifiedProductOutboundTargetMetadata};
 // The generic run-delivery components (§5.4): channel hosts wire these over
@@ -291,9 +286,9 @@ pub use policy::{
     NoopBeforeInboundPolicy,
 };
 pub use run_delivery::{
-    ApprovalPromptContextSource, BlockedAuthPromptSource, DeliveredChannelMessage,
-    RunDeliveryError, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
-    TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest, triggered_run_delivery_settings,
+    DeliveredChannelMessage, RunDeliveryError, RunDeliveryObserver, RunDeliveryServices,
+    RunDeliverySettings, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
+    triggered_run_delivery_settings,
 };
 // Adapter, projection, and event DTOs are re-exported from
 // `ironclaw_host_api::product_adapter` above so product terminals consume a
@@ -314,10 +309,8 @@ pub use reborn_services::{
     AUTOMATION_RENAME_COMMAND, AUTOMATION_RESUME_CAPABILITY, AUTOMATION_RESUME_CAPABILITY_ID,
     AUTOMATION_RESUME_COMMAND, AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATIONS_VIEW, ActiveModelReader,
-    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
-    AdminUserSecretMeta, AdminUserService, AdminUserStatus, AttachmentCleanupReport,
-    AutomationListRequest, AutomationProductService, CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND,
-    ChannelAuthAccountState, ChannelConfigProductService, ChannelConnectionService,
+    AttachmentCleanupReport, AutomationListRequest, AutomationProductService, CANCEL_RUN_COMMAND,
+    CREATE_THREAD_COMMAND, ChannelAuthAccountState, ChannelConnectionService,
     ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
     ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest, CodexLoginStart,
     EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY,
@@ -379,16 +372,16 @@ pub use reborn_services::{
     RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
     RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
-    RebornChannelConfigField, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornCommandRejection, RebornCreateProjectRequest, RebornCreateThreadResponse,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
-    RebornExecuteProductCommandRequest, RebornExecuteProductCommandResponse,
-    RebornExtensionActionResponse, RebornExtensionCredentialSetup, RebornExtensionInfo,
-    RebornExtensionListResponse, RebornExtensionOnboardingPayload, RebornExtensionOnboardingState,
-    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSetupField,
-    RebornExtensionSetupSecret, RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse,
-    RebornFsMountInfo, RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest,
-    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCommandRejection,
+    RebornCreateProjectRequest, RebornCreateThreadResponse, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExecuteProductCommandRequest,
+    RebornExecuteProductCommandResponse, RebornExtensionActionResponse,
+    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
+    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
+    RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
+    RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
+    RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
     RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
     RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
@@ -402,8 +395,7 @@ pub use reborn_services::{
     RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
     RebornOperatorSetupStatus, RebornOperatorSetupStep, RebornOperatorSetupStepStatus,
     RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
-    RebornOperatorStatusState, RebornOperatorSurfaceStatus, RebornOperatorToolCatalog,
-    RebornOperatorToolInfo, RebornOutboundDeliveryModality,
+    RebornOperatorStatusState, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetChannel,
     RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetDisplayName,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
@@ -424,8 +416,7 @@ pub use reborn_services::{
     RebornThreadArtifact, RebornThreadArtifactRequest, RebornTimelineRequest,
     RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
     RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    RebornVendorAuthAccounts, RebornViewDescriptor, RebornViewPage, RebornViewProvider,
-    RebornViewQuery, RunArtifactLogs, RunArtifactMessage, RunArtifactRedaction,
+    RebornVendorAuthAccounts, RunArtifactLogs, RunArtifactMessage, RunArtifactRedaction,
     RunArtifactToolCall, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
     SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY,
@@ -446,11 +437,14 @@ pub use reborn_services::{
     set_outbound_delivery_target_for_model,
 };
 
+pub use ironclaw_product_contracts::inbound_requests::{
+    ProductCancelReason, ProductCancelRunRequest, ProductCreateThreadRequest,
+    ProductGateResolution, ProductInboundAttachment, ProductListAutomationsRequest,
+    ProductListThreadsRequest, ProductRenameAutomationRequest, ProductResolveGateRequest,
+    ProductRetryRunRequest, ProductSetupExtensionRequest, ProductSubmitTurnRequest,
+};
 pub use product_surface_inbound::{
-    ProductAttachmentCapabilities, ProductCancelReason, ProductCancelRunRequest,
-    ProductCreateThreadRequest, ProductGateResolution, ProductInboundAttachment,
-    ProductInboundCommand, ProductListAutomationsRequest, ProductListThreadsRequest,
-    ProductRenameAutomationRequest, ProductResolveGateRequest, ProductRetryRunRequest,
-    ProductSetupExtensionRequest, ProductSubmitTurnRequest, product_attachment_capabilities,
+    DecodeInboundAttachments, IntoProductInboundCommand, ProductAttachmentCapabilities,
+    ProductInboundCommand, product_attachment_capabilities,
 };
 pub use workflow::DefaultProductSurface;

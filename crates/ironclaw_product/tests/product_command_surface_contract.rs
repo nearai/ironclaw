@@ -6,12 +6,11 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_product::{
-    ActionDispatchKind, AdminUserRole, CommandActorRoleResolver, DefaultProductSurface,
-    DirectConversationCommandAdmission, FakeConversationBindingService, FakeIdempotencyLedger,
-    FakeInboundTurnService, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
-    PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand,
-    ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
-    ProductInboundAck, ProductRejectionKind, ProductSurfaceFailure,
+    ActionDispatchKind, DefaultProductSurface, DirectConversationCommandAdmission,
+    FakeConversationBindingService, FakeIdempotencyLedger, FakeInboundTurnService,
+    PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID,
+    PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand, ProductCommandAdmission,
+    ProductCommandAdmissionService, ProductInboundAck, ProductRejectionKind, ProductSurfaceFailure,
 };
 use ironclaw_product::{
     AdapterInstallationId, AuthRequirement, ConversationBindingService, ExternalActorRef,
@@ -19,6 +18,8 @@ use ironclaw_product::{
     ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence,
     ResolveBindingRequest, ResolvedBinding, TrustedInboundContext,
 };
+use ironclaw_product_contracts::admin_users::AdminUserRole;
+use ironclaw_product_contracts::command::{CommandActorRoleResolver, ProductCommandContext};
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
     ProductSurfaceInvokeRequest, ProductSurfaceInvokeResponse,

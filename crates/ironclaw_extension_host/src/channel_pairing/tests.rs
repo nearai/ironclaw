@@ -12,15 +12,21 @@ use ironclaw_auth::{AuthProductError, RebornAuthContinuationDispatcher};
 use ironclaw_conversations::{
     ConditionalUnpairOutcome, ExternalActorRef as ConversationActorRef, InboundTurnError,
 };
+use ironclaw_extension_contracts::auth_prompt::AuthPromptChallengeKind;
 use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_extension_contracts::external::{
+    ExternalActorRef, ExternalConversationRef, ExternalEventId,
+};
 use ironclaw_extension_host::ingress::{InboundAdmission, InboundAdmissionAck, InboundSink};
 use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_host_api::product_adapter::ProductAdapterId;
 use ironclaw_host_api::user_identity::RebornUserIdentityLookupError;
-use ironclaw_product::{
-    AuthPromptChallengeKind, BlockedAuthPromptRequest, BlockedAuthPromptSource,
-    ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExternalActorRef,
-    ExternalConversationRef, ExternalEventId, ProductAdapterId, ProductTriggerReason,
-    RebornChannelConnectStrategy,
+use ironclaw_product::RebornChannelConnectStrategy;
+use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::package_lifecycle::ChannelConnectionRequirement;
+use ironclaw_product_contracts::prompt_source::{
+    BlockedAuthPromptRequest, BlockedAuthPromptSource,
 };
 use tokio::sync::Notify;
 
@@ -43,6 +49,20 @@ impl ChannelPairingInstallationSource for StaticInstallation {
         _caller: &UserId,
     ) -> Result<Option<AdapterInstallationId>, String> {
         Ok(self.0.clone())
+    }
+}
+
+/// An installation source whose backend is down. Used to drive the one
+/// `AccountConnectionStatusSource::connected` path that must sanitize.
+struct UnavailableInstallation;
+
+#[async_trait]
+impl ChannelPairingInstallationSource for UnavailableInstallation {
+    async fn current_installation(
+        &self,
+        _caller: &UserId,
+    ) -> Result<Option<AdapterInstallationId>, String> {
+        Err("postgres: connection refused at 10.0.0.7:5432".to_string())
     }
 }
 
@@ -310,6 +330,22 @@ fn fixture_with_prefixes(
     template_values: BTreeMap<String, String>,
     inbound_code_prefixes: &[&str],
 ) -> Fixture {
+    fixture_with_installation_source(
+        Arc::new(StaticInstallation(installation.map(|id| {
+            AdapterInstallationId::new(id).expect("installation id")
+        }))),
+        deep_link_template,
+        template_values,
+        inbound_code_prefixes,
+    )
+}
+
+fn fixture_with_installation_source(
+    installation_source: Arc<dyn ChannelPairingInstallationSource>,
+    deep_link_template: Option<&str>,
+    template_values: BTreeMap<String, String>,
+    inbound_code_prefixes: &[&str],
+) -> Fixture {
     let backend: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
     let tenant = TenantId::new("tenant-alpha").expect("tenant");
     let operator = UserId::new("operator").expect("operator");
@@ -343,9 +379,7 @@ fn fixture_with_prefixes(
             .map(|prefix| (*prefix).to_string())
             .collect(),
         store,
-        installation: Arc::new(StaticInstallation(
-            installation.map(|id| AdapterInstallationId::new(id).expect("installation id")),
-        )),
+        installation: installation_source,
         template_values: Arc::new(StaticTemplateValues(template_values)),
         identity_bind: Arc::clone(&identity) as Arc<dyn RebornUserIdentityBindingStore>,
         identity_lookup: Arc::clone(&identity) as Arc<dyn RebornUserIdentityLookup>,
@@ -1220,5 +1254,61 @@ async fn interceptor_accepts_another_manifest_declared_prefix() {
         ChannelPairingInterception::Consumed(ChannelPairingConsumeOutcome::Paired {
             user_id: user("alice"),
         })
+    );
+}
+
+/// The activation-preflight probe is the one place a pairing backend failure
+/// crosses into product-facing vocabulary, so it must fail **closed** and
+/// **sanitized**: activation cannot be allowed to proceed on an unknown
+/// connection state, and the concrete backend string (host, port, driver) must
+/// not ride out on the error a product surface renders.
+#[tokio::test]
+async fn connection_probe_fails_closed_and_sanitizes_the_backend_error() {
+    use ironclaw_product_contracts::account_setup::AccountConnectionStatusSource;
+
+    let fixture = fixture_with_installation_source(
+        Arc::new(UnavailableInstallation),
+        None,
+        BTreeMap::new(),
+        &[],
+    );
+    let caller = UserId::new("user-1").expect("user");
+
+    let error = fixture
+        .service
+        .connected(&caller)
+        .await
+        .expect_err("an unavailable pairing backend must not answer 'not connected'");
+
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("channel pairing status unavailable"),
+        "probe must report the sanitized reason: {rendered}"
+    );
+    for leak in ["postgres", "10.0.0.7", "5432", "connection refused"] {
+        assert!(
+            !rendered.contains(leak),
+            "backend detail {leak:?} leaked into the product-facing error: {rendered}"
+        );
+    }
+}
+
+/// The success half of the same probe: a resolvable installation answers with
+/// the pairing state itself, so an unpaired caller reports `false` rather than
+/// erroring — activation must be able to tell "not connected yet" apart from
+/// "cannot tell".
+#[tokio::test]
+async fn connection_probe_reports_not_connected_for_an_unpaired_caller() {
+    use ironclaw_product_contracts::account_setup::AccountConnectionStatusSource;
+
+    let fixture = fixture_with(Some(INSTALL), None, BTreeMap::new());
+    let caller = UserId::new("user-1").expect("user");
+
+    assert!(
+        !fixture
+            .service
+            .connected(&caller)
+            .await
+            .expect("a resolvable installation answers rather than erroring"),
     );
 }

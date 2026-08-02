@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use ironclaw_conversations::RebornFilesystemConversationServices;
+use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
 use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec;
 use ironclaw_extension_contracts::recipe::IngressVerificationRecipe;
 use ironclaw_extension_contracts::recipe::RecipeSecretField;
@@ -33,6 +34,7 @@ use ironclaw_extension_host::ingress::{
 };
 use ironclaw_extension_host::{DeploymentChannelBinding, DeploymentChannelRegistry, SnapshotWatch};
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
+use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
 use ironclaw_host_api::{
     ids::{AgentId, ExtensionId, ProjectId, SecretHandle, TenantId, ThreadId, UserId},
     mount::{MountGrant, MountPermissions, MountView},
@@ -40,21 +42,22 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_outbound::{CommunicationPreferenceRepository, DeliveredGateRouteStore};
+use ironclaw_product::ProjectFilesystemReader;
 use ironclaw_product::{
-    AdapterInstallationId, ExternalConversationRef, ExternalEventId, ProductAdapterId,
-    ProductInboundAck, ProductInboundEnvelope, ProjectFilesystemReader,
-};
-use ironclaw_product::{
-    ApprovalInteractionService, ApprovalPromptContextSource, AuthInteractionService,
-    BlockedAuthFlowCanceller, BlockedAuthPromptSource, ChannelConnectionNoticePolicy,
+    ApprovalInteractionService, AuthInteractionService, BlockedAuthFlowCanceller,
     ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
     DeliveryCoordinator, IdempotencyLedger, InboundAttachmentLander,
-    ProductActorUserResolutionRequest, ProductActorUserResolver,
-    ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
-    ProductSurfaceFailure, RebornFilesystemIdempotencyLedger, ResolvedProductActorUser,
-    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
+    ProductActorUserResolutionRequest, ProductActorUserResolver, ProductInstallationKey,
+    ProductInstallationScope, ProductSurfaceFailure, RebornFilesystemIdempotencyLedger,
+    ResolvedProductActorUser, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
     StaticProductInstallationResolver,
 };
+use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::inbound::{ProductInboundAck, ProductInboundEnvelope};
+use ironclaw_product_contracts::prompt_source::{
+    ApprovalPromptContextSource, BlockedAuthPromptSource,
+};
+use ironclaw_product_contracts::subject_route::ProductConversationSubjectRouteResolver;
 use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::{TurnCoordinator, TurnScope};
@@ -66,6 +69,7 @@ use crate::extension_ingress::{
     ManagedRegistrationOutcome, PostAdmissionObserver, VerifiedEvidenceMint,
 };
 use ironclaw_extension_host::ChannelConfigService;
+use ironclaw_product_contracts::admin_users::AdminUserService;
 
 const CHANNEL_IDEMPOTENCY_LEDGER_SETTLED_LIMIT: usize = 10_000;
 const CHANNEL_IDEMPOTENCY_LEDGER_PRUNE_INTERVAL: usize = 1_000;
@@ -367,7 +371,7 @@ pub struct GenericChannelHostDeps {
     /// for extensions that pair without an OAuth vendor.
     pub channel_pairing: Option<Arc<crate::channel_pairing::ChannelPairingRegistry>>,
     /// Admin-users directory backing channel-command role gating.
-    pub admin_users: Arc<dyn ironclaw_product::AdminUserService>,
+    pub admin_users: Arc<dyn AdminUserService>,
 }
 
 /// What the assembly last reconciled for one extension id.
@@ -1274,7 +1278,7 @@ impl PostAdmissionObserver for RunDeliveryPostAdmissionObserver {
     async fn observe_error(
         &self,
         envelope: ProductInboundEnvelope,
-        error: ironclaw_product::ProductAdapterError,
+        error: ironclaw_host_api::product_adapter_error::ProductAdapterError,
     ) {
         self.observer.observe_error(envelope, error).await;
     }

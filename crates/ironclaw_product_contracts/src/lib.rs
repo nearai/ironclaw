@@ -32,15 +32,31 @@
 //!   in this crate.
 #![warn(unreachable_pub)]
 
+pub mod account_setup;
+pub mod action;
+pub mod admin_users;
+pub mod channel_config;
+pub mod command;
+pub mod delivery;
+pub mod descriptors;
+pub mod error;
 pub mod inbound;
+pub mod inbound_requests;
 pub mod interaction_commands;
+pub mod lifecycle_service;
 pub mod operator_llm;
+pub mod operator_tools;
 pub mod outbound;
 pub mod package_lifecycle;
+pub mod product_wire;
 pub mod projection;
+pub mod prompt_source;
+pub mod subject_route;
 pub mod surface;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+pub mod views;
+pub mod workspace_views;
 
 // There is deliberately no flat prelude and no cross-module re-export here.
 // Every contract is reached through the module that owns it —

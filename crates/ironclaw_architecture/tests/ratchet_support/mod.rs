@@ -22,12 +22,40 @@ pub struct TypeDefOccurrence {
     pub cfg_gated: bool,
 }
 
+/// The workspace root: the nearest ancestor of `start` holding both a `crates/`
+/// directory and a `Cargo.toml`.
+///
+/// Deliberately a search, not `CARGO_MANIFEST_DIR.parent().parent()`. The fixed
+/// two-level form encoded "this crate sits directly under `crates/`", which the
+/// family move (`crates/<family>/ironclaw_*`, PROPOSAL §5) makes false — and its
+/// failure is silent for any gate that walks a directory: a wrong root makes
+/// `root.join("crates")` resolve to `crates/crates`, the walk finds nothing, and
+/// the gate passes having scanned zero files (CHECKLIST WS0, #6963).
+///
+/// This is the crate's ONLY definition of the rule — all twelve private copies
+/// were deleted in its favour, including
+/// `reborn_registration_pipeline_boundary.rs`'s (a review catch on #6996: it
+/// had been left behind with a comment claiming it needed one, which was never
+/// true — nothing about resolving scopes prevents a test binary from declaring
+/// `mod ratchet_support`).
+#[allow(dead_code)]
+pub fn find_workspace_root(start: &Path) -> Result<PathBuf, String> {
+    let mut current = Some(start);
+    while let Some(directory) = current {
+        if directory.join("crates").is_dir() && directory.join("Cargo.toml").is_file() {
+            return Ok(directory.to_path_buf());
+        }
+        current = directory.parent();
+    }
+    Err(format!(
+        "no workspace root above {} — expected an ancestor holding both crates/ and Cargo.toml",
+        start.display()
+    ))
+}
+
 pub fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("architecture crate must live under crates/ironclaw_architecture")
-        .to_path_buf()
+    find_workspace_root(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .expect("architecture crate must sit inside the workspace")
 }
 
 /// Names with more than one defining occurrence — a second same-named

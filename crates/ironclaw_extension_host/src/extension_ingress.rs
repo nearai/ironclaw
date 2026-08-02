@@ -18,6 +18,7 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
+use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
 use ironclaw_extension_contracts::verified_inbound;
 use ironclaw_extension_host::ingress::{
     ExtensionIngressRouter, InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError,
@@ -25,14 +26,15 @@ use ironclaw_extension_host::ingress::{
 };
 use ironclaw_host_api::ids::SecretHandle;
 use ironclaw_host_api::product_adapter::auth::ChannelIngressVerifier;
-use ironclaw_product::{
-    AdapterInstallationId, ExternalConversationRef, ExternalEventId, ProductAdapterId,
-    ProductInboundAck, ProductInboundEnvelope, ProductSourceChannel, ProtocolAuthEvidence,
-    classify_channel_inbound_text,
+use ironclaw_host_api::product_adapter::{
+    AdapterInstallationId, ProductAdapterId, ProtocolAuthEvidence,
 };
 use ironclaw_product::{
     ChannelInboundSurfaceOutcome, ChannelInboundSurfaceRejectedAdmission,
     ChannelInboundSurfaceRequest,
+};
+use ironclaw_product_contracts::inbound::{
+    ProductInboundAck, ProductInboundEnvelope, ProductSourceChannel, classify_channel_inbound_text,
 };
 use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
 use tokio::task::JoinSet;
@@ -65,7 +67,7 @@ pub trait PostAdmissionObserver: Send + Sync {
     async fn observe_error(
         &self,
         _envelope: ProductInboundEnvelope,
-        _error: ironclaw_product::ProductAdapterError,
+        _error: ironclaw_host_api::product_adapter_error::ProductAdapterError,
     ) {
     }
 }
@@ -877,16 +879,22 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+    use ironclaw_extension_contracts::channel_adapter::{
+        ChannelAttachmentRef, ProductTriggerReason,
+    };
+    use ironclaw_extension_contracts::external::{
+        ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
+        ProductAttachmentKind,
+    };
     use ironclaw_extension_contracts::tool_adapter::{
         RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
     };
     use ironclaw_host_api::ids::UserId;
-    use ironclaw_product::{
-        AuthResolutionPayload, AuthResolutionResult, ChannelAttachmentRef,
-        ChannelInboundClassification, ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
-        ExternalActorRef, ExternalConversationRef, ExternalEventId, InboundCommandPayload,
-        ParsedProductInbound, ProductAttachmentDescriptor, ProductAttachmentKind,
-        ProductInboundPayload, ProductTriggerReason, TrustedInboundContext, UserMessagePayload,
+    use ironclaw_product::{ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome};
+    use ironclaw_product_contracts::inbound::{
+        AuthResolutionPayload, AuthResolutionResult, ChannelInboundClassification,
+        InboundCommandPayload, ParsedProductInbound, ProductInboundPayload, TrustedInboundContext,
+        UserMessagePayload,
     };
     use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 

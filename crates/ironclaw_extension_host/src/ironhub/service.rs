@@ -3,6 +3,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
+use ironclaw_extension_contracts::lifecycle_id::LifecyclePackageId;
 use ironclaw_extension_contracts::state::InstallationState;
 use ironclaw_host_api::{
     action::NetworkMethod,
@@ -17,9 +18,9 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     BUILTIN_FIRST_PARTY_PROVIDER, HostRuntimeHttpEgressPort, HostRuntimeHttpEgressRequest,
 };
-use ironclaw_product::{
-    LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleProductSurfaceContext,
+use ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContext;
+use ironclaw_product_contracts::package_lifecycle::{
+    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
 };
 use ironclaw_skills::{
     ManagedSkillSource, ScopedSkillManagementError, ScopedSkillManagementPort,

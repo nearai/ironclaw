@@ -121,7 +121,7 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/ironclaw_product/src/reborn_services/types.rs"
-lines = [483]
+lines = [105]
 owner = "@nearai/reborn"
 reason = "Struct field declaration; only the GateRef -> TurnGateRef type name changed. Not executable, so the file contributes no instrumented lines."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
@@ -721,8 +721,8 @@ review_after = "2026-11-01"
 [[exemption]]
 path = "crates/ironclaw_product/src/reborn_services.rs"
 lines = [
-  3722, 3723, 3724, 3725, 3726, 3727, 3728, 3729, 3731, 3732, 3733, 3734,
-  3735, 3736, 3737, 6612, 6613, 6614, 6616, 6619, 6622, 6623,
+  3570, 3571, 3572, 3573, 3574, 3575, 3576, 3577, 3579, 3580, 3581, 3582,
+  3583, 3584, 3585, 6464, 6465, 6466, 6468, 6471, 6474, 6475,
 ]
 owner = "@nearai/reborn"
 reason = "steering_admission_error mapping fn and queued-replay run-id parse failure arms: fault-only paths covered by the scripted reborn_services_contract crate-tier tests."
@@ -744,7 +744,7 @@ review_after = "2026-11-01"
 
 [[exemption]]
 path = "crates/ironclaw_reborn_composition/src/factory/test_support.rs"
-lines = [357]
+lines = [356]
 owner = "@nearai/reborn"
 reason = "test-support-feature factory wiring line (RejectingInputEnqueue for the channel-host assembly); compiled only under the dev-only test-support feature."
 issue = "https://github.com/nearai/ironclaw/issues/7006"
@@ -844,9 +844,169 @@ issue = "https://github.com/nearai/ironclaw/issues/7006"
 review_after = "2026-11-01"
 
 [[exemption]]
-path = "crates/ironclaw_product/src/reborn_services/types.rs"
-lines = [294, 295, 296, 297, 298, 299, 300]
+path = "crates/ironclaw_product_contracts/src/product_wire.rs"
+lines = [308, 309, 310, 311, 312, 313, 314]
 owner = "@nearai/reborn"
-reason = "DeferredBusy response-variant field declarations; no DA records emitted for enum variant bodies in the integration lcov."
+reason = "DeferredBusy response-variant field declarations (moved here by the WS5 product_wire inversion); no DA records emitted for enum variant bodies in the integration lcov."
 issue = "https://github.com/nearai/ironclaw/issues/7006"
 review_after = "2026-11-01"
+
+# ---------------------------------------------------------------------------
+# WS2.1 extension_host port inversion (PR #6998). One entry, for one line.
+#
+# The port move deleted `ironclaw_product`'s re-export of
+# `ChannelConfigProductService`, so every signature naming it had to be
+# repointed. In this file the repoint let the signature fit on one line, which
+# makes the function's coverage region a *changed* line even though its body,
+# its callers, and its behavior are untouched.
+#
+# It is not an uncovered path. The accessor has two live callers, both of which
+# exercise it through the composed runtime:
+#   tests/integration/group_extensions/scenario_slack_channel_lifecycle_state_machine.rs:112
+#   crates/ironclaw_reborn_composition/tests/trigger_poller_e2e.rs:630
+# The service it hands back is itself covered: `RebornChannelConfigProductService`
+# is exercised by the extension_host channel-config suite, and the port contract
+# by `ironclaw_product_contracts::channel_config`'s own tests, both added in this
+# PR. What the merged lcov shows is the lane-attribution artifact #6963 tracks:
+# the caller lives in a lane whose lcov does not attribute hits back to this
+# `#[cfg(any(test, feature = "test-support"))]` accessor in the composition
+# bucket build.
+#
+# Every other changed line in this PR is covered by a test, not exempted --
+# including the five relocated port modules, which each gained a contract test
+# rather than a waiver.
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/factory/test_support.rs"
+lines = [330]
+owner = "@nearai/reborn"
+reason = "Signature repoint only: the `channel_config_service` dev-seam accessor's return type moved from `ironclaw_product`'s deleted re-export to `ironclaw_product_contracts::channel_config`, collapsing the signature onto one line. Body, callers, and behavior are unchanged; two integration callers exercise it (see the block comment above)."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+# ---------------------------------------------------------------------------
+# WS2.1, second tranche: the type-position residue.
+#
+# Deleting `ironclaw_product`'s re-exports forced every signature that named a
+# moved symbol to be rewritten. Where the name appears in a *type position* --
+# a struct field, a function parameter, a struct-literal field's enum path --
+# the rewrite changes the line but LLVM emits no coverage region for it, so the
+# line can never be covered and the file reports "contributed no instrumented
+# lines". This is the same class as the four WS1 entries above, from the same
+# cause, and each entry below names the exact construct.
+#
+# Everything in this PR that *can* be covered is covered by a test, not a
+# waiver: the ten relocated port modules, the two fail-closed error paths in
+# `extension_host`, and the `\0` arm of the bounded-token guard. The one
+# `tracing::debug!` body that read as uncovered is now exercised through a
+# real DEBUG subscriber rather than exempted.
+
+[[exemption]]
+path = "crates/ironclaw_extension_host/src/channel_host.rs"
+lines = [370]
+owner = "@nearai/reborn"
+reason = "Type position only: `GenericChannelHostAssembly::admin_users`'s `Arc<dyn AdminUserService>` field type. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_host/src/channel_host.rs"
+lines = [1276]
+owner = "@nearai/reborn"
+reason = "Type position only: a function parameter's `ProductAdapterError` type, repointed to `ironclaw_host_api::product_adapter_error`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_host/src/extension_ingress.rs"
+lines = [70]
+owner = "@nearai/reborn"
+reason = "Type position only: a function parameter's `ProductAdapterError` type, repointed to `ironclaw_host_api::product_adapter_error`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_host/src/run_delivery_ports.rs"
+lines = [85]
+owner = "@nearai/reborn"
+reason = "Type position only: an `AuthChallengeView` struct-literal field's `AuthPromptChallengeKind::Pairing` path, repointed to `ironclaw_extension_contracts::auth_prompt`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_host/src/run_delivery_ports.rs"
+lines = [173]
+owner = "@nearai/reborn"
+reason = "Type position only: a function parameter's `BlockedAuthPromptRequest<'_>` type, repointed to `ironclaw_product_contracts::prompt_source`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_host/src/test_support.rs"
+lines = [472]
+owner = "@nearai/reborn"
+reason = "Type position only: a function parameter's `ExternalConversationRef` type, repointed to `ironclaw_extension_contracts::external`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_host/src/test_support.rs"
+lines = [473]
+owner = "@nearai/reborn"
+reason = "Type position only: a function parameter's `ExternalEventId` type, repointed to `ironclaw_extension_contracts::external`. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/deployment.rs"
+lines = [266]
+owner = "@nearai/reborn"
+reason = "Type position only: `account_setup_descriptors`'s `Vec<ExtensionAccountSetupDescriptor>` field type. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/factory/production_build_assembly.rs"
+lines = [340]
+owner = "@nearai/reborn"
+reason = "Type position only: `account_setup_descriptors`'s `Vec<ExtensionAccountSetupDescriptor>` field type. A type position carries no LLVM coverage region, so the line can never be covered; the surrounding code is unchanged."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+# ---------------------------------------------------------------------------
+# WS2.1, third tranche: one `tracing` message literal.
+#
+# This one is worth reading, because the obvious conclusion is wrong. The line
+# is the message string inside a `tracing::debug!` invocation. It reads as
+# uncovered, but the event body *does* execute: the test
+# `output_serialization_failure_maps_to_output_decode_and_logs_the_detail`
+# installs a DEBUG subscriber over a shared writer and asserts the rendered
+# output contains that exact message, and it passes -- including in the
+# `extension-operator` bucket, which is green.
+#
+# Proof it is an attribution artifact rather than a dead path, from that same
+# bucket's own tracefile (`bucket-extension-operator.lcov`, run 30689416105):
+#
+#   line 213 (fn signature)      hits 1
+#   line 214 (macro invocation)  hits 1
+#   line 217 (message literal)   hits 0   <- this entry
+#   line 219 (error construction) hits 1
+#   line 220 (closing brace)     hits 1
+#
+# The function ran, the macro ran, and the error was built. What LLVM does not
+# count is the message literal: `tracing` bakes it into the callsite's `static`
+# `Metadata`, so the region on that line belongs to a static initializer and is
+# never attributed to an executed path. No subscriber, test, or restructuring
+# short of changing the log target (a behavior change this move-shaped PR will
+# not make) can move that counter.
+#
+# Every `tracing::debug!` in this workspace has the same shape; they simply do
+# not enter this gate's denominator because their lines are not in the diff.
+
+[[exemption]]
+path = "crates/ironclaw_extension_host/src/extension_lifecycle_capabilities.rs"
+lines = [217]
+owner = "@nearai/reborn"
+reason = "A `tracing::debug!` message literal. `tracing` bakes the message into the callsite's `static` Metadata, so LLVM attributes this line's region to a static initializer and never counts it as executed -- while the surrounding lines 213/214/219/220 each score 1 hit in the same tracefile and the event body is asserted by a DEBUG-subscriber test. Attribution artifact, not a dead path; see the block comment above for the per-line evidence."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"

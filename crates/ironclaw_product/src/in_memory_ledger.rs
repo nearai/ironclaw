@@ -4,6 +4,8 @@
 //! integration tests. Durable production deployments should wire a database
 //! ledger with the same lease semantics.
 
+use ironclaw_product_contracts::action::ActionFingerprintKey;
+
 use std::{
     collections::HashMap,
     num::NonZeroUsize,
@@ -13,10 +15,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 
-use crate::{
-    ActionFingerprintKey, IdempotencyDecision, IdempotencyLedger, ProductInboundAction,
-    ProductSurfaceFailure,
-};
+use crate::{IdempotencyDecision, IdempotencyLedger, ProductInboundAction, ProductSurfaceFailure};
 
 const DEFAULT_IN_FLIGHT_LEASE: Duration = Duration::seconds(60);
 

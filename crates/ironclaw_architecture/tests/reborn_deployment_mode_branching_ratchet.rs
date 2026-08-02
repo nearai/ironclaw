@@ -48,8 +48,13 @@
 //! Skips `tests/`, `examples/`, `benches/` trees and `*tests.rs` files —
 //! test fixtures naming a profile are not production branching.
 
+#[allow(dead_code)]
+mod ratchet_support;
+
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+use ratchet_support::workspace_root;
 
 /// Production files under composition `src/` allowed to name a
 /// `RebornCompositionProfile` variant, each with the reason it is still here.
@@ -71,14 +76,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
          when it grows a memory-binding axis (#5264).",
     ),
 ];
-
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("architecture crate must live under crates/ironclaw_architecture")
-        .to_path_buf()
-}
 
 /// Remove line comments, block comments, and string literals so that prose and
 /// fixtures inside them cannot trip the scan.

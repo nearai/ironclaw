@@ -20,7 +20,7 @@ pub trait AdminApiTokenMinter: Send + Sync {
 }
 
 /// Fail-closed placeholder for composition paths that need an
-/// [`AdminUserService`](ironclaw_product::AdminUserService) handle purely for
+/// [`AdminUserService`](ironclaw_product_contracts::admin_users::AdminUserService) handle purely for
 /// tenant-scoped role reads (channel-command admission's `get_user` calls,
 /// which never mint tokens) rather than the WebUI admin `create_user` route.
 /// `RebornAdminUserDirectory::create_user` is the sole caller of the minter;

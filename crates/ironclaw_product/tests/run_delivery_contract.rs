@@ -42,13 +42,18 @@ use ironclaw_product::{
     VerifiedInbound,
 };
 use ironclaw_product::{
-    BlockedAuthPromptRequest, BlockedAuthPromptSource, ChannelConnectionNoticePolicy,
-    ChannelDeliveryResolver, DeliveryCoordinator, DeliveryReplyContextSource, DeliveryRetryPolicy,
-    ResolvedChannelDelivery, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
-    TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
+    DeliveryCoordinator, DeliveryRetryPolicy, RunDeliveryObserver, RunDeliveryServices,
+    RunDeliverySettings, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
 };
 use ironclaw_product::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsStat,
+};
+use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::delivery::{
+    ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
+};
+use ironclaw_product_contracts::prompt_source::{
+    BlockedAuthPromptRequest, BlockedAuthPromptSource,
 };
 use ironclaw_threads::{
     AppendFinalizedAssistantMessageRequest, AttachmentKind, AttachmentRef, EnsureThreadRequest,

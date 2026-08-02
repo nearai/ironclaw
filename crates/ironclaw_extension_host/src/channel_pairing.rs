@@ -32,6 +32,7 @@ use ironclaw_conversations::{
 use ironclaw_filesystem::{
     CasApply, ContentType, Entry, FilesystemError, RootFilesystem, ScopedFilesystem, cas_update,
 };
+use ironclaw_host_api::product_adapter::AdapterInstallationId;
 use ironclaw_host_api::{
     error::HostApiError,
     ids::{AgentId, ExtensionId, InvocationId, ProjectId, TenantId, UserId},
@@ -39,8 +40,11 @@ use ironclaw_host_api::{
     path::{MountAlias, ScopedPath, VirtualPath},
     resource::ResourceScope,
 };
-use ironclaw_product::AdapterInstallationId;
-use ironclaw_product::{ChannelConnectionNoticePolicy, ChannelConnectionRequirement};
+use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::account_setup::{
+    AccountConnectionStatusError, AccountConnectionStatusSource,
+};
+use ironclaw_product_contracts::package_lifecycle::ChannelConnectionRequirement;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -1118,7 +1122,9 @@ impl crate::extension_ingress::ChannelPairingInterceptor for ChannelPairingServi
     ) -> crate::extension_ingress::ChannelPairingInterception {
         use crate::extension_ingress::ChannelPairingInterception;
 
-        if message.trigger != ironclaw_product::ProductTriggerReason::DirectChat {
+        if message.trigger
+            != ironclaw_extension_contracts::channel_adapter::ProductTriggerReason::DirectChat
+        {
             return ChannelPairingInterception::NotHandled;
         }
         let Some(code) = candidate_code(&message.text, &self.inbound_code_prefixes) else {
@@ -1176,20 +1182,15 @@ impl crate::extension_ingress::ChannelPairingInterceptor for ChannelPairingServi
 /// entry so activation can gate on the caller's pairing state without
 /// holding the full pairing surface.
 #[async_trait]
-impl ironclaw_product::AccountConnectionStatusSource for ChannelPairingService {
-    async fn connected(
-        &self,
-        user_id: &UserId,
-    ) -> Result<bool, ironclaw_product::AccountConnectionStatusError> {
+impl AccountConnectionStatusSource for ChannelPairingService {
+    async fn connected(&self, user_id: &UserId) -> Result<bool, AccountConnectionStatusError> {
         let status = self.status_for(user_id).await.map_err(|error| {
             tracing::debug!(
                 target: "ironclaw::reborn::channel_pairing",
                 error = %error,
                 "channel pairing status lookup failed"
             );
-            ironclaw_product::AccountConnectionStatusError::new(
-                "channel pairing status unavailable",
-            )
+            AccountConnectionStatusError::new("channel pairing status unavailable")
         })?;
         Ok(status.connected)
     }

@@ -33,12 +33,13 @@ use ironclaw_product::{
     ProductResolveGateRequest, ProductSubmitTurnRequest, RebornCancelRunResponse,
     RebornCreateThreadResponse, RebornDeleteThreadRequest, RebornListThreadsResponse,
     RebornSetupExtensionResponse, RebornSubmitTurnResponse, RebornTimelineResponse,
-    RebornTraceCreditsResponse, RebornViewQuery, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW,
-    TIMELINE_VIEW, TRACE_CREDITS_VIEW,
+    RebornTraceCreditsResponse, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW,
+    TRACE_CREDITS_VIEW,
 };
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
+use ironclaw_product_contracts::views::RebornViewQuery;
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_turns::{EventCursor, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus};
 use ironclaw_webui::{

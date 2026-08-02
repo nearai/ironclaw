@@ -4,19 +4,29 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+use ironclaw_extension_contracts::external::{
+    ExternalEventId, ProductAttachmentDescriptor, ProductAttachmentKind,
+};
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
 use ironclaw_host_api::ids::ThreadId;
+use ironclaw_host_api::product_adapter::ProductAdapterId;
 use ironclaw_product::{
-    CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND, ProductCancelRunRequest, ProductCreateThreadRequest,
-    ProductSubmitTurnRequest, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    SUBMIT_TURN_COMMAND,
+    CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND, DecodeInboundAttachments,
+    RebornCreateThreadResponse, SUBMIT_TURN_COMMAND,
 };
-use ironclaw_product::{
-    ExternalEventId, ProductAdapterId, ProductAttachmentDescriptor, ProductAttachmentKind,
+use ironclaw_product_contracts::inbound::{
     ProductInboundAck, ProductInboundPayload, ProductRejection, ProductRejectionKind,
-    ProductTriggerReason, ProjectionReadRequest, UserMessagePayload,
+    UserMessagePayload,
 };
+use ironclaw_product_contracts::inbound_requests::{
+    ProductCancelRunRequest, ProductCreateThreadRequest, ProductSubmitTurnRequest,
+};
+use ironclaw_product_contracts::product_wire::{
+    RebornCancelRunResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse,
+};
+use ironclaw_product_contracts::projection::ProjectionReadRequest;
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
     ProductSurfaceErrorKind,

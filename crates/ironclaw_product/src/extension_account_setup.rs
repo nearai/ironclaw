@@ -8,98 +8,13 @@
 use std::collections::{BTreeMap, btree_map::Entry as MapEntry};
 use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use async_trait::async_trait;
 use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
     ids::{ExtensionId, UserId},
 };
-use thiserror::Error;
-
-use crate::ChannelConnectionRequirement;
-
-/// A connection-status read failed inside the extension-owned host service.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("account connection status read failed: {reason}")]
-pub struct AccountConnectionStatusError {
-    reason: String,
-}
-
-impl AccountConnectionStatusError {
-    pub fn new(reason: impl Into<String>) -> Self {
-        Self {
-            reason: reason.into(),
-        }
-    }
-}
-
-/// Narrow per-user account-connection probe used during activation preflight.
-#[async_trait]
-pub trait AccountConnectionStatusSource: Send + Sync + std::fmt::Debug {
-    async fn connected(&self, user_id: &UserId) -> Result<bool, AccountConnectionStatusError>;
-}
-
-/// Product-owned copy for a channel account's pairing lifecycle.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChannelConnectionNoticePolicy {
-    pub connect_required: String,
-    pub paired: String,
-    pub already_paired_same_user: String,
-    pub already_bound_to_other_user: String,
-    pub expired_or_unknown: String,
-}
-
-impl ChannelConnectionNoticePolicy {
-    pub fn generic(display_name: &str) -> Self {
-        Self {
-            connect_required: format!(
-                "👋 To use {display_name}, connect it in the Ironclaw web app, then message me here again."
-            ),
-            paired: format!("✅ {display_name} is paired. You can talk to Ironclaw here."),
-            already_paired_same_user: format!(
-                "✅ This {display_name} account is already paired to you."
-            ),
-            already_bound_to_other_user: format!(
-                "This {display_name} account is already paired to another Ironclaw user."
-            ),
-            expired_or_unknown: format!(
-                "That {display_name} pairing code is invalid or expired. Get a fresh code from Ironclaw and try again."
-            ),
-        }
-    }
-}
-
-/// Immutable product metadata for an extension whose activation depends on a
-/// user-scoped external-account connection.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExtensionAccountSetupDescriptor {
-    pub extension_id: ExtensionId,
-    pub auth_requirement: RuntimeCredentialAuthRequirement,
-    pub connection_requirement: ChannelConnectionRequirement,
-    pub connection_notices: ChannelConnectionNoticePolicy,
-    pub activation_success_message: String,
-    /// `WebGeneratedCode` presentation: an optional deep-link template with
-    /// `{code}` plus non-secret `[channel.config]` field-handle placeholders
-    /// (e.g. `https://vendor.example/{bot_username}?start={code}`). `None`
-    /// presents the minted code alone.
-    pub pairing_deep_link_template: Option<String>,
-    /// Exact message prefixes the channel's pairing parser may strip before
-    /// validating a host-issued proof code.
-    pub inbound_code_prefixes: Vec<String>,
-}
-
-/// Sanitized lifecycle classification for an unavailable setup host or status
-/// backend. The concrete backend error never crosses this boundary.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum ExtensionAccountSetupError {
-    #[error("account setup host is unavailable for extension {extension_id}")]
-    HostUnavailable { extension_id: ExtensionId },
-    #[error("account connection status is unavailable for extension {extension_id}")]
-    StatusUnavailable {
-        extension_id: ExtensionId,
-        #[source]
-        source: AccountConnectionStatusError,
-    },
-}
+use ironclaw_product_contracts::account_setup::{
+    AccountConnectionStatusSource, ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
+};
 
 #[derive(Debug)]
 struct RegistryEntry {

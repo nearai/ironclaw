@@ -4,7 +4,7 @@ use ironclaw_extensions::{
     ExtensionError, ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry,
 };
 use ironclaw_host_api::{capability::EffectKind, trust::PackageSource};
-use ironclaw_product::ProductSurfaceFailure;
+use ironclaw_product_contracts::error::ProductOperationFailure;
 use ironclaw_trust::{
     AdminEntry, HostTrustAssignment, HostTrustPolicy, InvalidationBus, TrustError,
 };
@@ -33,7 +33,7 @@ impl ActiveExtensionPublisher {
         self.active_registry.snapshot()
     }
 
-    pub fn publish(&self, package: &ExtensionPackage) -> Result<(), ProductSurfaceFailure> {
+    pub fn publish(&self, package: &ExtensionPackage) -> Result<(), ProductOperationFailure> {
         self.upsert_trust_policy(package)?;
         if let Err(error) = self
             .active_registry
@@ -52,13 +52,16 @@ impl ActiveExtensionPublisher {
         Ok(())
     }
 
-    pub fn unpublish(&self, package: &ExtensionPackage) -> Result<(), ProductSurfaceFailure> {
+    pub fn unpublish(&self, package: &ExtensionPackage) -> Result<(), ProductOperationFailure> {
         self.remove_trust_policy(package)?;
         self.active_registry.remove(&package.id);
         Ok(())
     }
 
-    fn upsert_trust_policy(&self, package: &ExtensionPackage) -> Result<(), ProductSurfaceFailure> {
+    fn upsert_trust_policy(
+        &self,
+        package: &ExtensionPackage,
+    ) -> Result<(), ProductOperationFailure> {
         let input = extension_trust_policy_input(package)?;
         let entry = match &input.identity.source {
             PackageSource::DirectRemote { endpoint } => {
@@ -86,7 +89,7 @@ impl ActiveExtensionPublisher {
                 None,
             ),
             source => {
-                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                return Err(ProductOperationFailure::InvalidBindingRequest {
                     reason: format!("extension package has unsupported trust source: {source:?}"),
                 });
             }
@@ -105,7 +108,10 @@ impl ActiveExtensionPublisher {
             .map_err(map_trust_policy_error)
     }
 
-    fn remove_trust_policy(&self, package: &ExtensionPackage) -> Result<(), ProductSurfaceFailure> {
+    fn remove_trust_policy(
+        &self,
+        package: &ExtensionPackage,
+    ) -> Result<(), ProductOperationFailure> {
         let input = extension_trust_policy_input(package)?;
         let package_id = input.identity.package_id.clone();
         let source = input.identity.source.clone();
@@ -127,7 +133,7 @@ impl ActiveExtensionPublisher {
 
 pub fn extension_trust_policy_input(
     package: &ExtensionPackage,
-) -> Result<ironclaw_trust::TrustPolicyInput, ProductSurfaceFailure> {
+) -> Result<ironclaw_trust::TrustPolicyInput, ProductOperationFailure> {
     package
         .trust_policy_input(
             package.trust_policy_source().map_err(map_extension_error)?,
@@ -149,20 +155,20 @@ fn extension_allowed_effects(package: &ExtensionPackage) -> Vec<EffectKind> {
     effects
 }
 
-fn map_trust_policy_error(error: TrustError) -> ProductSurfaceFailure {
-    ProductSurfaceFailure::InvalidBindingRequest {
+fn map_trust_policy_error(error: TrustError) -> ProductOperationFailure {
+    ProductOperationFailure::InvalidBindingRequest {
         reason: format!("extension trust policy update failed: {error}"),
     }
 }
 
-fn map_extension_error(error: ExtensionError) -> ProductSurfaceFailure {
+fn map_extension_error(error: ExtensionError) -> ProductOperationFailure {
     match error {
         ExtensionError::Filesystem(_) | ExtensionError::LifecycleEventSink { .. } => {
-            ProductSurfaceFailure::Transient {
+            ProductOperationFailure::Transient {
                 reason: error.to_string(),
             }
         }
-        _ => ProductSurfaceFailure::InvalidBindingRequest {
+        _ => ProductOperationFailure::InvalidBindingRequest {
             reason: error.to_string(),
         },
     }
@@ -172,8 +178,8 @@ fn compensation_failure(
     context: &str,
     original: impl std::fmt::Display,
     compensation: impl std::fmt::Display,
-) -> ProductSurfaceFailure {
-    ProductSurfaceFailure::Transient {
+) -> ProductOperationFailure {
+    ProductOperationFailure::Transient {
         reason: format!(
             "{context}; original error: {original}; compensation error: {compensation}"
         ),
