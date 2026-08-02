@@ -1240,6 +1240,21 @@ async fn assert_normalized_backend_contract(
         &BTreeSet::from([bob.clone()])
     );
 
+    let mismatched_ref = ExtensionManifestRef::new(extension_id("other-tools"), None);
+    let mismatched = store
+        .upsert_manifest_only(
+            expected.installation_id(),
+            &mismatched_ref,
+            refreshed.updated_at(),
+            manifest("sha256:stale"),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        mismatched,
+        ExtensionInstallationError::ManifestExtensionMismatch { .. }
+    ));
+
     let stale = store
         .upsert_manifest_only(
             expected.installation_id(),
@@ -1253,6 +1268,35 @@ async fn assert_normalized_backend_contract(
         stale,
         ExtensionInstallationError::PreparationFinalizationRejected { .. }
     ));
+
+    let refresh_ref = refreshed.manifest_ref().clone();
+    let refresh_updated_at = refreshed.updated_at();
+    store
+        .activate_membership(expected.installation_id(), &alice)
+        .await
+        .unwrap();
+    store
+        .upsert_manifest_only(
+            expected.installation_id(),
+            &refresh_ref,
+            refresh_updated_at,
+            manifest("sha256:after-membership"),
+        )
+        .await
+        .unwrap();
+    let after_concurrent_refresh = store
+        .get_installation(expected.installation_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after_concurrent_refresh.owner().members().unwrap(),
+        &BTreeSet::from([alice.clone(), bob.clone()])
+    );
+    assert_eq!(
+        after_concurrent_refresh.manifest_ref().manifest_hash(),
+        Some(&manifest_hash("sha256:after-membership"))
+    );
     drop(store);
 
     let reopened = ExtensionInstallationStore::load_at(
@@ -1270,7 +1314,7 @@ async fn assert_normalized_backend_contract(
         .unwrap();
     assert_eq!(
         installation.owner().members().unwrap(),
-        &BTreeSet::from([bob])
+        &BTreeSet::from([alice, bob])
     );
     assert_eq!(
         reopened
@@ -1279,7 +1323,7 @@ async fn assert_normalized_backend_contract(
             .unwrap()
             .unwrap()
             .manifest_hash(),
-        Some(&manifest_hash("sha256:refresh"))
+        Some(&manifest_hash("sha256:after-membership"))
     );
 
     reopened

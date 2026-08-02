@@ -359,7 +359,7 @@ impl HostedMcpPreparationService {
                         requirements,
                     )?;
                 response.message = Some(
-                    "Hosted MCP rejected the bearer credentials; update them and retry activation."
+                    "Hosted MCP rejected the saved credentials; update or reconnect them and retry activation."
                         .to_string(),
                 );
                 return Ok(Some(response));

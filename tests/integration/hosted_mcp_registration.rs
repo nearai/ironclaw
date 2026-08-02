@@ -904,7 +904,9 @@ async fn bearer_registration_stays_setup_needed_until_the_existing_auth_continua
     );
     assert_eq!(
         rejected_retry.message.as_deref(),
-        Some("Hosted MCP rejected the bearer credentials; update them and retry activation."),
+        Some(
+            "Hosted MCP rejected the saved credentials; update or reconnect them and retry activation."
+        ),
         "a rejected bearer token must surface the hosted-MCP setup reason: {rejected_retry:#?}"
     );
     assert!(
