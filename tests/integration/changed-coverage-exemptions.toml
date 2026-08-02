@@ -677,6 +677,151 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 # ---------------------------------------------------------------------------
+# PR #6973 recovers the process-journal and ordered-index capacity regression
+# tracked in #6974. The branch adds deterministic contract coverage for the
+# successful paths and the faults that can be injected through the public test
+# seam. The residual lines below are the exact output of run 30719767929's
+# merged integration LCOV, replayed locally with reborn_changed_coverage.py.
+#
+# They fall into three narrow classes:
+#   * generic/test-support counter attribution (the calling contract tests run,
+#     but LLVM assigns the monomorphized body to another crate or test binary);
+#   * defensive infrastructure-error arms that require corrupt driver rows,
+#     failed rollback/oneshot channels, or a scheduler race unavailable through
+#     the typed contract seam;
+#   * retry/fallback arms whose externally observable boundary is already
+#     covered by deterministic BackendBusy/VersionMismatch and retry-exhaustion
+#     tests, while each internal failure site cannot be independently injected.
+# No file or glob is waived and the 100% policy remains unchanged.
+
+[[exemption]]
+path = "crates/ironclaw_filesystem/src/fault.rs"
+lines = [88, 89, 90, 91, 92, 166, 167, 168, 169]
+owner = "@nearai/reborn"
+reason = "FaultInjecting::version_mismatch is exercised by the transcript-migration CAS retry and exhaustion contract tests, but LLVM attributes this generic test-support body to the consuming ironclaw_threads test binary instead of ironclaw_filesystem. These are the constructor and conversion lines only."
+issue = "https://github.com/nearai/ironclaw/issues/6974"
+review_after = "2026-11-02"
+
+[[exemption]]
+path = "crates/ironclaw_filesystem/src/index.rs"
+lines = [433]
+branch_lines = [427, 432]
+owner = "@nearai/reborn"
+reason = "ancestor_prefixes is covered by direct root, trailing-slash, and deep-path tests plus three backend conformance suites. The residual arms are total-function defenses after rfind returns an ASCII slash offset; get(..index) cannot fail for that offset, and the loop termination variants are counter-attributed across backend monomorphizations."
+issue = "https://github.com/nearai/ironclaw/issues/6974"
+review_after = "2026-11-02"
+
+[[exemption]]
+path = "crates/ironclaw_filesystem/src/libsql.rs"
+lines = [2503, 2512, 2552, 2553, 2564, 2565]
+branch_lines = [2491, 2557]
+owner = "@nearai/reborn"
+reason = "The libSQL ordered-index conformance and legacy-trigger sweep execute the static projection install and validate insert/update/delete behavior. Residual arms require an over-arity typed IndexSpec, corrupt sqlite_master trigger metadata, invalid legacy trigger names, or an infrastructure failure during cleanup DDL; those cannot be produced through the validated contract seam."
+issue = "https://github.com/nearai/ironclaw/issues/6974"
+review_after = "2026-11-02"
+
+[[exemption]]
+path = "crates/ironclaw_filesystem/src/postgres.rs"
+lines = [2152, 2153, 2215, 2216]
+branch_lines = [2126, 2206, 2214, 2215, 2216, 2217]
+owner = "@nearai/reborn"
+reason = "The PostgreSQL contract suite provisions a real PG16 instance, validates the full static trigger set and update/delete projection behavior, and exercises the isolated legacy sweep. Residual arms are driver-error mapping, over-arity input rejected by the typed API, and defensive identifier filtering over catalog names created only by trusted DDL."
+issue = "https://github.com/nearai/ironclaw/issues/6974"
+review_after = "2026-11-02"
+
+[[exemption]]
+path = "crates/ironclaw_processes/src/journal_store.rs"
+lines = [279, 968]
+branch_lines = [278]
+owner = "@nearai/reborn"
+reason = "Process-journal contract tests cover grouped submission, mixed-command isolation, retry exhaustion, observer re-entry, and read-your-writes. These residual lines require the lazily owned flusher receiver or a oneshot responder to disappear while the store still owns the corresponding sender, an internal task-lifetime failure with no typed injection seam."
+issue = "https://github.com/nearai/ironclaw/issues/6974"
+review_after = "2026-11-02"
+
+[[exemption]]
+path = "crates/ironclaw_processes/src/journal_store/flusher.rs"
+lines = [
+  76, 98, 160, 175, 176, 180, 194, 204, 205, 231,
+  278, 279, 280, 307, 308, 351, 405, 420, 421, 422,
+  441, 460, 461, 462, 464, 466, 469, 470, 471, 486,
+  487, 488, 489, 490, 533, 547, 549, 551,
+]
+branch_lines = [
+  169, 170, 174, 201, 255, 327, 350, 401, 415, 460, 467, 532, 546,
+]
+owner = "@nearai/reborn"
+reason = "The production funnel is covered through batching, per-command rejection, retry exhaustion, one-shot write-fault, observer ordering, and re-entrant commit contracts. The exact residuals are task shutdown, rollback failure, sender disappearance, impossible post-preview shape mismatch, and scheduler-dependent fallback branches that are not independently injectable without production-only seams."
+issue = "https://github.com/nearai/ironclaw/issues/6974"
+review_after = "2026-11-02"
+
+[[exemption]]
+path = "crates/ironclaw_processes/src/journal_store/observer.rs"
+lines = [
+  151, 157, 207, 263, 264, 279, 285, 286, 287, 288,
+  289, 290, 291, 292, 293, 294, 295, 296, 297, 298, 299,
+]
+branch_lines = [141, 242, 303]
+owner = "@nearai/reborn"
+reason = "Observer contracts cover in-memory batch delivery, cursor monotonicity under a stale cache, replay fallback, concurrent observers, and callback re-entry. Residuals require poisoned registration state, task/channel teardown, or every observer/replay recovery path failing together; the public seam exposes observer failures but not these internal task-lifetime combinations."
+issue = "https://github.com/nearai/ironclaw/issues/6974"
+review_after = "2026-11-02"
+
+[[exemption]]
+path = "crates/ironclaw_processes/src/journal_store/rows.rs"
+lines = [317, 318, 319, 320, 321]
+owner = "@nearai/reborn"
+reason = "Batch row loading is exercised by every process-journal contract test. This residual is the defensive conversion of a supposedly loaded idempotency-order singleton being absent after its reference was requested; producing it would require violating the private References/load invariant rather than a backend behavior."
+issue = "https://github.com/nearai/ironclaw/issues/6974"
+review_after = "2026-11-02"
+
+[[exemption]]
+path = "crates/ironclaw_product/src/reborn_services.rs"
+lines = [6746, 6747]
+owner = "@nearai/reborn"
+reason = "TimelineUnavailable mapping is exercised at the product boundary; these lines only emit the server-side tracing event for a backend/serialization cause while preserving the sanitized response. The integration lane does not install a tracing collector that can force and attribute this detail-only side effect."
+issue = "https://github.com/nearai/ironclaw/issues/6974"
+review_after = "2026-11-02"
+
+[[exemption]]
+path = "crates/ironclaw_threads/src/filesystem_service.rs"
+lines = [371, 373, 375]
+branch_lines = [371, 378]
+owner = "@nearai/reborn"
+reason = "Thread contracts cover required and optional root-index declaration and the once-per-mount cache. Residuals are the optional Unsupported downgrade, a backend error while declaring a validated built-in spec, and poisoned cache-lock recovery; none is independently injectable through the filesystem contract without broadening production seams."
+issue = "https://github.com/nearai/ironclaw/issues/6974"
+review_after = "2026-11-02"
+
+[[exemption]]
+path = "crates/ironclaw_threads/src/filesystem_service/thread_index.rs"
+lines = [418, 419, 420, 421, 710]
+branch_lines = [417, 710]
+owner = "@nearai/reborn"
+reason = "Thread-index contracts cover title seeding, redaction clearing, migration backfill, and bounded cache eviction. The residual title arm is the idempotent no-op for a missing projection row; the eviction arm depends on HashSet iteration choosing the protected key first and is scheduler/hash-seed dependent while both externally visible outcomes preserve the bound."
+issue = "https://github.com/nearai/ironclaw/issues/6974"
+review_after = "2026-11-02"
+
+[[exemption]]
+path = "crates/ironclaw_threads/src/filesystem_service/transcript_migration.rs"
+lines = [
+  39, 62, 63, 103, 104, 159, 168, 169, 170, 171,
+  173, 178, 190, 202, 203, 204, 205, 207, 212, 213,
+  214, 216, 221, 222, 233, 238, 239, 241, 273, 274, 275,
+]
+branch_lines = [62, 101, 156, 169, 175, 183, 203, 212, 229, 238, 267]
+owner = "@nearai/reborn"
+reason = "Contract tests deterministically cover writer-admission BackendBusy, VersionMismatch page retry, bounded exhaustion, successful message/summary rebuild, and durable marker read-back. Residuals are alternate failure sites inside the same bounded state machine, malformed legacy records, disappearing rows, and non-durable marker/backend failures not separately selectable through FaultInjecting."
+issue = "https://github.com/nearai/ironclaw/issues/6974"
+review_after = "2026-11-02"
+
+[[exemption]]
+path = "crates/ironclaw_turns/src/process_projection/store_adapter.rs"
+lines = [393, 394, 395, 396, 397]
+owner = "@nearai/reborn"
+reason = "The only executable semantic change is adding GroupCommitFailed to the existing retryable Unavailable match arm. The variant-pattern line has no LLVM DA record of its own, so this otherwise changed production file contributes a zero denominator; process contracts cover the variant and state_tests classify it explicitly."
+issue = "https://github.com/nearai/ironclaw/issues/6974"
+review_after = "2026-11-02"
+
+# ---------------------------------------------------------------------------
 # WS2.1, second tranche: the type-position residue.
 #
 # Deleting `ironclaw_product`'s re-exports forced every signature that named a
