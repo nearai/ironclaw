@@ -22,6 +22,26 @@ report() {
     fi
 }
 
+assert_success() {
+    local label="$1"
+    shift
+    if "$@" > /dev/null 2>&1; then
+        report 1 "$label"
+    else
+        report 0 "$label"
+    fi
+}
+
+assert_failure() {
+    local label="$1"
+    shift
+    if "$@" > /dev/null 2>&1; then
+        report 0 "$label"
+    else
+        report 1 "$label"
+    fi
+}
+
 # Case 1: every comm invocation in CI scripts and tracked hooks must pin
 # LC_ALL=C so its collation matches the LC_ALL=C-sorted inputs. Backslash-
 # newline continuations are joined first so multiline invocations — both the
@@ -56,8 +76,9 @@ fi
 # compare equal and comm never notices the disorder. Select a locale by
 # proving the mismatch — unpinned comm must reject the C-sorted fixture under
 # it (this skips C-compatible collations such as C.UTF-8, where the case would
-# prove nothing) — then assert the pinned form succeeds in that same
-# environment. If no installed locale disagrees with C on the fixture, the
+# prove nothing) — then assert both sides in that same environment: unpinned
+# comm rejects the fixture and the pinned form accepts it. If no installed
+# locale disagrees with C on the fixture, the
 # mismatch is not reproducible on this machine; say so explicitly instead of
 # silently passing under C.
 fixture="$(mktemp "${TMPDIR:-/tmp}/comm-locale.XXXXXX")"
@@ -75,10 +96,11 @@ done < <(locale -a 2>/dev/null | grep -aiE 'utf-?8$')
 
 if [ -z "$mismatch_locale" ]; then
     echo "SKIP: no installed UTF-8 locale rejects the C-sorted fixture; collation mismatch not reproducible here"
-elif LC_ALL="$mismatch_locale" sh -c 'LC_ALL=C comm -12 "$1" "$2"' _ "$fixture" "$sentinel" > /dev/null 2>&1; then
-    report 1 "LC_ALL=C comm accepts C-sorted input under mismatching locale $mismatch_locale"
 else
-    report 0 "LC_ALL=C comm accepts C-sorted input under mismatching locale $mismatch_locale"
+    assert_failure "unpinned comm rejects C-sorted input under mismatching locale $mismatch_locale" \
+        env LC_ALL="$mismatch_locale" comm -12 "$fixture" "$sentinel"
+    assert_success "LC_ALL=C comm accepts C-sorted input under mismatching locale $mismatch_locale" \
+        env LC_ALL="$mismatch_locale" sh -c 'LC_ALL=C comm -12 "$1" "$2"' _ "$fixture" "$sentinel"
 fi
 rm -f "$fixture" "$sentinel"
 
