@@ -401,4 +401,16 @@ effects = ["network"]
             "non-structural client reasons must stay retryable, got {classified:?}"
         );
     }
+
+    #[test]
+    fn bare_auth_required_classifies_as_credentials_rejected() {
+        let classified = classify_mcp_client_error(ironclaw_mcp::McpClientError::AuthRequired);
+        assert!(matches!(
+            classified,
+            HostedMcpDiscoveryError::CredentialsRejected(challenge)
+                if challenge.status == 401
+                    && challenge.www_authenticate_metadata.is_empty()
+                    && challenge.protected_resource_metadata.is_empty()
+        ));
+    }
 }

@@ -812,7 +812,7 @@ async fn tenant_definition_is_discoverable_but_installation_and_removal_stay_per
 #[tokio::test]
 async fn bearer_registration_stays_setup_needed_until_the_existing_auth_continuation_succeeds() {
     let server = HostedMcpRegistrationServer::start(
-        HostedMcpAuthPolicy::ExactBearer {
+        HostedMcpAuthPolicy::ExactBearerWithoutChallenge {
             token: "correct-token".to_string(),
         },
         vec![HostedMcpTool::read_only("search", json!("ok"))],
@@ -891,6 +891,24 @@ async fn bearer_registration_stays_setup_needed_until_the_existing_auth_continua
             .expect("active capability projection")
             .is_empty(),
         "failed auth continuation publishes no MCP tools"
+    );
+    let rejected_retry = install_fixture(&services, scope.clone()).await;
+    assert_eq!(
+        rejected_retry.phase,
+        ironclaw_host_api::state::InstallationState::Installed,
+        "a rejected bearer token keeps the install in setup-needed state"
+    );
+    assert_eq!(
+        rejected_retry.message.as_deref(),
+        Some("Hosted MCP rejected the bearer credentials; update them and retry activation."),
+        "a rejected bearer token must surface the hosted-MCP setup reason: {rejected_retry:#?}"
+    );
+    assert!(
+        rejected_retry.blockers.iter().any(|blocker| matches!(
+            blocker,
+            ironclaw_host_api::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
+        )),
+        "a rejected bearer token must retain the credential blocker: {rejected_retry:#?}"
     );
 
     let submitted = submit_fixture_bearer(&services, scope.clone(), provider, "correct-token")

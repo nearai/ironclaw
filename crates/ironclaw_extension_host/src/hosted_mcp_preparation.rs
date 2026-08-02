@@ -208,7 +208,7 @@ impl HostedMcpPreparationService {
     // arch-exempt: too_many_args, mirrors the parameter set `prepare_if_pending`
     // already gathered under its operation-lock guard; missing a
     // HostedMcpPreparationAttempt context struct to own
-    // (package_ref, extension_id, scope, installation, manifest), plan TBD
+    // (package_ref, extension_id, scope, installation, manifest), plan #6329
     #[allow(clippy::too_many_arguments)]
     async fn attempt_hosted_mcp_preparation(
         &self,
@@ -350,12 +350,16 @@ impl HostedMcpPreparationService {
                     .await;
             }
             Err(crate::HostedMcpDiscoveryError::CredentialsRejected(_)) => {
-                return Ok(Some(
+                let mut response =
                     crate::product_lifecycle::activation_credentials_incomplete_response(
                         package_ref.clone(),
                         requirements,
-                    )?,
-                ));
+                    )?;
+                response.message = Some(
+                    "Hosted MCP rejected the bearer credentials; update them and retry activation."
+                        .to_string(),
+                );
+                return Ok(Some(response));
             }
             Err(error) => {
                 return Err(crate::hosted_mcp_manifest::discovery_error(error));
@@ -374,20 +378,13 @@ impl HostedMcpPreparationService {
         .map(|record| record.with_definition_retention(manifest.definition_retention()))
         .map_err(crate::product_lifecycle::map_extension_installation_error)?;
         if best_effort {
-            // `finalize_preparation` asserts a pending lease
-            // (`take_v2_preparation_lease` rejects any installation that is
-            // not awaiting its first resolution). A best-effort refresh runs
-            // on a package that already publishes capabilities, so there is
-            // no pending lease to finalize — persist the refreshed catalog as
-            // a plain upsert instead.
-            //
-            // `installation` predates the unlocked discovery call, and this
-            // upsert writes with `CasExpectation::Any`, so a concurrent
-            // installation-row mutation can be lost. Closing that needs a
-            // manifest-only CAS upsert across every storage backend; tracked
-            // as follow-up rather than widened here.
             self.installation_store
-                .upsert_manifest_and_installation(finalized.clone(), installation.clone())
+                .upsert_manifest_only(
+                    installation.installation_id(),
+                    installation.manifest_ref(),
+                    installation.updated_at(),
+                    finalized.clone(),
+                )
                 .await
                 .map_err(crate::product_lifecycle::map_extension_installation_error)?;
         } else {

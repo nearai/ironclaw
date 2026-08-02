@@ -255,6 +255,21 @@ mod tests {
     }
 
     #[test]
+    fn hosted_mcp_endpoint_deserialization_rejects_malformed_values() {
+        for value in [
+            serde_json::json!(""),
+            serde_json::json!("https://mcp.example.test/\npath"),
+            serde_json::json!("x".repeat(HOSTED_MCP_ENDPOINT_MAX_BYTES + 1)),
+            serde_json::json!(42),
+        ] {
+            assert!(
+                serde_json::from_value::<HostedMcpEndpoint>(value).is_err(),
+                "malformed hosted MCP endpoint must be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn direct_remote_source_serializes_with_exact_endpoint() {
         let source = crate::trust::PackageSource::DirectRemote {
             endpoint: "https://mcp.example.test/rpc?tenant=one".to_string(),
@@ -350,6 +365,18 @@ mod tests {
         assert_eq!(
             locations[0].as_str(),
             "https://mcp.notion.com/.well-known/oauth-protected-resource/mcp"
+        );
+    }
+
+    #[test]
+    fn stripe_style_unquoted_auth_challenge_extracts_metadata_location() {
+        let locations = extract_mcp_auth_metadata_locations(
+            "Bearer resource_metadata=https://mcp.stripe.com/.well-known/oauth-protected-resource",
+        );
+        assert_eq!(locations.len(), 1);
+        assert_eq!(
+            locations[0].as_str(),
+            "https://mcp.stripe.com/.well-known/oauth-protected-resource"
         );
     }
 }

@@ -1206,6 +1206,53 @@ async fn assert_normalized_backend_contract(
         .deactivate_membership(expected.installation_id(), &alice)
         .await
         .unwrap();
+
+    let before_refresh = store
+        .get_installation(expected.installation_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let expected_ref = before_refresh.manifest_ref().clone();
+    let expected_updated_at = before_refresh.updated_at();
+    store
+        .upsert_manifest_only(
+            expected.installation_id(),
+            &expected_ref,
+            expected_updated_at,
+            manifest("sha256:refresh"),
+        )
+        .await
+        .unwrap();
+    let refreshed = store
+        .get_installation(expected.installation_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(refreshed.installation_id(), expected.installation_id());
+    assert_eq!(refreshed.extension_id(), expected.extension_id());
+    assert_eq!(refreshed.incarnation_id(), expected.incarnation_id());
+    assert_eq!(
+        refreshed.credential_bindings(),
+        expected.credential_bindings()
+    );
+    assert_eq!(
+        refreshed.owner().members().unwrap(),
+        &BTreeSet::from([bob.clone()])
+    );
+
+    let stale = store
+        .upsert_manifest_only(
+            expected.installation_id(),
+            &expected_ref,
+            expected_updated_at,
+            manifest("sha256:stale"),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        stale,
+        ExtensionInstallationError::PreparationFinalizationRejected { .. }
+    ));
     drop(store);
 
     let reopened = ExtensionInstallationStore::load_at(
@@ -1224,6 +1271,15 @@ async fn assert_normalized_backend_contract(
     assert_eq!(
         installation.owner().members().unwrap(),
         &BTreeSet::from([bob])
+    );
+    assert_eq!(
+        reopened
+            .get_manifest(expected.extension_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .manifest_hash(),
+        Some(&manifest_hash("sha256:refresh"))
     );
 
     reopened

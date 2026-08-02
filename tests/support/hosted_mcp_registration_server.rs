@@ -21,6 +21,7 @@ use tokio::sync::oneshot;
 pub enum HostedMcpAuthPolicy {
     NoAuth,
     ExactBearer { token: String },
+    ExactBearerWithoutChallenge { token: String },
     OAuth { access_token: String },
 }
 
@@ -317,6 +318,7 @@ async fn mcp(
     let expected = match &state.policy {
         HostedMcpAuthPolicy::NoAuth => None,
         HostedMcpAuthPolicy::ExactBearer { token }
+        | HostedMcpAuthPolicy::ExactBearerWithoutChallenge { token }
         | HostedMcpAuthPolicy::OAuth {
             access_token: token,
         } => Some(format!("Bearer {token}")),
@@ -342,6 +344,9 @@ async fn mcp(
         return match state.policy {
             HostedMcpAuthPolicy::OAuth { .. } => oauth_challenge(StatusCode::UNAUTHORIZED),
             HostedMcpAuthPolicy::ExactBearer { .. } => bearer_challenge(StatusCode::UNAUTHORIZED),
+            HostedMcpAuthPolicy::ExactBearerWithoutChallenge { .. } => {
+                StatusCode::UNAUTHORIZED.into_response()
+            }
             HostedMcpAuthPolicy::NoAuth => StatusCode::UNAUTHORIZED.into_response(),
         };
     }

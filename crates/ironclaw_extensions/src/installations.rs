@@ -857,6 +857,28 @@ pub trait ExtensionInstallationStorePort: Send + Sync {
         installation: ExtensionInstallation,
     ) -> Result<(), ExtensionInstallationError>;
 
+    /// Conditionally refresh only the manifest embedded in a live installation.
+    /// The current installation row is read and retained by the CAS transform,
+    /// so concurrent membership and credential state cannot be overwritten by
+    /// a manifest refresh. A changed manifest reference rejects the refresh.
+    async fn upsert_manifest_only(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        expected_manifest_ref: &ExtensionManifestRef,
+        expected_updated_at: DateTime<Utc>,
+        manifest: ExtensionManifestRecord,
+    ) -> Result<(), ExtensionInstallationError> {
+        let _ = (
+            installation_id,
+            expected_manifest_ref,
+            expected_updated_at,
+            manifest,
+        );
+        Err(store_unavailable_error(
+            "extension installation store does not implement manifest-only updates",
+        ))
+    }
+
     /// Conditionally commit a prepared manifest. Implementations must reject
     /// a stale incarnation or pending-manifest reference without publication.
     async fn finalize_preparation(
@@ -1001,6 +1023,23 @@ where
         installation: ExtensionInstallation,
     ) -> Result<(), ExtensionInstallationError> {
         (**self).upsert_installation(installation).await
+    }
+
+    async fn upsert_manifest_only(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        expected_manifest_ref: &ExtensionManifestRef,
+        expected_updated_at: DateTime<Utc>,
+        manifest: ExtensionManifestRecord,
+    ) -> Result<(), ExtensionInstallationError> {
+        (**self)
+            .upsert_manifest_only(
+                installation_id,
+                expected_manifest_ref,
+                expected_updated_at,
+                manifest,
+            )
+            .await
     }
 
     async fn finalize_preparation(
@@ -3459,6 +3498,87 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
         let _ = self
             .put_installation(&installation, CasExpectation::Any)
             .await;
+        Ok(())
+    }
+
+    async fn upsert_manifest_only(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        expected_manifest_ref: &ExtensionManifestRef,
+        expected_updated_at: DateTime<Utc>,
+        manifest: ExtensionManifestRecord,
+    ) -> Result<(), ExtensionInstallationError> {
+        if manifest.extension_id() != expected_manifest_ref.extension_id() {
+            return Err(ExtensionInstallationError::ManifestExtensionMismatch {
+                extension_id: expected_manifest_ref.extension_id().clone(),
+                manifest_extension_id: manifest.extension_id().clone(),
+            });
+        }
+        let path = self.v2_scoped_path(&self.v2_installation_path(installation_id)?)?;
+        let installation_id = installation_id.clone();
+        let expected_manifest_ref = expected_manifest_ref.clone();
+        let manifest_wire = WireManifestRecord::from(&manifest);
+        cas_update(
+            self.scoped_filesystem.as_ref(),
+            &ResourceScope::system(),
+            &path,
+            decode_v2_installation_body,
+            entry_for_v2_installation,
+            move |current: Option<V2InstallationRecord>| {
+                let installation_id = installation_id.clone();
+                let expected_manifest_ref = expected_manifest_ref.clone();
+                let manifest_wire = manifest_wire.clone();
+                async move {
+                    let Some(mut record) = current else {
+                        return Err(ExtensionInstallationError::InstallationNotFound {
+                            installation_id,
+                        });
+                    };
+                    if record.installation_id != installation_id {
+                        return Err(invalid_installation_error(
+                            "v2 installation body identity did not match its key",
+                        ));
+                    }
+                    if record.is_removed() {
+                        return Err(ExtensionInstallationError::InstallationNotFound {
+                            installation_id,
+                        });
+                    }
+                    if record.lease.is_some()
+                        || record.manifest_ref() != expected_manifest_ref
+                        || record.updated_at != expected_updated_at
+                    {
+                        return Err(
+                            ExtensionInstallationError::PreparationFinalizationRejected {
+                                installation_id,
+                            },
+                        );
+                    }
+                    let manifest_extension_id = manifest_wire
+                        .resolved
+                        .as_ref()
+                        .ok_or_else(|| {
+                            invalid_installation_error("manifest-only refresh was not resolved")
+                        })?
+                        .id
+                        .clone();
+                    if record.extension_id != manifest_extension_id {
+                        return Err(ExtensionInstallationError::ManifestExtensionMismatch {
+                            extension_id: record.extension_id,
+                            manifest_extension_id,
+                        });
+                    }
+                    record.manifest = manifest_wire;
+                    record.updated_at = Utc::now();
+                    Ok(CasApply::new(record, ()))
+                }
+            },
+        )
+        .await
+        .map_err(|error| map_extension_state_cas_error(error, "installation"))?;
+        // The v2 row is authoritative. Keep the legacy projection best effort;
+        // startup repair converges it if this compatibility write races.
+        let _ = self.put_manifest(&manifest, CasExpectation::Any).await;
         Ok(())
     }
 
