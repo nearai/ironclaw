@@ -85,6 +85,22 @@ impl ReplyTargetBindingValidator for FakeReplyTargetBindingValidator {
     }
 }
 
+struct ConcurrentReplyTargetBindingValidator {
+    barrier: Arc<Barrier>,
+}
+
+#[async_trait]
+impl ReplyTargetBindingValidator for ConcurrentReplyTargetBindingValidator {
+    async fn validate_reply_target(
+        &self,
+        request: ironclaw_outbound::ReplyTargetValidationRequest,
+    ) -> Result<ReplyTargetBindingClaim, OutboundError> {
+        assert_eq!(request.candidate.target, validated_reply_target());
+        self.barrier.wait().await;
+        Ok(ReplyTargetBindingClaim::new(request.candidate.target))
+    }
+}
+
 #[derive(Default)]
 struct FakePreferenceRepository {
     records: Mutex<HashMap<CommunicationPreferenceKey, VersionedCommunicationPreferenceRecord>>,
@@ -835,6 +851,18 @@ fn coordinator_over_recording_reply_lookups(
     (coordinator, reply_context)
 }
 
+fn shared_store_pair() -> (
+    Arc<OutboundStateStore<InMemoryBackend>>,
+    Arc<OutboundStateStore<InMemoryBackend>>,
+) {
+    let filesystem = ironclaw_outbound::test_support::in_memory_backed_outbound_filesystem();
+    #[allow(clippy::disallowed_methods)]
+    let first_store = Arc::new(OutboundStateStore::new(Arc::clone(&filesystem)));
+    #[allow(clippy::disallowed_methods)]
+    let second_store = Arc::new(OutboundStateStore::new(filesystem));
+    (first_store, second_store)
+}
+
 /// Resolver that rejects with `OutboundTargetNotDirectMessage` whenever
 /// `require_direct_message` is set — the coordinator-path analog of the live
 /// `TriggeredReplyTargetAuthority` DM guard (`run_delivery/triggered.rs`),
@@ -1016,6 +1044,116 @@ async fn coordinator_persists_sending_before_the_adapter_delivers() {
     assert_eq!(
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::Delivered
+    );
+}
+
+#[tokio::test]
+async fn concurrent_coordinators_claim_one_durable_delivery_before_egress() {
+    let scope = scope();
+    let (first_store, second_store) = shared_store_pair();
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&first_store),
+        scope.clone(),
+        vec![
+            Ok(DeliveryReport {
+                parts: vec![sent("ts-first")],
+            }),
+            Ok(DeliveryReport {
+                parts: vec![sent("ts-duplicate")],
+            }),
+        ],
+    ));
+    let first_coordinator = coordinator_over(&first_store, &adapter);
+    let second_coordinator = coordinator_over(&second_store, &adapter);
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let validator = ConcurrentReplyTargetBindingValidator {
+        barrier: Arc::new(Barrier::new(2)),
+    };
+    let first_policy = configured_policy(&first_store, &validator);
+    let second_policy = configured_policy(&second_store, &validator);
+    let resolver = FakeProductOutboundTargetResolver;
+    let delivery = delivery_request(scope.clone());
+    let first_thread_scope = project_thread_scope();
+    let second_thread_scope = project_thread_scope();
+
+    let (first, second) = tokio::join!(
+        first_coordinator.deliver(
+            &first_policy,
+            &preferences,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            CoordinatedDeliveryRequest {
+                intent: DeliveryIntent::FinalReply,
+                delivery: delivery.clone(),
+                parts: vec![ironclaw_product::OutboundPart::Text(
+                    "one durable fact".to_string(),
+                )],
+                attachments: Vec::new(),
+                thread_anchor: None,
+                require_direct_message_target: false,
+                extension_id: "vendorx",
+                thread_scope: &first_thread_scope,
+            },
+        ),
+        second_coordinator.deliver(
+            &second_policy,
+            &preferences,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            CoordinatedDeliveryRequest {
+                intent: DeliveryIntent::FinalReply,
+                delivery,
+                parts: vec![ironclaw_product::OutboundPart::Text(
+                    "one durable fact".to_string(),
+                )],
+                attachments: Vec::new(),
+                thread_anchor: None,
+                require_direct_message_target: false,
+                extension_id: "vendorx",
+                thread_scope: &second_thread_scope,
+            },
+        ),
+    );
+
+    let outcomes = [
+        first.expect("the durable-claim loser is a semantic no-op, not a transport error"),
+        second.expect("the durable-claim loser is a semantic no-op, not a transport error"),
+    ];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, CoordinatedDeliveryOutcome::Delivered { .. }))
+            .count(),
+        1,
+        "exactly one coordinator owns and completes vendor egress"
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| {
+                matches!(
+                    outcome,
+                    CoordinatedDeliveryOutcome::DuplicateSuppressed { .. }
+                )
+            })
+            .count(),
+        1,
+        "the lost durable claim is reported as duplicate-suppressed"
+    );
+    assert_eq!(
+        adapter.deliver_calls(),
+        1,
+        "vendor egress occurs exactly once"
+    );
+    assert_eq!(
+        first_store
+            .list_delivery_attempts(scope)
+            .await
+            .expect("shared attempts remain readable")
+            .len(),
+        1,
+        "both coordinators address one stable durable delivery fact"
     );
 }
 
