@@ -686,13 +686,13 @@ review_after = "2026-11-01"
 [[exemption]]
 path = "crates/ironclaw_loop_host/src/input_queue.rs"
 lines = [
-  146, 148, 174, 176, 236, 296, 297, 310, 386, 387, 401, 402, 425, 426,
-  427, 428, 433, 441, 444, 447, 449, 450, 462, 463, 464, 465, 466, 484,
-  507, 530, 552, 553, 554, 556, 593, 594, 607, 610, 613, 614, 620, 628,
-  631, 634, 636, 637, 649, 650, 651, 652, 653, 672, 694, 714, 737, 751,
-  776, 790, 830, 831, 839, 844, 846, 847, 855, 860, 862, 863, 872, 873,
+  149, 151, 177, 179, 239, 299, 300, 313, 394, 395, 409, 410, 433, 434,
+  435, 436, 441, 449, 452, 455, 457, 458, 470, 471, 472, 473, 474, 492,
+  515, 538, 560, 561, 562, 564, 601, 602, 615, 618, 621, 622, 628, 636,
+  639, 642, 644, 645, 657, 658, 659, 660, 661, 680, 702, 722, 745, 759,
+  784, 798, 838, 839, 847, 852, 854, 855, 863, 868, 870, 871, 880, 881,
 ]
-branch_lines = [235, 295, 309, 385, 424, 504, 505, 607, 609]
+branch_lines = [238, 298, 312, 393, 432, 512, 513, 615, 617]
 owner = "@nearai/reborn"
 reason = "RejectingInputEnqueue (integration wires a real queue), watermark-compaction edge arms, best-effort flip-failure debug logging, poisoned-lock collapse, and the in-memory backend (integration runs the durable backend). All covered by the crate-tier conformance suite that runs over both backends."
 issue = "https://github.com/nearai/ironclaw/issues/7006"
@@ -772,10 +772,10 @@ review_after = "2026-11-01"
 [[exemption]]
 path = "crates/ironclaw_runner/src/steering_reconcile.rs"
 lines = [
-  51, 53, 55, 57, 67, 69, 71, 73, 75, 89, 91, 159, 162, 163,
-  176, 177, 194, 196, 208, 210, 252, 254,
+  51, 53, 55, 57, 67, 69, 71, 73, 75, 89, 91, 237, 240, 241,
+  254, 255, 272, 274, 286, 288, 330, 332,
 ]
-branch_lines = [158]
+branch_lines = [236]
 owner = "@nearai/reborn"
 reason = "Cancel-reconcile decorator fault arms plus the transition-port decorator forwarders and reconcile-failure logging (reject_unconsumed failure, non-terminal passthrough); require an injected queue failure or transitions the harness does not drive. Crate-tier decorator tests cover every arm."
 issue = "https://github.com/nearai/ironclaw/issues/7006"
@@ -783,7 +783,7 @@ review_after = "2026-11-01"
 
 [[exemption]]
 path = "crates/ironclaw_runner/src/runtime.rs"
-branch_lines = [823]
+branch_lines = [863]
 owner = "@nearai/reborn"
 reason = "input_queue_reconcile None arm of the transition-port decoration: production (and the integration harness) always wire the reconcile handle, so the undecorated branch runs only in compositions without a steering queue. Crate-tier runtime tests cover the wiring shape."
 issue = "https://github.com/nearai/ironclaw/issues/7006"

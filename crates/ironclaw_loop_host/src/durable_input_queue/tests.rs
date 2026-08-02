@@ -655,7 +655,11 @@ async fn in_memory_ack_rejects_unknown_sequence_instead_of_poisoning_state() {
 /// Capacity ceiling: a run's queue refuses the entry PAST
 /// [`MAX_QUEUED_INPUTS_PER_RUN`](crate::input_queue::MAX_QUEUED_INPUTS_PER_RUN)
 /// with the typed capacity error, while a retry of an already-queued message
-/// still dedups instead of bouncing off the ceiling.
+/// still dedups instead of bouncing off the ceiling. The ceiling counts the
+/// WHOLE tracked state — consumed entries whose `Submitted` flip is still
+/// pending retry (the ghost thread makes every flip fail here) occupy slots
+/// too, so a persistently failing thread store cannot grow the record one
+/// failed flip at a time.
 async fn conformance_enqueue_bounds_per_run_capacity<Q: ConformanceQueue>(queue: Q) {
     let run_id = TurnRunId::new();
     let request = |tag: &str| EnqueueQueuedMessageRequest {
@@ -666,7 +670,25 @@ async fn conformance_enqueue_bounds_per_run_capacity<Q: ConformanceQueue>(queue:
         message_id: ThreadMessageId::new(),
         input: steering(&format!("msg:{tag}")),
     };
-    for index in 0..crate::input_queue::MAX_QUEUED_INPUTS_PER_RUN {
+    let half = crate::input_queue::MAX_QUEUED_INPUTS_PER_RUN / 2;
+    for index in 0..half {
+        queue
+            .enqueue_queued_message(request(&format!("cap-pending-{index}")))
+            .await
+            .expect("enqueue within capacity");
+    }
+    // Consume-and-ack the first half; the ghost thread fails every flip, so
+    // the bindings stay as pending flips — freed live slots must NOT free
+    // ceiling room.
+    let batch = queue.next_after(run_id, origin(), 64).await.expect("poll");
+    queue
+        .ack_consumed(
+            run_id,
+            batch.inputs.iter().map(|e| e.ack_token.clone()).collect(),
+        )
+        .await
+        .expect("ack half");
+    for index in 0..(crate::input_queue::MAX_QUEUED_INPUTS_PER_RUN - half) {
         queue
             .enqueue_queued_message(request(&format!("cap-{index}")))
             .await
@@ -675,7 +697,8 @@ async fn conformance_enqueue_bounds_per_run_capacity<Q: ConformanceQueue>(queue:
     let overflow = queue.enqueue_queued_message(request("cap-overflow")).await;
     assert!(
         matches!(overflow, Err(HostInputQueueError::CapacityExhausted)),
-        "enqueue past the per-run ceiling must fail with the typed capacity error, got {overflow:?}"
+        "enqueue past the per-run ceiling (live + pending flips) must fail with the typed \
+         capacity error, got {overflow:?}"
     );
     // A retry of an existing message dedups BEFORE the capacity check.
     let retry = queue
@@ -685,7 +708,7 @@ async fn conformance_enqueue_bounds_per_run_capacity<Q: ConformanceQueue>(queue:
     let batch = queue.next_after(run_id, origin(), 64).await.expect("poll");
     assert_eq!(
         batch.inputs.len(),
-        crate::input_queue::MAX_QUEUED_INPUTS_PER_RUN,
+        crate::input_queue::MAX_QUEUED_INPUTS_PER_RUN - half,
         "the overflow entry must not have landed"
     );
     assert_eq!(retry.ack_token, batch.inputs[0].ack_token);
@@ -707,10 +730,13 @@ async fn in_memory_enqueue_bounds_per_run_capacity() {
     .await;
 }
 
-/// Terminal close is a tombstone: after `reject_unconsumed`, a late enqueue
-/// for the run is refused with the typed closed error instead of recreating
-/// the queue and stranding the message behind a run that will never drain.
-async fn conformance_closed_queue_rejects_late_enqueue<Q: ConformanceQueue>(
+/// Terminal reconciliation settles and STAYS settled: the rows flip to
+/// `RejectedBusy`, a repeated reconciliation is a no-op, and nothing is
+/// redelivered. (The closed-tombstone late-enqueue refusal is pinned
+/// separately in `durable_reject_unconsumed_retains_document_until_flips_settle`,
+/// which holds the record open with an unsettled flip — here the queue
+/// settles and reclaims its record, taking the tombstone with it.)
+async fn conformance_terminal_reconcile_settles_and_stays_settled<Q: ConformanceQueue>(
     queue: Q,
     thread_service: Arc<InMemorySessionThreadService>,
 ) {
@@ -782,14 +808,14 @@ async fn conformance_closed_queue_rejects_late_enqueue<Q: ConformanceQueue>(
 async fn durable_closed_queue_settles_and_stays_reconciled() {
     let thread_service = Arc::new(InMemorySessionThreadService::default());
     let queue = durable_queue(Arc::clone(&thread_service));
-    conformance_closed_queue_rejects_late_enqueue(queue, thread_service).await;
+    conformance_terminal_reconcile_settles_and_stays_settled(queue, thread_service).await;
 }
 
 #[tokio::test]
 async fn in_memory_closed_queue_settles_and_stays_reconciled() {
     let thread_service = Arc::new(InMemorySessionThreadService::default());
     let queue = in_memory_queue(Arc::clone(&thread_service));
-    conformance_closed_queue_rejects_late_enqueue(queue, thread_service).await;
+    conformance_terminal_reconcile_settles_and_stays_settled(queue, thread_service).await;
 }
 
 /// The ack-versus-terminal-reconciliation race settles each input exactly

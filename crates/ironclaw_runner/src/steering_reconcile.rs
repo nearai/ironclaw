@@ -35,9 +35,9 @@ use ironclaw_host_api::ids::ProcessId;
 use ironclaw_loop_host::HostInputQueueReconcile;
 use ironclaw_processes::{
     ClaimProcessesRequest, ClaimedProcess, FailProcessRequest, JournaledProcessSnapshot,
-    ProcessJournalCursor, ProcessLeaseRequest, ProcessStateTransitionRequest,
-    ProcessTransitionPort, RecoverExpiredProcessLeasesRequest, RecoverExpiredProcessLeasesResponse,
-    SuspendProcessRequest,
+    ProcessJournalCommit, ProcessJournalCommitObserver, ProcessJournalCursor, ProcessJournalKind,
+    ProcessKind, ProcessLeaseRequest, ProcessStateTransitionRequest, ProcessTransitionPort,
+    RecoverExpiredProcessLeasesRequest, RecoverExpiredProcessLeasesResponse, SuspendProcessRequest,
 };
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
@@ -126,6 +126,82 @@ impl TurnCoordinator for CancelReconcilingTurnCoordinator {
     }
 }
 
+/// [`ProcessJournalCommitObserver`] that reconciles the run's steering queue
+/// on every TERMINAL agent-turn journal commit, whichever caller performed
+/// the transition. This is the completeness net over
+/// [`SteeringReconcilingProcessTransitions`]: the scheduler/supervisor
+/// terminalizes crash-reclaimed and panicked runs through the raw
+/// [`ProcessRuntimePort`](ironclaw_processes::ProcessRuntimePort) handle
+/// (which the decorator never sees), but every terminal transition — from any
+/// writer — lands in the process journal, and the observer registry delivers
+/// commits durably (cursor-tracked, retried, replayed across restarts). The
+/// reconciliation is idempotent, so double delivery via decorator + observer
+/// is a no-op.
+///
+/// Delivery-contract note: reconciliation failures return `Ok` (logged at
+/// debug) rather than `Err` — an `Err` would wedge this observer's durable
+/// cursor behind one permanently unreconcilable run and stall delivery for
+/// every later terminal commit. The retained queue record remains the durable
+/// retry source.
+pub struct SteeringReconcileCommitObserver {
+    input_queue: Arc<dyn HostInputQueueReconcile>,
+}
+
+impl SteeringReconcileCommitObserver {
+    pub fn new(input_queue: Arc<dyn HostInputQueueReconcile>) -> Self {
+        Self { input_queue }
+    }
+}
+
+#[async_trait]
+impl ProcessJournalCommitObserver for SteeringReconcileCommitObserver {
+    fn process_observer_id(&self) -> &'static str {
+        "steering-queue-terminal-reconcile-v1"
+    }
+
+    async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String> {
+        if commit.state.process_kind != ProcessKind::AgentTurn {
+            return Ok(());
+        }
+        if !matches!(
+            commit.kind,
+            ProcessJournalKind::Completed
+                | ProcessJournalKind::Failed
+                | ProcessJournalKind::Cancelled
+                | ProcessJournalKind::Stopped
+                | ProcessJournalKind::Killed
+        ) {
+            return Ok(());
+        }
+        let run_id = TurnRunId::from_uuid(commit.state.process_id.as_uuid());
+        match self.input_queue.reject_unconsumed(run_id).await {
+            Ok(rejected) if !rejected.is_empty() => {
+                debug!(
+                    %run_id,
+                    kind = ?commit.kind,
+                    rejected = rejected.len(),
+                    "flipped stranded queued messages to rejected-busy after terminal journal commit"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                // silent-ok: best-effort post-terminal reconciliation — an Err
+                // here would wedge the observer's durable cursor behind one
+                // unreconcilable run; the retained queue record keeps the rows
+                // reconcilable instead.
+                debug!(
+                    %run_id,
+                    kind = ?commit.kind,
+                    error = %error,
+                    "steering-queue reconciliation after terminal journal commit failed; \
+                     queued rows may lag"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 /// [`ProcessTransitionPort`] decorator that reconciles the run's steering
 /// queue after every successful terminal transition (`complete_process`,
 /// `fail_process`, `cancel_process`). Non-terminal methods forward untouched.
@@ -135,7 +211,9 @@ impl TurnCoordinator for CancelReconcilingTurnCoordinator {
 /// still `Queued`, and reclaims the per-run queue record once settled — so
 /// normally-completed steered runs do not accumulate queue records. Process
 /// ids are the run uuid (`process_id_from_turn_run_id` in `ironclaw_turns`),
-/// so the run identity is recovered from the transition request.
+/// so the run identity is recovered from the transition request. Scheduler /
+/// supervisor terminal writes that bypass this decorated handle are covered
+/// by [`SteeringReconcileCommitObserver`].
 pub struct SteeringReconcilingProcessTransitions<E> {
     inner: Arc<dyn ProcessTransitionPort<Error = E>>,
     input_queue: Arc<dyn HostInputQueueReconcile>,
@@ -721,5 +799,250 @@ mod transition_decorator_tests {
             credential_requirements: Vec::new(),
             detail: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod observer_tests {
+    use std::sync::Mutex as StdMutex;
+
+    use chrono::Utc;
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::ids::{TenantId, UserId};
+    use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
+    use ironclaw_host_api::path::{MountAlias, VirtualPath};
+    use ironclaw_host_api::resource::ResourceScope;
+    use ironclaw_loop_host::HostInputQueueError;
+    use ironclaw_processes::{
+        ProcessFailureRecovery, ProcessJournalObserverRegistry, ProcessJournalStore,
+        ProcessOperationId, ProcessSubmissionPort, ProcessWorkerId, SubmitProcessRequest,
+    };
+    use ironclaw_threads::ThreadMessageId;
+    use ironclaw_turns::TurnRunId;
+
+    use super::*;
+
+    fn processes_filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/processes").expect("mount alias"),
+            VirtualPath::new("/engine/processes").expect("virtual path"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view");
+        Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::new()),
+            mounts,
+        ))
+    }
+
+    #[derive(Default)]
+    struct RecordingQueue {
+        reconciled_runs: StdMutex<Vec<TurnRunId>>,
+    }
+
+    #[async_trait]
+    impl HostInputQueueReconcile for RecordingQueue {
+        async fn reject_unconsumed(
+            &self,
+            run_id: TurnRunId,
+        ) -> Result<Vec<ThreadMessageId>, HostInputQueueError> {
+            self.reconciled_runs.lock().expect("lock").push(run_id);
+            Ok(Vec::new())
+        }
+    }
+
+    fn scope() -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new("tenant-observer").expect("tenant"),
+            user_id: UserId::new("user-observer").expect("user"),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+        }
+    }
+
+    /// The regression the raw-handle gap demands: a terminal transition
+    /// performed directly on the journal store — the same undecorated handle
+    /// the scheduler/supervisor uses for crash-reclaimed and panicked runs —
+    /// still reconciles the run's steering queue, because the subscribed
+    /// commit observer sees every terminal journal commit regardless of
+    /// which caller wrote it.
+    #[tokio::test]
+    async fn raw_store_terminal_transition_reconciles_via_commit_observer() {
+        let store = ProcessJournalStore::new(processes_filesystem());
+        let queue = Arc::new(RecordingQueue::default());
+        store
+            .subscribe_process_observer(Arc::new(SteeringReconcileCommitObserver::new(
+                queue.clone(),
+            )))
+            .expect("subscribe observer");
+
+        let scope = scope();
+        let process_id = ironclaw_host_api::ids::ProcessId::new();
+        store
+            .submit_process(SubmitProcessRequest {
+                process_id,
+                process_kind: ProcessKind::AgentTurn,
+                scope: scope.clone(),
+                exclusive_within_scope: false,
+                operation_id: Some(ProcessOperationId::from_trusted("observer-regression")),
+                owner_user_id: Some(scope.user_id.clone()),
+                concurrency_class: None,
+                parent_process_id: None,
+                root_process_id: None,
+                spawn_tree_descendant_cap: None,
+                dependency: None,
+                checkpoint_ref: None,
+                input: None,
+                created_at: Utc::now(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .expect("submit process");
+        let worker_id = ProcessWorkerId::from_trusted("observer-worker");
+        let claimed = store
+            .claim_next_processes(ClaimProcessesRequest {
+                worker_id: worker_id.clone(),
+                scope_filter: Some(scope.clone()),
+                process_id_filter: Some(process_id),
+                process_kind_filter: Some(ProcessKind::AgentTurn),
+                max_processes: 1,
+            })
+            .await
+            .expect("claim process");
+        assert_eq!(claimed.len(), 1);
+
+        // Terminalize through the RAW store handle — no decorator in sight.
+        store
+            .fail_process(FailProcessRequest {
+                process_id,
+                worker_id,
+                lease_token: claimed[0].lease_token.clone(),
+                failure: ironclaw_host_api::turn::SanitizedFailure::from_trusted_static(
+                    "scheduler_executor_panic",
+                ),
+                recovery: ProcessFailureRecovery::Terminal,
+                checkpoint_ref: None,
+                metadata: None,
+            })
+            .await
+            .expect("fail process through the raw handle");
+
+        // Observer delivery is asynchronous-but-prompt; poll briefly.
+        let expected_run = TurnRunId::from_uuid(process_id.as_uuid());
+        for _ in 0..100 {
+            if queue
+                .reconciled_runs
+                .lock()
+                .expect("lock")
+                .contains(&expected_run)
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("terminal journal commit on the raw handle must reconcile the steering queue");
+    }
+
+    #[tokio::test]
+    async fn non_terminal_and_foreign_kind_commits_do_not_reconcile() {
+        let queue = Arc::new(RecordingQueue::default());
+        let observer = SteeringReconcileCommitObserver::new(queue.clone());
+        let process_id = ironclaw_host_api::ids::ProcessId::new();
+
+        let commit = |process_kind, kind| ProcessJournalCommit {
+            state: JournaledProcessSnapshot {
+                process_id,
+                process_kind,
+                scope: scope(),
+                status: ironclaw_processes::ProcessLifecycleStatus::Running,
+                suspension: None,
+                checkpoint_ref: None,
+                input_ref: None,
+                failure: None,
+                journal_cursor: ProcessJournalCursor(0),
+                lease: None,
+                crash_reclaim_count: 0,
+                created_at: Utc::now(),
+                owner_user_id: None,
+                concurrency_class: None,
+                parent_process_id: None,
+                root_process_id: None,
+                metadata: serde_json::Value::Null,
+            },
+            kind,
+            sanitized_reason: None,
+        };
+
+        observer
+            .observe_process_commit(commit(ProcessKind::AgentTurn, ProcessJournalKind::Claimed))
+            .await
+            .expect("non-terminal commit accepted");
+        observer
+            .observe_process_commit(commit(ProcessKind::Internal, ProcessJournalKind::Failed))
+            .await
+            .expect("foreign-kind commit accepted");
+        assert!(
+            queue.reconciled_runs.lock().expect("lock").is_empty(),
+            "only terminal agent-turn commits may reconcile"
+        );
+
+        observer
+            .observe_process_commit(commit(ProcessKind::AgentTurn, ProcessJournalKind::Failed))
+            .await
+            .expect("terminal commit accepted");
+        assert_eq!(
+            *queue.reconciled_runs.lock().expect("lock"),
+            vec![TurnRunId::from_uuid(process_id.as_uuid())]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_reconciliation_never_wedges_the_observer_cursor() {
+        struct FailingQueue;
+
+        #[async_trait]
+        impl HostInputQueueReconcile for FailingQueue {
+            async fn reject_unconsumed(
+                &self,
+                _run_id: TurnRunId,
+            ) -> Result<Vec<ThreadMessageId>, HostInputQueueError> {
+                Err(HostInputQueueError::Unavailable {
+                    reason: "scripted reconcile failure".to_string(),
+                })
+            }
+        }
+
+        let observer = SteeringReconcileCommitObserver::new(Arc::new(FailingQueue));
+        let commit = ProcessJournalCommit {
+            state: JournaledProcessSnapshot {
+                process_id: ironclaw_host_api::ids::ProcessId::new(),
+                process_kind: ProcessKind::AgentTurn,
+                scope: scope(),
+                status: ironclaw_processes::ProcessLifecycleStatus::Failed,
+                suspension: None,
+                checkpoint_ref: None,
+                input_ref: None,
+                failure: None,
+                journal_cursor: ProcessJournalCursor(0),
+                lease: None,
+                crash_reclaim_count: 0,
+                created_at: Utc::now(),
+                owner_user_id: None,
+                concurrency_class: None,
+                parent_process_id: None,
+                root_process_id: None,
+                metadata: serde_json::Value::Null,
+            },
+            kind: ProcessJournalKind::Failed,
+            sanitized_reason: None,
+        };
+
+        observer
+            .observe_process_commit(commit)
+            .await
+            .expect("a failed reconciliation must return Ok so the durable cursor advances");
     }
 }

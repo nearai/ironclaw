@@ -389,6 +389,7 @@ pub enum DefaultPlannedRuntimeBuildError {
     PlannedDriver(DefaultPlannedDriverRegistrationError),
     RunProfile(String),
     SubagentCompletion(String),
+    SteeringReconcileObserver(String),
 }
 
 impl fmt::Display for DefaultPlannedRuntimeBuildError {
@@ -399,6 +400,12 @@ impl fmt::Display for DefaultPlannedRuntimeBuildError {
             Self::RunProfile(error) => write!(formatter, "run profile resolver failed: {error}"),
             Self::SubagentCompletion(error) => {
                 write!(formatter, "subagent completion wiring failed: {error}")
+            }
+            Self::SteeringReconcileObserver(error) => {
+                write!(
+                    formatter,
+                    "steering reconcile observer wiring failed: {error}"
+                )
             }
         }
     }
@@ -654,6 +661,19 @@ where
             parts.turn_event_sink.clone(),
         )))
         .map_err(DefaultPlannedRuntimeBuildError::SubagentCompletion)?;
+    if let Some(reconcile) = parts.input_queue_reconcile.clone() {
+        // Completeness net over the transition-port decoration below: the
+        // scheduler/supervisor terminalizes crash-reclaimed and panicked runs
+        // through the raw runtime handle, but every terminal transition lands
+        // in the journal, and observer delivery is durable (cursor-tracked,
+        // retried, replayed across restarts). Reconciliation is idempotent,
+        // so double delivery with the decorator is a no-op.
+        process_system
+            .subscribe_process_observer(Arc::new(
+                crate::steering_reconcile::SteeringReconcileCommitObserver::new(reconcile),
+            ))
+            .map_err(DefaultPlannedRuntimeBuildError::SteeringReconcileObserver)?;
+    }
     let base_coordinator = DefaultTurnCoordinator::new(Arc::clone(&agent_turn_runtime))
         .with_run_profile_resolver(Arc::clone(&run_profile_resolver))
         .with_wake_notifier(Arc::clone(&wake_notifier))

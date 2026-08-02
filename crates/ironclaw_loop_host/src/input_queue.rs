@@ -127,10 +127,13 @@ pub enum HostInputQueueError {
     Internal,
 }
 
-/// Ceiling on live (unconsumed) queued inputs per run. Steering inputs are
-/// small fixed-shape refs (`LoopInput::Steering { message_ref }`), so an entry
-/// count bound also bounds serialized size; 32 is far beyond any interactive
-/// use while keeping the durable document's rewrite-per-enqueue cost trivial.
+/// Ceiling on tracked queued inputs per run — live entries PLUS consumed
+/// entries whose `Submitted` flip is still pending retry, so the whole
+/// persisted state is bounded even while the thread store keeps failing.
+/// Steering inputs are small fixed-shape refs
+/// (`LoopInput::Steering { message_ref }`), so a count bound also bounds
+/// serialized size; 32 is far beyond any interactive use while keeping the
+/// durable document's rewrite-per-enqueue cost trivial.
 pub const MAX_QUEUED_INPUTS_PER_RUN: usize = 32;
 
 #[async_trait]
@@ -345,7 +348,12 @@ impl RunQueueModel {
                 flip: pending.clone(),
             });
         }
-        if self.entries.len() >= MAX_QUEUED_INPUTS_PER_RUN {
+        // The ceiling bounds the WHOLE persisted state, not only the live
+        // segment: a consumed entry whose `Submitted` flip keeps failing
+        // moves to `pending_submit_flips` rather than vanishing, so counting
+        // live entries alone would let the document grow past the bound one
+        // failed flip at a time.
+        if self.entries.len() + self.pending_submit_flips.len() >= MAX_QUEUED_INPUTS_PER_RUN {
             return Err(HostInputQueueError::CapacityExhausted);
         }
         let sequence = self.next_sequence;
