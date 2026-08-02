@@ -132,6 +132,7 @@ jobs:
         run: |
           scripts/ci/test-check-include-str-paths.sh
           scripts/ci/test-check-hermetic-env.sh
+          scripts/ci/test-ci-comm-locale-pin.sh
           scripts/ci/test-classify-test-scope.sh
           scripts/ci/test-build-wasm-extensions.sh
           scripts/ci/test-package-feature-flags.sh
