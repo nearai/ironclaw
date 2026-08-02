@@ -23,13 +23,18 @@ use ironclaw_host_api::{
     ids::{ActivityId, ExtensionId, TenantId, UserId},
     mount::{MountGrant, MountPermissions, MountView},
     path::{HostPath, MountAlias, VirtualPath},
-    product_surface::{ProductSurface, ProductSurfaceCaller, ProductSurfaceError},
     resolution::{Blocked, Resolution},
     result_meta::FailureKind,
 };
 use ironclaw_product::{
     EXTENSION_INSTALL_CAPABILITY, EXTENSION_REMOVE_CAPABILITY, OPERATOR_SERVICE_LIFECYCLE_COMMAND,
-    ProductCapabilityDescriptor, RebornOperatorToolCatalog, RebornOperatorToolInfo,
+    ProductCapabilityDescriptor,
+};
+use ironclaw_product_contracts::operator_tools::{
+    RebornOperatorToolCatalog, RebornOperatorToolInfo,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
 };
 use std::time::Duration;
 
@@ -393,8 +398,10 @@ async fn runtime_product_surface_wires_lifecycle_owner_identity() {
         .product_surface(None)
         .expect("product surface build");
 
-    let surface =
-        ironclaw_host_api::product_surface::BoundProductSurface::new(bundle.clone(), caller("bob"));
+    let surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
+        bundle.clone(),
+        caller("bob"),
+    );
     let error = OPERATOR_SERVICE_LIFECYCLE_COMMAND
         .invoke_on(
             &surface,
@@ -763,7 +770,7 @@ async fn invoke_lifecycle_product_capability(
     input: serde_json::Value,
 ) -> Result<Resolution, ProductSurfaceError> {
     let surface =
-        ironclaw_host_api::product_surface::BoundProductSurface::new(Arc::clone(bundle), caller);
+        ironclaw_product_contracts::surface::BoundProductSurface::new(Arc::clone(bundle), caller);
     capability
         .invoke_on(&surface, input, ActivityId::new())
         .await
@@ -922,7 +929,7 @@ async fn product_surface_channel_extension_remove_deletes_the_durable_membership
     let installer_view: ironclaw_product::RebornExtensionListResponse =
         ironclaw_product::EXTENSIONS_VIEW
             .query_on(
-                &ironclaw_host_api::product_surface::BoundProductSurface::new(
+                &ironclaw_product_contracts::surface::BoundProductSurface::new(
                     Arc::clone(&bundle),
                     caller.clone(),
                 ),

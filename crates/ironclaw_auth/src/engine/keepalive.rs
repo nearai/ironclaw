@@ -608,7 +608,7 @@ mod tests {
         account.ownership = CredentialOwnership::ExtensionOwned;
         account.owner_extension = Some(extension.clone());
 
-        let recipe: ironclaw_host_api::recipe::VendorAuthRecipe =
+        let recipe: ironclaw_extension_contracts::recipe::VendorAuthRecipe =
             serde_json::from_value(serde_json::json!({
                 "method": "oauth2_code",
                 "display_name": "Acme MCP",

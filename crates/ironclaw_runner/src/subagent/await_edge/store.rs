@@ -249,7 +249,7 @@ impl ironclaw_loop_host::AwaitEdgeWriter for AwaitEdgeStore {
         child_scope: &TurnScope,
         parent_run_id: TurnRunId,
         child_run_id: TurnRunId,
-    ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
+    ) -> Result<(), ironclaw_loop_contracts::AgentLoopHostError> {
         self.abandon(child_scope, parent_run_id, child_run_id)
             .await
             .map_err(super::map_await_edge_error)

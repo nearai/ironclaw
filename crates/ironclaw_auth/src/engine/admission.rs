@@ -8,12 +8,10 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{
-    hosted_mcp::McpAuthChallenge,
-    recipe::{
-        BoundedJsonPointer, HttpsEndpoint, OAuth2CodeRecipe, RecipeClientCredentials,
-        TokenResponseMap, VendorAuthRecipe,
-    },
+use ironclaw_extension_contracts::hosted_mcp::McpAuthChallenge;
+use ironclaw_extension_contracts::recipe::{
+    BoundedJsonPointer, HttpsEndpoint, OAuth2CodeRecipe, RecipeClientCredentials, TokenResponseMap,
+    VendorAuthRecipe,
 };
 
 use crate::{AuthProductError, ResolvedVendorAuthRecipe};
@@ -249,11 +247,11 @@ where
         };
         let recipe = OAuth2CodeRecipe {
             display_name: request.vendor.clone(),
-            authorization_endpoint: ironclaw_host_api::recipe::HttpsEndpoint::new(
+            authorization_endpoint: ironclaw_extension_contracts::recipe::HttpsEndpoint::new(
                 authorization_endpoint.to_string(),
             )
             .map_err(|_| AuthProductError::MalformedConfig)?,
-            token_endpoint: ironclaw_host_api::recipe::HttpsEndpoint::new(
+            token_endpoint: ironclaw_extension_contracts::recipe::HttpsEndpoint::new(
                 token_endpoint.to_string(),
             )
             .map_err(|_| AuthProductError::MalformedConfig)?,
@@ -298,7 +296,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::hosted_mcp::McpAuthMetadataLocation;
+    use ironclaw_extension_contracts::hosted_mcp::McpAuthMetadataLocation;
 
     #[derive(Debug)]
     struct Profiles(Option<AdmissionClientProfile>);

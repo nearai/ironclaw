@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use ironclaw_extension_contracts::surface::CapabilitySurfaceKind;
 use ironclaw_extensions::{
     CapabilityProviderHostApiContract, CapabilitySurfaceDeclV2, CapabilityVisibility,
     ExtensionManifestV2, ExtensionRuntimeV2, HostApiContractRegistry, HostApiId,
@@ -19,7 +20,6 @@ use ironclaw_host_api::{
     http::RuntimeCredentialTarget,
     ids::{ExtensionId, SecretHandle, VendorId},
     runtime::{RuntimeKind, TrustClass},
-    surface::CapabilitySurfaceKind,
     trust::RequestedTrustClass,
 };
 

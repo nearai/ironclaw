@@ -26,25 +26,21 @@ use ironclaw_host_api::{
     resource::ResourceScope,
 };
 use ironclaw_product::{
-    ActionDispatchKind, ActionFingerprintKey, ApprovalInteractionDecision,
-    ApprovalInteractionScope, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionScope, AuthInteractionService, AuthInteractionStatus, AuthRequestRef,
-    BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
-    ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
-    FakeBeforeInboundPolicy, FakeConversationBindingService, FakeIdempotencyLedger,
-    FakeInboundTurnService, IdempotencyDecision, IdempotencyLedger, InMemoryIdempotencyLedger,
-    InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch, LinkedThreadActionId,
+    ActionDispatchKind, ApprovalInteractionDecision, ApprovalInteractionScope,
+    ApprovalInteractionService, AuthInteractionDecision, AuthInteractionScope,
+    AuthInteractionService, AuthInteractionStatus, BeforeInboundPolicy, BeforeInboundPolicyOutcome,
+    BeforeInboundPolicyRequest, ConversationBindingService, DefaultInboundTurnService,
+    DefaultProductSurface, FakeBeforeInboundPolicy, FakeConversationBindingService,
+    FakeIdempotencyLedger, FakeInboundTurnService, IdempotencyDecision, IdempotencyLedger,
+    InMemoryIdempotencyLedger, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
     ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, PendingApprovalInteractionView,
     PendingAuthInteractionView, ProductActorUserResolutionRequest, ProductActorUserResolver,
-    ProductCommandName, ProductConversationBindingService, ProductConversationRouteKey,
-    ProductConversationSubjectRouteResolutionRequest, ProductConversationSubjectRouteResolver,
-    ProductInstallationKey, ProductInstallationScope, ProductSurfaceFailure,
-    RebornFilesystemIdempotencyLedger, ResolveApprovalInteractionRequest,
+    ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
+    ProductSurfaceFailure, RebornFilesystemIdempotencyLedger, ResolveApprovalInteractionRequest,
     ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse, ResolveBindingRequest, ResolvedBinding,
-    ResolvedProductActorUser, SourceBindingKey, StaticProductInstallationResolver,
-    approval_gate_ref,
+    ResolvedProductActorUser, StaticProductInstallationResolver, approval_gate_ref,
 };
 use ironclaw_product::{
     AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
@@ -57,6 +53,15 @@ use ironclaw_product::{
     ProductTriggerReason, ProjectionCursor, ProjectionReadPayload, ProjectionSubscriptionPayload,
     ProtocolAuthEvidence, ScopedApprovalResolutionPayload, TrustedInboundContext,
     UserMessagePayload,
+};
+use ironclaw_product_contracts::action::{
+    ActionFingerprintKey, AuthRequestRef, LinkedThreadActionId, ProductCommandName,
+    SourceBindingKey,
+};
+use ironclaw_product_contracts::error::ProductOperationFailure;
+use ironclaw_product_contracts::subject_route::{
+    ProductConversationRouteKey, ProductConversationSubjectRouteResolutionRequest,
+    ProductConversationSubjectRouteResolver,
 };
 use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_turns::{
@@ -6765,7 +6770,7 @@ impl ProductConversationSubjectRouteResolver for RecordingSubjectRouteResolver {
     async fn resolve_product_conversation_subject_route(
         &self,
         request: ProductConversationSubjectRouteResolutionRequest,
-    ) -> Result<Option<UserId>, ProductSurfaceFailure> {
+    ) -> Result<Option<UserId>, ProductOperationFailure> {
         self.calls
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -6797,12 +6802,12 @@ impl ProductConversationSubjectRouteResolver for FailingSubjectRouteResolver {
     async fn resolve_product_conversation_subject_route(
         &self,
         _request: ProductConversationSubjectRouteResolutionRequest,
-    ) -> Result<Option<UserId>, ProductSurfaceFailure> {
+    ) -> Result<Option<UserId>, ProductOperationFailure> {
         *self
             .calls
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) += 1;
-        Err(ProductSurfaceFailure::Transient {
+        Err(ProductOperationFailure::Transient {
             reason: "subject resolver backend down".into(),
         })
     }

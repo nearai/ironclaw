@@ -1,5 +1,7 @@
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
-use ironclaw_product::{ProjectionReadRequest, ProjectionSubscriptionRequest};
+use ironclaw_product_contracts::projection::{
+    ProjectionReadRequest, ProjectionSubscriptionRequest,
+};
 
 use crate::{OpenAiCompatAuthenticatedCaller, OpenAiCompatErrorKind, OpenAiCompatHttpError};
 

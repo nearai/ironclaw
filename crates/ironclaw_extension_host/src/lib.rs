@@ -8,8 +8,8 @@
 //! installation state and the active snapshot ([`lifecycle`]).
 //!
 //! It contains no concrete product name, protocol route, or behavior branch:
-//! concrete extensions implement the [`ironclaw_host_api::tool_adapter::ToolAdapter`] and
-//! [`ironclaw_product::ChannelAdapter`] traits and are supplied by the binary.
+//! concrete extensions implement the [`ironclaw_extension_contracts::tool_adapter::ToolAdapter`] and
+//! [`ironclaw_extension_contracts::channel_adapter::ChannelAdapter`] traits and are supplied by the binary.
 //! The generic assembly layer binds those adapters and resolved manifests to
 //! the host-runtime lane binder without linking concrete extension crates.
 
@@ -86,7 +86,6 @@ pub mod run_delivery_ports;
 pub mod skill_auto_activate_capability;
 pub mod skill_learning;
 pub mod skill_listing;
-pub mod state;
 pub mod store;
 pub mod webui_extension_credentials;
 
@@ -252,7 +251,6 @@ pub use removal_cleanup::{
 };
 pub use reply_contexts::FilesystemReplyContextStore;
 pub use resolver::SnapshotToolResolver;
-pub use state::{AuthAccountState, InstallationState};
 pub use store::{
     InstallationRecord, InstallationRecordStore, RehydratedInstallationRecordStore, StoreError,
 };

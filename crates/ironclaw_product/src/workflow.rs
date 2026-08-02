@@ -6,34 +6,37 @@
 
 use std::sync::Arc;
 
+use ironclaw_product_contracts::action::{ActionFingerprintKey, ProductActionId, SourceBindingKey};
+use ironclaw_product_contracts::command::ProductCommandContext;
+
 use crate::{
-    ApprovalDecision, ChannelAdapter, ExternalConversationRef, ParsedProductInbound,
-    ProductAdapterError, ProductCommandResultPayload, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductProjectionReadInput, ProductProjectionSubject,
-    ProductProjectionSubscribeInput, ProductRejection, ProductRejectionKind,
-    ProductSurfaceRejectionKind, ProjectionReadRequest, ProjectionSubscriptionRequest,
-    RedactedString, TrustedInboundContext, UserMessagePayload,
+    ApprovalDecision, ExternalConversationRef, ParsedProductInbound, ProductAdapterError,
+    ProductCommandResultPayload, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+    ProductProjectionReadInput, ProductProjectionSubject, ProductProjectionSubscribeInput,
+    ProductRejection, ProductRejectionKind, ProductSurfaceRejectionKind, ProjectionReadRequest,
+    ProjectionSubscriptionRequest, RedactedString, TrustedInboundContext, UserMessagePayload,
 };
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
+use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, IdempotencyKey, TurnActor, TurnGateRef, TurnRunId, TurnScope,
 };
 use ironclaw_host_api::{
     attachment::InboundAttachment,
     ids::{ActivityId, CapabilityId, ThreadId, UserId},
-    product_surface::{
-        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-        ProductSurfaceInvokeRequest,
-    },
-    tool_adapter::RestrictedEgress,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceInvokeRequest,
 };
 use ironclaw_turns::{AdmissionRejectionReason, TurnError, TurnErrorCategory};
 use sha2::{Digest, Sha256};
 use tracing::debug;
 
-use crate::action::{ActionDispatchKind, ActionFingerprintKey, SourceBindingKey};
+use crate::action::ActionDispatchKind;
 use crate::approval_interaction::{
     ApprovalInteractionDecision, ApprovalInteractionRejectionKind, ApprovalInteractionService,
     ListPendingApprovalsRequest, RejectingApprovalInteractionService,
@@ -52,7 +55,7 @@ use crate::binding_ref::{
     DEFAULT_BINDING_REF_RAW_MAX_BYTES, binding_ref_segment, bounded_idempotency_key,
 };
 use crate::command_dispatch::{
-    ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
+    ProductCommandAdmission, ProductCommandAdmissionService,
     RejectingProductCommandAdmissionService,
 };
 use crate::commands::{
@@ -64,8 +67,10 @@ use crate::error::ProductSurfaceFailure;
 use crate::inbound_turn::{InboundTurnService, InboundUserMessageDispatch};
 use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
 use crate::policy::{BeforeInboundPolicy, NoopBeforeInboundPolicy};
+use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
+
 use crate::reborn_services::{
-    ChannelInboundProductSurface, ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
+    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
     ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
 };
 
@@ -1137,7 +1142,7 @@ fn validate_projection_thread_hint(
 
 async fn dispatch_payload(
     envelope: &ProductInboundEnvelope,
-    action_id: crate::ProductActionId,
+    action_id: ProductActionId,
     action_fingerprint: ActionFingerprintKey,
     ports: DispatchPorts<'_>,
     attachment_admission: InboundAttachmentAdmission,
@@ -1719,7 +1724,7 @@ fn product_surface_failure(error: ProductSurfaceError) -> ProductSurfaceFailure 
 
 async fn dispatch_product_command(
     envelope: &ProductInboundEnvelope,
-    action_id: crate::ProductActionId,
+    action_id: ProductActionId,
     binding_service: &dyn ConversationBindingService,
     command_surface: Option<&dyn ProductSurface>,
     command: ProductCommand,

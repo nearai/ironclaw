@@ -31,7 +31,7 @@ behavior, and persistent behavior is proven on libSQL **and** PostgreSQL.
 Already generic on this branch: one manifest per extension parsed through
 `ExtensionManifestV2::parse`; surfaces projected by `capability_surfaces()`
 (`crates/ironclaw_extensions/src/v2.rs`); surface kinds in
-`crates/ironclaw_host_api/src/surface.rs`; channel surfaces on the extensions
+`crates/ironclaw_extension_contracts/src/surface.rs`; channel surfaces on the extensions
 wire with directions and connection affordance
 (`crates/ironclaw_product/src/reborn_services/{types,extensions}.rs`);
 a narrow channel protocol adapter trait

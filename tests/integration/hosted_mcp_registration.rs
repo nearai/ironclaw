@@ -23,6 +23,10 @@ use ironclaw_auth::{
     RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornOAuthCallbackOutcome,
     RebornOAuthCallbackRequest, RebornOAuthStartFlowRequest,
 };
+use ironclaw_extension_contracts::hosted_mcp::{
+    HostedMcpAuthSelection, HostedMcpEndpoint, RegisterHostedMcpRequest,
+};
+use ironclaw_extension_contracts::lifecycle_id::LifecyclePackageId;
 use ironclaw_extension_host::lifecycle_test_support::{
     build_lifecycle_test_services, build_lifecycle_test_services_with_auth_provider,
     invoke_with_standalone_approval, lifecycle_product_context,
@@ -32,18 +36,16 @@ use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
-    hosted_mcp::{HostedMcpAuthSelection, HostedMcpEndpoint, RegisterHostedMcpRequest},
     ids::{CapabilityGrantId, CapabilityId, ExtensionId, SecretHandle},
     mount::MountView,
-    package_lifecycle::LifecyclePackageId,
-    product_surface::{ProductSurfaceErrorCode, ProductSurfaceErrorKind},
     runtime::{RuntimeKind, TrustClass},
     scope::Principal,
 };
 use ironclaw_product::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload,
-    LifecycleProductService,
 };
+use ironclaw_product_contracts::lifecycle_service::LifecycleProductService;
+use ironclaw_product_contracts::surface::{ProductSurfaceErrorCode, ProductSurfaceErrorKind};
 use ironclaw_secrets::SecretStorePort;
 use secrecy::SecretString;
 use serde_json::json;
@@ -136,7 +138,7 @@ fn fixture_package_ref() -> LifecyclePackageRef {
 async fn install_fixture(
     services: &ironclaw_extension_host::lifecycle_test_support::ExtensionLifecycleTestServices,
     scope: ironclaw_host_api::resource::ResourceScope,
-) -> ironclaw_host_api::package_lifecycle::LifecycleProductResponse {
+) -> ironclaw_product_contracts::package_lifecycle::LifecycleProductResponse {
     services
         .lifecycle_service
         .execute(
@@ -150,16 +152,18 @@ async fn install_fixture(
 }
 
 fn credential_provider_from_response(
-    response: &ironclaw_host_api::package_lifecycle::LifecycleProductResponse,
+    response: &ironclaw_product_contracts::package_lifecycle::LifecycleProductResponse,
 ) -> AuthProviderId {
     response
         .blockers
         .iter()
-        .find_map(|blocker| match blocker {
-            ironclaw_host_api::package_lifecycle::LifecycleReadinessBlocker::Credential {
+        .find_map(|blocker| {
+            match blocker {
+            ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential {
                 ref_id: Some(provider),
             } => AuthProviderId::new(provider.as_str()).ok(),
             _ => None,
+        }
         })
         .expect("credential blocker identifies the provider for the existing auth UI")
 }
@@ -384,7 +388,7 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
     );
     assert_eq!(
         registration.phase,
-        ironclaw_host_api::state::InstallationState::Installed,
+        ironclaw_extension_contracts::state::InstallationState::Installed,
         "registration persists a catalog definition without implicit installation: {registration:#?}",
     );
     assert!(
@@ -413,7 +417,7 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
     assert_eq!(exact_retry.package_ref, registration.package_ref);
     assert_eq!(
         exact_retry.phase,
-        ironclaw_host_api::state::InstallationState::Installed
+        ironclaw_extension_contracts::state::InstallationState::Installed
     );
     let mut conflicting = automatic_request();
     conflicting.desired_name = "Different fixture MCP".to_string();
@@ -433,7 +437,7 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
     let installed = install_fixture(&services, scope.clone()).await;
     assert_eq!(
         installed.phase,
-        ironclaw_host_api::state::InstallationState::Active
+        ironclaw_extension_contracts::state::InstallationState::Active
     );
     let active_capabilities = services
         .extension_management
@@ -560,7 +564,7 @@ async fn registered_but_never_installed_definition_survives_restart_and_installs
     let installed = install_fixture(&restored, scope).await;
     assert_eq!(
         installed.phase,
-        ironclaw_host_api::state::InstallationState::Active,
+        ironclaw_extension_contracts::state::InstallationState::Active,
         "the restored definition installs without re-registration: {installed:#?}",
     );
 }
@@ -721,13 +725,13 @@ async fn tenant_definition_is_discoverable_but_installation_and_removal_stay_per
         .expect("member joins through the ordinary install lifecycle");
     assert_eq!(
         member_install.phase,
-        ironclaw_host_api::state::InstallationState::Active
+        ironclaw_extension_contracts::state::InstallationState::Active
     );
 
     let admin_install = install_fixture(&services, admin_scope.clone()).await;
     assert_eq!(
         admin_install.phase,
-        ironclaw_host_api::state::InstallationState::Active
+        ironclaw_extension_contracts::state::InstallationState::Active
     );
 
     services
@@ -839,7 +843,7 @@ async fn bearer_registration_stays_setup_needed_until_the_existing_auth_continua
         .expect("bearer MCP definition is admitted before credentials exist");
     assert_eq!(
         registration.phase,
-        ironclaw_host_api::state::InstallationState::Installed
+        ironclaw_extension_contracts::state::InstallationState::Installed
     );
     assert!(
         registration.blockers.is_empty(),
@@ -853,7 +857,7 @@ async fn bearer_registration_stays_setup_needed_until_the_existing_auth_continua
     assert!(
         unfinished_retry.blockers.iter().any(|blocker| matches!(
             blocker,
-            ironclaw_host_api::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
+            ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
         )),
         "ordinary installation exposes credential readiness"
     );
@@ -869,7 +873,7 @@ async fn bearer_registration_stays_setup_needed_until_the_existing_auth_continua
 
     assert_eq!(
         unfinished_retry.phase,
-        ironclaw_host_api::state::InstallationState::Installed
+        ironclaw_extension_contracts::state::InstallationState::Installed
     );
 
     let provider = credential_provider_from_response(&unfinished_retry);
@@ -1001,7 +1005,7 @@ async fn pending_oauth_registration_survives_fresh_restore_and_resumes_existing_
     let pending_provider = credential_provider_from_response(&pending);
     assert!(pending.blockers.iter().any(|blocker| matches!(
         blocker,
-        ironclaw_host_api::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
+        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
     )));
 
     let restored_secret_store = Arc::new(OnceLock::new());
@@ -1038,7 +1042,7 @@ async fn pending_oauth_registration_survives_fresh_restore_and_resumes_existing_
     assert!(
         activation_only.blockers.iter().any(|blocker| matches!(
             blocker,
-            ironclaw_host_api::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
+            ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
         )),
         "activation without a prior re-install must still surface the credential setup \
          blocker rather than \"is not installed\": {activation_only:#?}"
@@ -1061,7 +1065,7 @@ async fn pending_oauth_registration_survives_fresh_restore_and_resumes_existing_
     );
     assert!(resumed.blockers.iter().any(|blocker| matches!(
         blocker,
-        ironclaw_host_api::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
+        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
     )));
     assert!(
         restored
@@ -1117,7 +1121,7 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
 
     assert_eq!(
         registration.phase,
-        ironclaw_host_api::state::InstallationState::Installed
+        ironclaw_extension_contracts::state::InstallationState::Installed
     );
     assert!(
         registration.blockers.is_empty(),
@@ -1132,7 +1136,7 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
     assert!(
         install.blockers.iter().any(|blocker| matches!(
             blocker,
-            ironclaw_host_api::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
+            ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
         )),
         "ordinary install discovers OAuth and returns the credential setup blocker: {install:#?}"
     );
@@ -1244,7 +1248,7 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
     assert!(
         extensions.iter().any(|extension| {
             extension.summary.package_ref == fixture_package_ref()
-                && extension.phase == ironclaw_host_api::state::InstallationState::Active
+                && extension.phase == ironclaw_extension_contracts::state::InstallationState::Active
         }),
         "a callback that publishes tools must project as active: {extensions:#?}"
     );
@@ -1552,7 +1556,7 @@ async fn oauth_callback_with_a_rejected_token_stays_setup_needed_and_publishes_n
     };
     assert!(extensions.iter().any(|extension| {
         extension.summary.package_ref == fixture_package_ref()
-            && extension.phase == ironclaw_host_api::state::InstallationState::Installed
+            && extension.phase == ironclaw_extension_contracts::state::InstallationState::Installed
     }));
 }
 
@@ -1681,7 +1685,8 @@ async fn oauth_empty_catalog_after_callback_retains_account_and_stays_installed(
     assert!(
         extensions.iter().any(|extension| {
             extension.summary.package_ref == fixture_package_ref()
-                && extension.phase == ironclaw_host_api::state::InstallationState::Installed
+                && extension.phase
+                    == ironclaw_extension_contracts::state::InstallationState::Installed
         }),
         "empty catalog remains installed for a later lifecycle retry: {extensions:#?}"
     );
@@ -1722,7 +1727,7 @@ async fn live_notion_oauth_registration_reaches_generic_setup() {
         .expect("Notion OAuth registration persists its definition");
     assert_eq!(
         registration.phase,
-        ironclaw_host_api::state::InstallationState::Installed
+        ironclaw_extension_contracts::state::InstallationState::Installed
     );
     assert!(registration.blockers.is_empty());
     let install = services
@@ -1739,7 +1744,7 @@ async fn live_notion_oauth_registration_reaches_generic_setup() {
     assert!(
         install.blockers.iter().any(|blocker| matches!(
             blocker,
-            ironclaw_host_api::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
+            ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
         )),
         "Notion install must hand off to generic setup: {install:#?}"
     );
@@ -1781,7 +1786,7 @@ async fn live_microsoft_mrc_registers_discovers_and_invokes_a_read_only_tool() {
         .expect("public no-auth server registers through the standard lifecycle");
     assert_eq!(
         registration.phase,
-        ironclaw_host_api::state::InstallationState::Installed
+        ironclaw_extension_contracts::state::InstallationState::Installed
     );
     let install = services
         .lifecycle_service
@@ -1799,7 +1804,7 @@ async fn live_microsoft_mrc_registers_discovers_and_invokes_a_read_only_tool() {
         .expect("public no-auth server installs through the standard lifecycle");
     assert_eq!(
         install.phase,
-        ironclaw_host_api::state::InstallationState::Active
+        ironclaw_extension_contracts::state::InstallationState::Active
     );
 
     let capabilities = services

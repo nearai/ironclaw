@@ -4,11 +4,10 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount, CredentialAccountStatus,
     CredentialAccountUpdateBinding,
 };
+use ironclaw_extension_contracts::state::InstallationState;
 use ironclaw_host_api::{
     ids::{ExtensionId, InvocationId},
-    product_surface::{ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind},
     resource::ResourceScope,
-    state::InstallationState,
 };
 use ironclaw_operator::llm_admin::nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpBootstrapOutcome, durable_product_auth_storage_enabled,
@@ -16,6 +15,9 @@ use ironclaw_operator::llm_admin::nearai_mcp::{
 use ironclaw_product::{
     ExtensionCredentialSetupService, ExtensionCredentialSubmitRequest, LifecyclePackageKind,
     LifecyclePackageRef, LifecycleProductPayload,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
 
 use crate::RebornBuildError;

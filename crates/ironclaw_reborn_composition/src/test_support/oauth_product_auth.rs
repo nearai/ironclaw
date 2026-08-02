@@ -261,7 +261,7 @@ fn engine_provider_client_for_test(
     egress: Arc<ScriptedOAuthTokenEgress>,
     secret_store: Arc<dyn ironclaw_secrets::SecretStorePort>,
 ) -> Arc<ironclaw_auth::AuthEngine> {
-    let recipe: ironclaw_host_api::recipe::VendorAuthRecipe =
+    let recipe: ironclaw_extension_contracts::recipe::VendorAuthRecipe =
         serde_json::from_value(serde_json::json!({
             "method": "oauth2_code",
             "display_name": format!("{vendor} account"),
@@ -310,7 +310,7 @@ impl ironclaw_auth::EngineClientCredentialsSource for TestStaticClientCredential
     async fn resolve(
         &self,
         _vendor: &str,
-        _credentials: &ironclaw_host_api::recipe::RecipeClientCredentials,
+        _credentials: &ironclaw_extension_contracts::recipe::RecipeClientCredentials,
     ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, ironclaw_auth::AuthProductError> {
         Ok(ironclaw_auth::EngineOAuthClientMaterial {
             client_id: ironclaw_auth::OAuthClientId::new("test-client-id")?,
@@ -767,7 +767,7 @@ fn engine_provider_client_with_identity_for_test(
     egress: Arc<ScriptedOAuthTokenEgress>,
     secret_store: Arc<dyn ironclaw_secrets::SecretStorePort>,
 ) -> Arc<ironclaw_auth::AuthEngine> {
-    let recipe: ironclaw_host_api::recipe::VendorAuthRecipe =
+    let recipe: ironclaw_extension_contracts::recipe::VendorAuthRecipe =
         serde_json::from_value(serde_json::json!({
             "method": "oauth2_code",
             "display_name": format!("{vendor} account"),

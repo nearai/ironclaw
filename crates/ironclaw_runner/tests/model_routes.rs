@@ -34,8 +34,8 @@ fn model_slots_are_exposed_in_cli_display_order() {
 #[test]
 fn model_slots_cover_builtin_interactive_and_mission_profiles() {
     let interactive_model =
-        ironclaw_turns::run_profile::ModelProfileId::new("interactive_model").unwrap();
-    let mission_model = ironclaw_turns::run_profile::ModelProfileId::new("mission_model").unwrap();
+        ironclaw_loop_contracts::ModelProfileId::new("interactive_model").unwrap();
+    let mission_model = ironclaw_loop_contracts::ModelProfileId::new("mission_model").unwrap();
 
     assert_eq!(
         ModelSlot::from_model_profile_id(&interactive_model),

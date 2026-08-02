@@ -45,6 +45,7 @@ ironclaw_approvals = { path = "../ironclaw_approvals", version = "0.1.0" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
+ironclaw_loop_contracts = { path = "../ironclaw_loop_contracts", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 jsonschema = { version = "0.49", default-features = false }
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }

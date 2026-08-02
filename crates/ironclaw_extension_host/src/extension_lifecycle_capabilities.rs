@@ -2,6 +2,7 @@
 use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::state::InstallationState;
 use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
 };
@@ -15,21 +16,22 @@ use ironclaw_host_api::{
     error::HostApiError,
     ids::CapabilityId,
     resource::{ResourceEstimate, ResourceProfile, ResourceUsage},
-    state::InstallationState,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
-use ironclaw_product::{
+use ironclaw_product::RebornChannelConnectStrategy;
+use ironclaw_product_contracts::error::ProductOperationFailure;
+use ironclaw_product_contracts::package_lifecycle::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
-    ProductSurfaceFailure, RebornChannelConnectStrategy,
 };
 use serde::Deserialize;
 
 use crate::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
 use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
 use ironclaw_auth::RuntimeCredentialAccountSelectionService;
+use ironclaw_product_contracts::package_lifecycle::public_lifecycle_response_json;
 
 pub const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
 pub const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
@@ -201,6 +203,23 @@ struct ExtensionIdInput {
     extension_id: String,
 }
 
+/// Sanitizes a lifecycle-projection serialization failure into the capability
+/// error the model sees.
+///
+/// Extracted from an inline closure so the mapping is reachable from a test:
+/// the failure itself is a defensive guard (a well-formed
+/// [`LifecycleProductResponse`] does not fail `serde_json`), but *what it maps
+/// to* is a live contract — the model must get `OutputDecode`, and the serde
+/// error, which can quote projection contents, must stay in the debug log.
+fn lifecycle_output_decode_error(error: impl std::fmt::Debug) -> FirstPartyCapabilityError {
+    tracing::debug!(
+        target: "ironclaw::reborn::extension_lifecycle",
+        ?error,
+        "extension lifecycle output serialization failed"
+    );
+    FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputDecode)
+}
+
 #[async_trait]
 impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
     async fn dispatch(
@@ -348,14 +367,7 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
         );
         let response = without_model_visible_connection_chrome(response);
         let output =
-            ironclaw_product::public_lifecycle_response_json(&response).map_err(|error| {
-                tracing::debug!(
-                    target: "ironclaw::reborn::extension_lifecycle",
-                    ?error,
-                    "extension lifecycle output serialization failed"
-                );
-                FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputDecode)
-            })?;
+            public_lifecycle_response_json(&response).map_err(lifecycle_output_decode_error)?;
         Ok(
             FirstPartyCapabilityResult::new(output, resource_usage(started))
                 .with_display_preview(connection_preview),
@@ -484,9 +496,9 @@ fn activation_response_has_credential_blocker(response: &LifecycleProductRespons
     )
 }
 
-fn install_activation_readiness_error(error: ProductSurfaceFailure) -> FirstPartyCapabilityError {
+fn install_activation_readiness_error(error: ProductOperationFailure) -> FirstPartyCapabilityError {
     match error {
-        ProductSurfaceFailure::ProviderInstanceNotConfigured { .. } => {
+        ProductOperationFailure::ProviderInstanceNotConfigured { .. } => {
             provider_instance_unavailable_error()
         }
         error => lifecycle_error(error),
@@ -494,14 +506,14 @@ fn install_activation_readiness_error(error: ProductSurfaceFailure) -> FirstPart
 }
 
 fn install_activation_error(
-    error: ProductSurfaceFailure,
+    error: ProductOperationFailure,
     install_response: LifecycleProductResponse,
 ) -> Result<LifecycleProductResponse, FirstPartyCapabilityError> {
     match error {
-        ProductSurfaceFailure::ProviderInstanceNotConfigured { .. } => {
+        ProductOperationFailure::ProviderInstanceNotConfigured { .. } => {
             Err(provider_instance_unavailable_error())
         }
-        ProductSurfaceFailure::Transient { reason } => {
+        ProductOperationFailure::Transient { reason } => {
             tracing::debug!(
                 target: "ironclaw::reborn::extension_lifecycle",
                 %reason,
@@ -509,7 +521,7 @@ fn install_activation_error(
             );
             Ok(install_response)
         }
-        ProductSurfaceFailure::InvalidBindingRequest { reason }
+        ProductOperationFailure::InvalidBindingRequest { reason }
             if reason.starts_with("hosted MCP catalog preparation failed:")
                 || reason
                     == "generic extension host rejected the activation: hosted MCP discovery published no callable tools" =>
@@ -620,7 +632,7 @@ fn provider_instance_unavailable_error() -> FirstPartyCapabilityError {
     )
 }
 
-fn lifecycle_error(error: ProductSurfaceFailure) -> FirstPartyCapabilityError {
+fn lifecycle_error(error: ProductOperationFailure) -> FirstPartyCapabilityError {
     match error {
         // UNTRUSTED on purpose. `InvalidBindingRequest` has ~40 construction
         // sites and several interpolate externally-influenced text: a hosted
@@ -636,7 +648,7 @@ fn lifecycle_error(error: ProductSurfaceFailure) -> FirstPartyCapabilityError {
         // `ironclaw_threads` applies to untrusted output. The trusted channel
         // is reserved for reasons built entirely from host-authored constants
         // (the `ProviderInstanceNotConfigured` arm below).
-        ProductSurfaceFailure::InvalidBindingRequest { reason } => {
+        ProductOperationFailure::InvalidBindingRequest { reason } => {
             FirstPartyCapabilityError::dispatch_with_diagnostic(
                 RuntimeDispatchErrorKind::InputEncode,
                 None,
@@ -655,17 +667,17 @@ fn lifecycle_error(error: ProductSurfaceFailure) -> FirstPartyCapabilityError {
         // arm is the one exception routed onto the TRUSTED channel
         // (`dispatch_with_host_remediation`), because its `reason` is built
         // entirely from host-authored constants.
-        ProductSurfaceFailure::ProviderInstanceNotConfigured { reason } => {
+        ProductOperationFailure::ProviderInstanceNotConfigured { reason } => {
             FirstPartyCapabilityError::dispatch_with_host_remediation(
                 RuntimeDispatchErrorKind::OperationFailed,
                 Some(PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY.to_string()),
                 reason,
             )
         }
-        ProductSurfaceFailure::UnsupportedActionKind { .. } => {
+        ProductOperationFailure::UnsupportedActionKind { .. } => {
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
         }
-        ProductSurfaceFailure::Transient { .. } => {
+        ProductOperationFailure::Transient { .. } => {
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
         }
         _ => FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed),
@@ -674,6 +686,73 @@ fn lifecycle_error(error: ProductSurfaceFailure) -> FirstPartyCapabilityError {
 
 #[cfg(test)]
 mod tests {
+    /// The serialization guard is defensive — a well-formed projection does
+    /// not fail `serde_json` — but the mapping is a live contract with two
+    /// halves, and this asserts both: the model sees `OutputDecode` and never
+    /// the serde error (which can quote the projection contents it failed on),
+    /// *and* the detail is not simply discarded — it reaches the debug log,
+    /// which is where an operator diagnoses it from.
+    ///
+    /// The DEBUG subscriber is load-bearing, not decoration: with no
+    /// subscriber installed `tracing` short-circuits on the null dispatcher
+    /// and the macro body never runs, so a test without one cannot tell
+    /// "logged the detail" from "dropped it".
+    #[test]
+    fn output_serialization_failure_maps_to_output_decode_and_logs_the_detail() {
+        use std::io::Write as _;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct SharedLog(Arc<Mutex<Vec<u8>>>);
+        struct SharedLogGuard(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for SharedLogGuard {
+            fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("log lock").extend(buffer);
+                Ok(buffer.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLog {
+            type Writer = SharedLogGuard;
+            fn make_writer(&'a self) -> Self::Writer {
+                SharedLogGuard(Arc::clone(&self.0))
+            }
+        }
+
+        let logs = SharedLog::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(logs.clone())
+            .finish();
+
+        let error = tracing::subscriber::with_default(subscriber, || {
+            super::lifecycle_output_decode_error("key must be a string")
+        });
+
+        assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::OutputDecode));
+        assert!(
+            !format!("{error:?}").contains("key must be a string"),
+            "the serde detail must not ride out on the capability error"
+        );
+
+        let rendered = String::from_utf8(logs.0.lock().expect("log lock").clone())
+            .expect("tracing output is UTF-8");
+        assert!(
+            rendered.contains("extension lifecycle output serialization failed"),
+            "the guard must leave a diagnosable trace: {rendered}"
+        );
+        assert!(
+            rendered.contains("key must be a string"),
+            "the detail belongs in the debug log, not nowhere: {rendered}"
+        );
+        let _ = std::io::sink().flush();
+    }
+
     use ironclaw_auth::{
         AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
         CredentialAccountStatus, CredentialOwnership, NewCredentialAccount, ProviderScope,
@@ -708,11 +787,12 @@ mod tests {
         ExtensionLifecycleTestServices, build_lifecycle_test_services,
         invoke_json_with_standalone_approval, invoke_with_standalone_approval,
     };
-    use ironclaw_host_api::state::InstallationState;
-    use ironclaw_product::{
+    use ironclaw_extension_contracts::state::InstallationState;
+    use ironclaw_product::RebornChannelConnectStrategy;
+    use ironclaw_product_contracts::package_lifecycle::{
         ChannelConnectionRequirement, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
         LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
-        LifecycleSearchExtensionSummary, RebornChannelConnectStrategy,
+        LifecycleSearchExtensionSummary,
     };
 
     const TEST_OWNER_ID: &str = "extension-tool-test-user";
@@ -2031,7 +2111,7 @@ mod tests {
     /// `config set` command verbatim.
     #[test]
     fn provider_instance_not_configured_safe_summary_validates_and_diagnostic_names_config_set() {
-        ironclaw_turns::run_profile::LoopSafeSummary::new(
+        ironclaw_loop_contracts::LoopSafeSummary::new(
             PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY,
         )
         .expect("fixed safe_summary must pass the strict LoopSafeSummary validator");
@@ -2041,7 +2121,7 @@ mod tests {
             ironclaw_reborn_config::google_remediation_text(),
             ironclaw_reborn_config::apply_step_text()
         );
-        let mapped = lifecycle_error(ProductSurfaceFailure::ProviderInstanceNotConfigured {
+        let mapped = lifecycle_error(ProductOperationFailure::ProviderInstanceNotConfigured {
             reason: reason.clone(),
         });
 
@@ -2079,7 +2159,7 @@ mod tests {
     /// entirely from host-authored constants may ride the trusted channel.
     #[test]
     fn invalid_binding_request_carries_reason_on_the_untrusted_diagnostic_channel() {
-        let mapped = lifecycle_error(ProductSurfaceFailure::InvalidBindingRequest {
+        let mapped = lifecycle_error(ProductOperationFailure::InvalidBindingRequest {
             reason: "telegram account setup was declared without a mounted host".to_string(),
         });
 
@@ -2097,7 +2177,7 @@ mod tests {
 
     #[test]
     fn transient_lifecycle_errors_map_to_retryable_backend_failure() {
-        let mapped = lifecycle_error(ProductSurfaceFailure::Transient {
+        let mapped = lifecycle_error(ProductOperationFailure::Transient {
             reason: "temporary lifecycle store outage".to_string(),
         });
 
@@ -2114,7 +2194,7 @@ mod tests {
     /// credential-vocabulary scan.
     #[test]
     fn model_influenced_invalid_binding_reason_never_reaches_the_trusted_channel() {
-        let mapped = lifecycle_error(ProductSurfaceFailure::InvalidBindingRequest {
+        let mapped = lifecycle_error(ProductOperationFailure::InvalidBindingRequest {
             reason: "extension api_key is not installed".to_string(),
         });
 

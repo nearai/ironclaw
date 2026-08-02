@@ -1,57 +1,13 @@
-use std::fmt;
-
-use crate::{
-    CheckpointSchemaId, LoopCheckpointKind, LoopCheckpointStateRef, LoopGateRef, RunProfileVersion,
-    TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnScope, TurnTimestamp,
-};
 use async_trait::async_trait;
+use ironclaw_loop_contracts::{
+    CheckpointSchemaId, LoopCheckpointKind, LoopCheckpointStateRef, RedactedCheckpointPayload,
+};
 use serde::{Deserialize, Serialize};
 
-pub const MAX_CHECKPOINT_STATE_PAYLOAD_BYTES: usize =
-    ironclaw_processes::MAX_PROCESS_CHECKPOINT_PAYLOAD_BYTES;
-
-/// Internal loop checkpoint payload bytes.
-///
-/// This value is intentionally not serializable. It is host-owned resume state,
-/// not public turn status, event, milestone, or transcript content.
-#[derive(Clone, PartialEq, Eq)]
-pub struct RedactedCheckpointPayload {
-    bytes: Vec<u8>,
-}
-
-impl RedactedCheckpointPayload {
-    pub fn new(bytes: impl Into<Vec<u8>>) -> Result<Self, String> {
-        let bytes = bytes.into();
-        validate_checkpoint_payload_len(bytes.len())?;
-        Ok(Self { bytes })
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    pub fn into_payload_bytes(self) -> Vec<u8> {
-        self.bytes
-    }
-
-    pub fn len(&self) -> usize {
-        self.bytes.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
-    }
-}
-
-impl fmt::Debug for RedactedCheckpointPayload {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("RedactedCheckpointPayload")
-            .field("len", &self.bytes.len())
-            .field("payload", &"<redacted>")
-            .finish()
-    }
-}
+use crate::{
+    LoopGateRef, RunProfileVersion, TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnScope,
+    TurnTimestamp,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopCheckpointRecord {
@@ -110,11 +66,20 @@ pub trait LoopCheckpointStore: Send + Sync {
     ) -> Result<Option<LoopCheckpointRecord>, TurnError>;
 }
 
-fn validate_checkpoint_payload_len(len: usize) -> Result<(), String> {
-    if len > MAX_CHECKPOINT_STATE_PAYLOAD_BYTES {
-        return Err(format!(
-            "checkpoint payload must be at most {MAX_CHECKPOINT_STATE_PAYLOAD_BYTES} bytes"
-        ));
+#[cfg(test)]
+mod tests {
+    use ironclaw_loop_contracts::MAX_CHECKPOINT_STATE_PAYLOAD_BYTES;
+
+    /// The contracts crate cannot depend on the process kernel, so it states the
+    /// checkpoint payload ceiling as a literal. This crate depends on both and
+    /// pins them equal: a loop checkpoint is journalled as a process checkpoint,
+    /// so a divergence would let a loop stage a payload the journal rejects.
+    #[test]
+    fn checkpoint_payload_ceiling_matches_process_journal() {
+        assert_eq!(
+            MAX_CHECKPOINT_STATE_PAYLOAD_BYTES,
+            ironclaw_processes::MAX_PROCESS_CHECKPOINT_PAYLOAD_BYTES,
+            "loop checkpoint payload ceiling must equal the process journal ceiling"
+        );
     }
-    Ok(())
 }

@@ -55,6 +55,24 @@ source_path="crates/ironclaw_demo/src/lib.rs"
 mkdir -p "${case_root}/crates/ironclaw_demo/src"
 printf '%s\n' 'pub fn classify(value: bool) -> bool {' '    value' '}' >"${case_root}/${source_path}"
 
+# The gate resolves "is this a Reborn production source?" from the crate
+# inventory (scripts/ci/lib/crate_tree.py) rather than from a
+# `crates/ironclaw_*` pattern, so the fixture has to be a real crate tree:
+# a Cargo.toml per crate, and enough of them to clear crate_tree's
+# MIN_CRATE_DIRECTORIES discovery floor. Padding the fixture up to the floor is
+# deliberate — the alternative (lowering or bypassing the floor for tests) would
+# retire the very fail-closed assertion these tests exist to pin.
+write_crate_manifest() {
+  local crate_dir="$1"
+  mkdir -p "${case_root}/${crate_dir}/src"
+  printf '[package]\nname = "%s"\n' "$(basename "${crate_dir}")" \
+    >"${case_root}/${crate_dir}/Cargo.toml"
+}
+write_crate_manifest crates/ironclaw_demo
+for pad_index in $(seq 1 24); do
+  write_crate_manifest "crates/ironclaw_pad${pad_index}"
+done
+
 cat >"${work}/policy.toml" <<'TOML'
 [policy]
 line_percent = 100.0
@@ -104,6 +122,59 @@ check_rc "fully covered changed lines and branches pass" 0
 check_text "line denominator is reported" "Changed line coverage: 100.00% (3/3)"
 check_text "branch denominator is reported" "Changed branch coverage: 100.00% (2/2)"
 check_report_text "machine report preserves the branch denominator" '"instrumented_branches": 2'
+
+echo "▶ restored original changed-line floor"
+cat >"${work}/policy.toml" <<'TOML'
+[policy]
+line_percent = 90.0
+branch_percent = 0.0
+TOML
+threshold_lines=20
+: >"${case_root}/${source_path}"
+: >"${work}/change.diff"
+printf '%s\n' \
+  "diff --git a/${source_path} b/${source_path}" \
+  "--- /dev/null" \
+  "+++ b/${source_path}" \
+  "@@ -0,0 +1,${threshold_lines} @@" >>"${work}/change.diff"
+for line in $(seq 1 "${threshold_lines}"); do
+  printf 'pub fn threshold_line_%s() {}\n' "${line}" >>"${case_root}/${source_path}"
+  printf '+pub fn threshold_line_%s() {}\n' "${line}" >>"${work}/change.diff"
+done
+write_threshold_lcov() {
+  local line_18_hits="$1"
+  printf 'SF:%s\n' "${case_root}/${source_path}" >"${work}/coverage.lcov"
+  for line in $(seq 1 17); do
+    printf 'DA:%s,1\n' "${line}" >>"${work}/coverage.lcov"
+  done
+  printf 'DA:18,%s\nDA:19,0\nDA:20,0\n' "${line_18_hits}" \
+    >>"${work}/coverage.lcov"
+  for line in $(seq 1 20); do
+    printf 'BRDA:%s,0,0,0\n' "${line}" >>"${work}/coverage.lcov"
+  done
+  printf 'LF:20\nBRF:20\nend_of_record\n' >>"${work}/coverage.lcov"
+}
+
+write_threshold_lcov 1
+run_gate
+check_rc "90% changed lines pass at the original floor" 0
+check_text "line floor denominator is reported" "Changed line coverage: 90.00% (18/20)"
+check_text "ungated branch coverage remains visible" "Changed branch coverage: 0.00% (0/20)"
+check_text "uncovered branch detail remains visible" "${source_path}:1 branch 0/0"
+check_report_text "machine report records the 90% line floor" '"threshold_percent": 90.0'
+check_report_text "machine report records the zero branch floor" '"branch_threshold_percent": 0.0'
+
+write_threshold_lcov 0
+run_gate
+check_rc "changed-line coverage below 90% fails" 1
+check_text "line-floor failure names the original threshold" "line coverage 85.00% is below 90.0%"
+
+printf '%s\n' 'pub fn classify(value: bool) -> bool {' '    value' '}' >"${case_root}/${source_path}"
+cat >"${work}/policy.toml" <<'TOML'
+[policy]
+line_percent = 100.0
+branch_percent = 100.0
+TOML
 
 echo "▶ diff markers inside hunk content are parsed by their first byte"
 cat >"${work}/change.diff" <<'DIFF'
@@ -609,6 +680,133 @@ capture grep -Fq -- "--diff-algorithm=histogram" "${work}/git-argv.log"
 check_rc "the gate pins the histogram diff algorithm when it generates the diff" 0
 capture grep -Eq -- "diff .*--unified=0" "${work}/git-argv.log"
 check_rc "the gate still generates the diff with zero context" 0
+
+echo "▶ discovery is tree-shape-agnostic and fails closed"
+# The WS10 failure mode (docs/reborn/target-architecture/CHECKLIST.md, #6963):
+# with the old `crates/ironclaw_*/src/**` keying, every case below reported
+# "no Reborn production lines added" and exited 0 — a green gate that measured
+# nothing. Coverage numbers here are deliberately identical to the flat-tree
+# happy path, because the tree shape must not change what the gate measures.
+nested_path="crates/substrates/ironclaw_nested/src/lib.rs"
+write_crate_manifest crates/substrates/ironclaw_nested
+printf '%s\n' 'pub fn classify(value: bool) -> bool {' '    value' '}' \
+  >"${case_root}/${nested_path}"
+cat >"${work}/policy.toml" <<'TOML'
+[policy]
+line_percent = 100.0
+branch_percent = 100.0
+TOML
+cat >"${work}/change.diff" <<DIFF
+diff --git a/${nested_path} b/${nested_path}
+--- /dev/null
++++ b/${nested_path}
+@@ -0,0 +1,3 @@
++pub fn classify(value: bool) -> bool {
++    value
++}
+DIFF
+cat >"${work}/coverage.lcov" <<EOF
+SF:${case_root}/${nested_path}
+DA:1,1
+DA:2,0
+DA:3,1
+BRDA:2,0,0,1
+BRDA:2,0,1,1
+LF:3
+LH:2
+BRF:2
+BRH:2
+end_of_record
+EOF
+run_gate
+check_rc "an uncovered line in a family-nested crate still fails the gate" 1
+check_text "the nested crate is measured, not skipped" "Changed line coverage: 66.67% (2/3)"
+check_text "the nested uncovered line is named" "${nested_path}:2"
+
+# A crate-owned path that is not the crate's own `src/` was outside the
+# denominator under the old regex (`crates/<one-segment>/src/…`) and must stay
+# outside it: `crates/ironclaw_safety/fuzz/src/main.rs` is the real instance.
+# It is attributable — so it must be *excluded*, not *refused*.
+fuzz_path="crates/ironclaw_demo/fuzz/src/main.rs"
+mkdir -p "$(dirname "${case_root}/${fuzz_path}")"
+printf '%s\n' 'fn main() {}' >"${case_root}/${fuzz_path}"
+cat >"${work}/change.diff" <<DIFF
+diff --git a/${fuzz_path} b/${fuzz_path}
+--- /dev/null
++++ b/${fuzz_path}
+@@ -0,0 +1,1 @@
++fn main() {}
+DIFF
+run_gate
+check_rc "a nested non-src tree inside a crate stays out of the denominator" 0
+check_text "the crate-owned non-src path is excluded, not refused" \
+  "no Reborn production lines added"
+
+# The fail-closed half: a `crates/` Rust file no crate owns means the inventory
+# and the tree disagree. Falling through to "not production" is precisely how a
+# moved tree goes quiet, so it is refused instead.
+cat >"${work}/change.diff" <<'DIFF'
+diff --git a/crates/not_a_crate/src/lib.rs b/crates/not_a_crate/src/lib.rs
+--- /dev/null
++++ b/crates/not_a_crate/src/lib.rs
+@@ -0,0 +1,1 @@
++pub fn orphan() {}
+DIFF
+run_gate
+check_rc "an unattributable crates/ Rust file fails closed" 1
+check_text "the unattributable path is named" "belongs to no discovered crate"
+
+# ...and the same refusal must reach the mode CI actually runs. `--diff-file`
+# hands the gate an un-narrowed diff, but `--base/--head` narrows to per-crate
+# `src/` pathspecs BEFORE `parse_diff` ever sees a path — so an unattributable
+# file was filtered out of the diff text and the check above could not fire at
+# all in production. Verified against this fixture: the gate printed
+# "no Reborn production lines added" and exited 0. `screen_unattributable`
+# closes that, and this case is the pin: a fail-closed check that cannot fail
+# in the mode that matters is not a check (#6963).
+orphan_path="crates/not_a_crate/src/lib.rs"
+mkdir -p "$(dirname "${case_root}/${orphan_path}")"
+printf '%s\n' 'pub fn orphan() {}' >"${case_root}/${orphan_path}"
+fixture_git add "${orphan_path}"
+fixture_git \
+  -c user.name=coverage-test -c user.email=coverage@example.invalid -c commit.gpgsign=false \
+  commit -qm orphan
+orphan_commit="$(fixture_git rev-parse HEAD)"
+capture python3 "${gate}" \
+  --lcov "${work}/coverage.lcov" \
+  --manifest "${work}/policy.toml" \
+  --base "${head_commit}" \
+  --head "${orphan_commit}" \
+  --repo-root "${case_root}"
+check_rc "an unattributable path is refused through --base/--head too" 1
+check_text "the --base/--head refusal names the path" "${orphan_path}"
+fixture_git rm -rq "$(dirname "${orphan_path}")"
+fixture_git \
+  -c user.name=coverage-test -c user.email=coverage@example.invalid -c commit.gpgsign=false \
+  commit -qm drop-orphan
+
+# A missing or truncated crate tree cannot read as "nothing changed".
+empty_root="${work}/no-crates"
+mkdir -p "${empty_root}"
+capture python3 "${gate}" \
+  --lcov "${work}/coverage.lcov" \
+  --manifest "${work}/policy.toml" \
+  --diff-file "${work}/change.diff" \
+  --repo-root "${empty_root}"
+check_rc "a repo root with no crates/ tree fails closed" 1
+check_text "missing crate tree is actionable" "crate discovery failed"
+
+short_root="${work}/short-crates"
+mkdir -p "${short_root}/crates/ironclaw_lonely/src"
+printf '[package]\nname = "ironclaw_lonely"\n' \
+  >"${short_root}/crates/ironclaw_lonely/Cargo.toml"
+capture python3 "${gate}" \
+  --lcov "${work}/coverage.lcov" \
+  --manifest "${work}/policy.toml" \
+  --diff-file "${work}/change.diff" \
+  --repo-root "${short_root}"
+check_rc "a crate inventory below the discovery floor fails closed" 1
+check_text "short crate tree is actionable" "crate discovery failed"
 
 echo
 if [ "${failures}" -ne 0 ]; then

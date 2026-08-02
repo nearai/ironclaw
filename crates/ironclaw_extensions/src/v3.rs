@@ -25,14 +25,17 @@ use ironclaw_host_api::{
         EffectKind, OriginGateMatrix, PermissionMode, RuntimeCredentialAccountSetup,
         RuntimeCredentialRequirementSource,
     },
-    channel::{ChannelDescriptor, ChannelDescriptorError},
     error::HostApiError,
     host_port::{HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog},
     http::RuntimeCredentialTarget,
     ids::{ExtensionId, VendorId},
+    trust::RequestedTrustClass,
+};
+
+use ironclaw_extension_contracts::{
+    channel::{ChannelDescriptor, ChannelDescriptorError},
     memory::MemoryDescriptor,
     recipe::{RecipeValidationError, VendorAuthRecipe},
-    trust::RequestedTrustClass,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -200,7 +203,7 @@ struct RawAudienceV3 {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawMcpV3 {
-    server: ironclaw_host_api::recipe::HttpsEndpoint,
+    server: ironclaw_extension_contracts::recipe::HttpsEndpoint,
     #[serde(default)]
     origin_gate_matrix: Option<OriginGateMatrix>,
     namespace: String,
@@ -395,7 +398,7 @@ pub(crate) fn parse_v3(
     let memory_tool_namespace = raw
         .memory
         .is_some()
-        .then_some(ironclaw_host_api::memory::MEMORY_TOOL_ID_NAMESPACE);
+        .then_some(ironclaw_extension_contracts::memory::MEMORY_TOOL_ID_NAMESPACE);
     let mut referenced_vendors: BTreeMap<VendorId, ()> = BTreeMap::new();
     let mut capabilities = Vec::new();
     let mut mcp_template_credentials = None;
@@ -627,7 +630,8 @@ pub(crate) fn parse_v3(
                 })
                 .unwrap_or_default(),
             dynamic_input_schemas: std::collections::BTreeMap::new(),
-            registration_auth: ironclaw_host_api::hosted_mcp::HostedMcpAuthSelection::NoAuth,
+            registration_auth:
+                ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::NoAuth,
         }),
         tools: manifest.capabilities.clone(),
         channel: raw.channel,

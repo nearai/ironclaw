@@ -1,6 +1,5 @@
-use ironclaw_turns::{
-    LoopExit,
-    run_profile::{AgentLoopDriverHost, LoopDriverNoteKind, LoopProgressEvent, ParentLoopOutput},
+use ironclaw_loop_contracts::{
+    AgentLoopDriverHost, LoopDriverNoteKind, LoopExit, LoopProgressEvent, ParentLoopOutput,
 };
 use tracing::debug;
 

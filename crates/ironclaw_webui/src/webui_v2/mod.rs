@@ -1,7 +1,7 @@
 //! Reborn WebChat v2 HTTP route surface.
 //!
 //! This crate ships the minimal native WebUI v2 route set on top of the
-//! [`ironclaw_host_api::product_surface::ProductSurface`] service. It is compiled into
+//! [`ironclaw_product_contracts::surface::ProductSurface`] service. It is compiled into
 //! every build.
 //!
 //! ## Boundaries
@@ -34,9 +34,9 @@
 //! maximum lifetime so leaked guards or stuck pollers cannot wedge a
 //! caller's slot indefinitely.
 //!
-//! [`ProductSurface`]: ironclaw_host_api::product_surface::ProductSurface
+//! [`ProductSurface`]: ironclaw_product_contracts::surface::ProductSurface
 //! [`WebChatV2EventFrame`]: crate::WebChatV2EventFrame
-//! [`ProductSurfaceCaller`]: ironclaw_host_api::product_surface::ProductSurfaceCaller
+//! [`ProductSurfaceCaller`]: ironclaw_product_contracts::surface::ProductSurfaceCaller
 //! [`IngressRouteDescriptor`]: ironclaw_host_api::ingress::IngressRouteDescriptor
 
 mod descriptors;

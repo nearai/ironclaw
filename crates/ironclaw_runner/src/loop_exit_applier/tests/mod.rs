@@ -1,3 +1,4 @@
+use ironclaw_turns::loop_exit::LoopExitApplier;
 // arch-exempt: large_file, checkpoint evidence integration coverage, plan #6168
 use std::sync::Arc;
 
@@ -5,6 +6,11 @@ use ironclaw_host_api::ids::{AgentId, ApprovalRequestId, TenantId, ThreadId, Use
 use ironclaw_host_api::turn::{
     LoopGateRef, LoopMessageRef, LoopResultRef, TurnActor, TurnCheckpointId, TurnGateRef, TurnId,
     TurnRunId, TurnScope, TurnStatus,
+};
+use ironclaw_loop_contracts::{
+    LoopBlocked, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStateRef, LoopCompleted,
+    LoopCompletionKind, LoopExit, LoopFailed, LoopFailureKind, LoopModelUsage,
+    RedactedCheckpointPayload,
 };
 use ironclaw_loop_host::SpawnSubagentMode;
 use ironclaw_threads::{
@@ -14,16 +20,13 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::test_support::{in_memory_agent_turn_runtime, in_memory_loop_checkpoint_store};
 use ironclaw_turns::{
-    AgentTurnRuntimePort, LoopBlocked, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStateRef,
-    LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopExit, LoopFailed, LoopFailureKind,
-    PutLoopCheckpointRequest, RedactedCheckpointPayload, TurnError, run_profile::LoopModelUsage,
+    AgentTurnRuntimePort, LoopCheckpointStore, PutLoopCheckpointRequest, TurnError,
 };
 
 use super::{
     ApprovalGateEvidenceStore, AwaitDependentRunEvidenceStore, BlockedEvidenceRequest,
     CompletionEvidenceRequest, FailureEvidenceRequest, InMemoryLoopExitEvidencePort,
-    LoopExitApplier, LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort,
-    verify_tool_result_ref,
+    LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort, verify_tool_result_ref,
 };
 
 mod support;
@@ -193,8 +196,9 @@ async fn blocked_exit_requires_before_block_checkpoint() {
 async fn auth_blocked_exit_with_durable_checkpoint_maps_to_blocked_auth() {
     let claimed = claimed_run();
     let checkpoint_id = TurnCheckpointId::new();
-    let state_ref = ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:auth-blocked-state")
-        .expect("valid state ref");
+    let state_ref =
+        ironclaw_loop_contracts::LoopCheckpointStateRef::new("checkpoint:auth-blocked-state")
+            .expect("valid state ref");
     let gate_ref = LoopGateRef::new("gate:test").expect("valid gate ref");
     let checkpoint = loop_checkpoint_record_with_gate(
         &claimed,
@@ -224,8 +228,8 @@ async fn auth_blocked_exit_with_durable_checkpoint_maps_to_blocked_auth() {
 async fn cancelled_exit_requires_observed_cancel_input() {
     let fixture =
         Fixture::new(InMemoryLoopExitEvidencePort::new().with_final_checkpoint_verified(true));
-    let exit = LoopExit::Cancelled(ironclaw_turns::LoopCancelled {
-        reason_kind: ironclaw_turns::LoopCancelledReasonKind::HostCancellation,
+    let exit = LoopExit::Cancelled(ironclaw_loop_contracts::LoopCancelled {
+        reason_kind: ironclaw_loop_contracts::LoopCancelledReasonKind::HostCancellation,
         checkpoint_id: None,
         interrupted_message_refs: vec![],
         exit_id: test_exit_id(),
@@ -259,8 +263,8 @@ async fn observed_host_cancellation_still_requires_final_checkpoint_when_configu
         transition,
         Arc::new(InMemoryLoopExitEvidencePort::new().with_cancellation_observed(true)),
     ));
-    let exit = LoopExit::Cancelled(ironclaw_turns::LoopCancelled {
-        reason_kind: ironclaw_turns::LoopCancelledReasonKind::HostCancellation,
+    let exit = LoopExit::Cancelled(ironclaw_loop_contracts::LoopCancelled {
+        reason_kind: ironclaw_loop_contracts::LoopCancelledReasonKind::HostCancellation,
         checkpoint_id: None,
         interrupted_message_refs: vec![],
         exit_id: test_exit_id(),
@@ -288,8 +292,8 @@ async fn thread_checkpoint_evidence_accepts_durable_cancel_requested_run() {
         empty_await_dependent_run_evidence(),
     ));
     let applier = Arc::new(LoopExitApplier::new(transition.clone(), evidence));
-    let exit = LoopExit::Cancelled(ironclaw_turns::LoopCancelled {
-        reason_kind: ironclaw_turns::LoopCancelledReasonKind::HostCancellation,
+    let exit = LoopExit::Cancelled(ironclaw_loop_contracts::LoopCancelled {
+        reason_kind: ironclaw_loop_contracts::LoopCancelledReasonKind::HostCancellation,
         checkpoint_id: None,
         interrupted_message_refs: vec![],
         exit_id: test_exit_id(),
@@ -314,8 +318,8 @@ async fn thread_checkpoint_evidence_accepts_durable_cancelled_run() {
         empty_await_dependent_run_evidence(),
     ));
     let applier = Arc::new(LoopExitApplier::new(transition.clone(), evidence));
-    let exit = LoopExit::Cancelled(ironclaw_turns::LoopCancelled {
-        reason_kind: ironclaw_turns::LoopCancelledReasonKind::HostCancellation,
+    let exit = LoopExit::Cancelled(ironclaw_loop_contracts::LoopCancelled {
+        reason_kind: ironclaw_loop_contracts::LoopCancelledReasonKind::HostCancellation,
         checkpoint_id: None,
         interrupted_message_refs: vec![],
         exit_id: test_exit_id(),
@@ -969,9 +973,10 @@ async fn applier_rejects_agentless_transcript_evidence_before_transition() {
 async fn external_tool_blocked_exit_with_durable_checkpoint_maps_to_blocked_external_tool() {
     let claimed = claimed_run();
     let checkpoint_id = TurnCheckpointId::new();
-    let state_ref =
-        ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:external-tool-blocked-state")
-            .expect("valid state ref");
+    let state_ref = ironclaw_loop_contracts::LoopCheckpointStateRef::new(
+        "checkpoint:external-tool-blocked-state",
+    )
+    .expect("valid state ref");
     let gate_ref = LoopGateRef::new("gate:test").expect("valid gate ref");
     let checkpoint = loop_checkpoint_record_with_gate(
         &claimed,
@@ -1115,7 +1120,7 @@ async fn thread_checkpoint_evidence_verifies_pending_approval_blocked_checkpoint
     let claimed = claimed_run();
     let checkpoint_id = TurnCheckpointId::new();
     let state_ref =
-        ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:approval-blocked-state")
+        ironclaw_loop_contracts::LoopCheckpointStateRef::new("checkpoint:approval-blocked-state")
             .expect("valid state ref");
     let request_id = ApprovalRequestId::new();
     let gate_ref = LoopGateRef::new(format!("gate:approval-{request_id}")).expect("valid gate ref");
@@ -1161,9 +1166,10 @@ async fn thread_checkpoint_evidence_verifies_pending_approval_blocked_checkpoint
 async fn thread_checkpoint_evidence_verifies_awaited_child_blocked_checkpoint() {
     let claimed = claimed_run();
     let checkpoint_id = TurnCheckpointId::new();
-    let state_ref =
-        ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:await-child-blocked-state")
-            .expect("valid state ref");
+    let state_ref = ironclaw_loop_contracts::LoopCheckpointStateRef::new(
+        "checkpoint:await-child-blocked-state",
+    )
+    .expect("valid state ref");
     let child_run_id = TurnRunId::new();
     let gate_ref =
         LoopGateRef::new(format!("gate:subagent-{child_run_id}")).expect("valid gate ref");
@@ -1227,9 +1233,10 @@ async fn thread_checkpoint_evidence_verifies_awaited_child_blocked_checkpoint() 
 async fn thread_checkpoint_evidence_rejects_background_child_gate_for_await_dependent_run() {
     let claimed = claimed_run();
     let checkpoint_id = TurnCheckpointId::new();
-    let state_ref =
-        ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:await-child-background-state")
-            .expect("valid state ref");
+    let state_ref = ironclaw_loop_contracts::LoopCheckpointStateRef::new(
+        "checkpoint:await-child-background-state",
+    )
+    .expect("valid state ref");
     let child_run_id = TurnRunId::new();
     let gate_ref =
         LoopGateRef::new(format!("gate:subagent-{child_run_id}")).expect("valid gate ref");
@@ -1283,8 +1290,9 @@ async fn thread_checkpoint_evidence_rejects_background_child_gate_for_await_depe
 async fn thread_checkpoint_evidence_verifies_auth_blocked_checkpoint() {
     let claimed = claimed_run();
     let checkpoint_id = TurnCheckpointId::new();
-    let state_ref = ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:auth-blocked-state")
-        .expect("valid state ref");
+    let state_ref =
+        ironclaw_loop_contracts::LoopCheckpointStateRef::new("checkpoint:auth-blocked-state")
+            .expect("valid state ref");
     let gate_ref = LoopGateRef::new("gate:test").expect("valid gate ref");
     let checkpoint = loop_checkpoint_record_with_gate(
         &claimed,
@@ -1317,8 +1325,9 @@ async fn thread_checkpoint_evidence_rejects_auth_blocked_checkpoint_gate_mismatc
     // validate as Auth evidence even when the state_ref matches.
     let claimed = claimed_run();
     let checkpoint_id = TurnCheckpointId::new();
-    let state_ref = ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:auth-blocked-state")
-        .expect("valid state ref");
+    let state_ref =
+        ironclaw_loop_contracts::LoopCheckpointStateRef::new("checkpoint:auth-blocked-state")
+            .expect("valid state ref");
     // Checkpoint carries a *different* gate_ref (e.g. from an Approval block).
     let checkpoint_gate = LoopGateRef::new("gate:approval").expect("valid gate ref");
     let checkpoint = loop_checkpoint_record_with_gate(
@@ -1357,7 +1366,7 @@ async fn thread_checkpoint_evidence_rejects_auth_blocked_checkpoint_state_mismat
     let checkpoint = loop_checkpoint_record(
         &claimed,
         checkpoint_id,
-        ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:other-state")
+        ironclaw_loop_contracts::LoopCheckpointStateRef::new("checkpoint:other-state")
             .expect("valid state ref"),
         LoopCheckpointKind::BeforeBlock,
     );
@@ -1365,7 +1374,7 @@ async fn thread_checkpoint_evidence_rejects_auth_blocked_checkpoint_state_mismat
     let exit = blocked_exit_with_checkpoint(
         LoopBlockedKind::Auth,
         checkpoint_id,
-        ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:auth-blocked-state")
+        ironclaw_loop_contracts::LoopCheckpointStateRef::new("checkpoint:auth-blocked-state")
             .expect("valid state ref"),
     );
     let LoopExit::Blocked(blocked) = &exit else {

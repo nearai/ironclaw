@@ -2,32 +2,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AcceptedMessageRef, GateKind, IdempotencyKey, ProductTurnContext, ReplyTargetBindingRef,
-    RunProfileRequest, SanitizedCancelReason, SourceBindingRef, TurnActor, TurnGateRef, TurnRunId,
-    TurnScope, TurnStatus,
+    AcceptedMessageRef, GateKind, GateResumeDisposition, IdempotencyKey, ProductTurnContext,
+    ReplyTargetBindingRef, RunProfileRequest, SanitizedCancelReason, SourceBindingRef, TurnActor,
+    TurnGateRef, TurnRunId, TurnScope, TurnStatus,
 };
 
 pub type TurnTimestamp = DateTime<Utc>;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GateResumeDisposition {
-    /// The user explicitly declined the gate (auth OR approval). The executor
-    /// surfaces this to the model as a non-retryable authorization failure rather
-    /// than re-dispatching the gate.
-    ///
-    /// New variants (e.g. `Deferred`) may be added here as needs arise.
-    Denied,
-}
-
-impl GateResumeDisposition {
-    /// Stable snake_case value shared with the serde wire representation.
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::Denied => "denied",
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

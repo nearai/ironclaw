@@ -9,18 +9,16 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::memory::{MemoryDescriptor, MemoryLifecycleHook};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_host_api::turn::{TurnActor, TurnScope};
-use ironclaw_host_api::{
-    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
-    memory::{MemoryDescriptor, MemoryLifecycleHook},
+use ironclaw_loop_contracts::{
+    ContextProfileId, MemoryPromptContextRequest, MemoryPromptContextService,
+    memory_snippet_display_ref,
 };
 use ironclaw_memory::{
     MemoryInvocation, MemoryService, MemoryServiceContextRequest, MemoryServiceContextSnippet,
     MemoryServiceError,
-};
-use ironclaw_turns::run_profile::{
-    ContextProfileId, MemoryPromptContextRequest, MemoryPromptContextService,
-    memory_snippet_display_ref,
 };
 
 use ironclaw_host_runtime::memory_context::ProductionMemoryPromptContextService;
@@ -543,7 +541,7 @@ async fn host_builds_stable_legacy_memory_snippet_reference() {
     // the model-visible reference cannot silently rotate across the lift (see PR
     // #5163 thread discussion_r3466587649). The host builds this from the
     // provider's raw scope/path components via the canonical
-    // `ironclaw_turns::run_profile::memory_snippet_display_ref`.
+    // `ironclaw_loop_contracts::memory_snippet_display_ref`.
     let memory_service = Arc::new(MockMemoryService::with_snippets(vec![
         MemoryServiceContextSnippet {
             tenant_id: "tenant-native-memory".to_string(),

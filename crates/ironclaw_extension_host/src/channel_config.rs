@@ -20,15 +20,19 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::recipe::RecipeSecretField;
 use ironclaw_extensions::{
     ExtensionInstallationStorePort, ExtensionManifestRecord, ResolvedExtensionManifest,
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     ids::{ExtensionId, SecretHandle},
-    product_surface::{ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind},
-    recipe::RecipeSecretField,
     resource::ResourceScope,
+};
+use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
+use ironclaw_product_contracts::package_lifecycle::ChannelConfigField;
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
 use ironclaw_secrets::{SecretMaterial, SecretStorePort};
 
@@ -661,7 +665,7 @@ fn channel_config_admin_idempotency_key(
     })
 }
 
-/// The production [`ironclaw_product::ChannelConfigProductService`] port
+/// The production [`ChannelConfigProductService`] port
 /// over [`ChannelConfigService`] — the surface the WebUI setup service and
 /// the lifecycle configure action route through.
 pub struct RebornChannelConfigProductService {
@@ -675,11 +679,11 @@ impl RebornChannelConfigProductService {
 }
 
 #[async_trait]
-impl ironclaw_product::ChannelConfigProductService for RebornChannelConfigProductService {
+impl ChannelConfigProductService for RebornChannelConfigProductService {
     async fn field_status(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<Vec<ironclaw_product::RebornChannelConfigField>, ProductSurfaceError> {
+    ) -> Result<Vec<ChannelConfigField>, ProductSurfaceError> {
         if let Ok(manifest) = self.service.resolved_manifest(extension_id).await
             && !manifest.admin_configuration.is_empty()
         {
@@ -688,7 +692,7 @@ impl ironclaw_product::ChannelConfigProductService for RebornChannelConfigProduc
         match self.service.status(extension_id).await {
             Ok(statuses) => Ok(statuses
                 .into_iter()
-                .map(|status| ironclaw_product::RebornChannelConfigField {
+                .map(|status| ChannelConfigField {
                     name: status.handle,
                     label: status.label,
                     secret: status.secret,

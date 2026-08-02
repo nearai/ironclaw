@@ -7,16 +7,8 @@ use chrono::Utc;
 use async_trait::async_trait;
 #[cfg(test)]
 use ironclaw_extensions::SharedExtensionRegistry;
-use ironclaw_host_api::{
-    ids::InvocationId,
-    product_surface::{
-        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-        ProductSurfaceErrorKind,
-    },
-    resource::ResourceScope,
-};
+use ironclaw_host_api::{ids::InvocationId, resource::ResourceScope};
 use ironclaw_operator::OperatorServiceLifecycle;
-use ironclaw_product::ProjectionStream;
 use ironclaw_product::{
     ChannelConnectionService, OperatorStatusService, ProjectScopedAttachmentLander,
     ProjectScopedAttachmentReader, ProjectScopedFilesystemReader, RebornAutomationProductService,
@@ -24,6 +16,11 @@ use ironclaw_product::{
     RebornOperatorStatusState, RebornServices as ProductRebornServices, RebornSkillContentResponse,
     RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, SkillsProductService,
+};
+use ironclaw_product_contracts::projection::ProjectionStream;
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind,
 };
 
 use ironclaw_triggers::TriggerRepository;

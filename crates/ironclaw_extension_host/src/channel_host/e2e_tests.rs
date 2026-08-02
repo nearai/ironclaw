@@ -32,11 +32,17 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
+use ironclaw_extension_contracts::external::{
+    ExternalActorRef, ExternalConversationRef, ExternalEventId,
+};
 use ironclaw_extensions::{
     ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStorePort as _,
     ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
 };
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
+use ironclaw_host_api::product_adapter::{
+    AdapterInstallationId, AuthRequirement, ProductAdapterId, ProtocolAuthEvidence,
+};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
     TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
@@ -57,16 +63,6 @@ use ironclaw_outbound::{
     WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product::{
-    AdapterInstallationId, AuthRequirement, AuthResolutionPayload, AuthResolutionResult,
-    ExternalActorRef, ExternalConversationRef, ExternalEventId, ParsedProductInbound,
-    ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProtocolAuthEvidence, TrustedInboundContext,
-};
-use ironclaw_product::{
-    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
-    AdminUserSecretMeta, AdminUserService, AdminUserStatus,
-};
-use ironclaw_product::{
     ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
     ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
     ConversationBindingService, DeliveryCoordinator, DeliveryRetryPolicy,
@@ -76,6 +72,14 @@ use ironclaw_product::{
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
     ResolvedBinding, RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
     TriggeredRunDeliveryRequest,
+};
+use ironclaw_product_contracts::admin_users::{
+    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
+    AdminUserSecretMeta, AdminUserService, AdminUserStatus,
+};
+use ironclaw_product_contracts::inbound::{
+    AuthResolutionPayload, AuthResolutionResult, ParsedProductInbound, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, TrustedInboundContext,
 };
 use ironclaw_secrets::{SecretStore, SecretStorePort};
 use ironclaw_slack_extension::{
@@ -114,7 +118,7 @@ use ironclaw_extension_host::{IngressReplyContextSource, SnapshotChannelDelivery
 use ironclaw_host_api::user_identity::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
 use ironclaw_host_ingress::PublicRouteMount;
 use ironclaw_product::AuthChallengeProvider;
-use ironclaw_product::BlockedAuthPromptSource;
+use ironclaw_product_contracts::prompt_source::BlockedAuthPromptSource;
 
 #[path = "e2e_auth_challenge.rs"]
 mod e2e_auth_challenge;
@@ -133,7 +137,7 @@ impl ironclaw_product::InboundAttachmentLander for InertAttachmentLander {
         _attachments: Vec<ironclaw_host_api::attachment::InboundAttachment>,
     ) -> Result<
         Vec<ironclaw_threads::AttachmentRef>,
-        ironclaw_host_api::product_surface::ProductSurfaceError,
+        ironclaw_product_contracts::surface::ProductSurfaceError,
     > {
         Ok(Vec::new())
     }
@@ -142,7 +146,7 @@ impl ironclaw_product::InboundAttachmentLander for InertAttachmentLander {
         &self,
         _thread_scope: &ironclaw_threads::ThreadScope,
         _attachments: &[ironclaw_threads::AttachmentRef],
-    ) -> Result<(), ironclaw_host_api::product_surface::ProductSurfaceError> {
+    ) -> Result<(), ironclaw_product_contracts::surface::ProductSurfaceError> {
         Ok(())
     }
 
@@ -152,7 +156,7 @@ impl ironclaw_product::InboundAttachmentLander for InertAttachmentLander {
         _referenced_storage_keys: &[String],
     ) -> Result<
         ironclaw_product::AttachmentCleanupReport,
-        ironclaw_host_api::product_surface::ProductSurfaceError,
+        ironclaw_product_contracts::surface::ProductSurfaceError,
     > {
         Ok(ironclaw_product::AttachmentCleanupReport::default())
     }
@@ -598,7 +602,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     let assembly = GenericChannelHostAssembly::start(deps);
     let command_executions = Arc::new(RecordingCommandExecutionSurface::default());
     let command_surface_set = assembly.set_product_command_surface(Arc::clone(&command_executions)
-        as Arc<dyn ironclaw_host_api::product_surface::ProductSurface>);
+        as Arc<dyn ironclaw_product_contracts::surface::ProductSurface>);
     assert!(command_surface_set); // safety: this file is included only by cfg(test).
     // Vendor extras exactly as the binary's channel-extension binding feeds
     // them: the preference-target codec — no storage-root override.
@@ -774,8 +778,8 @@ async fn slack_test_extension_host_with_manifest_commands(
     };
     use ironclaw_extension_host::{
         BindContext, BindError, ExtensionBindings, ExtensionEntrypoint, ExtensionHost,
-        ExtensionHostDeps, ExtensionLoader, InstallationRecord, InstallationState, LoadContext,
-        LoadedExtension, RehydratedInstallationRecordStore,
+        ExtensionHostDeps, ExtensionLoader, InstallationRecord, LoadContext, LoadedExtension,
+        RehydratedInstallationRecordStore,
     };
 
     struct SlackTestEntrypoint;
@@ -2309,7 +2313,8 @@ async fn shared_channel_admission_follows_saved_channel_config() {
     let expected_managed_subject = ironclaw_extension_host::managed_channel_subject_user_id(
         ADAPTER,
         &TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
-        &ironclaw_product::AdapterInstallationId::new(INSTALLATION).expect("installation"), // safety: static test installation id is valid.
+        &ironclaw_host_api::product_adapter::AdapterInstallationId::new(INSTALLATION)
+            .expect("installation"), // safety: static test installation id is valid.
         Some(TEAM),
         "C777",
     )
@@ -3365,14 +3370,14 @@ impl RecordingCommandExecutionSurface {
 }
 
 #[async_trait]
-impl ironclaw_host_api::product_surface::ProductSurface for RecordingCommandExecutionSurface {
+impl ironclaw_product_contracts::surface::ProductSurface for RecordingCommandExecutionSurface {
     async fn invoke(
         &self,
-        caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
+        caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        request: ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest,
     ) -> Result<
-        ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse,
-        ironclaw_host_api::product_surface::ProductSurfaceError,
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
+        ironclaw_product_contracts::surface::ProductSurfaceError,
     > {
         let operation_id = request.operation_id.as_str().to_string();
         let title = if operation_id == "product.status.command" {
@@ -3389,7 +3394,7 @@ impl ironclaw_host_api::product_surface::ProductSurface for RecordingCommandExec
                 request.input,
             ));
         Ok(
-            ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse {
+            ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse {
                 output: serde_json::json!({
                     "title": title,
                     "fields": [{"label": "Provider", "value": "stub-provider"}],
@@ -3400,24 +3405,24 @@ impl ironclaw_host_api::product_surface::ProductSurface for RecordingCommandExec
 
     async fn query(
         &self,
-        _caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
-        _request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
+        _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        _request: ironclaw_product_contracts::surface::ProductSurfaceQueryRequest,
     ) -> Result<
-        ironclaw_host_api::product_surface::ProductSurfaceQueryPage,
-        ironclaw_host_api::product_surface::ProductSurfaceError,
+        ironclaw_product_contracts::surface::ProductSurfaceQueryPage,
+        ironclaw_product_contracts::surface::ProductSurfaceError,
     > {
-        Err(ironclaw_host_api::product_surface::ProductSurfaceError::internal())
+        Err(ironclaw_product_contracts::surface::ProductSurfaceError::internal())
     }
 
     async fn stream_events(
         &self,
-        _caller: ironclaw_host_api::product_surface::ProductSurfaceCaller,
-        _request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
+        _caller: ironclaw_product_contracts::surface::ProductSurfaceCaller,
+        _request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
     ) -> Result<
-        ironclaw_host_api::product_surface::ProductSurfaceStreamResponse,
-        ironclaw_host_api::product_surface::ProductSurfaceError,
+        ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
+        ironclaw_product_contracts::surface::ProductSurfaceError,
     > {
-        Err(ironclaw_host_api::product_surface::ProductSurfaceError::internal())
+        Err(ironclaw_product_contracts::surface::ProductSurfaceError::internal())
     }
 }
 
@@ -3451,8 +3456,8 @@ impl ChannelEgressTransport for RecordingEgress {
         &self,
         approved: ApprovedChannelEgress,
     ) -> Result<
-        ironclaw_host_api::tool_adapter::RestrictedEgressResponse,
-        ironclaw_host_api::tool_adapter::RestrictedEgressError,
+        ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse,
+        ironclaw_extension_contracts::tool_adapter::RestrictedEgressError,
     > {
         let response = slack_response_for_approved(&approved);
         self.requests
@@ -3465,9 +3470,11 @@ impl ChannelEgressTransport for RecordingEgress {
 
 fn slack_response_for_approved(
     approved: &ApprovedChannelEgress,
-) -> ironclaw_host_api::tool_adapter::RestrictedEgressResponse {
-    fn response(body: &[u8]) -> ironclaw_host_api::tool_adapter::RestrictedEgressResponse {
-        ironclaw_host_api::tool_adapter::RestrictedEgressResponse {
+) -> ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
+    fn response(
+        body: &[u8],
+    ) -> ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
+        ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
             status: 200,
             body: body.to_vec(),
         }
@@ -4377,10 +4384,11 @@ use crate::channel_outbound_targets::{
     GenericChannelOutboundTargetProvider, register_generic_channel_outbound_targets,
 };
 use crate::channel_triggered_delivery::GenericTriggeredRunDeliveryHook;
+use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec as _;
+use ironclaw_extension_contracts::state::InstallationState;
 use ironclaw_extension_host::{FilesystemChannelDmTargetStore, dm_target_payload};
 use ironclaw_outbound::OutboundDeliveryTargetProvider;
 use ironclaw_outbound::{OutboundDeliveryTargetScope, TriggeredRunDeliveryStore};
-use ironclaw_product::PreferenceTargetCodec as _;
 
 /// The retired Slack setup surface's installation id — DIFFERENT from the
 /// durable extension installation id (`INSTALLATION`) the active snapshot

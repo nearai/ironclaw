@@ -121,7 +121,7 @@ def crate_directory(name: str, repo_root: str | pathlib.Path = ".") -> str:
 
     matches = [
         directory
-        for directory in crate_directories(repo_root)
+        for directory in _crate_directories_cached(repo_root)
         if directory.rsplit("/", 1)[-1] == name
     ]
     if len(matches) != 1:
@@ -132,6 +132,75 @@ def crate_directory(name: str, repo_root: str | pathlib.Path = ".") -> str:
             "measure an empty tree."
         )
     return matches[0]
+
+
+def owning_crate_directory(
+    path: str, repo_root: str | pathlib.Path = "."
+) -> str | None:
+    """Return the crate directory that owns repo-relative ``path``, else ``None``.
+
+    Outermost wins, matching `crate_directories()` and the inline rule in
+    `scripts/ci/classify-test-scope.sh`: `crates/ironclaw_safety/fuzz/src/main.rs`
+    is owned by `crates/ironclaw_safety`, not by the nested fuzz manifest.
+
+    ``None`` means "under `crates/` but attributable to no crate" (or not under
+    `crates/` at all). Callers that classify production sources must treat the
+    first case as an error rather than as "not production" — that fall-through
+    is the WS10 silent-dark failure mode
+    (docs/reborn/target-architecture/CHECKLIST.md).
+    """
+
+    normalized = pathlib.PurePosixPath(path).as_posix()
+    for directory in _crate_directories_cached(repo_root):
+        if normalized.startswith(f"{directory}/"):
+            return directory
+    return None
+
+
+def crate_source_relative(
+    path: str, repo_root: str | pathlib.Path = "."
+) -> tuple[str, str] | None:
+    """Split ``path`` into ``(crate_directory, in-crate remainder)``, else ``None``."""
+
+    owner = owning_crate_directory(path, repo_root)
+    if owner is None:
+        return None
+    return owner, pathlib.PurePosixPath(path).as_posix()[len(owner) + 1 :]
+
+
+_INVENTORY_CACHE: dict[str, list[str]] = {}
+
+
+def _crate_directories_cached(repo_root: str | pathlib.Path = ".") -> list[str]:
+    """`crate_directories()` memoized per resolved root.
+
+    Path classification is a per-file question asked thousands of times per gate
+    run; re-walking `crates/` for each one turns an O(tree) gate into O(tree x
+    files). The cache is process-local and the tree does not change under a
+    running gate. `crate_directories()` already prunes manifests nested inside a
+    crate, so no entry is a prefix of another and lookup order cannot change the
+    answer; shortest-first is kept anyway so that if that pruning is ever
+    relaxed, the first match is still the *outermost* owner — the rule
+    `owning_crate_directory` documents.
+    """
+
+    key = str(pathlib.Path(repo_root).resolve())
+    cached = _INVENTORY_CACHE.get(key)
+    if cached is None:
+        cached = sorted(crate_directories(repo_root), key=len)
+        _INVENTORY_CACHE[key] = cached
+    return cached
+
+
+def reset_inventory_cache() -> None:
+    """Drop the memoized inventories.
+
+    Only in-process callers that mutate a crate tree between queries need this
+    — self-tests that build a fixture root, assert, then sabotage the same root.
+    Gates run once per process and never call it.
+    """
+
+    _INVENTORY_CACHE.clear()
 
 
 def main() -> int:

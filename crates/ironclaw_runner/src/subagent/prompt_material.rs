@@ -2,6 +2,7 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_host_api::ids::{CapabilityId, InvocationId, ProcessId};
+use ironclaw_loop_contracts::{AgentLoopHostError, AgentLoopHostErrorKind, LoopRunContext};
 use ironclaw_loop_host::{
     SubagentGoalRecord, SubagentPromptGoal, SubagentPromptMaterial, SubagentPromptMaterialSource,
     SubagentThreadKind, SubagentThreadMetadata,
@@ -10,7 +11,6 @@ use ironclaw_processes::{GetProcessInputRequest, ProcessInputPort};
 use ironclaw_threads::{
     MessageKind, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadScope,
 };
-use ironclaw_turns::run_profile::{AgentLoopHostError, AgentLoopHostErrorKind, LoopRunContext};
 
 use crate::subagent::{
     directions::direction_prompt,

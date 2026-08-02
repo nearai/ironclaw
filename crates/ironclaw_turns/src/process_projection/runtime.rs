@@ -34,16 +34,19 @@ use super::{
 };
 use crate::{
     AdmissionRejection, AdmissionRejectionReason, BlockedReason, EventCursor, GateKind,
-    ProductTurnContext, RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver,
-    SubmitChildRunRequest, TurnAdmissionPolicy, TurnCheckpointId, TurnCommittedEventObserver,
-    TurnError, TurnEventKind, TurnEventSink, TurnId, TurnLifecycleEvent, TurnOriginKind, TurnRunId,
-    TurnRunProfile, TurnRunRecord, TurnRunState, TurnRunnerId, TurnScope, TurnStatus,
+    ProductTurnContext, SubmitChildRunRequest, TurnAdmissionPolicy, TurnCheckpointId,
+    TurnCommittedEventObserver, TurnError, TurnEventKind, TurnEventSink, TurnId,
+    TurnLifecycleEvent, TurnOriginKind, TurnRunId, TurnRunProfile, TurnRunRecord, TurnRunState,
+    TurnRunnerId, TurnScope, TurnStatus,
     agent_turn_runtime::SpawnTreeReservation,
     events::TurnBlockedGateKind,
     request::{CancelRunRequest, ResumeTurnRequest, RetryTurnRequest, SubmitTurnRequest},
     response::{CancelRunResponse, ResumeTurnResponse, RetryTurnResponse, SubmitTurnResponse},
-    run_profile::{LoopCheckpointKind, LoopModelRouteSnapshot},
     runner::{ClaimedTurnRun, TurnRunnerOutcome},
+};
+use ironclaw_loop_contracts::{
+    LoopCheckpointKind, LoopModelRouteSnapshot, RunProfileResolutionError,
+    RunProfileResolutionRequest, RunProfileResolver,
 };
 
 pub const AGENT_TURN_PROCESS_KIND: &str = "agent_turn";
@@ -608,7 +611,7 @@ impl AgentTurnProcessRuntime {
 }
 
 fn failure_prohibits_retry(failure: &SanitizedFailure) -> bool {
-    failure.category() == crate::LoopFailureKind::CheckpointRejected.as_str()
+    failure.category() == ironclaw_loop_contracts::LoopFailureKind::CheckpointRejected.as_str()
 }
 
 #[async_trait]

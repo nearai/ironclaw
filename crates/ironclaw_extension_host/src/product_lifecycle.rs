@@ -9,6 +9,9 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, SecretCleanupAction, SecretCleanupReport,
     SecretCleanupRequest,
 };
+use ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest;
+use ironclaw_extension_contracts::lifecycle_id::LifecycleBlockerRef;
+use ironclaw_extension_contracts::{state::InstallationState, surface::CapabilitySurfaceKind};
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionError, ExtensionInstallation, ExtensionInstallationError,
     ExtensionInstallationId, ExtensionLifecycleService, ExtensionManifestRecord, ExtensionPackage,
@@ -17,27 +20,29 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
-    hosted_mcp::RegisterHostedMcpRequest,
     ids::{ExtensionId, UserId, VendorId},
-    product_surface::{ProductSurfaceCaller, ProductSurfaceError},
     resource::ResourceScope,
-    state::InstallationState,
-    surface::CapabilitySurfaceKind,
 };
 use ironclaw_product::{
-    ChannelConnectionService, ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
-    ExtensionAccountSetupRegistry, LifecycleBlockerRef, LifecycleExtensionSummary,
-    LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleReadinessBlocker,
-    LifecycleSearchExtensionSummary, ProductSurfaceFailure, RebornChannelConnectStrategy,
+    ChannelConnectionService, ExtensionAccountSetupRegistry, RebornChannelConnectStrategy,
 };
+use ironclaw_product_contracts::account_setup::{
+    ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
+};
+use ironclaw_product_contracts::error::ProductOperationFailure;
+use ironclaw_product_contracts::package_lifecycle::{
+    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+    LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleReadinessBlocker, LifecycleSearchExtensionSummary,
+};
+use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceError};
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
 fn unzip_extension_bundle_for_product(
     bundle: &[u8],
-) -> Result<Vec<(String, Vec<u8>)>, ProductSurfaceFailure> {
+) -> Result<Vec<(String, Vec<u8>)>, ProductOperationFailure> {
     crate::unzip_extension_bundle(bundle).map_err(|error| {
-        ProductSurfaceFailure::InvalidBindingRequest {
+        ProductOperationFailure::InvalidBindingRequest {
             reason: error.reason().to_string(),
         }
     })
@@ -231,7 +236,7 @@ impl ExtensionLifecycleManager {
     pub async fn register_hosted_mcp(
         &self,
         request: RegisterHostedMcpRequest,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         self.hosted_mcp_preparation.register(request).await
     }
 
@@ -243,7 +248,7 @@ impl ExtensionLifecycleManager {
         scope: ResourceScope,
         credential_gate: &dyn ExtensionActivationCredentialGate,
         caller: &UserId,
-    ) -> Result<Option<LifecycleProductResponse>, ProductSurfaceFailure> {
+    ) -> Result<Option<LifecycleProductResponse>, ProductOperationFailure> {
         self.hosted_mcp_preparation
             .prepare_if_pending(package_ref, scope, credential_gate, caller)
             .await
@@ -328,7 +333,7 @@ impl ExtensionLifecycleManager {
         extension_id: &ExtensionId,
         installation_id: &ExtensionInstallationId,
         active_package: &ExtensionPackage,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         let Some(host) = self.generic_host.get() else {
             return Ok(());
         };
@@ -337,7 +342,7 @@ impl ExtensionLifecycleManager {
             .get_manifest(extension_id)
             .await
             .map_err(map_extension_installation_error)?
-            .ok_or_else(|| ProductSurfaceFailure::InvalidBindingRequest {
+            .ok_or_else(|| ProductOperationFailure::InvalidBindingRequest {
                 reason: format!(
                     "extension {} manifest is not installed",
                     extension_id.as_str()
@@ -356,7 +361,7 @@ impl ExtensionLifecycleManager {
         let record = crate::InstallationRecord {
             extension_id: extension_id.as_str().to_string(),
             installation_id: installation_id.as_str().to_string(),
-            state: crate::InstallationState::Installed,
+            state: ironclaw_extension_contracts::state::InstallationState::Installed,
             resolved: Arc::new(effective),
             config,
             last_error: None,
@@ -381,7 +386,7 @@ impl ExtensionLifecycleManager {
         &self,
         package: &ExtensionPackage,
         resolved: Option<&ironclaw_extensions::ResolvedExtensionManifest>,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         self.active_extensions.publish(package)?;
         let Some(host) = self.generic_host.get() else {
             return Ok(());
@@ -396,7 +401,7 @@ impl ExtensionLifecycleManager {
                 let available = self.catalog.read().await.resolve(&package_ref)?;
                 let host_ports =
                     ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-                        ProductSurfaceFailure::InvalidBindingRequest {
+                        ProductOperationFailure::InvalidBindingRequest {
                             reason: format!(
                                 "host port catalog rejected bundled extension: {error}"
                             ),
@@ -404,7 +409,7 @@ impl ExtensionLifecycleManager {
                     })?;
                 let contracts =
                     crate::product_extension_host_api_contract_registry().map_err(|error| {
-                        ProductSurfaceFailure::InvalidBindingRequest {
+                        ProductOperationFailure::InvalidBindingRequest {
                             reason: format!(
                                 "host API contracts rejected bundled extension: {error}"
                             ),
@@ -418,7 +423,7 @@ impl ExtensionLifecycleManager {
                     &contracts,
                     package.root_binding.clone(),
                 )
-                .map_err(|error| ProductSurfaceFailure::InvalidBindingRequest {
+                .map_err(|error| ProductOperationFailure::InvalidBindingRequest {
                     reason: format!("bundled extension manifest is invalid: {error}"),
                 })?
                 .resolved()
@@ -445,7 +450,7 @@ impl ExtensionLifecycleManager {
         host.install(crate::InstallationRecord {
             extension_id: package.id.as_str().to_string(),
             installation_id: format!("{}-test-install", package.id.as_str()),
-            state: crate::InstallationState::Installed,
+            state: ironclaw_extension_contracts::state::InstallationState::Installed,
             resolved: Arc::new(effective),
             config,
             last_error: None,
@@ -561,7 +566,7 @@ impl ExtensionLifecycleManager {
         query: &str,
         credential_gate: Option<&dyn ExtensionActivationCredentialGate>,
         caller: &UserId,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         let extensions = {
             let catalog = self.catalog.read().await;
             catalog.search(query).collect::<Vec<_>>()
@@ -607,7 +612,7 @@ impl ExtensionLifecycleManager {
     pub async fn list_installed(
         &self,
         caller: &UserId,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         let summaries = self.installed_summaries(caller).await?;
         let count = summaries.len();
         Ok(response_with_payload(
@@ -624,7 +629,7 @@ impl ExtensionLifecycleManager {
         &self,
         package_ref: LifecyclePackageRef,
         caller: &UserId,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         let (_, installation_id) = extension_ids_from_package_ref(&package_ref)?;
         let installation = self
             .installation_store
@@ -673,7 +678,7 @@ impl ExtensionLifecycleManager {
 
     pub async fn active_model_visible_capabilities(
         &self,
-    ) -> Result<Vec<ActiveExtensionCapability>, ProductSurfaceFailure> {
+    ) -> Result<Vec<ActiveExtensionCapability>, ProductOperationFailure> {
         // #5459 P1: carry each enabled installation's owner onto its
         // capabilities so the per-request grant minting in the standalone
         // capability surface can filter user-private extensions to their
@@ -707,7 +712,7 @@ impl ExtensionLifecycleManager {
     /// regardless of activation state.
     pub async fn installation_owners(
         &self,
-    ) -> Result<std::collections::BTreeMap<ExtensionId, InstallationOwner>, ProductSurfaceFailure>
+    ) -> Result<std::collections::BTreeMap<ExtensionId, InstallationOwner>, ProductOperationFailure>
     {
         project_installation_owners(
             self.installation_store
@@ -721,7 +726,7 @@ impl ExtensionLifecycleManager {
         &self,
         package_ref: &LifecyclePackageRef,
         caller: &UserId,
-    ) -> Result<Vec<RuntimeCredentialAuthRequirement>, ProductSurfaceFailure> {
+    ) -> Result<Vec<RuntimeCredentialAuthRequirement>, ProductOperationFailure> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(package_ref)?;
         let _operation_guard = self.operation_lock.lock().await;
         let installation = self
@@ -759,7 +764,7 @@ impl ExtensionLifecycleManager {
                 .get(&requirement.provider)
                 .cloned()
         }) {
-            return Err(ProductSurfaceFailure::ProviderInstanceNotConfigured { reason });
+            return Err(ProductOperationFailure::ProviderInstanceNotConfigured { reason });
         }
         Ok(requirements)
     }
@@ -772,15 +777,13 @@ impl ExtensionLifecycleManager {
     /// `activation_error` are driven from this one source.
     pub async fn installation_activation_errors(
         &self,
-    ) -> Result<std::collections::HashMap<String, String>, ProductSurfaceFailure> {
+    ) -> Result<std::collections::HashMap<String, String>, ProductOperationFailure> {
         match self.generic_host.get() {
-            Some(host) => {
-                host.installation_errors()
-                    .await
-                    .map_err(|error| ProductSurfaceFailure::Transient {
-                        reason: format!("extension activation errors could not be read: {error}"),
-                    })
-            }
+            Some(host) => host.installation_errors().await.map_err(|error| {
+                ProductOperationFailure::Transient {
+                    reason: format!("extension activation errors could not be read: {error}"),
+                }
+            }),
             None => Ok(std::collections::HashMap::new()),
         }
     }
@@ -788,7 +791,7 @@ impl ExtensionLifecycleManager {
     async fn installed_summaries(
         &self,
         caller: &UserId,
-    ) -> Result<Vec<LifecycleInstalledExtensionSummary>, ProductSurfaceFailure> {
+    ) -> Result<Vec<LifecycleInstalledExtensionSummary>, ProductOperationFailure> {
         let installations = self
             .installation_store
             .list_installations()
@@ -835,7 +838,7 @@ impl ExtensionLifecycleManager {
         credential_gate: Option<&dyn ExtensionActivationCredentialGate>,
         caller: &UserId,
         activation_errors: &std::collections::HashMap<String, String>,
-    ) -> Result<LifecycleSearchExtensionSummary, ProductSurfaceFailure> {
+    ) -> Result<LifecycleSearchExtensionSummary, ProductOperationFailure> {
         let mut summary = extension.summary();
         suppress_search_credential_onboarding(&mut summary);
         let installation = self
@@ -863,7 +866,7 @@ impl ExtensionLifecycleManager {
     async fn search_installation(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<Option<ExtensionInstallation>, ProductSurfaceFailure> {
+    ) -> Result<Option<ExtensionInstallation>, ProductOperationFailure> {
         let installation_id = ExtensionInstallationId::new(extension_id.as_str().to_string())
             .map_err(map_extension_installation_error)?;
         let installation = self
@@ -875,7 +878,7 @@ impl ExtensionLifecycleManager {
             .as_ref()
             .is_some_and(|installation| installation.extension_id() != extension_id)
         {
-            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
                 reason: format!(
                     "installation {} does not belong to extension {}",
                     installation_id.as_str(),
@@ -912,13 +915,13 @@ impl ExtensionLifecycleManager {
     pub async fn import_bundle(
         &self,
         bundle: Vec<u8>,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         // Hold the permit until the package has passed duplicate checks,
         // materialization, and catalog insertion. This bounds the number of
         // fully expanded packages retained by an import in addition to the
         // decode work itself.
         let _decode_permit = self.import_decode_semaphore.acquire().await.map_err(|_| {
-            ProductSurfaceFailure::Transient {
+            ProductOperationFailure::Transient {
                 reason: "import decode limiter is closed".to_string(),
             }
         })?;
@@ -928,7 +931,7 @@ impl ExtensionLifecycleManager {
             imported_extension_package(files, &reserved_bundled_ids)
         })
         .await
-        .map_err(|error| ProductSurfaceFailure::Transient {
+        .map_err(|error| ProductOperationFailure::Transient {
             reason: format!("import decode task failed: {error}"),
         })??;
         let package_ref = package.package_ref.clone();
@@ -936,7 +939,7 @@ impl ExtensionLifecycleManager {
         let mut catalog = self.catalog.write().await;
         let _operation_guard = self.operation_lock.lock().await;
         if catalog.resolve(&package_ref).is_ok() {
-            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
                 reason: format!(
                     "extension {} already exists in the catalog; remove it before importing a replacement",
                     package_ref.id.as_str()
@@ -976,9 +979,9 @@ impl ExtensionLifecycleManager {
         force: bool,
         caller: &UserId,
         scope: &ResourceScope,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         if package.source != ironclaw_extensions::ManifestSource::RegistryInstalled {
-            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
                 reason: "registry install requires a registry-validated package".to_string(),
             });
         }
@@ -998,7 +1001,7 @@ impl ExtensionLifecycleManager {
                     .await;
             }
             if !force {
-                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                return Err(ProductOperationFailure::InvalidBindingRequest {
                     reason: format!(
                         "extension {} already exists in the catalog; retry with force to replace it",
                         extension_id.as_str()
@@ -1006,7 +1009,7 @@ impl ExtensionLifecycleManager {
                 });
             }
             if previous.source == ironclaw_extensions::ManifestSource::HostBundled {
-                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                return Err(ProductOperationFailure::InvalidBindingRequest {
                     reason: format!(
                         "extension {} is host-bundled and cannot be replaced by a registry package",
                         extension_id.as_str()
@@ -1024,7 +1027,7 @@ impl ExtensionLifecycleManager {
                 .map_err(map_extension_installation_error)?
                 .is_some();
         if had_installation && previous.is_none() {
-            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
                 reason: format!(
                     "extension {} has installed state but no restorable catalog package",
                     extension_id.as_str()
@@ -1038,7 +1041,7 @@ impl ExtensionLifecycleManager {
             .is_some();
         if had_installation {
             if !force {
-                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                return Err(ProductOperationFailure::InvalidBindingRequest {
                     reason: format!(
                         "extension {} is already installed; retry with force to replace it",
                         extension_id.as_str()
@@ -1112,7 +1115,7 @@ impl ExtensionLifecycleManager {
         &self,
         package_ref: LifecyclePackageRef,
         caller: &UserId,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         self.install(package_ref.clone(), caller).await?;
         self.activate(package_ref, caller).await
     }
@@ -1121,7 +1124,7 @@ impl ExtensionLifecycleManager {
         &self,
         package_ref: LifecyclePackageRef,
         caller: &UserId,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         // Snapshot the package before taking `operation_lock`. The catalog
         // lock must not be held across installation-store, filesystem, or
         // credential awaits. Acquiring the read lock first preserves the
@@ -1199,7 +1202,7 @@ impl ExtensionLifecycleManager {
         &self,
         available: &AvailableExtensionPackage,
         caller: &UserId,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         let owner = derive_owner(caller, &self.tenant_operator_user_id);
         let retained_definition = self
             .installation_store
@@ -1251,7 +1254,7 @@ impl ExtensionLifecycleManager {
         &self,
         package_ref: LifecyclePackageRef,
         caller: &UserId,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         let credential_gate = UnavailableExtensionActivationCredentialGate;
         self.activate_inner(package_ref, &credential_gate, caller)
             .await
@@ -1263,7 +1266,7 @@ impl ExtensionLifecycleManager {
         scope: ResourceScope,
         credential_gate: &dyn ExtensionActivationCredentialGate,
         caller: &UserId,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         if let Some(response) = self
             .prepare_if_pending(&package_ref, scope, credential_gate, caller)
             .await?
@@ -1277,7 +1280,7 @@ impl ExtensionLifecycleManager {
     pub async fn activate_with_prechecked_credentials_for_test(
         &self,
         package_ref: LifecyclePackageRef,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         let caller = self.tenant_operator_user_id.clone();
         self.activate_with_prechecked_credentials_for_user_for_test(package_ref, &caller)
             .await
@@ -1287,7 +1290,7 @@ impl ExtensionLifecycleManager {
         &self,
         package_ref: LifecyclePackageRef,
         caller: &UserId,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         let credential_gate = crate::PrecheckedExtensionActivationCredentialGate;
         self.activate_inner(package_ref, &credential_gate, caller)
             .await
@@ -1298,7 +1301,7 @@ impl ExtensionLifecycleManager {
         package_ref: LifecyclePackageRef,
         credential_gate: &dyn ExtensionActivationCredentialGate,
         caller: &UserId,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
 
         let _operation_guard = self.operation_lock.lock().await;
@@ -1358,7 +1361,7 @@ impl ExtensionLifecycleManager {
         installation_id: &ExtensionInstallationId,
         previous_state: ExtensionActivationState,
         active_package: ExtensionPackage,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         if previous_state == ExtensionActivationState::Enabled
             && self
                 .active_extensions
@@ -1505,7 +1508,7 @@ impl ExtensionLifecycleManager {
         package_ref: LifecyclePackageRef,
         scope: &ResourceScope,
         authenticated_actor_user_id: Option<&ironclaw_host_api::ids::UserId>,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         let (removed_extension_id, _) = extension_ids_from_package_ref(&package_ref)?;
         // Record only whether this invocation began while local removal state
         // existed. Authority is re-checked under `operation_lock`; this bit is
@@ -1553,12 +1556,12 @@ impl ExtensionLifecycleManager {
                 .await
                 .map_err(map_extension_installation_error)?;
             if installation.is_none() && installed_manifest.is_none() && began_with_local_state {
-                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                return Err(ProductOperationFailure::InvalidBindingRequest {
                     reason: format!("extension {} is not installed", extension_id.as_str()),
                 });
             }
             if installation.is_some() && installed_manifest.is_none() {
-                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                return Err(ProductOperationFailure::InvalidBindingRequest {
                     reason: format!(
                         "extension {} manifest is not installed",
                         extension_id.as_str()
@@ -1598,12 +1601,12 @@ impl ExtensionLifecycleManager {
             if (!cleanup_requirements.is_empty() || removes_connectable_channel)
                 && authenticated_actor_user_id.is_none()
             {
-                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                return Err(ProductOperationFailure::InvalidBindingRequest {
                     reason: "extension removal cleanup requires an authenticated actor".to_string(),
                 });
             }
             if !removed_providers.is_empty() && authenticated_actor_user_id.is_none() {
-                return Err(ProductSurfaceFailure::InvalidBindingRequest {
+                return Err(ProductOperationFailure::InvalidBindingRequest {
                     reason: "extension credential cleanup requires an authenticated actor"
                         .to_string(),
                 });
@@ -1645,7 +1648,7 @@ impl ExtensionLifecycleManager {
                 // extensions fill the slot (runtime composition in
                 // `build_reborn_runtime`, the channel-connection test bundle).
                 let Some(channel_connection) = self.channel_disconnect_slot.get() else {
-                    return Err(ProductSurfaceFailure::Transient {
+                    return Err(ProductOperationFailure::Transient {
                         reason: format!(
                             "channel connection cleanup is unavailable for extension {}: no \
                              channel connection service is composed; retry removal once the \
@@ -1665,7 +1668,7 @@ impl ExtensionLifecycleManager {
                         extension_id.as_str(),
                     )
                     .await
-                    .map_err(|error| ProductSurfaceFailure::Transient {
+                    .map_err(|error| ProductOperationFailure::Transient {
                         reason: format!(
                             "channel connection cleanup did not complete for extension {}: {:?}; retry removal",
                             extension_id.as_str(),
@@ -1747,7 +1750,7 @@ impl ExtensionLifecycleManager {
     /// credential cleanup.
     fn removed_extension_providers_from_manifest(
         manifest_record: &ExtensionManifestRecord,
-    ) -> Result<Vec<AuthProviderId>, ProductSurfaceFailure> {
+    ) -> Result<Vec<AuthProviderId>, ProductOperationFailure> {
         let manifest = manifest_record
             .manifest()
             .clone()
@@ -1759,11 +1762,11 @@ impl ExtensionLifecycleManager {
 
     fn removed_extension_providers_from_requirements(
         requirements: Vec<RuntimeCredentialAuthRequirement>,
-    ) -> Result<Vec<AuthProviderId>, ProductSurfaceFailure> {
+    ) -> Result<Vec<AuthProviderId>, ProductOperationFailure> {
         let mut providers = Vec::new();
         for requirement in requirements {
             let provider = AuthProviderId::new(requirement.provider.as_str()).map_err(|_| {
-                ProductSurfaceFailure::InvalidBindingRequest {
+                ProductOperationFailure::InvalidBindingRequest {
                     reason: "extension credential provider is invalid for cleanup".to_string(),
                 }
             })?;
@@ -1785,7 +1788,7 @@ impl ExtensionLifecycleManager {
         removed_extension_id: &ExtensionId,
         removed_providers: &[AuthProviderId],
         caller: &UserId,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         let Some(cleanup) = self.credential_cleanup.as_ref() else {
             return Ok(());
         };
@@ -1806,7 +1809,7 @@ impl ExtensionLifecycleManager {
                 extension_id = %removed_extension_id,
                 "removed extension id could not form an auth lifecycle package ref"
             );
-            ProductSurfaceFailure::InvalidBindingRequest {
+            ProductOperationFailure::InvalidBindingRequest {
                 reason: "extension id is not a valid lifecycle package ref for cleanup".to_string(),
             }
         })?;
@@ -1826,7 +1829,7 @@ impl ExtensionLifecycleManager {
                     extension_id = %removed_extension_id,
                     "extension removal extension-keyed cleanup failed"
                 );
-                ProductSurfaceFailure::Transient {
+                ProductOperationFailure::Transient {
                     reason: "extension credential cleanup did not complete; retry removal"
                         .to_string(),
                 }
@@ -1837,7 +1840,7 @@ impl ExtensionLifecycleManager {
                 quarantined_accounts = report.quarantined_accounts.len(),
                 "extension removal extension-keyed cleanup was incomplete"
             );
-            return Err(ProductSurfaceFailure::Transient {
+            return Err(ProductOperationFailure::Transient {
                 reason: "extension credential cleanup was incomplete; retry removal".to_string(),
             });
         }
@@ -1847,7 +1850,7 @@ impl ExtensionLifecycleManager {
         let providers_still_in_use = self
             .providers_still_in_use(removed_extension_id, caller)
                 .await
-                .ok_or_else(|| ProductSurfaceFailure::Transient {
+                .ok_or_else(|| ProductOperationFailure::Transient {
                     reason: "extension credential cleanup could not determine whether credentials are shared; retry removal"
                         .to_string(),
                 })?;
@@ -1869,7 +1872,7 @@ impl ExtensionLifecycleManager {
                     %provider,
                     "extension removal credential cleanup failed"
                 );
-                ProductSurfaceFailure::Transient {
+                ProductOperationFailure::Transient {
                     reason: format!(
                         "extension credential cleanup did not complete for provider {provider}; retry removal"
                     ),
@@ -1881,7 +1884,7 @@ impl ExtensionLifecycleManager {
                     quarantined_accounts = report.quarantined_accounts.len(),
                     "extension removal credential cleanup was incomplete"
                 );
-                return Err(ProductSurfaceFailure::Transient {
+                return Err(ProductOperationFailure::Transient {
                     reason: format!(
                         "extension credential cleanup was incomplete for provider {provider}; retry removal"
                     ),
@@ -1968,7 +1971,7 @@ impl ExtensionLifecycleManager {
     async fn remove_orphaned_runtime_state(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         let lifecycle_package = {
             self.lifecycle_service
                 .lock()
@@ -2042,7 +2045,7 @@ impl ExtensionLifecycleManager {
         &self,
         reserved: bool,
         installation: &ExtensionInstallation,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         if !reserved {
             return Ok(());
         }
@@ -2056,7 +2059,7 @@ impl ExtensionLifecycleManager {
         &self,
         package_ref: LifecyclePackageRef,
         caller: &UserId,
-    ) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+    ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
         let installation = self
             .load_installation(&extension_id, &installation_id)
@@ -2089,7 +2092,7 @@ impl ExtensionLifecycleManager {
                         .members()
                         .is_some_and(|members| members.contains(caller))
                     {
-                        return Err(ProductSurfaceFailure::Transient {
+                        return Err(ProductOperationFailure::Transient {
                             reason: format!(
                                 "extension {} membership store returned an invalid owner projection",
                                 extension_id.as_str()
@@ -2306,10 +2309,10 @@ impl ExtensionLifecycleManager {
     async fn register_lifecycle_package(
         &self,
         package: &ExtensionPackage,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         let mut lifecycle = self.lifecycle_service.lock().await;
         if lifecycle.registry().get_extension(&package.id).is_some() {
-            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
                 reason: format!("extension {} is already installed", package.id.as_str()),
             });
         }
@@ -2326,7 +2329,7 @@ impl ExtensionLifecycleManager {
     async fn ensure_lifecycle_package_registered_from_aggregate(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         ensure_lifecycle_package_registered(
             &self.installation_store,
             &self.lifecycle_service,
@@ -2344,7 +2347,7 @@ impl ExtensionLifecycleManager {
         &self,
         extension_id: &ExtensionId,
         installation_id: &ExtensionInstallationId,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         if self
             .installation_store
             .get_installation(installation_id)
@@ -2352,7 +2355,7 @@ impl ExtensionLifecycleManager {
             .map_err(map_extension_installation_error)?
             .is_some()
         {
-            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
                 reason: format!("extension {} is already installed", extension_id.as_str()),
             });
         }
@@ -2363,7 +2366,7 @@ impl ExtensionLifecycleManager {
             .map_err(map_extension_installation_error)?
             .is_some()
         {
-            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
                 reason: format!(
                     "extension {} is already installed; if a previous removal was interrupted, run remove again to finish its cleanup, then retry the import",
                     extension_id.as_str()
@@ -2377,17 +2380,17 @@ impl ExtensionLifecycleManager {
         &self,
         extension_id: &ExtensionId,
         installation_id: &ExtensionInstallationId,
-    ) -> Result<ExtensionInstallation, ProductSurfaceFailure> {
+    ) -> Result<ExtensionInstallation, ProductOperationFailure> {
         let installation = self
             .installation_store
             .get_installation(installation_id)
             .await
             .map_err(map_extension_installation_error)?
-            .ok_or_else(|| ProductSurfaceFailure::InvalidBindingRequest {
+            .ok_or_else(|| ProductOperationFailure::InvalidBindingRequest {
                 reason: format!("extension {} is not installed", extension_id.as_str()),
             })?;
         if installation.extension_id() != extension_id {
-            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
                 reason: format!(
                     "installation {} does not belong to extension {}",
                     installation_id.as_str(),
@@ -2401,14 +2404,14 @@ impl ExtensionLifecycleManager {
     async fn lifecycle_package(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<ExtensionPackage, ProductSurfaceFailure> {
+    ) -> Result<ExtensionPackage, ProductOperationFailure> {
         lifecycle_package_from(&self.lifecycle_service, extension_id).await
     }
 
     async fn enable_lifecycle_package(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         self.lifecycle_service
             .lock()
             .await
@@ -2420,7 +2423,7 @@ impl ExtensionLifecycleManager {
     async fn disable_lifecycle_package(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         self.lifecycle_service
             .lock()
             .await
@@ -2432,7 +2435,7 @@ impl ExtensionLifecycleManager {
     async fn remove_lifecycle_package(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         self.lifecycle_service
             .lock()
             .await
@@ -2444,7 +2447,7 @@ impl ExtensionLifecycleManager {
     async fn rollback_lifecycle_install(
         &self,
         extension_id: &ExtensionId,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         let mut lifecycle = self.lifecycle_service.lock().await;
         lifecycle
             .remove(extension_id)
@@ -2456,7 +2459,7 @@ impl ExtensionLifecycleManager {
         &self,
         package: &ExtensionPackage,
         previous_state: ExtensionActivationState,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         let mut lifecycle = self.lifecycle_service.lock().await;
         lifecycle
             .install(package.clone())
@@ -2482,7 +2485,7 @@ impl ExtensionLifecycleManager {
     async fn restore_installation(
         &self,
         installation: &ExtensionInstallation,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         self.installation_store
             .upsert_installation(installation.clone())
             .await
@@ -2493,7 +2496,7 @@ impl ExtensionLifecycleManager {
         &self,
         package: &ExtensionPackage,
         previous_state: ExtensionActivationState,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         if previous_state == ExtensionActivationState::Enabled {
             self.active_extensions.publish(package)?;
         }
@@ -2503,7 +2506,7 @@ impl ExtensionLifecycleManager {
     async fn persist_install_plan(
         &self,
         plan: ExtensionInstallPlan,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         // One merged record commits the definition and installation together,
         // so a failed install leaves nothing behind — the manifest-orphan
         // compensation the old two-write sequence needed no longer exists.
@@ -2516,7 +2519,7 @@ impl ExtensionLifecycleManager {
     async fn delete_materialized_extension_files(
         &self,
         package: &ExtensionPackage,
-    ) -> Result<(), ProductSurfaceFailure> {
+    ) -> Result<(), ProductOperationFailure> {
         let Ok(extension_root) = package.materialized_root() else {
             return Ok(());
         };
@@ -2524,7 +2527,7 @@ impl ExtensionLifecycleManager {
             Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
             Err(error) => {
                 tracing::debug!(%error, extension_id = %package.id, "extension file removal failed");
-                Err(ProductSurfaceFailure::Transient {
+                Err(ProductOperationFailure::Transient {
                     reason: "failed to remove extension files; retry removal".to_string(),
                 })
             }
@@ -2538,14 +2541,14 @@ impl ExtensionLifecycleManager {
 pub(crate) async fn lifecycle_package_from(
     lifecycle_service: &Arc<Mutex<ExtensionLifecycleService>>,
     extension_id: &ExtensionId,
-) -> Result<ExtensionPackage, ProductSurfaceFailure> {
+) -> Result<ExtensionPackage, ProductOperationFailure> {
     lifecycle_service
         .lock()
         .await
         .registry()
         .get_extension(extension_id)
         .cloned()
-        .ok_or_else(|| ProductSurfaceFailure::InvalidBindingRequest {
+        .ok_or_else(|| ProductOperationFailure::InvalidBindingRequest {
             reason: format!("extension {} is not installed", extension_id.as_str()),
         })
 }
@@ -2556,12 +2559,12 @@ pub(crate) async fn ensure_lifecycle_package_registered(
     installation_store: &Arc<dyn ironclaw_extensions::ExtensionInstallationStorePort>,
     lifecycle_service: &Arc<Mutex<ExtensionLifecycleService>>,
     extension_id: &ExtensionId,
-) -> Result<(), ProductSurfaceFailure> {
+) -> Result<(), ProductOperationFailure> {
     let record = installation_store
         .get_manifest(extension_id)
         .await
         .map_err(map_extension_installation_error)?
-        .ok_or_else(|| ProductSurfaceFailure::InvalidBindingRequest {
+        .ok_or_else(|| ProductOperationFailure::InvalidBindingRequest {
             reason: format!(
                 "extension {} has no installed manifest",
                 extension_id.as_str()
@@ -2597,7 +2600,7 @@ pub(crate) async fn ensure_lifecycle_package_registered(
         record.resolved(),
         extension_id.as_str(),
     )
-    .map_err(|reason| ProductSurfaceFailure::InvalidBindingRequest { reason })?;
+    .map_err(|reason| ProductOperationFailure::InvalidBindingRequest { reason })?;
     let mut lifecycle = lifecycle_service.lock().await;
     match lifecycle.registry().get_extension(extension_id) {
         None => lifecycle
@@ -2622,7 +2625,7 @@ impl crate::ChannelConfigReactivation for ExtensionLifecycleManager {
         &self,
         extension_id: &ExtensionId,
     ) -> Result<(), crate::ChannelConfigReactivationError> {
-        let result: Result<(), ProductSurfaceFailure> = async {
+        let result: Result<(), ProductOperationFailure> = async {
             let _operation_guard = self.operation_lock.lock().await;
             let installations = self
                 .installation_store
@@ -2710,7 +2713,7 @@ fn activation_success_response(
 pub(crate) fn activation_credentials_incomplete_response(
     package_ref: LifecyclePackageRef,
     missing: Vec<RuntimeCredentialAuthRequirement>,
-) -> Result<LifecycleProductResponse, ProductSurfaceFailure> {
+) -> Result<LifecycleProductResponse, ProductOperationFailure> {
     let blockers = missing
         .iter()
         .map(|requirement| {
@@ -2801,25 +2804,25 @@ fn activation_success_message(
 // no backend mounts the generic proof-code redeem route — the first
 // inbound channel must mount one alongside this requirement or its submit
 // will 404 (see PAIRING_REDEEM_PATH in the webui pairing-api.js).
-fn generic_host_error(error: crate::LifecycleError) -> ProductSurfaceFailure {
-    ProductSurfaceFailure::InvalidBindingRequest {
+fn generic_host_error(error: crate::LifecycleError) -> ProductOperationFailure {
+    ProductOperationFailure::InvalidBindingRequest {
         reason: format!("generic extension host rejected the activation: {error}"),
     }
 }
 
-fn map_channel_config_error(error: crate::ChannelConfigError) -> ProductSurfaceFailure {
+fn map_channel_config_error(error: crate::ChannelConfigError) -> ProductOperationFailure {
     tracing::warn!(error = %error, "effective extension configuration resolution failed");
-    ProductSurfaceFailure::Transient {
+    ProductOperationFailure::Transient {
         reason: "effective extension configuration is unavailable".to_string(),
     }
 }
 
 pub(crate) fn extension_ids_from_package_ref(
     package_ref: &LifecyclePackageRef,
-) -> Result<(ExtensionId, ExtensionInstallationId), ProductSurfaceFailure> {
+) -> Result<(ExtensionId, ExtensionInstallationId), ProductOperationFailure> {
     package_ref.require_kind(LifecyclePackageKind::Extension)?;
     let extension_id = ExtensionId::new(package_ref.id.as_str().to_string()).map_err(|error| {
-        ProductSurfaceFailure::InvalidBindingRequest {
+        ProductOperationFailure::InvalidBindingRequest {
             reason: error.to_string(),
         }
     })?;
@@ -2908,7 +2911,7 @@ async fn search_installation_phase(
     installation: &ExtensionInstallation,
     credential_gate: Option<&dyn ExtensionActivationCredentialGate>,
     has_last_error: bool,
-) -> Result<InstallationState, ProductSurfaceFailure> {
+) -> Result<InstallationState, ProductOperationFailure> {
     let phase = installation_state_for_installation(
         installation,
         package_has_activatable_surface(&extension.package),
@@ -2932,7 +2935,7 @@ async fn search_installation_phase(
 async fn search_credentials_configured(
     extension: &AvailableExtensionPackage,
     credential_gate: Option<&dyn ExtensionActivationCredentialGate>,
-) -> Result<bool, ProductSurfaceFailure> {
+) -> Result<bool, ProductOperationFailure> {
     let Some(credential_gate) = credential_gate else {
         return Ok(false);
     };
@@ -3010,10 +3013,10 @@ fn extension_search_has_installed_external_channel_result(
     })
 }
 
-fn map_account_setup_error(error: ExtensionAccountSetupError) -> ProductSurfaceFailure {
+fn map_account_setup_error(error: ExtensionAccountSetupError) -> ProductOperationFailure {
     match error {
         ExtensionAccountSetupError::HostUnavailable { extension_id } => {
-            ProductSurfaceFailure::InvalidBindingRequest {
+            ProductOperationFailure::InvalidBindingRequest {
                 reason: format!(
                     "the account setup host for extension {} is not enabled on this deployment",
                     extension_id.as_str()
@@ -3029,7 +3032,7 @@ fn map_account_setup_error(error: ExtensionAccountSetupError) -> ProductSurfaceF
                 error = %source,
                 "extension account connection status read failed during activation"
             );
-            ProductSurfaceFailure::Transient {
+            ProductOperationFailure::Transient {
                 reason: format!(
                     "account connection status is temporarily unavailable for extension {}",
                     extension_id.as_str()
@@ -3039,14 +3042,14 @@ fn map_account_setup_error(error: ExtensionAccountSetupError) -> ProductSurfaceF
     }
 }
 
-pub(crate) fn map_extension_error(error: ExtensionError) -> ProductSurfaceFailure {
+pub(crate) fn map_extension_error(error: ExtensionError) -> ProductOperationFailure {
     match error {
         ExtensionError::Filesystem(_) | ExtensionError::LifecycleEventSink { .. } => {
-            ProductSurfaceFailure::Transient {
+            ProductOperationFailure::Transient {
                 reason: error.to_string(),
             }
         }
-        _ => ProductSurfaceFailure::InvalidBindingRequest {
+        _ => ProductOperationFailure::InvalidBindingRequest {
             reason: error.to_string(),
         },
     }
@@ -3054,7 +3057,7 @@ pub(crate) fn map_extension_error(error: ExtensionError) -> ProductSurfaceFailur
 
 pub(crate) fn map_extension_installation_error(
     error: ExtensionInstallationError,
-) -> ProductSurfaceFailure {
+) -> ProductOperationFailure {
     match error {
         // #4091: a store IO/backend outage is retryable backend trouble, not a
         // malformed lifecycle request — surface it in the same Transient class
@@ -3062,11 +3065,11 @@ pub(crate) fn map_extension_installation_error(
         // operation instead of abandoning it.
         error @ (ExtensionInstallationError::StoreUnavailable { .. }
         | ExtensionInstallationError::MembershipMutationInProgress { .. }) => {
-            ProductSurfaceFailure::Transient {
+            ProductOperationFailure::Transient {
                 reason: error.to_string(),
             }
         }
-        error => ProductSurfaceFailure::InvalidBindingRequest {
+        error => ProductOperationFailure::InvalidBindingRequest {
             reason: error.to_string(),
         },
     }
@@ -3074,7 +3077,7 @@ pub(crate) fn map_extension_installation_error(
 
 fn project_installation_owners<I>(
     installations: I,
-) -> Result<std::collections::BTreeMap<ExtensionId, InstallationOwner>, ProductSurfaceFailure>
+) -> Result<std::collections::BTreeMap<ExtensionId, InstallationOwner>, ProductOperationFailure>
 where
     I: IntoIterator<Item = ExtensionInstallation>,
 {
@@ -3087,7 +3090,7 @@ where
             .insert(extension_id.clone(), installation.owner().clone())
             .is_some()
         {
-            return Err(ProductSurfaceFailure::InvalidBindingRequest {
+            return Err(ProductOperationFailure::InvalidBindingRequest {
                 reason: format!(
                     "duplicate extension id in lifecycle owner projection: {}",
                     extension_id.as_str()
@@ -3103,9 +3106,9 @@ fn ensure_caller_may_mutate_tenant_installation(
     caller: &UserId,
     tenant_operator: &UserId,
     operation: &str,
-) -> Result<(), ProductSurfaceFailure> {
+) -> Result<(), ProductOperationFailure> {
     if installation.owner().is_tenant() && caller != tenant_operator {
-        return Err(ProductSurfaceFailure::InvalidBindingRequest {
+        return Err(ProductOperationFailure::InvalidBindingRequest {
             reason: format!(
                 "extension {} is a shared tool; only the tenant admin can {operation} it",
                 installation.extension_id().as_str()
@@ -3119,8 +3122,8 @@ fn compensation_failure(
     context: &str,
     original: impl std::fmt::Display,
     compensation: impl std::fmt::Display,
-) -> ProductSurfaceFailure {
-    ProductSurfaceFailure::Transient {
+) -> ProductOperationFailure {
+    ProductOperationFailure::Transient {
         reason: format!(
             "{context}; original error: {original}; compensation error: {compensation}"
         ),
@@ -3143,7 +3146,9 @@ mod tests {
         path::VirtualPath,
         resource::ResourceScope,
     };
-    use ironclaw_product::{LifecyclePackageKind, LifecyclePackageRef};
+    use ironclaw_product_contracts::package_lifecycle::{
+        LifecyclePackageKind, LifecyclePackageRef,
+    };
     use ironclaw_trust::{HostTrustPolicy, InvalidationBus};
 
     use super::*;
@@ -3623,17 +3628,19 @@ output_schema_ref = "schemas/run.output.json"
             },
         ));
 
-        let register_request = ironclaw_host_api::hosted_mcp::RegisterHostedMcpRequest {
-            desired_id: ironclaw_host_api::package_lifecycle::LifecyclePackageId::new(
+        let register_request = ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest {
+            desired_id: ironclaw_extension_contracts::lifecycle_id::LifecyclePackageId::new(
                 "lock-order-register",
             )
             .expect("package id"),
             desired_name: "Lock order register fixture".to_string(),
-            endpoint: ironclaw_host_api::hosted_mcp::HostedMcpEndpoint::new(
+            endpoint: ironclaw_extension_contracts::hosted_mcp::HostedMcpEndpoint::new(
                 "https://mcp.example.test/mcp",
             )
             .expect("public fixture endpoint"),
-            auth_selection: Some(ironclaw_host_api::hosted_mcp::HostedMcpAuthSelection::Auto),
+            auth_selection: Some(
+                ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::Auto,
+            ),
         };
         let register_manager = Arc::clone(&manager);
         let register_task =

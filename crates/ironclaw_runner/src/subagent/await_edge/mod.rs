@@ -109,7 +109,7 @@ pub struct AwaitEdge {
     /// closes the same deadlock class for the recovery path: it sources this
     /// field from `SubagentThreadMetadata.parent_run_context` instead, with
     /// zero live `agent_turn_runtime` lookup for the parent.
-    pub parent_run_context: ironclaw_turns::run_profile::LoopRunContext,
+    pub parent_run_context: ironclaw_loop_contracts::LoopRunContext,
     pub tree_root_run_id: TurnRunId,
     pub gate_ref: TurnGateRef,
     pub source_binding_ref: SourceBindingRef,
@@ -146,7 +146,7 @@ pub enum AwaitEdgeStoreError {
 
 pub(crate) fn map_await_edge_error(
     error: AwaitEdgeStoreError,
-) -> ironclaw_turns::run_profile::AgentLoopHostError {
-    use ironclaw_turns::run_profile::{AgentLoopHostError, AgentLoopHostErrorKind};
+) -> ironclaw_loop_contracts::AgentLoopHostError {
+    use ironclaw_loop_contracts::{AgentLoopHostError, AgentLoopHostErrorKind};
     AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, error.to_string())
 }

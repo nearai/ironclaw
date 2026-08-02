@@ -7,9 +7,9 @@ use crate::{
     reject_non_future_next_run_at, reject_run_ref_rewrite, trigger_run_history_status_text,
 };
 // arch-exempt: large_file, cancellation-safe transactions stay with trigger backend, plan #6815
+use crate::AutomationName;
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
-use ironclaw_common::AutomationName;
 use ironclaw_host_api::turn::TurnRunId;
 use ironclaw_host_api::{
     Timestamp,

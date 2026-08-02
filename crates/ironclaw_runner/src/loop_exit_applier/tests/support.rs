@@ -1,3 +1,4 @@
+use ironclaw_turns::loop_exit::LoopExitApplier;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -7,6 +8,10 @@ use ironclaw_host_api::turn::{
     ReplyTargetBindingRef, RunProfileVersion, SanitizedFailure, SourceBindingRef, TurnActor,
     TurnCheckpointId, TurnGateRef, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope,
     TurnStatus,
+};
+use ironclaw_loop_contracts::{
+    CheckpointSchemaId, LoopBlocked, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStateRef,
+    LoopCompleted, LoopCompletionKind, LoopDriverId, LoopExit, RedactedCheckpointPayload,
 };
 use ironclaw_processes::{
     ClaimProcessesRequest, ClaimedProcess, FailProcessRequest, JournaledProcessSnapshot,
@@ -20,16 +25,13 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, GetLoopCheckpointRequest,
-    GetRunStateRequest, LoopBlocked, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointRecord,
-    LoopCheckpointStateRef, LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopExit,
-    PutLoopCheckpointRequest, RedactedCheckpointPayload, ResumeTurnRequest, ResumeTurnResponse,
-    SubmitTurnRequest, SubmitTurnResponse, TurnError, TurnRunState,
-    run_profile::{CheckpointSchemaId, LoopDriverId},
-    runner::ClaimedTurnRun,
+    GetRunStateRequest, LoopCheckpointRecord, LoopCheckpointStore, PutLoopCheckpointRequest,
+    ResumeTurnRequest, ResumeTurnResponse, SubmitTurnRequest, SubmitTurnResponse, TurnError,
+    TurnRunState, runner::ClaimedTurnRun,
 };
 
 use crate::loop_exit_applier::{
-    AwaitDependentRunEvidenceStore, InMemoryLoopExitEvidencePort, LoopExitApplier,
+    AwaitDependentRunEvidenceStore, InMemoryLoopExitEvidencePort,
     ThreadCheckpointLoopExitEvidencePort,
 };
 
@@ -206,7 +208,7 @@ impl AgentTurnRuntimePort for StaticAgentTurnRuntime {
         &self,
         _request: SubmitTurnRequest,
         _admission_policy: &dyn ironclaw_turns::TurnAdmissionPolicy,
-        _run_profile_resolver: &dyn ironclaw_turns::RunProfileResolver,
+        _run_profile_resolver: &dyn ironclaw_loop_contracts::RunProfileResolver,
     ) -> Result<SubmitTurnResponse, TurnError> {
         panic!("submit_turn should not be called by evidence tests")
     }
@@ -393,7 +395,7 @@ impl Fixture {
 }
 
 pub(super) fn claimed_run() -> ClaimedTurnRun {
-    let descriptor = ironclaw_turns::AgentLoopDriverDescriptor {
+    let descriptor = ironclaw_loop_contracts::AgentLoopDriverDescriptor {
         id: LoopDriverId::new("test_loop").expect("valid"),
         version: RunProfileVersion::new(1),
         checkpoint_schema_id: Some(CheckpointSchemaId::new("test_checkpoint").expect("valid")),
@@ -441,9 +443,9 @@ pub(super) fn claimed_run() -> ClaimedTurnRun {
 }
 
 fn test_profile(
-    descriptor: ironclaw_turns::AgentLoopDriverDescriptor,
-) -> ironclaw_turns::ResolvedRunProfile {
-    use ironclaw_turns::run_profile::*;
+    descriptor: ironclaw_loop_contracts::AgentLoopDriverDescriptor,
+) -> ironclaw_loop_contracts::ResolvedRunProfile {
+    use ironclaw_loop_contracts::*;
     use ironclaw_turns::*;
 
     ResolvedRunProfile {
@@ -479,7 +481,7 @@ fn test_profile(
             max_model_calls: 32,
             max_capability_invocations: 64,
         },
-        personal_context_policy: ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
+        personal_context_policy: ironclaw_loop_contracts::PersonalContextPolicy::Excluded,
         runtime_constraints: RuntimeProfileConstraints {
             allow_raw_runtime_backend_selection: false,
             allow_broad_capability_surface: false,

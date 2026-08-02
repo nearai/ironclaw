@@ -51,16 +51,17 @@ use ironclaw_host_api::ingress::{
 };
 use ironclaw_host_api::{
     ids::{AgentId, ExtensionId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
-    product_surface::{
-        BoundProductSurface, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
-        ProductSurfaceQueryRequest,
-    },
     resource::ResourceScope,
 };
 use ironclaw_host_ingress::SplitRouteMount;
-use ironclaw_product::{
-    EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, LifecyclePackageKind, RebornExtensionCredentialSetup,
-    RebornExtensionListResponse, RebornSetupExtensionResponse,
+use ironclaw_product::{EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, RebornExtensionListResponse};
+use ironclaw_product_contracts::package_lifecycle::LifecyclePackageKind;
+use ironclaw_product_contracts::product_wire::{
+    RebornExtensionCredentialSetup, RebornSetupExtensionResponse,
+};
+use ironclaw_product_contracts::surface::{
+    BoundProductSurface, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
+    ProductSurfaceQueryRequest,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -2181,7 +2182,7 @@ mod tests {
         async fn resolve(
             &self,
             _vendor: &str,
-            _credentials: &ironclaw_host_api::recipe::RecipeClientCredentials,
+            _credentials: &ironclaw_extension_contracts::recipe::RecipeClientCredentials,
         ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, AuthProductError> {
             Ok(ironclaw_auth::EngineOAuthClientMaterial {
                 client_id: ironclaw_auth::OAuthClientId::new("vendorco-client-id")?,

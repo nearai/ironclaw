@@ -18,10 +18,14 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::memory::{MemoryDescriptor, MemoryLifecycleHook};
 use ironclaw_host_api::{
     ids::{CorrelationId, InvocationId},
-    memory::{MemoryDescriptor, MemoryLifecycleHook},
     resource::ResourceScope,
+};
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, LoopContextSnippet, LoopSafeSummary,
+    MemoryPromptContextRequest, MemoryPromptContextService, memory_snippet_display_ref,
 };
 use ironclaw_memory::{
     MemoryContextProfileId, MemoryInvocation, MemoryService, MemoryServiceContextRequest,
@@ -29,10 +33,6 @@ use ironclaw_memory::{
     memory_context_disabled,
 };
 use ironclaw_prompt_envelope::{EnvelopeSource, EnvelopeTrust, wrap_untrusted_with_limit};
-use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, LoopContextSnippet, LoopSafeSummary,
-    MemoryPromptContextRequest, MemoryPromptContextService, memory_snippet_display_ref,
-};
 
 /// Aggregate model-visible byte budget across all admitted snippets in one turn.
 /// This combined ceiling is the one budget that must see both lanes, so it stays

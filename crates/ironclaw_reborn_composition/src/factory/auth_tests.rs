@@ -526,7 +526,7 @@ async fn oauth_callback_exchanges_vendor_recipe_through_reborn_product_auth_boun
     let egress = Arc::new(RecordingOAuthEgress::ok(
         br#"{"access_token":"vendor-access","refresh_token":"vendor-refresh","expires_in":3600,"token_type":"Bearer"}"#.to_vec(),
     ));
-    let recipe: ironclaw_host_api::recipe::VendorAuthRecipe =
+    let recipe: ironclaw_extension_contracts::recipe::VendorAuthRecipe =
         serde_json::from_value(serde_json::json!({
             "method": "oauth2_code",
             "display_name": "Vendor account",
@@ -551,7 +551,7 @@ async fn oauth_callback_exchanges_vendor_recipe_through_reborn_product_auth_boun
         async fn resolve(
             &self,
             _vendor: &str,
-            _credentials: &ironclaw_host_api::recipe::RecipeClientCredentials,
+            _credentials: &ironclaw_extension_contracts::recipe::RecipeClientCredentials,
         ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, ironclaw_auth::AuthProductError>
         {
             Ok(ironclaw_auth::EngineOAuthClientMaterial {

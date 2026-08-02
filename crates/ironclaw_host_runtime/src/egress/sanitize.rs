@@ -1,4 +1,4 @@
-use ironclaw_host_api::hosted_mcp::extract_mcp_auth_metadata_locations;
+use ironclaw_extension_contracts::hosted_mcp::extract_mcp_auth_metadata_locations;
 use ironclaw_host_api::http::{
     RuntimeHttpEgressError, RuntimeHttpEgressRequest, is_sensitive_runtime_request_header,
     is_sensitive_runtime_response_header,

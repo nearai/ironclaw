@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use ironclaw_extension_contracts::hosted_mcp::{HostedMcpAuthSelection, HostedMcpEndpoint};
 use ironclaw_extensions::{
     ExtensionManifestRecord, ExtensionPackage, ManifestSource, PackageDefinitionRetention,
     PackageRootBinding,
@@ -17,13 +18,12 @@ use ironclaw_host_api::{
         CapabilityDescriptor, RuntimeCredentialAccountSetup, RuntimeCredentialRequirement,
         RuntimeCredentialRequirementSource,
     },
-    hosted_mcp::{HostedMcpAuthSelection, HostedMcpEndpoint},
     http::RuntimeCredentialTarget,
     ids::{ExtensionId, SecretHandle, VendorId},
 };
-use ironclaw_product::{
+use ironclaw_product_contracts::error::ProductOperationFailure;
+use ironclaw_product_contracts::package_lifecycle::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
-    ProductSurfaceFailure,
 };
 
 use crate::{
@@ -36,7 +36,7 @@ use crate::{
 pub(crate) fn registration_response(package_ref: LifecyclePackageRef) -> LifecycleProductResponse {
     LifecycleProductResponse {
         package_ref: Some(package_ref),
-        phase: ironclaw_host_api::state::InstallationState::Installed,
+        phase: ironclaw_extension_contracts::state::InstallationState::Installed,
         blockers: Vec::new(),
         message: Some("Hosted MCP registration accepted.".to_string()),
         payload: Some(LifecycleProductPayload::ExtensionInstall {
@@ -48,24 +48,24 @@ pub(crate) fn registration_response(package_ref: LifecyclePackageRef) -> Lifecyc
     }
 }
 
-pub(crate) fn name_unavailable() -> ProductSurfaceFailure {
-    ProductSurfaceFailure::InvalidBindingRequest {
+pub(crate) fn name_unavailable() -> ProductOperationFailure {
+    ProductOperationFailure::InvalidBindingRequest {
         reason: "hosted MCP extension name is unavailable".to_string(),
     }
 }
 
-pub(crate) fn discovery_error(error: HostedMcpDiscoveryError) -> ProductSurfaceFailure {
+pub(crate) fn discovery_error(error: HostedMcpDiscoveryError) -> ProductOperationFailure {
     match error {
-        HostedMcpDiscoveryError::Transient(reason) => ProductSurfaceFailure::Transient {
+        HostedMcpDiscoveryError::Transient(reason) => ProductOperationFailure::Transient {
             reason: format!("hosted MCP catalog preparation failed: {reason}"),
         },
         HostedMcpDiscoveryError::Permanent(reason) => {
-            ProductSurfaceFailure::InvalidBindingRequest {
+            ProductOperationFailure::InvalidBindingRequest {
                 reason: format!("hosted MCP catalog preparation failed: {reason}"),
             }
         }
         HostedMcpDiscoveryError::CredentialsRejected(_) => {
-            ProductSurfaceFailure::InvalidBindingRequest {
+            ProductOperationFailure::InvalidBindingRequest {
                 reason: "hosted MCP account setup is required".to_string(),
             }
         }
@@ -74,14 +74,14 @@ pub(crate) fn discovery_error(error: HostedMcpDiscoveryError) -> ProductSurfaceF
 
 pub(crate) fn oauth_admission_error(
     error: ironclaw_auth::AuthProductError,
-) -> ProductSurfaceFailure {
+) -> ProductOperationFailure {
     tracing::debug!(?error, "hosted MCP OAuth metadata admission rejected");
-    ProductSurfaceFailure::InvalidBindingRequest {
+    ProductOperationFailure::InvalidBindingRequest {
         reason: "hosted MCP OAuth metadata was not admissible".to_string(),
     }
 }
 
-pub(crate) fn metadata_network_policy(url: &str) -> Result<NetworkPolicy, ProductSurfaceFailure> {
+pub(crate) fn metadata_network_policy(url: &str) -> Result<NetworkPolicy, ProductOperationFailure> {
     let parsed = url::Url::parse(url)
         .map_err(|_| oauth_admission_error(ironclaw_auth::AuthProductError::MalformedConfig))?;
     if parsed.scheme() != "https"
@@ -109,7 +109,7 @@ pub(crate) fn manifest_with_admitted_oauth(
     seed: ExtensionManifestRecord,
     endpoint: &hosted_mcp_admission::CanonicalHostedMcpEndpoint,
     admitted: ironclaw_auth::ResolvedVendorAuthRecipe,
-) -> Result<ExtensionManifestRecord, ProductSurfaceFailure> {
+) -> Result<ExtensionManifestRecord, ProductOperationFailure> {
     if admitted.token_exchange_resource.as_deref() != Some(endpoint.as_str()) {
         return Err(oauth_admission_error(
             ironclaw_auth::AuthProductError::MalformedConfig,
@@ -173,7 +173,7 @@ pub(crate) fn manifest_with_admitted_oauth(
 
 pub(crate) fn manifest_with_bearer(
     seed: ExtensionManifestRecord,
-) -> Result<ExtensionManifestRecord, ProductSurfaceFailure> {
+) -> Result<ExtensionManifestRecord, ProductOperationFailure> {
     let resolved = seed.resolved();
     let server = resolved
         .mcp
@@ -197,9 +197,9 @@ pub(crate) fn pending_manifest(
     desired_name: &str,
     endpoint: &hosted_mcp_admission::CanonicalHostedMcpEndpoint,
     selection: &HostedMcpAuthSelection,
-) -> Result<ExtensionManifestRecord, ProductSurfaceFailure> {
+) -> Result<ExtensionManifestRecord, ProductOperationFailure> {
     if desired_name.trim().is_empty() || desired_name.len() > 256 {
-        return Err(ProductSurfaceFailure::InvalidBindingRequest {
+        return Err(ProductOperationFailure::InvalidBindingRequest {
             reason: "hosted MCP extension name is invalid".to_string(),
         });
     }
@@ -210,7 +210,7 @@ pub(crate) fn pending_manifest(
             || profile.len() > 128
             || profile.chars().any(char::is_control))
     {
-        return Err(ProductSurfaceFailure::InvalidBindingRequest {
+        return Err(ProductOperationFailure::InvalidBindingRequest {
             reason: "hosted MCP OAuth client profile is invalid".to_string(),
         });
     }
@@ -265,13 +265,13 @@ effects = ["network", "use_secret"]
         raw.clone(),
         ManifestSource::UserRegistered,
         &ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-            ProductSurfaceFailure::InvalidBindingRequest {
+            ProductOperationFailure::InvalidBindingRequest {
                 reason: format!("host port catalog rejected hosted MCP registration: {error}"),
             }
         })?,
         Some(manifest_hash.clone()),
         &product_extension_host_api_contract_registry().map_err(|error| {
-            ProductSurfaceFailure::InvalidBindingRequest {
+            ProductOperationFailure::InvalidBindingRequest {
                 reason: format!("host API contracts rejected hosted MCP registration: {error}"),
             }
         })?,
@@ -298,11 +298,11 @@ effects = ["network", "use_secret"]
 
 pub(crate) fn available_package(
     record: &ExtensionManifestRecord,
-) -> Result<AvailableExtensionPackage, ProductSurfaceFailure> {
+) -> Result<AvailableExtensionPackage, ProductOperationFailure> {
     let id = record.resolved().id.as_str();
     let manifest: ironclaw_extensions::ExtensionManifest =
         record.manifest().clone().try_into().map_err(|error| {
-            ProductSurfaceFailure::InvalidBindingRequest {
+            ProductOperationFailure::InvalidBindingRequest {
                 reason: format!("hosted MCP package manifest is invalid: {error}"),
             }
         })?;

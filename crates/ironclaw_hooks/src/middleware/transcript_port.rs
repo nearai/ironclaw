@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::ids::TenantId;
-use ironclaw_turns::LoopMessageRef;
-use ironclaw_turns::run_profile::{
+use ironclaw_host_api::turn::LoopMessageRef;
+use ironclaw_loop_contracts::{
     AgentLoopHostError, AppendCapabilityResultRef, BeginAssistantDraft, FinalizeAssistantMessage,
     LoopTranscriptPort, UpdateAssistantDraft,
 };
@@ -104,7 +104,7 @@ mod tests {
     use crate::sink::{ObserverHook, ObserverSink};
     use crate::trust::HookTrustClass;
     use async_trait::async_trait;
-    use ironclaw_turns::run_profile::AssistantReply;
+    use ironclaw_loop_contracts::AssistantReply;
     use std::sync::Mutex;
 
     fn tenant() -> TenantId {
@@ -149,7 +149,7 @@ mod tests {
             *self.finalize_calls.lock().expect("not poisoned") += 1;
             if self.fail {
                 return Err(AgentLoopHostError::new(
-                    ironclaw_turns::run_profile::AgentLoopHostErrorKind::TranscriptWriteFailed,
+                    ironclaw_loop_contracts::AgentLoopHostErrorKind::TranscriptWriteFailed,
                     "stub finalize failure",
                 ));
             }
@@ -270,7 +270,7 @@ mod tests {
             .expect_err("must err");
         assert_eq!(
             err.kind,
-            ironclaw_turns::run_profile::AgentLoopHostErrorKind::TranscriptWriteFailed
+            ironclaw_loop_contracts::AgentLoopHostErrorKind::TranscriptWriteFailed
         );
         assert_eq!(*seen.lock().expect("not poisoned"), 0);
     }

@@ -57,11 +57,12 @@ fn trace_coordinator_latency_error<E: ?Sized>(
 
 use crate::{
     AdmissionRejection, AgentTurnRuntimePort, AgentTurnSpawnTreeRuntimePort, CancelRunRequest,
-    CancelRunResponse, EventCursor, GetRunStateRequest, InMemoryRunProfileResolver,
-    ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileResolver,
-    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnCapacityResource, TurnError,
-    TurnRunId, TurnRunState, TurnScope, TurnStatus, process_projection::AgentTurnProcessRuntime,
+    CancelRunResponse, EventCursor, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
+    RetryTurnRequest, RetryTurnResponse, SubmitChildRunRequest, SubmitTurnRequest,
+    SubmitTurnResponse, TurnCapacityResource, TurnError, TurnRunId, TurnRunState, TurnScope,
+    TurnStatus, process_projection::AgentTurnProcessRuntime,
 };
+use ironclaw_loop_contracts::{InMemoryRunProfileResolver, RunProfileResolver};
 
 pub trait TurnAdmissionPolicy: Send + Sync {
     fn check_submit(&self, request: &SubmitTurnRequest) -> Result<(), AdmissionRejection>;

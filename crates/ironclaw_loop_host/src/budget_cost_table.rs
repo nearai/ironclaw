@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use ironclaw_turns::run_profile::ModelProfileId;
+use ironclaw_loop_contracts::ModelProfileId;
 use rust_decimal::Decimal;
 
 /// Static cost-per-token + max-output-tokens table for a single model.

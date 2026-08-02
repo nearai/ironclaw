@@ -5,11 +5,10 @@ use serde_json::{Value, json};
 
 use crate::{
     AcceptedMessageRef, GateResumeDisposition, ProductTurnContext, ReplyTargetBindingRef,
-    ResolvedRunProfile, RunProfileId, RunProfileVersion, SourceBindingRef, TurnActor,
-    TurnRunRecord, TurnRunState,
-    run_profile::{LoopModelRouteSnapshot, LoopModelUsage},
+    RunProfileId, RunProfileVersion, SourceBindingRef, TurnActor, TurnRunRecord, TurnRunState,
     runner::ClaimedTurnRun,
 };
+use ironclaw_loop_contracts::{LoopModelRouteSnapshot, LoopModelUsage, ResolvedRunProfile};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentTurnProcessMetadata {

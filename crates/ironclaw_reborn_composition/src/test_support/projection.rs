@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use ironclaw_events::DurableEventLog;
-use ironclaw_product::ProjectionStream;
+use ironclaw_product_contracts::projection::ProjectionStream;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnCoordinator, TurnEventProjectionSource};
 
 /// Build a turn-lifecycle-only `ProjectionStream` for

@@ -10,10 +10,8 @@ use ironclaw_host_api::{
     },
 };
 
-use crate::{
-    ProductTurnContext, ResolvedRunProfile, TurnAdmissionClass, request::TurnTimestamp,
-    run_profile::LoopModelRouteSnapshot,
-};
+use crate::{ProductTurnContext, TurnAdmissionClass, request::TurnTimestamp};
+use ironclaw_loop_contracts::{LoopModelRouteSnapshot, ResolvedRunProfile};
 
 /// The recoverability-critical transition boundary (#6263 Step 3 / #6284 / Step 5b).
 ///
@@ -188,7 +186,7 @@ pub struct TurnRunState {
     /// stubs) or that pre-date usage capture. Read by the OpenAI-compatible
     /// Responses/Chat surfaces to report `usage` and cost.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_usage: Option<crate::run_profile::LoopModelUsage>,
+    pub model_usage: Option<ironclaw_loop_contracts::LoopModelUsage>,
     pub received_at: TurnTimestamp,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<TurnGateRef>,

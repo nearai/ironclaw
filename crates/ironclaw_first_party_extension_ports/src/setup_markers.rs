@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use futures::{StreamExt, stream};
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::path::ScopedPath;
-use ironclaw_turns::run_profile::LoopRunContext;
+use ironclaw_loop_contracts::LoopRunContext;
 
 use crate::{SkillActivationSelectionError, activation::SetupMarkerSource};
 
@@ -102,12 +102,10 @@ mod tests {
         ids::{AgentId, ProjectId, TenantId},
         mount::MountView,
     };
-    use ironclaw_turns::{
-        AcceptedMessageRef, TurnActor, TurnId, TurnRunId, TurnScope,
-        run_profile::{
-            InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver,
-        },
+    use ironclaw_loop_contracts::{
+        InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver,
     };
+    use ironclaw_turns::{AcceptedMessageRef, TurnActor, TurnId, TurnRunId, TurnScope};
 
     async fn run_context() -> LoopRunContext {
         let resolved = InMemoryRunProfileResolver::default()

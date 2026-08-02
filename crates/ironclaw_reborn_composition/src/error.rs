@@ -140,7 +140,7 @@ mod tests {
     #[test]
     fn composition_run_profile_becomes_planned_run_profile_resolver() {
         let error = RebornBuildError::from(crate::RebornCompositionError::RunProfile(
-            ironclaw_turns::run_profile::RunProfileRegistryError::InvalidProfile {
+            ironclaw_loop_contracts::RunProfileRegistryError::InvalidProfile {
                 reason: "broken run profile".to_string(),
             },
         ));

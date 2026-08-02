@@ -4,6 +4,11 @@ use ironclaw_host_api::{
     resolution::Suspension,
     safe_summary::SafeSummary,
 };
+use ironclaw_loop_contracts::{
+    CapabilitySurfaceVersion, InMemoryRunProfileResolver, ModelVisibleToolObservation,
+    ObservationTrust, RegisterProviderToolCallRequest, RunProfileResolutionRequest,
+    RunProfileResolver, ToolObservationDetail, ToolObservationStatus, resolution,
+};
 use ironclaw_threads::{
     AcceptedInboundMessage, AcceptedInboundMessageReplay, AppendAssistantDraftRequest,
     AppendCapabilityDisplayPreviewRequest, AppendToolResultReferenceRequest, ContextMessages,
@@ -16,14 +21,9 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AgentTurnRuntimePort, CancelRunResponse, CapabilityActivityId, EventCursor,
-    GetRunStateRequest, InMemoryRunProfileResolver, ResumeTurnRequest, ResumeTurnResponse,
-    RunProfileId, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
+    GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
     SpawnTreeReservation, SubmitTurnRequest, TurnId, TurnRunProfile, TurnRunRecord, TurnRunState,
     TurnStatus,
-    run_profile::{
-        CapabilitySurfaceVersion, ModelVisibleToolObservation, ObservationTrust,
-        RegisterProviderToolCallRequest, ToolObservationDetail, ToolObservationStatus, resolution,
-    },
 };
 use serde_json::json;
 
@@ -280,7 +280,7 @@ impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
         Ok(resolution::completed(
             LoopResultRef::new("result:auth").unwrap(),
             "authorized".to_string(),
-            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
             false,
             0,
             None,
@@ -406,7 +406,7 @@ impl LoopCapabilityPort for AuthPassPort {
         Ok(resolution::completed(
             LoopResultRef::new("result:auth").unwrap(),
             "authorized".to_string(),
-            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
             false,
             0,
             None,
@@ -1282,7 +1282,7 @@ fn completed_outcome(label: &str) -> Resolution {
     resolution::completed(
         LoopResultRef::new(format!("result:{label}")).unwrap(),
         "completed".to_string(),
-        ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+        ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
         false,
         0,
         None,

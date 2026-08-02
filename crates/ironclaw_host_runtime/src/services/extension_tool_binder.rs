@@ -17,15 +17,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use ironclaw_extension_contracts::tool_adapter::{
+    ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
+};
 use ironclaw_extensions::ExtensionPackage;
 use ironclaw_host_api::{
-    capability::CapabilityDescriptor,
-    dispatch::DispatchError,
-    ids::CapabilityId,
-    lane::RuntimeLane,
-    runtime::RuntimeKind,
-    runtime_policy::EffectiveRuntimePolicy,
-    tool_adapter::{ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult},
+    capability::CapabilityDescriptor, dispatch::DispatchError, ids::CapabilityId,
+    lane::RuntimeLane, runtime::RuntimeKind, runtime_policy::EffectiveRuntimePolicy,
 };
 use ironclaw_resources::ResourceGovernor;
 

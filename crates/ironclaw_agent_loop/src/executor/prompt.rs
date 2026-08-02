@@ -1,13 +1,10 @@
 use async_trait::async_trait;
-use ironclaw_turns::{
-    LoopExit,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilitySurfaceVersion, CompactionInitiator,
-        LoopCompactionError, LoopCompactionMode, LoopCompactionOutcome, LoopCompactionRequest,
-        LoopContextCompactionKind, LoopContextCompactionMetadata, LoopInlineMessage,
-        LoopModelCapabilityView, LoopModelMessage, LoopProgressEvent, LoopSafeSummary,
-        SystemInferenceTaskId, VisibleCapabilityRequest, VisibleCapabilitySurface,
-    },
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilitySurfaceVersion, CompactionInitiator,
+    LoopCompactionError, LoopCompactionMode, LoopCompactionOutcome, LoopCompactionRequest,
+    LoopContextCompactionKind, LoopContextCompactionMetadata, LoopExit, LoopInlineMessage,
+    LoopModelCapabilityView, LoopModelMessage, LoopProgressEvent, LoopSafeSummary,
+    SystemInferenceTaskId, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 use tracing::debug;
 
@@ -45,7 +42,7 @@ pub(super) struct PromptOutput {
     pub(super) state: LoopExecutionState,
     pub(super) pending_input_ack: PendingInputAck,
     pub(super) surface: VisibleCapabilitySurface,
-    pub(super) messages: Vec<ironclaw_turns::run_profile::LoopModelMessage>,
+    pub(super) messages: Vec<ironclaw_loop_contracts::LoopModelMessage>,
     pub(super) inline_messages: Vec<LoopInlineMessage>,
     pub(super) capability_view: LoopModelCapabilityView,
     pub(super) rendered_repeated_call_warning: bool,
@@ -55,7 +52,7 @@ pub(super) struct ApprovalResumePromptOutput {
     pub(super) state: LoopExecutionState,
     pub(super) pending_input_ack: PendingInputAck,
     pub(super) surface: VisibleCapabilitySurface,
-    pub(super) call: ironclaw_turns::run_profile::CapabilityCallCandidate,
+    pub(super) call: ironclaw_loop_contracts::CapabilityCallCandidate,
 }
 
 pub(super) enum PromptStep {
@@ -615,7 +612,7 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
 }
 
 enum CompactionCallOutcome {
-    Completed(Result<LoopCompactionOutcome, ironclaw_turns::run_profile::LoopCompactionError>),
+    Completed(Result<LoopCompactionOutcome, ironclaw_loop_contracts::LoopCompactionError>),
     Cancelled,
 }
 
@@ -810,7 +807,7 @@ fn prompt_host_error(error: AgentLoopHostError) -> AgentLoopExecutorError {
             );
             (
                 LoopSafeSummary::tool_failure_details_redacted(),
-                Some(ironclaw_turns::run_profile::sanitize_model_visible_text(
+                Some(ironclaw_loop_contracts::sanitize_model_visible_text(
                     raw_summary,
                 )),
             )

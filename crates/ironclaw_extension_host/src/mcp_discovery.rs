@@ -15,7 +15,7 @@ pub enum HostedMcpDiscoveryError {
     Permanent(String),
     /// The remote rejected the currently staged account. This is a setup
     /// outcome, not a retryable transport failure.
-    CredentialsRejected(ironclaw_host_api::hosted_mcp::McpAuthChallenge),
+    CredentialsRejected(ironclaw_extension_contracts::hosted_mcp::McpAuthChallenge),
 }
 
 pub async fn discover_hosted_mcp_package(
@@ -129,7 +129,7 @@ fn classify_mcp_client_error(error: ironclaw_mcp::McpClientError) -> HostedMcpDi
         // arrives here as `AuthRequired` with no metadata — it is still a
         // credential rejection, never a retryable transport failure.
         ironclaw_mcp::McpClientError::AuthRequired => HostedMcpDiscoveryError::CredentialsRejected(
-            ironclaw_host_api::hosted_mcp::McpAuthChallenge {
+            ironclaw_extension_contracts::hosted_mcp::McpAuthChallenge {
                 status: 401,
                 www_authenticate_metadata: Vec::new(),
                 protected_resource_metadata: Vec::new(),

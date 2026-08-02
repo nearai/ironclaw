@@ -10,6 +10,7 @@ use ironclaw_auth::{
     UnavailableAuthProviderClient, map_account_error, runtime_credential_account_selection_request,
 };
 use ironclaw_authorization::CapabilityLeaseStore;
+use ironclaw_extension_contracts::extension::ExtensionHostAssemblyConfig;
 use ironclaw_extensions::{
     ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry,
 };
@@ -21,7 +22,6 @@ use ironclaw_host_api::{
     capability::CapabilityDescriptor,
     decision::{Decision, Obligation, Obligations},
     dispatch::CredentialStageError,
-    extension::ExtensionHostAssemblyConfig,
     ids::{CapabilityId, VendorId},
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
@@ -36,7 +36,9 @@ use ironclaw_host_runtime::{
     RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
 };
 use ironclaw_processes::ProcessServices;
-use ironclaw_product::{LifecycleProductService, LifecycleProductSurfaceContext};
+use ironclaw_product_contracts::lifecycle_service::{
+    LifecycleProductService, LifecycleProductSurfaceContext,
+};
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_secrets::{SecretStore, SecretStorePort};
 use ironclaw_trust::{AdminConfig, HostTrustPolicy, InvalidationBus};
@@ -53,6 +55,7 @@ use crate::{
     product_extension_host_api_contract_registry, provider_instance_readiness_map,
     restore_extension_lifecycle_state,
 };
+use ironclaw_product_contracts::lifecycle_service::LifecycleProductContext;
 use ironclaw_skills::ScopedSkillManagementPort;
 
 pub type TestApprovalRequestStore = ApprovalRequestStore<FaultInjecting<InMemoryBackend>>;
@@ -476,10 +479,8 @@ pub async fn invoke_with_standalone_approval(
     }
 }
 
-pub fn lifecycle_product_context(
-    scope: ResourceScope,
-) -> ironclaw_product::LifecycleProductContext {
-    ironclaw_product::LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+pub fn lifecycle_product_context(scope: ResourceScope) -> LifecycleProductContext {
+    LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
         tenant_id: scope.tenant_id,
         user_id: scope.user_id,
         agent_id: scope.agent_id,

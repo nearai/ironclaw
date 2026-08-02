@@ -1,11 +1,12 @@
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-use ironclaw_host_api::attachment::WorkspaceFile;
-use ironclaw_host_api::product_adapter::{
-    ExternalConversationRef, OutboundEnvelope, OutboundPart, OutboundTarget, PartDeliveryOutcome,
+use ironclaw_extension_contracts::channel_adapter::{
+    OutboundEnvelope, OutboundPart, OutboundTarget, PartDeliveryOutcome,
 };
-use ironclaw_host_api::tool_adapter::{RestrictedEgressError, RestrictedEgressResponse};
+use ironclaw_extension_contracts::external::ExternalConversationRef;
+use ironclaw_extension_contracts::tool_adapter::{RestrictedEgressError, RestrictedEgressResponse};
+use ironclaw_host_api::attachment::WorkspaceFile;
 
 use super::*;
 

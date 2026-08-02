@@ -1,4 +1,4 @@
-use ironclaw_turns::run_profile::{LoopContextCompactionKind, LoopContextCompactionMetadata};
+use ironclaw_loop_contracts::{LoopContextCompactionKind, LoopContextCompactionMetadata};
 
 /// Builds one compaction index entry for prompt-bundle fixtures.
 pub fn compaction_metadata(

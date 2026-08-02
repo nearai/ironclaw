@@ -16,7 +16,7 @@ use ironclaw_events::{
     EventCursor, RuntimeEvent, RuntimeEventKind, SecurityAuditEvent, SecurityAuditSink,
     SecurityBoundary, SecurityDecision,
 };
-use ironclaw_turns::run_profile::{HookDecisionSummary, HookMilestoneSink, LoopHostMilestoneKind};
+use ironclaw_loop_contracts::{HookDecisionSummary, HookMilestoneSink, LoopHostMilestoneKind};
 
 /// Stable `&'static str` reason code recorded on the
 /// [`SecurityAuditEvent`] when a `before_capability` hook explicitly
@@ -263,7 +263,7 @@ impl HookDispatcher {
     /// *before* wrapping the dispatcher in `Arc`. This is the documented
     /// composition order: build dispatcher, set sink, wrap in `Arc`, install
     /// into the factory via `with_hook_dispatcher`. The sink should be a
-    /// [`ironclaw_turns::run_profile::RunScopedHookMilestoneSink`] (or
+    /// [`ironclaw_loop_contracts::RunScopedHookMilestoneSink`] (or
     /// equivalent adapter) that injects run-context before forwarding to the
     /// host's `LoopHostMilestoneSink`.
     pub(crate) fn with_milestone_sink(mut self, sink: Arc<dyn HookMilestoneSink>) -> Self {
@@ -3636,7 +3636,7 @@ mod tests {
 
     // ─── Milestone telemetry ────────────────────────────────────────────
 
-    use ironclaw_turns::run_profile::{InMemoryHookMilestoneSink, LoopHostMilestoneKind};
+    use ironclaw_loop_contracts::{InMemoryHookMilestoneSink, LoopHostMilestoneKind};
 
     fn install_milestone_sink(
         dispatcher: HookDispatcher,

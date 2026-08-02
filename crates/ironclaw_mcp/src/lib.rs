@@ -17,6 +17,7 @@ use std::{
 
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
+use ironclaw_extension_contracts::hosted_mcp::McpAuthChallenge;
 use ironclaw_extensions::{
     ExtensionPackage, ExtensionRuntime, HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations,
 };
@@ -24,7 +25,6 @@ use ironclaw_host_api::{
     action::{NetworkMethod, NetworkPolicy},
     capability::{RuntimeCredentialRequirement, RuntimeCredentialRequirementSource},
     decision::RuntimeCredentialAuthRequirement,
-    hosted_mcp::McpAuthChallenge,
     http::{
         CapabilityHostHttpRequest, RuntimeCredentialInjection, RuntimeCredentialSource,
         RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressResponse,
@@ -1009,11 +1009,17 @@ fn mcp_auth_challenge_from_response(response: &McpHostHttpResponse) -> McpAuthCh
     let mut protected_resource_metadata = Vec::new();
     for (name, value) in &response.headers {
         if name.eq_ignore_ascii_case("www-authenticate") {
-            www_authenticate_metadata
-                .extend(ironclaw_host_api::hosted_mcp::extract_mcp_auth_metadata_locations(value));
+            www_authenticate_metadata.extend(
+                ironclaw_extension_contracts::hosted_mcp::extract_mcp_auth_metadata_locations(
+                    value,
+                ),
+            );
         } else if name.eq_ignore_ascii_case("protected-resource-metadata") {
-            protected_resource_metadata
-                .extend(ironclaw_host_api::hosted_mcp::extract_mcp_auth_metadata_locations(value));
+            protected_resource_metadata.extend(
+                ironclaw_extension_contracts::hosted_mcp::extract_mcp_auth_metadata_locations(
+                    value,
+                ),
+            );
         }
     }
     McpAuthChallenge {

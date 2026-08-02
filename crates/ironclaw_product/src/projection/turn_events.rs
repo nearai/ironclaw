@@ -1,3 +1,4 @@
+use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
@@ -22,22 +23,21 @@ use ironclaw_host_api::{
     approval::ApprovalRequest,
     ids::{InvocationId, UserId},
 };
+use ironclaw_loop_contracts::{
+    SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest, SystemInferenceTaskId,
+    SystemPromptId, SystemPromptSource, SystemTaskKind, sanitize_model_visible_text,
+};
 use ironclaw_turns::{
     GetRunStateRequest, TurnBlockedGateKind, TurnCoordinator, TurnError, TurnEventKind,
     TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
     TurnEventProjectionSource, TurnEventReducerService, TurnLifecycleEvent,
-    run_profile::{
-        SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,
-        SystemInferenceTaskId, SystemPromptId, SystemPromptSource, SystemTaskKind,
-        sanitize_model_visible_text,
-    },
 };
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 use crate::AuthChallengeProvider;
-use crate::{BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth};
-use ironclaw_runner::failure_categories::CHECKPOINT_REJECTED_CATEGORY;
-use ironclaw_runner::failure_summary::{
+use crate::auth_prompt_view_for_blocked_auth;
+use ironclaw_host_api::failure::categories::CHECKPOINT_REJECTED_CATEGORY;
+use ironclaw_host_api::failure::summary::{
     checkpoint_rejection_host_explanation_from_detail, pinned_failure_summary_for_category,
     reborn_failure_summary_for_category_and_detail,
 };
@@ -995,9 +995,19 @@ fn failure_explanation_request(input: &FailureExplanationInput) -> Option<System
     })
 }
 
+/// The failure-explainer system prompt.
+///
+/// The asset is product-owned (WS1.7): this projection is its only consumer,
+/// and prompt *content* is explicitly out of charter for the loop tier
+/// (PROPOSAL §6.1.4/§6.7.2), where it used to live as
+/// `ironclaw_loop_host::FAILURE_EXPLANATION_SYSTEM_PROMPT`.
 fn failure_explanation_system_prompt() -> &'static str {
-    ironclaw_loop_host::FAILURE_EXPLANATION_SYSTEM_PROMPT
+    FAILURE_EXPLANATION_SYSTEM_PROMPT
 }
+
+/// Product-owned prompt asset; see [`failure_explanation_system_prompt`].
+const FAILURE_EXPLANATION_SYSTEM_PROMPT: &str =
+    include_str!("../../prompts/failure_explanation.md");
 
 pub(super) fn failure_explanation_user_prompt(input: &FailureExplanationInput) -> String {
     let mut prompt = format!(

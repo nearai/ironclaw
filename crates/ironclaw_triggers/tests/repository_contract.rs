@@ -1,5 +1,4 @@
 use chrono::{SecondsFormat, TimeZone, Utc};
-use ironclaw_common::AutomationName;
 use ironclaw_filesystem::{LibSqlRootFilesystem, RootFilesystem, SeqNo};
 use ironclaw_host_api::turn::TurnRunId;
 use ironclaw_host_api::{
@@ -8,6 +7,7 @@ use ironclaw_host_api::{
     path::VirtualPath,
 };
 use ironclaw_libsql_runtime::LibSqlRuntime;
+use ironclaw_triggers::AutomationName;
 use ironclaw_triggers::PostgresTriggerRepository;
 use ironclaw_triggers::{
     ActiveTriggerScanCursor, ClearActiveFireRequest, InMemoryTriggerRepository,

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole, LoopPromptBundleRequest,
     PromptMode,
 };
@@ -156,15 +156,13 @@ pub(crate) fn terminal_warning_control_message(
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::ids::{TenantId, ThreadId};
-    use ironclaw_turns::{
-        AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
-        run_profile::{
-            CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId,
-            ConcurrencyClass, ContextProfileId, LoopDriverId, LoopRunContext, ModelProfileId,
-            PromptMode, RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy,
-            ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
-            SchedulingClass, SteeringPolicy,
-        },
+    use ironclaw_host_api::turn::{RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope};
+    use ironclaw_loop_contracts::{
+        AgentLoopDriverDescriptor, CancellationPolicy, CapabilitySurfaceProfileId,
+        CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ContextProfileId, LoopDriverId,
+        LoopRunContext, ModelProfileId, PromptMode, RedactedRunProfileProvenance,
+        ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
+        RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
     };
 
     use super::{
@@ -234,7 +232,7 @@ mod tests {
                 max_model_calls: 32,
                 max_capability_invocations: 64,
             },
-            personal_context_policy: ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
+            personal_context_policy: ironclaw_loop_contracts::PersonalContextPolicy::Excluded,
             runtime_constraints: RuntimeProfileConstraints {
                 allow_raw_runtime_backend_selection: false,
                 allow_broad_capability_surface: false,
@@ -365,7 +363,7 @@ mod tests {
 
         assert_eq!(
             message.role,
-            ironclaw_turns::run_profile::LoopInlineMessageRole::System
+            ironclaw_loop_contracts::LoopInlineMessageRole::System
         );
         assert_eq!(
             message.safe_body.as_str(),

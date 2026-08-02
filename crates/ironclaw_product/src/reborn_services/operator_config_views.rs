@@ -1,5 +1,7 @@
 //! Descriptor-backed operator configuration read projections.
 
+use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewProvider};
+
 use futures::future::try_join_all;
 use serde::Deserialize;
 
@@ -7,10 +9,10 @@ use super::{
     AUTO_APPROVE_CONFIG_KEY, ProductCapabilityInvoker, ProductSurfaceCaller, ProductSurfaceError,
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse, RebornServices,
-    RebornViewDescriptor, RebornViewProvider, TOOL_CONFIG_PREFIX, auto_approve_config_entry,
-    caller_resource_scope, find_operator_tool, operator_config_not_wired_response,
-    operator_config_unknown_key_error, operator_config_validation_diagnostics,
-    operator_tool_permission_context, tool_config_entry, tool_config_entry_with_context,
+    TOOL_CONFIG_PREFIX, auto_approve_config_entry, caller_resource_scope, find_operator_tool,
+    operator_config_not_wired_response, operator_config_unknown_key_error,
+    operator_config_validation_diagnostics, operator_tool_permission_context, tool_config_entry,
+    tool_config_entry_with_context,
 };
 
 pub const OPERATOR_CONFIG_LIST_VIEW: RebornViewDescriptor = RebornViewDescriptor {

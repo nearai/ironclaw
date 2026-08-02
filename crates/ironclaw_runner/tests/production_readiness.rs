@@ -1,6 +1,11 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use ironclaw_loop_contracts::{
+    AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverHost,
+    AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, CheckpointSchemaId, LoopDriverId,
+    LoopExit,
+};
 use ironclaw_runner::{
     driver_registry::{DriverKind, DriverRegistry, DriverRequirements, LoopDriverRegistryKey},
     production_readiness::{
@@ -12,11 +17,7 @@ use ironclaw_runner::{
         validate_reborn_loop_production_readiness,
     },
 };
-use ironclaw_turns::{
-    AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
-    AgentLoopDriverRunRequest, LoopExit, RunProfileId, RunProfileVersion, TurnStatus,
-    run_profile::{AgentLoopDriverHost, CheckpointSchemaId, LoopDriverId},
-};
+use ironclaw_turns::{RunProfileId, RunProfileVersion, TurnStatus};
 
 #[test]
 fn production_readiness_rejects_missing_selected_driver() {

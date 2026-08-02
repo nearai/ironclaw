@@ -16,19 +16,20 @@ use ironclaw_host_api::turn::{IdempotencyKey, TurnGateRef, TurnRunId, TurnScope,
 use ironclaw_host_api::{
     ids::{AgentId, ProjectId, TenantId, ThreadId},
     path::VirtualPath,
-    product_surface::{
-        BoundProductSurface, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
-        ProductSurfaceStreamRequest,
-    },
 };
+use ironclaw_loop_contracts::LoopModelUsage;
 use ironclaw_product::{
     LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, RebornTimelineRequest,
     TIMELINE_VIEW,
 };
 use ironclaw_product::{
     ProductInboundAck, ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
-    ProductProjectionState, ProjectionCursor, ProjectionReadRequest, ProjectionStream,
-    ProjectionSubscriptionRequest,
+    ProductProjectionState, ProjectionCursor, ProjectionReadRequest, ProjectionSubscriptionRequest,
+};
+use ironclaw_product_contracts::projection::ProjectionStream;
+use ironclaw_product_contracts::surface::{
+    BoundProductSurface, ProductSurface, ProductSurfaceCaller, ProductSurfaceError,
+    ProductSurfaceStreamRequest,
 };
 use ironclaw_reborn_openai_compat::OpenAiCompatRefStore;
 use ironclaw_reborn_openai_compat::{
@@ -59,7 +60,6 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, GetRunStateRequest,
     ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnError, TurnErrorCategory,
-    run_profile::LoopModelUsage,
 };
 use sha2::{Digest, Sha256};
 

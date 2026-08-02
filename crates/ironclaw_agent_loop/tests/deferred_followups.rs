@@ -5,9 +5,9 @@ use ironclaw_agent_loop::{
     state::{CheckpointKind, LoopExecutionState},
     test_support::{MockAgentLoopDriverHost, MockHostCall, ScenarioScript},
 };
-use ironclaw_turns::{
-    LoopCancelledReasonKind, LoopExit,
-    run_profile::{LoopCancelReasonKind, LoopCancellationSignal, LoopRunInfoPort},
+use ironclaw_loop_contracts::{
+    LoopCancelReasonKind, LoopCancellationSignal, LoopCancelledReasonKind, LoopExit,
+    LoopRunInfoPort,
 };
 
 #[tokio::test(start_paused = true)]

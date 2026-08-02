@@ -31,6 +31,27 @@ changes. Root `Cargo.toml` and `Cargo.lock` changes are broader workspace risk:
 they run the lane in the merge queue, before landing, without adding the full
 WASM build to ordinary PR feedback. Push and deep-CI runs remain exhaustive.
 
+`reborn-tests.yml` follows the same PR-versus-queue contract. Pull requests use
+`reborn_pr_test_plan.py` to run affected crate buckets and exact changed root,
+integration, and frontend suites without LLVM instrumentation. Recorded QA
+replay remains a baseline on every pull request because it detects ordering
+and cross-surface regressions that cannot be inferred from changed paths. The
+full transitive reverse workspace dependency closure is included in PR crate
+selection. Foundational-crate changes that span more than three canonical
+buckets coalesce every changed and dependent package into at most three PR
+jobs instead of omitting consumer tests. The merge queue and pushes to `main`
+still run every crate bucket, root
+partition, group suite, integration lane, frontend test, recorded replay, and
+coverage gate. Unknown paths, empty diffs, and recognized test-topology or
+workspace-topology changes fail closed to that same full plan on the pull
+request. A planner execution or schema failure also fails the required check
+loudly.
+The queue therefore preserves exhaustive deterministic evidence while
+ordinary PRs avoid consuming 20-plus runners for unrelated lanes. Pull-request
+parallelism is capped at three crate buckets, one root partition, and one
+integration lane; merge queue and main retain full matrix parallelism so this
+feedback optimization does not serialize the production gate.
+
 History: the slim-vs-full clippy matrix violated this — the queue linted only
 `--all-features` while push linted a broader matrix, so feature-gated dead code
 could pass the queue and turn main red post-merge.
@@ -213,22 +234,30 @@ trail: the former in-run alert jobs and `nightly-alert-issue.sh` were removed
 in favor of this single external check, because an in-run alert dies with its
 own run on a startup_failure and can never see a cron that didn't fire.
 
-### Main branch alerting
+### Main branch and merge-queue alerting
 
 `main-ci-slack-alerts.yml` watches completed `workflow_run` events for the
-current `push` to `main` workflows: Code Style, Tests (Reborn), Reborn E2E,
-Platform & Compat, Replay Snapshot Gate, Code Coverage,
+current `push` to `main` and `merge_group` workflows: Code Style, Tests
+(Reborn), Reborn E2E, Platform & Compat, Replay Snapshot Gate, Code Coverage,
 nearai-bench dispatcher tests, and Release-plz. Any watched run that concludes
 `failure`, `timed_out`, `action_required`, or `startup_failure` posts a Slack
-message with the workflow, conclusion, failed job names, commit, actor, and run
-link.
+message with the workflow, conclusion, failed job and step names, available
+failure annotations, commit, actor, and run link. Merge-queue alerts also
+resolve the PR number from GitHub's `gh-readonly-queue/main/pr-<number>-...`
+ref and include the PR title, author, and link.
 
-Alerts go to `secrets.MAIN_CI_SLACK_WEBHOOK_URLS`; the value may be a single
-webhook URL or multiple URLs separated by newlines or commas. This is
-intentionally separate from the canary/nightly `SLACK_WEBHOOK_URL` so main CI
-alerts can target dedicated channels.
+Main-branch alerts go to `secrets.MAIN_CI_SLACK_WEBHOOK_URLS`; the value may be
+a single webhook URL or multiple URLs separated by newlines or commas.
+Merge-queue alerts go to `secrets.SLACK_WEBHOOK_URL`, the existing live-canary
+channel. This keeps post-merge CI alerts in their dedicated channels while
+making queue bounces visible alongside live-canary failures.
 When adding a new workflow that runs on `push` to `main`, add its workflow
 `name:` to the watched list in `main-ci-slack-alerts.yml`.
+
+Code Coverage uses same-ref concurrency with cancellation. When merges land
+faster than coverage completes, only the newest cumulative `main` commit keeps
+running; superseded post-merge coverage runs do not consume runners needed by
+pull requests.
 
 ## Reborn-only release policy
 

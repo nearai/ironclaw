@@ -12,6 +12,9 @@ use ironclaw_host_api::{
     resource::ResourceScope,
     scope::Principal,
 };
+use ironclaw_loop_contracts::{
+    LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
+};
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse,
@@ -22,14 +25,11 @@ use ironclaw_product::{
 };
 use ironclaw_reborn_composition::{
     HooksActivationConfig, PollSettings, RebornHostBindings, RebornRuntimeError,
-    RebornRuntimeIdentity, RebornRuntimeInput, RebornSkillSourceKind, RebornTurnDriveOutcome,
+    RebornRuntimeIdentity, RebornRuntimeInput, RebornSkillActivationSource, RebornTurnDriveOutcome,
     TurnRunnerSettings, build_reborn_runtime,
 };
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, local_runtime_build_input_with_options,
-};
-use ironclaw_turns::run_profile::{
-    LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
 };
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey, ResumeTurnRequest,
@@ -471,7 +471,7 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
         .iter()
         .filter(|activation| {
             activation.name == "policy-helper"
-                && activation.source == Some(RebornSkillSourceKind::User)
+                && activation.source == Some(RebornSkillActivationSource::User)
         })
         .collect();
     assert_eq!(
@@ -486,7 +486,8 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
         .active_bundles()
         .iter()
         .filter(|bundle| {
-            bundle.source == RebornSkillSourceKind::User && bundle.skill_name == "policy-helper"
+            bundle.source == RebornSkillActivationSource::User
+                && bundle.skill_name == "policy-helper"
         })
         .collect();
     assert_eq!(

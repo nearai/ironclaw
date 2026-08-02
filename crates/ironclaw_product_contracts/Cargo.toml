@@ -1,0 +1,59 @@
+[package]
+name = "ironclaw_product_contracts"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "The product-tier contract for IronClaw Reborn: the ProductSurface membrane, its caller/descriptor types, the product wire DTOs every transport speaks, and the product-side ports whose implementations sit beside product"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "contracts"
+
+[features]
+# Dev-only seam (rule: cargo-features.md bar #4 — the sanctioned `test-support`
+# name). Compiles the recording `ProductSurface` double and the in-memory
+# product-DTO fakes so downstream crates stop hand-rolling them. Never enabled
+# by a shipped artifact.
+test-support = []
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+# `AdminUserService::put_secret` takes the secret material and
+# `AdminCreatedUser` carries the one-time API token; both are `SecretString`
+# so the port cannot be implemented (or called) with a plain `String` that
+# `Debug`-prints itself. A value wrapper, not a framework or runtime client —
+# the contracts-purity denylist in `reborn_dependency_boundaries.rs` governs
+# the latter and this is deliberately not one. `serde` is on because the three
+# `Deserialize`-derived bodies that carry secret material on the wire —
+# `RebornOperatorSetupRequest` (`api_key`, `webui_access_token`),
+# `UpsertLlmProviderRequest` and `LlmProbeRequest` (`api_key`) — must not
+# degrade those fields to a `String` here.
+secrecy = { version = "0.10", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+# `ProductSurfaceEventSubscription` and `ProjectionStream` are the two
+# continuation handles a transport holds open across a client connection; both
+# are `tokio::sync` channel types. Evicting them is the WS1 "evict behavior
+# from host_api" row, which owns the `tokio::sync::mpsc` projection type by
+# name — this crate inherits the dependency with the types, it does not add it.
+tokio = { version = "1", features = ["sync"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+# `ProtocolAuthEvidence::test_verified`, used by the inbound-envelope suites,
+# is behind `ironclaw_host_api`'s dev-only `test-support` seam.
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0", features = [
+    "test-support",
+] }
+serde_json = "1"
+static_assertions = "1"
+tokio = { version = "1", features = ["macros", "rt", "sync"] }
