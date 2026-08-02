@@ -783,9 +783,10 @@ review_after = "2026-11-01"
 
 [[exemption]]
 path = "crates/ironclaw_runner/src/runtime.rs"
-branch_lines = [863]
+lines = [404, 405, 406, 407, 676]
+branch_lines = [664, 843]
 owner = "@nearai/reborn"
-reason = "input_queue_reconcile None arm of the transition-port decoration: production (and the integration harness) always wire the reconcile handle, so the undecorated branch runs only in compositions without a steering queue. Crate-tier runtime tests cover the wiring shape."
+reason = "input_queue_reconcile None arms of the observer subscription and transition-port decoration (production and the integration harness always wire the reconcile handle), the observer-subscription error arm (subscribe fails only on a duplicate observer id), and the matching build-error Display arm. Crate-tier runtime and decorator tests cover the wiring shape."
 issue = "https://github.com/nearai/ironclaw/issues/7006"
 review_after = "2026-11-01"
 
