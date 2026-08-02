@@ -46,17 +46,39 @@ assert_failure() {
 # LC_ALL=C so its collation matches the LC_ALL=C-sorted inputs. Backslash-
 # newline continuations are joined first so multiline invocations — both the
 # offending `comm \` form and a valid `LC_ALL=C \` + `comm` form — are
-# inspected as whole commands; comment lines are then dropped. `find -L`
-# follows the .githooks symlinks to their tracked targets; build caches are
-# pruned. This file is excluded: it deliberately runs unpinned comm to prove
-# the failure mode.
-unpinned=""
-while IFS= read -r -d '' file; do
-    hits="$(sed -e ':a' -e '/\\$/{N; s/\\\n[[:space:]]*/ /; ba' -e '}' "$file" \
+# inspected as whole commands; comment lines are then dropped, and compound
+# commands are split at `;`, `&`, and `|` so each invocation is inspected
+# independently (a pinned comm must not excuse an unpinned one on the same
+# logical line). `find -L` follows the .githooks symlinks to their tracked
+# targets; build caches are pruned. This file is excluded: it deliberately
+# runs unpinned comm to prove the failure mode.
+scan_unpinned_comm() {
+    sed -e ':a' -e '/\\$/{N; s/\\\n[[:space:]]*/ /; ba' -e '}' "$1" \
         | grep -av '^[[:space:]]*#' \
+        | tr ';&|' '\n\n\n' \
         | grep -anE '(^|[^-=[:alnum:]_.])comm([[:space:]]|$)' \
         | grep -avE 'LC_ALL=C[[:space:]]+comm([[:space:]]|$)' \
-        || true)"
+        || true
+}
+
+# Scanner self-checks: each invocation in a compound command is judged on its
+# own, and the pinned forms (single, compound, multiline continuation) stay
+# clean.
+scanner_fixture="$(mktemp "${TMPDIR:-/tmp}/comm-locale.XXXXXX")"
+printf 'LC_ALL=C comm -12 a b; comm -12 c d\n' > "$scanner_fixture"
+assert_failure "scanner flags an unpinned comm after a pinned one in a compound command" \
+    test -z "$(scan_unpinned_comm "$scanner_fixture")"
+printf 'comm \\\n  -12 a b\n' > "$scanner_fixture"
+assert_failure "scanner flags an unpinned multiline comm continuation" \
+    test -z "$(scan_unpinned_comm "$scanner_fixture")"
+printf 'LC_ALL=C comm -12 a b && LC_ALL=C \\\n  comm -12 c d\n' > "$scanner_fixture"
+assert_success "scanner accepts pinned comm in compound and multiline forms" \
+    test -z "$(scan_unpinned_comm "$scanner_fixture")"
+rm -f "$scanner_fixture"
+
+unpinned=""
+while IFS= read -r -d '' file; do
+    hits="$(scan_unpinned_comm "$file")"
     if [ -n "$hits" ]; then
         unpinned="${unpinned}${file}: ${hits}"$'\n'
     fi
@@ -71,16 +93,17 @@ fi
 
 # Case 2: the fixture pair that broke the ratchet. In C collation
 # "ironclaw_event_streams" < "ironclaw_events" ('_' 0x5f < 's' 0x73). The
-# sentinel second file ("zzz" sorts last in any collation) forces comm to
-# advance through file 1 and check its order — with identical files the lines
-# compare equal and comm never notices the disorder. Select a locale by
-# proving the mismatch — unpinned comm must reject the C-sorted fixture under
-# it (this skips C-compatible collations such as C.UTF-8, where the case would
-# prove nothing) — then assert both sides in that same environment: unpinned
-# comm rejects the fixture and the pinned form accepts it. If no installed
-# locale disagrees with C on the fixture, the
-# mismatch is not reproducible on this machine; say so explicitly instead of
-# silently passing under C.
+# sentinel second file ("zzz") forces comm to advance through file 1 and
+# check its order — with identical files the lines compare equal and comm
+# never notices the disorder. Select a locale by proving the mismatch:
+# the sentinel must still sort after both fixture entries under it (or the
+# fixture-order path is never exercised) and unpinned comm must reject the
+# C-sorted fixture under it (this skips C-compatible collations such as
+# C.UTF-8, where the case would prove nothing). Then assert both sides in
+# that same environment: unpinned comm rejects the fixture and the pinned
+# form accepts it. If no installed locale qualifies, the mismatch is not
+# reproducible on this machine; say so explicitly instead of silently
+# passing under C.
 fixture="$(mktemp "${TMPDIR:-/tmp}/comm-locale.XXXXXX")"
 sentinel="$(mktemp "${TMPDIR:-/tmp}/comm-locale.XXXXXX")"
 printf 'ironclaw_event_streams\nironclaw_events\n' > "$fixture"
@@ -88,6 +111,10 @@ printf 'zzz\n' > "$sentinel"
 
 mismatch_locale=""
 while IFS= read -r candidate; do
+    last="$(cat "$fixture" "$sentinel" | LC_ALL="$candidate" sort | tail -n 1)"
+    if [ "$last" != "zzz" ]; then
+        continue
+    fi
     if ! LC_ALL="$candidate" comm -12 "$fixture" "$sentinel" > /dev/null 2>&1; then
         mismatch_locale="$candidate"
         break
