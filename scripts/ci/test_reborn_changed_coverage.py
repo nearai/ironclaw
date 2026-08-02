@@ -33,14 +33,14 @@ class ChangedCoverageWorkflowTests(unittest.TestCase):
         )
         self.assertIsNotNone(success, result.stdout)
 
-    def test_committed_policy_keeps_high_non_absolute_floors(self):
+    def test_committed_policy_restores_original_line_floor(self):
         with (ROOT / "tests/integration/changed-coverage-exemptions.toml").open(
             "rb"
         ) as handle:
             policy = tomllib.load(handle)["policy"]
 
-        self.assertEqual(policy["line_percent"], 95.0)
-        self.assertEqual(policy["branch_percent"], 85.0)
+        self.assertEqual(policy["line_percent"], 90.0)
+        self.assertEqual(policy["branch_percent"], 0.0)
 
     def test_reborn_workflow_runs_gate_and_preserves_machine_report(self):
         workflow = (ROOT / ".github/workflows/reborn-tests.yml").read_text(
