@@ -8,7 +8,7 @@ publish = false
 layer = "substrates"
 
 [dependencies]
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 hkdf = "0.13"

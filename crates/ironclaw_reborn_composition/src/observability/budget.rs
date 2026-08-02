@@ -10,10 +10,10 @@
 
 use std::sync::Arc;
 
+use ironclaw_loop_contracts::LoopModelBudgetAccountant;
 use ironclaw_loop_host::{BudgetSeedingPolicy, GovernorBackedAccountant, ModelCostTable};
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::{BudgetEventSink, BudgetPeriod, BudgetThresholds, ResourceGovernor};
-use ironclaw_turns::run_profile::LoopModelBudgetAccountant;
 use rust_decimal::Decimal;
 
 /// Build a production-shaped `GovernorBackedAccountant` from the
@@ -116,7 +116,7 @@ mod tests {
 
         // Drive one `pre_model_call` to fire the seeding policy.
         let context = test_run_context("tenant-shared-helper", "alice-shared-helper");
-        let request = ironclaw_turns::run_profile::LoopModelRequest {
+        let request = ironclaw_loop_contracts::LoopModelRequest {
             inline_messages: Vec::new(),
             messages: vec![],
             surface_version: None,
@@ -159,19 +159,17 @@ mod tests {
         );
     }
 
-    fn test_run_context(tenant: &str, user: &str) -> ironclaw_turns::run_profile::LoopRunContext {
+    fn test_run_context(tenant: &str, user: &str) -> ironclaw_loop_contracts::LoopRunContext {
         use ironclaw_host_api::ids::ThreadId;
+        use ironclaw_loop_contracts::{
+            AgentLoopDriverDescriptor, CancellationPolicy, CapabilitySurfaceProfileId,
+            CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ContextProfileId, LoopDriverId,
+            LoopRunContext, ModelProfileId, PersonalContextPolicy, RedactedRunProfileProvenance,
+            ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
+            RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
+        };
         use ironclaw_turns::{
-            AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnActor, TurnId,
-            TurnRunId, TurnScope,
-            run_profile::{
-                CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy,
-                CheckpointSchemaId, ConcurrencyClass, ContextProfileId, LoopDriverId,
-                LoopRunContext, ModelProfileId, PersonalContextPolicy,
-                RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy,
-                ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
-                SchedulingClass, SteeringPolicy,
-            },
+            RunProfileId, RunProfileVersion, TurnActor, TurnId, TurnRunId, TurnScope,
         };
 
         let scope = TurnScope::new(

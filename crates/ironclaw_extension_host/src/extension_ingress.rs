@@ -17,20 +17,26 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
+use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
+use ironclaw_extension_contracts::verified_inbound;
 use ironclaw_extension_host::ingress::{
     ExtensionIngressRouter, InboundAdmission, InboundAdmissionAck, InboundSink, InboundSinkError,
     IngressConfigurationPort, IngressPortError, IngressSecretsPort, VerificationCandidate,
 };
-use ironclaw_host_api::{ids::SecretHandle, product_surface::ChannelInboundProductSurface};
-use ironclaw_product::{
-    AdapterInstallationId, ExternalConversationRef, ExternalEventId, NormalizedInboundMessage,
-    ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductSourceChannel,
-    ProtocolAuthEvidence, classify_channel_inbound_text,
+use ironclaw_host_api::ids::SecretHandle;
+use ironclaw_host_api::product_adapter::auth::ChannelIngressVerifier;
+use ironclaw_host_api::product_adapter::{
+    AdapterInstallationId, ProductAdapterId, ProtocolAuthEvidence,
 };
 use ironclaw_product::{
     ChannelInboundSurfaceOutcome, ChannelInboundSurfaceRejectedAdmission,
     ChannelInboundSurfaceRequest,
 };
+use ironclaw_product_contracts::inbound::{
+    ProductInboundAck, ProductInboundEnvelope, ProductSourceChannel, classify_channel_inbound_text,
+};
+use ironclaw_product_contracts::surface::ChannelInboundProductSurface;
 use tokio::task::JoinSet;
 
 use crate::channel_pairing::ChannelPairingConsumeOutcome;
@@ -61,7 +67,7 @@ pub trait PostAdmissionObserver: Send + Sync {
     async fn observe_error(
         &self,
         _envelope: ProductInboundEnvelope,
-        _error: ironclaw_product::ProductAdapterError,
+        _error: ironclaw_host_api::product_adapter_error::ProductAdapterError,
     ) {
     }
 }
@@ -79,19 +85,36 @@ pub enum VerifiedEvidenceMint {
     },
 }
 
+/// This crate is the generic ingress verifier — trust stage T2 — so it holds the
+/// one production `ChannelIngressVerifier` implementation in the workspace, and
+/// `reborn_sealed_evidence_mint_ratchet` keeps it that way. The impl sits on
+/// `VerifiedEvidenceMint` because that value *is* the recipe the router
+/// executed: the grant and the claim it authorizes are derived from the same
+/// verification, not from two independently-trusted facts.
+///
+/// A channel package never reaches this: it holds no grant, so
+/// `ironclaw_extension_contracts::verified_inbound` is uncallable from a
+/// package (PROPOSAL §12.1a).
+impl ChannelIngressVerifier for VerifiedEvidenceMint {}
+
 impl VerifiedEvidenceMint {
     fn mint(&self, subject: &str) -> ProtocolAuthEvidence {
         match self {
             Self::RequestSignature {
                 signature_header,
                 timestamp_header,
-            } => ironclaw_product::auth::mark_request_signature_verified(
+            } => verified_inbound::mark_request_signature_verified(
+                self.verified_inbound_grant(),
                 signature_header.clone(),
                 timestamp_header.clone(),
                 subject,
             ),
             Self::SharedSecretHeader { header } => {
-                ironclaw_product::auth::mark_shared_secret_header_verified(header.clone(), subject)
+                verified_inbound::mark_shared_secret_header_verified(
+                    self.verified_inbound_grant(),
+                    header.clone(),
+                    subject,
+                )
             }
         }
     }
@@ -855,16 +878,23 @@ mod serve_mount {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use ironclaw_host_api::ids::UserId;
-    use ironclaw_host_api::tool_adapter::{
+    use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+    use ironclaw_extension_contracts::channel_adapter::{
+        ChannelAttachmentRef, ProductTriggerReason,
+    };
+    use ironclaw_extension_contracts::external::{
+        ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
+        ProductAttachmentKind,
+    };
+    use ironclaw_extension_contracts::tool_adapter::{
         RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
     };
-    use ironclaw_product::{
-        AuthResolutionPayload, AuthResolutionResult, ChannelAdapter, ChannelAttachmentRef,
-        ChannelInboundClassification, ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
-        ExternalActorRef, ExternalConversationRef, ExternalEventId, InboundCommandPayload,
-        ParsedProductInbound, ProductAttachmentDescriptor, ProductAttachmentKind,
-        ProductInboundPayload, ProductTriggerReason, TrustedInboundContext, UserMessagePayload,
+    use ironclaw_host_api::ids::UserId;
+    use ironclaw_product::{ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome};
+    use ironclaw_product_contracts::inbound::{
+        AuthResolutionPayload, AuthResolutionResult, ChannelInboundClassification,
+        InboundCommandPayload, ParsedProductInbound, ProductInboundPayload, TrustedInboundContext,
+        UserMessagePayload,
     };
     use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
@@ -953,7 +983,7 @@ mod tests {
             &self,
             request: ChannelInboundSurfaceRequest,
             _channel_adapter: Arc<dyn ChannelAdapter>,
-            _channel_egress: Arc<dyn ironclaw_host_api::tool_adapter::RestrictedEgress>,
+            _channel_egress: Arc<dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress>,
         ) -> ChannelInboundSurfaceOutcome {
             self.transfer_submissions.fetch_add(1, Ordering::SeqCst);
             self.admit_channel_inbound(request).await

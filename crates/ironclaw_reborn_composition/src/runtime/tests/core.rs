@@ -237,7 +237,7 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
     assert_eq!(network_egress.calls.load(Ordering::SeqCst), 1);
 
     extension_management
-        .activate_with_prechecked_credentials_for_test(slack_ref, ExtensionActivationMode::Static)
+        .activate_with_prechecked_credentials_for_test(slack_ref)
         .await
         .expect("activate Slack and publish the generic host snapshot");
 
@@ -512,15 +512,16 @@ fn production_scheduler_wake_guard_passes_standalone_with_absent_wiring() {
         .expect("standalone is exempt from the scheduler wake wiring requirement");
 }
 
+use ironclaw_extension_contracts::state::{InstallationState, LifecyclePublicState};
 use ironclaw_host_api::ids::ProjectId;
-use ironclaw_host_api::state::{InstallationState, LifecyclePublicState};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, IdempotencyKey, LoopResultRef, ReplyTargetBindingRef,
+    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnId, TurnRunId, TurnScope, TurnStatus,
+};
 use ironclaw_host_api::{
     ids::{
         ActivityId, AgentId, ApprovalRequestId, CapabilityId, InvocationId, TenantId, ThreadId,
         UserId,
-    },
-    product_surface::{
-        ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     },
     resolution::Resolution,
     resource::ResourceScope,
@@ -529,6 +530,11 @@ use ironclaw_host_api::{
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
     },
     scope::Principal,
+};
+use ironclaw_loop_contracts::{
+    InMemoryRunProfileResolver, LoopCapabilityPort, LoopRunContext, ModelProfileId,
+    ProviderToolCall, RegisterProviderToolCallRequest, RunProfileResolutionRequest,
+    RunProfileResolver, SkillVisibility, VisibleCapabilityRequest,
 };
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
@@ -544,9 +550,13 @@ use ironclaw_product::{
     ProductSurfaceCommandDescriptor, RESOLVE_GATE_COMMAND, RebornExtensionCredentialSetup,
     RebornOutboundPreferencesResponse, RebornSetupExtensionResponse, RebornSkillListResponse,
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornViewPage, RebornViewQuery, SUBMIT_TURN_COMMAND, approval_gate_ref,
+    SUBMIT_TURN_COMMAND, approval_gate_ref,
 };
 use ironclaw_product::{ProductOutboundPayload, ProductProjectionItem};
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+};
+use ironclaw_product_contracts::views::{RebornViewPage, RebornViewQuery};
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
     AppendToolResultReferenceRequest, EnsureThreadRequest, LoadContextMessagesRequest, MessageKind,
@@ -554,15 +564,8 @@ use ironclaw_threads::{
     ToolResultSafeSummary,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, GetRunStateRequest, IdempotencyKey,
-    LoopResultRef, ReplyTargetBindingRef, SanitizedCancelReason, SourceBindingRef,
-    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnId, TurnRunId,
-    TurnScope, TurnStatus,
-    run_profile::{
-        InMemoryRunProfileResolver, LoopCapabilityPort, LoopRunContext, ModelProfileId,
-        ProviderToolCall, RegisterProviderToolCallRequest, RunProfileResolutionRequest,
-        RunProfileResolver, SkillVisibility, VisibleCapabilityRequest,
-    },
+    AllowAllTurnAdmissionPolicy, GetRunStateRequest, SubmitChildRunRequest, SubmitTurnRequest,
+    SubmitTurnResponse,
 };
 use rust_decimal_macros::dec;
 
@@ -574,10 +577,9 @@ use crate::runtime_input::{
     TriggerPollerSettings,
 };
 use crate::{RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError};
-use ironclaw_extension_host::ExtensionActivationMode;
 use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
 
-use super::{RebornSkillSourceKind, build_reborn_runtime};
+use super::{RebornSkillActivationSource, build_reborn_runtime};
 
 const RUNTIME_POLL_TIMEOUT: Duration = Duration::from_secs(10);
 const RUNTIME_SEND_TIMEOUT: Duration = Duration::from_secs(15);
@@ -1565,12 +1567,12 @@ async fn nearai_auth_capture_server_rejects_missing_content_length() {
 
 fn nearai_gateway_test_request() -> HostManagedModelRequest {
     HostManagedModelRequest {
-        model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("interactive_model")
+        model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("interactive_model")
             .expect("model profile id"),
         messages: vec![ironclaw_loop_host::HostManagedModelMessage {
             role: HostManagedModelMessageRole::User,
             content: "hello model".to_string(),
-            content_ref: ironclaw_turns::LoopMessageRef::new(
+            content_ref: ironclaw_host_api::turn::LoopMessageRef::new(
                 "msg:22222222-2222-2222-2222-222222222222",
             )
             .expect("message ref"),
@@ -1803,7 +1805,12 @@ async fn root_llm_gateway_bootstraps_nearai_session_token_from_env() {
 
 #[tokio::test]
 async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
-    let _token_guard = RuntimeEnvGuard::set("NEARAI_SESSION_TOKEN", "sess_reborn_mcp_token").await;
+    let _env_guard = RuntimeEnvGuard::with([
+        ("NEARAI_SESSION_TOKEN", Some("sess_reborn_mcp_token")),
+        ("NEARAI_API_KEY", None),
+        ("NEARAI_BASE_URL", Some("https://cloud-api.nearai.example")),
+    ])
+    .await;
     let root = tempfile::tempdir().expect("tempdir");
     let session_dir = tempfile::tempdir().expect("session tempdir");
     let standalone_root = root.path().join("standalone");
@@ -1811,13 +1818,13 @@ async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
     let config = ironclaw_llm::LlmConfig {
         backend: "nearai".to_string(),
         session: ironclaw_llm::SessionConfig {
-            auth_base_url: "https://private.near.ai".to_string(),
+            auth_base_url: "https://private.nearai.example".to_string(),
             session_path: session_dir.path().join("session.json"),
         },
         nearai: ironclaw_llm::NearAiConfig {
             model: "test-model".to_string(),
             cheap_model: None,
-            base_url: "https://private.near.ai".to_string(),
+            base_url: "https://private.nearai.example".to_string(),
             api_key: None,
             fallback_model: None,
             max_retries: 0,
@@ -1892,7 +1899,7 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     let _env_guard = RuntimeEnvGuard::with([
         ("NEARAI_SESSION_TOKEN", None),
         ("NEARAI_API_KEY", None),
-        ("NEARAI_BASE_URL", None),
+        ("NEARAI_BASE_URL", Some("https://cloud-api.nearai.example")),
     ])
     .await;
     let root = tempfile::tempdir().expect("tempdir");
@@ -1920,13 +1927,13 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     let config = ironclaw_llm::LlmConfig {
         backend: "nearai".to_string(),
         session: ironclaw_llm::SessionConfig {
-            auth_base_url: "https://private.near.ai".to_string(),
+            auth_base_url: "https://private.nearai.example".to_string(),
             session_path: session_dir.path().join("session.json"),
         },
         nearai: ironclaw_llm::NearAiConfig {
             model: "test-model".to_string(),
             cheap_model: None,
-            base_url: "https://cloud-api.near.ai".to_string(),
+            base_url: "https://cloud-api.nearai.example".to_string(),
             api_key: None,
             fallback_model: None,
             max_retries: 0,
@@ -2041,7 +2048,7 @@ async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
     let _env_guard = RuntimeEnvGuard::with([
         ("NEARAI_SESSION_TOKEN", None),
         ("NEARAI_API_KEY", None),
-        ("NEARAI_BASE_URL", None),
+        ("NEARAI_BASE_URL", Some("https://cloud-api.nearai.example")),
     ])
     .await;
     let root = tempfile::tempdir().expect("tempdir");
@@ -2069,13 +2076,13 @@ async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
     let config = ironclaw_llm::LlmConfig {
         backend: "nearai".to_string(),
         session: ironclaw_llm::SessionConfig {
-            auth_base_url: "https://private.near.ai".to_string(),
+            auth_base_url: "https://private.nearai.example".to_string(),
             session_path: session_dir.path().join("session.json"),
         },
         nearai: ironclaw_llm::NearAiConfig {
             model: "test-model".to_string(),
             cheap_model: None,
-            base_url: "https://cloud-api.near.ai".to_string(),
+            base_url: "https://cloud-api.nearai.example".to_string(),
             api_key: Some(secrecy::SecretString::from("sk-prebuild-nearai-mcp-key")),
             fallback_model: None,
             max_retries: 0,
@@ -2470,7 +2477,9 @@ async fn env_trace_recording_attaches_recorder_factory_only_when_enabled() {
 /// the real caller (`build_reborn_runtime`) instead.
 #[tokio::test]
 async fn provider_factory_runs_during_production_boot() {
-    let _env_guard = RuntimeEnvGuard::with([("NEARAI_BASE_URL", None)]).await;
+    let _env_guard =
+        RuntimeEnvGuard::with([("NEARAI_BASE_URL", Some("https://cloud-api.nearai.example"))])
+            .await;
     let root = tempfile::tempdir().expect("tempdir");
     let session_dir = tempfile::tempdir().expect("session tempdir");
     let standalone_root = root.path().join("standalone");
@@ -2539,7 +2548,7 @@ async fn standalone_runtime_startup_uses_stored_nearai_api_key_after_restart() {
     let _env_guard = RuntimeEnvGuard::with([
         ("NEARAI_SESSION_TOKEN", None),
         ("NEARAI_API_KEY", None),
-        ("NEARAI_BASE_URL", None),
+        ("NEARAI_BASE_URL", Some("https://cloud-api.nearai.example")),
     ])
     .await;
     let (base_url, auth_rx) = start_nearai_auth_capture_server().await;
@@ -3396,7 +3405,7 @@ async fn send_user_message_auto_queues_trace_for_enrolled_scope() {
 /// carried.
 #[tokio::test(flavor = "multi_thread")]
 async fn send_user_message_persists_personal_owner_for_webui() {
-    use ironclaw_turns::TurnOwner;
+    use ironclaw_host_api::turn::TurnOwner;
 
     let root = tempfile::tempdir().expect("tempdir");
     let actor_owner_id = "runtime-personal-owner-user";
@@ -3548,7 +3557,7 @@ async fn send_user_message_renders_cli_origin_in_model_request() {
 }
 
 #[tokio::test]
-async fn send_user_message_until_gate_returns_blocked_on_auth_gate() {
+async fn hosted_mcp_activation_stays_pending_until_preparation_completes() {
     let root = tempfile::tempdir().expect("tempdir");
     let host_home = root.path().join("host-home");
     std::fs::create_dir_all(&host_home).expect("host home");
@@ -3589,67 +3598,15 @@ async fn send_user_message_until_gate_returns_blocked_on_auth_gate() {
         )
         .await
         .expect("install Notion MCP");
-    // v3 hosted-MCP packages publish no model-visible tools on static
-    // activation; script tools/list discovery so the notion-search tool
-    // the auth-gate gateway calls exists as a model-visible capability.
-    extension_management
-        .activate_with_prechecked_credentials_for_test(
-            notion_ref,
-            ExtensionActivationMode::HostedMcpDiscovery {
-                scope: ResourceScope::local_default(
-                    UserId::new("runtime-auth-gate-owner").expect("valid user"),
-                    InvocationId::new(),
-                )
-                .expect("valid scope"),
-                runtime_http_egress: Arc::new(
-                    ironclaw_extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress::with_tool_name("notion-search"),
-                ),
-            },
-        )
+    // Hosted-MCP discovery belongs to pending preparation, not activation
+    // mode selection. The prechecked helper bypasses that product seam, so
+    // activation remains visibly pending instead of publishing a guessed tool
+    // catalog.
+    let activation = extension_management
+        .activate_with_prechecked_credentials_for_test(notion_ref)
         .await
-        .expect("activate Notion MCP with scripted discovery");
-
-    let conversation = runtime.new_conversation().await.expect("conversation");
-    runtime
-        .enable_global_auto_approve_for_test(&conversation)
-        .await;
-    let outcome = tokio::time::timeout(
-        RUNTIME_SEND_TIMEOUT,
-        runtime.send_user_message_until_gate(&conversation, "search Notion"),
-    )
-    .await
-    .expect("gate-aware send should return before timeout")
-    .expect("gate-aware send should succeed");
-
-    let (run_id, gate_ref) = match outcome {
-        super::RebornTurnDriveOutcome::BlockedOnGate {
-            run_id,
-            status,
-            gate_ref,
-            ..
-        } => {
-            assert_eq!(status, TurnStatus::BlockedAuth);
-            assert!(
-                gate_ref.as_str().starts_with("gate:auth-"),
-                "auth gate ref should carry the auth prefix, got {}",
-                gate_ref.as_str()
-            );
-            (run_id, gate_ref)
-        }
-        super::RebornTurnDriveOutcome::Terminal(reply) => {
-            panic!("auth-gated turn should pause before terminal reply, got {reply:?}");
-        }
-    };
-    let state = runtime
-        .turn_coordinator
-        .get_run_state(GetRunStateRequest {
-            scope: runtime.turn_scope_for(&conversation.0),
-            run_id,
-        })
-        .await
-        .expect("blocked run state");
-    assert_eq!(state.status, TurnStatus::BlockedAuth);
-    assert_eq!(state.gate_ref.as_ref(), Some(&gate_ref));
+        .expect("pending hosted-MCP activation returns a lifecycle response");
+    assert_eq!(activation.phase, InstallationState::Installed);
 
     runtime.shutdown().await.expect("runtime shutdown");
 }
@@ -3801,7 +3758,10 @@ async fn cancel_run_propagates_to_subagent_children() {
                     result_ref,
                     handoff: None,
                     parent_run_context: parent_run_context.clone(),
-                    gate_ref: ironclaw_turns::GateRef::new("gate:runtime-cancel-child").unwrap(),
+                    gate_ref: ironclaw_host_api::turn::TurnGateRef::new(
+                        "gate:runtime-cancel-child",
+                    )
+                    .unwrap(),
                 })
                 .unwrap(),
             ),
@@ -4550,7 +4510,7 @@ async fn execute_skill_message_returns_plan_and_reads_active_bundle_assets() {
     assert_eq!(result.plan.activations()[0].name, "asset-helper");
     assert_eq!(
         result.plan.activations()[0].source,
-        Some(RebornSkillSourceKind::User)
+        Some(RebornSkillActivationSource::User)
     );
     assert_eq!(result.plan.active_bundles().len(), 1);
     assert_eq!(result.plan.active_bundles()[0].skill_name, "asset-helper");
@@ -5285,14 +5245,14 @@ async fn production_channel_host_lands_attachment_with_read_write_mount() {
 }
 
 async fn query_webui_extension_setup(
-    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
+    api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
     package_id: &str,
 ) -> RebornSetupExtensionResponse {
     let page = query_product_surface_page(
         api,
         caller,
-        ironclaw_product::RebornViewQuery {
+        ironclaw_product_contracts::views::RebornViewQuery {
             view_id: ironclaw_product::EXTENSION_SETUP_VIEW.id.to_string(),
             params: serde_json::json!({ "package_id": package_id }),
             cursor: None,
@@ -5304,7 +5264,7 @@ async fn query_webui_extension_setup(
 }
 
 async fn invoke_product_command<T, O>(
-    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
+    api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
     command: ProductSurfaceCommandDescriptor<T, O>,
     input: T,
@@ -5314,10 +5274,10 @@ where
     O: serde::de::DeserializeOwned,
 {
     let input = serde_json::to_value(input).map_err(ProductSurfaceError::internal_from)?;
-    let response = ironclaw_host_api::product_surface::ProductSurface::invoke(
+    let response = ironclaw_product_contracts::surface::ProductSurface::invoke(
         api,
         caller,
-        ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
             operation_id: command.capability_id()?,
             input,
             activity_id: ActivityId::new(),
@@ -5328,7 +5288,7 @@ where
 }
 
 async fn invoke_product_capability<T>(
-    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
+    api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
     capability_id: &str,
     input: T,
@@ -5337,10 +5297,10 @@ where
     T: serde::Serialize,
 {
     let input = serde_json::to_value(input).map_err(ProductSurfaceError::internal_from)?;
-    let response = ironclaw_host_api::product_surface::ProductSurface::invoke(
+    let response = ironclaw_product_contracts::surface::ProductSurface::invoke(
         api,
         caller,
-        ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
             operation_id: CapabilityId::new(capability_id).expect("capability id"),
             input,
             activity_id: ActivityId::new(),
@@ -5351,14 +5311,14 @@ where
 }
 
 async fn query_product_surface_page(
-    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
+    api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
     query: RebornViewQuery,
 ) -> Result<RebornViewPage, ProductSurfaceError> {
-    let page = ironclaw_host_api::product_surface::ProductSurface::query(
+    let page = ironclaw_product_contracts::surface::ProductSurface::query(
         api,
         caller,
-        ironclaw_host_api::product_surface::ProductSurfaceQueryRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceQueryRequest {
             view_id: query.view_id,
             input: query.params,
             cursor: query.cursor,
@@ -5378,14 +5338,14 @@ async fn query_product_surface_page(
 }
 
 async fn stream_product_events(
-    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
+    api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
     request: RebornStreamEventsRequest,
 ) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
-    let response = ironclaw_host_api::product_surface::ProductSurface::stream_events(
+    let response = ironclaw_product_contracts::surface::ProductSurface::stream_events(
         api,
         caller,
-        ironclaw_host_api::product_surface::ProductSurfaceStreamRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceStreamRequest {
             stream_id: Some(request.thread_id),
             after_cursor: request
                 .after_cursor
@@ -5403,7 +5363,7 @@ async fn stream_product_events(
 }
 
 async fn submit_webui_extension_setup(
-    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
+    api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
     package_id: &str,
     request: ProductSetupExtensionRequest,
@@ -5432,7 +5392,7 @@ async fn submit_webui_extension_setup(
 }
 
 async fn install_webui_extension_for_setup(
-    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
+    api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
     package_id: &str,
 ) {
@@ -5609,7 +5569,7 @@ async fn standalone_webui_bundle_exposes_outbound_preferences_service() {
     let cleared_page = query_product_surface_page(
         bundle.as_ref(),
         caller.clone(),
-        ironclaw_product::RebornViewQuery {
+        ironclaw_product_contracts::views::RebornViewQuery {
             view_id: ironclaw_product::OUTBOUND_PREFERENCES_VIEW.id.to_string(),
             params: serde_json::json!({}),
             cursor: None,
@@ -5624,7 +5584,7 @@ async fn standalone_webui_bundle_exposes_outbound_preferences_service() {
     let targets_page = query_product_surface_page(
         bundle.as_ref(),
         caller,
-        ironclaw_product::RebornViewQuery {
+        ironclaw_product_contracts::views::RebornViewQuery {
             view_id: ironclaw_product::OUTBOUND_DELIVERY_TARGETS_VIEW
                 .id
                 .to_string(),
@@ -5697,7 +5657,7 @@ async fn standalone_webui_bundle_invokes_skill_install_with_scoped_mounts() {
     let skills_page = query_product_surface_page(
         bundle.as_ref(),
         caller,
-        ironclaw_product::RebornViewQuery {
+        ironclaw_product_contracts::views::RebornViewQuery {
             view_id: ironclaw_product::SKILLS_VIEW.id.to_string(),
             params: serde_json::json!({}),
             cursor: None,
@@ -5910,7 +5870,7 @@ async fn runtime_product_surface_without_local_runtime_still_lists_automations_f
     let response = query_product_surface_page(
         bundle.as_ref(),
         caller,
-        ironclaw_product::RebornViewQuery {
+        ironclaw_product_contracts::views::RebornViewQuery {
             view_id: ironclaw_product::AUTOMATIONS_VIEW.id.to_string(),
             params: serde_json::to_value(ProductListAutomationsRequest::default())
                 .expect("automation list params"),
@@ -6297,9 +6257,9 @@ async fn standalone_webui_bundle_records_selectable_filesystem_skill_context() {
 /// candidates carry the same (prompt-stage) surface version and the run completes.
 #[tokio::test]
 async fn multi_tool_call_response_survives_surface_change_mid_register() {
-    use ironclaw_product::{
-        LifecycleProductAction, LifecycleProductContext, LifecycleProductService,
-        LifecycleProductSurfaceContext,
+    use ironclaw_product::LifecycleProductAction;
+    use ironclaw_product_contracts::lifecycle_service::{
+        LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
     };
     use std::sync::OnceLock;
 
@@ -6334,7 +6294,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
         async fn stream_model_with_capabilities(
             &self,
             _request: HostManagedModelRequest,
-            capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
+            capabilities: Arc<dyn ironclaw_loop_contracts::LoopCapabilityPort>,
         ) -> Result<HostManagedModelResponse, HostManagedModelError> {
             let call_index = {
                 let mut calls = self.calls.lock().expect("multi-tool gateway lock poisoned");

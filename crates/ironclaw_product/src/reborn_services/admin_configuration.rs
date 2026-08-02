@@ -1,8 +1,10 @@
 //! Product DTOs for the manifest-declared administrator configuration view.
 
+use ironclaw_product_contracts::views::RebornViewDescriptor;
+
 use serde::{Deserialize, Serialize};
 
-use super::{ProductCapabilityDescriptor, RebornViewDescriptor};
+use super::ProductCapabilityDescriptor;
 
 pub const ADMIN_CONFIGURATION_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "admin_configuration",

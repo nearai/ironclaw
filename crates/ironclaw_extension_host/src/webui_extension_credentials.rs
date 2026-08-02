@@ -8,12 +8,13 @@ use ironclaw_auth::{
     RebornManualTokenSubmitRequest, RebornProductAuthServices,
     RuntimeCredentialAccountSelectionRequest,
 };
-use ironclaw_host_api::product_surface::{
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-};
 use ironclaw_product::{
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-    ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialSetup,
+    ExtensionCredentialSubmitRequest,
+};
+use ironclaw_product_contracts::package_lifecycle::LifecycleExtensionCredentialSetup;
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
 
 const EXTENSION_CREDENTIAL_SETUP_TTL_SECONDS: i64 = 300;
@@ -196,10 +197,8 @@ mod tests {
         ids::{ExtensionId, InvocationId, SecretHandle, TenantId, UserId},
         resource::ResourceScope,
     };
-    use ironclaw_product::{
-        ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-        LifecycleExtensionCredentialSetup,
-    };
+    use ironclaw_product::{ExtensionCredentialSetupService, ExtensionCredentialStatusRequest};
+    use ironclaw_product_contracts::package_lifecycle::LifecycleExtensionCredentialSetup;
 
     struct NoopDispatcher;
 

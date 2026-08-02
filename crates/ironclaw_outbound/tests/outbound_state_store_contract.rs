@@ -13,13 +13,15 @@ use ironclaw_filesystem::{
     FilesystemOperation, Filter, InMemoryBackend, IndexKind, IndexName, IndexSpec,
     LibSqlRootFilesystem, Page, RecordVersion, RootFilesystem, ScopedFilesystem, VersionedEntry,
 };
+use ironclaw_host_api::turn::{
+    ReplyTargetBindingRef, RunOriginAdapter, TurnActor, TurnRunId, TurnScope,
+};
 use ironclaw_host_api::{
     ids::{AgentId, ProjectId, RunId, TenantId, ThreadId, UserId},
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, ScopedPath, VirtualPath},
 };
 use ironclaw_outbound::*;
-use ironclaw_turns::{ReplyTargetBindingRef, RunOriginAdapter, TurnActor, TurnRunId, TurnScope};
 use tokio::sync::{Mutex, Notify};
 
 const TEST_OUTBOUND_ROOT: &str = "/engine/tenants/test/users/test/outbound";
@@ -2933,7 +2935,7 @@ async fn final_reply_handoff_survives_reopen_and_cursor_replay_is_monotonic() {
     let first = build_outbound_store_for_backend(Arc::clone(&backend));
     let reopened = build_outbound_store_for_backend(backend);
     let handoff = RunFinalReplyHandoffRecord {
-        event_cursor: ironclaw_turns::EventCursor(41),
+        event_cursor: ironclaw_host_api::turn::EventCursor(41),
         scope: turn_scope(),
         run_id: TurnRunId::new(),
     };
@@ -2943,7 +2945,7 @@ async fn final_reply_handoff_survives_reopen_and_cursor_replay_is_monotonic() {
         .await
         .expect("persist handoff before process death");
     first
-        .advance_run_final_reply_handoff_cursor(ironclaw_turns::EventCursor(41))
+        .advance_run_final_reply_handoff_cursor(ironclaw_host_api::turn::EventCursor(41))
         .await
         .expect("persist materialization cursor");
 
@@ -2959,11 +2961,11 @@ async fn final_reply_handoff_survives_reopen_and_cursor_replay_is_monotonic() {
             .load_run_final_reply_handoff_cursor()
             .await
             .expect("reopened store loads cursor"),
-        ironclaw_turns::EventCursor(41)
+        ironclaw_host_api::turn::EventCursor(41)
     );
 
     reopened
-        .advance_run_final_reply_handoff_cursor(ironclaw_turns::EventCursor(12))
+        .advance_run_final_reply_handoff_cursor(ironclaw_host_api::turn::EventCursor(12))
         .await
         .expect("stale replay is idempotent");
     assert_eq!(
@@ -2971,7 +2973,7 @@ async fn final_reply_handoff_survives_reopen_and_cursor_replay_is_monotonic() {
             .load_run_final_reply_handoff_cursor()
             .await
             .expect("cursor never regresses"),
-        ironclaw_turns::EventCursor(41)
+        ironclaw_host_api::turn::EventCursor(41)
     );
 
     reopened
@@ -2997,7 +2999,7 @@ async fn final_reply_handoff_keyset_survives_deletion_between_pages() {
     let store = build_outbound_store_for_backend(backend);
     let mut handoffs = (0..3)
         .map(|_| RunFinalReplyHandoffRecord {
-            event_cursor: ironclaw_turns::EventCursor(41),
+            event_cursor: ironclaw_host_api::turn::EventCursor(41),
             scope: turn_scope(),
             run_id: TurnRunId::new(),
         })
@@ -3337,8 +3339,8 @@ async fn final_reply_handoff_cursor_converges_across_concurrent_store_instances(
     let second = Arc::new(build_outbound_store_for_backend(backend));
 
     let (low, high) = tokio::join!(
-        first.advance_run_final_reply_handoff_cursor(ironclaw_turns::EventCursor(17)),
-        second.advance_run_final_reply_handoff_cursor(ironclaw_turns::EventCursor(29)),
+        first.advance_run_final_reply_handoff_cursor(ironclaw_host_api::turn::EventCursor(17)),
+        second.advance_run_final_reply_handoff_cursor(ironclaw_host_api::turn::EventCursor(29)),
     );
     low.expect("lower cursor writer");
     high.expect("higher cursor writer");
@@ -3347,6 +3349,6 @@ async fn final_reply_handoff_cursor_converges_across_concurrent_store_instances(
             .load_run_final_reply_handoff_cursor()
             .await
             .expect("load converged cursor"),
-        ironclaw_turns::EventCursor(29)
+        ironclaw_host_api::turn::EventCursor(29)
     );
 }

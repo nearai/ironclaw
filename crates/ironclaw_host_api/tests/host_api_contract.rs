@@ -32,7 +32,6 @@ use ironclaw_host_api::{
     ingress::{IngressPolicy, IngressRouteDescriptor},
     mount::{MountGrant, MountPermissions, MountView},
     path::{HostPath, MountAlias, ScopedPath, VirtualPath},
-    product_surface::{ProductSurfaceEventSubscription, ProductSurfaceStreamResponse},
     resource::{
         LOCAL_DEFAULT_AGENT_ID, LOCAL_DEFAULT_PROJECT_ID, LOCAL_DEFAULT_TENANT_ID, ResourceCeiling,
         ResourceEstimate, ResourceScope,
@@ -1757,43 +1756,5 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
     assert!(
         !debug_with_requirement.contains("google"),
         "provider id must not appear in Debug output; got: {debug_with_requirement}"
-    );
-}
-
-#[test]
-fn product_stream_continuation_is_process_local_not_wire_state() {
-    let (_sender, receiver) = tokio::sync::mpsc::channel(1);
-    let response = ProductSurfaceStreamResponse {
-        events: vec![json!({"kind": "projection_update"})],
-        next_cursor: Some("cursor-1".to_string()),
-        subscription: Some(ProductSurfaceEventSubscription::new(receiver)),
-    };
-
-    let encoded = serde_json::to_value(response).expect("stream response serializes");
-    assert_eq!(
-        encoded,
-        json!({
-            "events": [{"kind": "projection_update"}],
-            "next_cursor": "cursor-1"
-        }),
-        "the in-process continuation handle must never cross the wire"
-    );
-    let decoded: ProductSurfaceStreamResponse =
-        serde_json::from_value(encoded).expect("wire response deserializes");
-    assert!(decoded.subscription.is_none());
-}
-
-#[test]
-fn product_stream_continuation_debug_and_identity_are_stable() {
-    let (_sender, receiver) = tokio::sync::mpsc::channel(1);
-    let subscription = ProductSurfaceEventSubscription::new(receiver);
-    let (_other_sender, other_receiver) = tokio::sync::mpsc::channel(1);
-    let other_subscription = ProductSurfaceEventSubscription::new(other_receiver);
-
-    assert_eq!(subscription, subscription);
-    assert_ne!(subscription, other_subscription);
-    assert_eq!(
-        format!("{subscription:?}"),
-        "ProductSurfaceEventSubscription { .. }"
     );
 }

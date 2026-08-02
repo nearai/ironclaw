@@ -10,10 +10,8 @@ use ironclaw_host_api::{
     ids::{CapabilityId, ProviderToolName},
     runtime::RuntimeKind,
 };
+use ironclaw_loop_contracts::{CapabilityDescriptorView, ConcurrencyHint, ProviderToolDefinition};
 use ironclaw_loop_host::CapabilityAllowSet;
-use ironclaw_turns::run_profile::{
-    CapabilityDescriptorView, ConcurrencyHint, ProviderToolDefinition,
-};
 use serde_json::{Map, Value, json};
 
 /// Canonical core tool names from the progressive-disclosure policy.

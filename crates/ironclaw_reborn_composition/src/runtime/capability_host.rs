@@ -29,22 +29,20 @@ use ironclaw_loop_host::{
 };
 use ironclaw_product::{OutboundPreferencesProductService, ProjectService};
 
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputRef,
+    LoopCapabilityPort, LoopHostMilestoneSink, LoopRunContext,
+    MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
+    ModelVisibleToolObservation, ObservationTrust, ProviderToolCall, ToolObservationDetail,
+    ToolObservationStatus, resolution,
+};
 use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
     CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, SessionThreadService,
     TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadMessageId, ThreadScope,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
-use ironclaw_turns::{
-    ExternalToolCatalog, LoopResultRef,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputRef,
-        LoopCapabilityPort, LoopHostMilestoneSink, LoopRunContext,
-        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
-        ModelVisibleToolObservation, ObservationTrust, ProviderToolCall, ToolObservationDetail,
-        ToolObservationStatus, resolution,
-    },
-};
+use ironclaw_turns::{ExternalToolCatalog, LoopResultRef};
 
 use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
 use crate::capability_authorization::{StoreApprovalSettingsProvider, effects_require_approval};

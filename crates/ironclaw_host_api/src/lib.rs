@@ -38,15 +38,12 @@ pub mod audit;
 pub mod authorized;
 pub mod capability;
 pub mod capability_profile;
-pub mod channel;
-pub mod channel_identity;
 pub mod decision;
 pub mod dispatch;
 #[cfg(feature = "test-support")]
 pub mod dispatch_test_support;
 mod dotted_id;
 pub mod error;
-pub mod extension;
 pub mod failure;
 pub mod gate_record;
 pub mod host_port;
@@ -56,13 +53,9 @@ pub mod ids;
 pub mod ingress;
 pub mod invocation;
 pub mod lane;
-pub mod memory;
 pub mod mount;
-pub mod operator_llm;
 pub mod outbound;
-pub mod package_lifecycle;
 pub mod path;
-pub mod recipe;
 pub mod resolution;
 pub mod resource;
 pub mod result_meta;
@@ -70,9 +63,6 @@ pub mod runtime;
 pub mod runtime_policy;
 pub mod safe_summary;
 pub mod scope;
-pub mod state;
-pub mod surface;
-pub mod tool_adapter;
 pub mod trust;
 pub mod turn;
 pub mod user_identity;
@@ -81,7 +71,6 @@ mod credential_redaction;
 pub mod model_result_preview;
 pub mod product_adapter;
 pub mod product_adapter_error;
-pub mod product_surface;
 
 // There is deliberately no flat re-export prelude here. Every contract is
 // reached through the module that owns it — `ironclaw_host_api::scope::

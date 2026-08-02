@@ -1,15 +1,17 @@
 use std::sync::Arc;
 
 use ironclaw_auth::RuntimeCredentialAccountSelectionService;
-use ironclaw_host_api::{
-    http::RuntimeHttpEgress, product_surface::ProductSurfaceError, state::InstallationState,
+use ironclaw_extension_contracts::hosted_mcp::RegisterHostedMcpRequest;
+use ironclaw_extension_contracts::state::InstallationState;
+use ironclaw_product_contracts::error::ProductOperationFailure;
+use ironclaw_product_contracts::lifecycle_service::{
+    LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
 };
-use ironclaw_product::{
+use ironclaw_product_contracts::package_lifecycle::{
     LifecycleExtensionSource, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
-    LifecycleProductContext, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleProductService, LifecycleProductSurfaceContext, LifecycleSearchExtensionSummary,
-    ProductSurfaceFailure,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
+use ironclaw_product_contracts::surface::ProductSurfaceError;
 use thiserror::Error;
 
 use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
@@ -18,6 +20,7 @@ use ironclaw_skills::ScopedSkillManagementPort;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RebornExtensionLifecycleCommand {
+    RegisterHostedMcp { request: RegisterHostedMcpRequest },
     Search { query: String },
     Install { id: String },
     Activate { id: String },
@@ -29,7 +32,7 @@ pub enum RebornExtensionLifecycleCommandError {
     #[error("extension lifecycle is available only for standalone Reborn services")]
     LocalRuntimeUnavailable,
     #[error("extension lifecycle command is invalid: {0}")]
-    ProductCommand(#[from] ProductSurfaceFailure),
+    ProductCommand(#[from] ProductOperationFailure),
     #[error("extension lifecycle failed: {0}")]
     ProductSurface(#[from] ProductSurfaceError),
 }
@@ -37,7 +40,6 @@ pub enum RebornExtensionLifecycleCommandError {
 pub trait RebornExtensionLifecycleRuntime {
     fn skill_management(&self) -> Arc<ScopedSkillManagementPort>;
     fn extension_management(&self) -> Arc<RebornLocalExtensionManagementPort>;
-    fn runtime_http_egress(&self) -> Option<Arc<dyn RuntimeHttpEgress>>;
     fn runtime_credential_accounts(&self) -> Arc<dyn RuntimeCredentialAccountSelectionService>;
     fn extension_lifecycle_surface_context(&self) -> LifecycleProductSurfaceContext;
 }
@@ -46,12 +48,9 @@ pub async fn execute_reborn_extension_lifecycle_command(
     runtime: &impl RebornExtensionLifecycleRuntime,
     command: RebornExtensionLifecycleCommand,
 ) -> Result<LifecycleProductResponse, RebornExtensionLifecycleCommandError> {
-    let mut service = ExtensionHostLifecycleProductService::new(runtime.skill_management())
+    let service = ExtensionHostLifecycleProductService::new(runtime.skill_management())
         .with_extension_management(runtime.extension_management());
-    if let Some(runtime_http_egress) = runtime.runtime_http_egress() {
-        service = service.with_runtime_http_egress(runtime_http_egress);
-    }
-    service = service.with_runtime_credential_accounts(runtime.runtime_credential_accounts());
+    let service = service.with_runtime_credential_accounts(runtime.runtime_credential_accounts());
     let context = LifecycleProductContext::Surface(runtime.extension_lifecycle_surface_context());
     execute_reborn_extension_lifecycle_service_command(&service, context, command).await
 }
@@ -169,8 +168,11 @@ pub fn render_reborn_extension_lifecycle_response(
 }
 
 impl RebornExtensionLifecycleCommand {
-    fn into_action(self) -> Result<LifecycleProductAction, ProductSurfaceFailure> {
+    fn into_action(self) -> Result<LifecycleProductAction, ProductOperationFailure> {
         Ok(match self {
+            Self::RegisterHostedMcp { request } => {
+                LifecycleProductAction::ExtensionRegisterHostedMcp { request }
+            }
             Self::Search { query } => LifecycleProductAction::ExtensionSearch { query },
             Self::Install { id } => LifecycleProductAction::ExtensionInstall {
                 package_ref: extension_package_ref(id)?,
@@ -187,7 +189,7 @@ impl RebornExtensionLifecycleCommand {
 
 fn extension_package_ref(
     id: impl Into<String>,
-) -> Result<LifecyclePackageRef, ProductSurfaceFailure> {
+) -> Result<LifecyclePackageRef, ProductOperationFailure> {
     Ok(LifecyclePackageRef::new(
         LifecyclePackageKind::Extension,
         id,
@@ -252,12 +254,13 @@ mod tests {
     use ironclaw_auth::{
         AuthContinuationRef, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
     };
+    use ironclaw_extension_contracts::state::InstallationState;
     use ironclaw_host_api::{
         ids::{AgentId, InvocationId, TenantId, UserId},
         resource::ResourceScope,
-        state::InstallationState,
     };
-    use ironclaw_product::LifecycleExtensionSummary;
+    use ironclaw_product_contracts::package_lifecycle::LifecycleExtensionRuntimeKind;
+    use ironclaw_product_contracts::package_lifecycle::LifecycleExtensionSummary;
     use secrecy::SecretString;
 
     use super::*;
@@ -365,7 +368,7 @@ mod tests {
                         version: "0.1.0".to_string(),
                         description: "line\rrewrite".to_string(),
                         source: LifecycleExtensionSource::HostBundled,
-                        runtime_kind: ironclaw_product::LifecycleExtensionRuntimeKind::WasmTool,
+                        runtime_kind: LifecycleExtensionRuntimeKind::WasmTool,
                         surface_kinds: Vec::new(),
                         channel_directions: None,
                         channel_connection: None,

@@ -8,7 +8,7 @@
 //!
 //! | baseline | recorded in |
 //! |---|---|
-//! | `LAYER_MATRIX_EXCEPTIONS` count (20) | `reborn_dependency_boundaries.rs` |
+//! | `LAYER_MATRIX_EXCEPTIONS` count (WS0 20, now 15) | `reborn_dependency_boundaries.rs` |
 //! | extension-specificity allowlist size (130) | `reborn_extension_specificity.rs` |
 //! | production-struct dead-code inventory (82 paths / 283 members) | `reborn_struct_test_support_ratchet.rs` |
 //!

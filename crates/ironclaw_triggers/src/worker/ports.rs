@@ -1,11 +1,11 @@
 use std::{collections::HashMap, time::Duration};
 
 use async_trait::async_trait;
+use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 use ironclaw_host_api::{
     Timestamp,
     ids::{TenantId, ThreadId},
 };
-use ironclaw_turns::{TurnRunId, TurnScope};
 
 use crate::{
     TriggerError, TriggerFire, TriggerId, TriggerMaterializedPrompt, TriggerRecord,

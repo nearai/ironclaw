@@ -20,7 +20,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_host_api::product_surface::ProductSurfaceCaller;
 use ironclaw_host_api::{
     ids::{AgentId, TenantId, UserId},
     runtime_policy::{
@@ -35,6 +34,7 @@ use ironclaw_host_runtime::{
 use ironclaw_product::{
     PROJECT_CREATE_COMMAND, PROJECTS_VIEW, RebornCreateProjectRequest, RebornListProjectsRequest,
 };
+use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornRuntimeProcessBinding, build_reborn_runtime,
@@ -142,8 +142,10 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
     // the `ProductSurface` default and this returned
     // `service_unavailable`. A successful create proves `with_project_service`
     // was wired from the production store graph.
-    let owner_surface =
-        ironclaw_host_api::product_surface::BoundProductSurface::new(bundle.clone(), owner.clone());
+    let owner_surface = ironclaw_product_contracts::surface::BoundProductSurface::new(
+        bundle.clone(),
+        owner.clone(),
+    );
     let created = PROJECT_CREATE_COMMAND
         .invoke_on(
             &owner_surface,
@@ -179,7 +181,7 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
         None,
     );
     let other_surface =
-        ironclaw_host_api::product_surface::BoundProductSurface::new(bundle.clone(), other_tenant);
+        ironclaw_product_contracts::surface::BoundProductSurface::new(bundle.clone(), other_tenant);
     let other_listed = PROJECTS_VIEW
         .query_on(
             &other_surface,

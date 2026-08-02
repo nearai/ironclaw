@@ -163,9 +163,9 @@ impl JournalProcessExecutor for TurnProcessExecutor {
             .await
             .map_err(|error| {
                 let recovery = match error.failure_category() {
-                    crate::failure_categories::HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY
-                    | crate::failure_categories::HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY
-                    | crate::failure_categories::HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY => {
+                    ironclaw_host_api::failure::categories::HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY
+                    | ironclaw_host_api::failure::categories::HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY
+                    | ironclaw_host_api::failure::categories::HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY => {
                         ProcessFailureRecovery::RedriveIfCheckpointless
                     }
                     _ => ProcessFailureRecovery::Terminal,

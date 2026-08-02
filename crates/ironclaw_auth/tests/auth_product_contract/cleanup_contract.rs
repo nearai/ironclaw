@@ -546,6 +546,7 @@ async fn uninstall_cancels_pending_flow_and_rejects_late_callback() {
             scope: flow_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: authorization_url("https://provider.example/oauth"),
                 expires_at,
@@ -629,6 +630,7 @@ async fn cleanup_cancels_all_pending_flow_kinds_for_provider_on_deactivate() {
                     scope: flow_scope,
                     kind: AuthFlowKind::IntegrationCredential,
                     provider,
+                    requester_extension: None,
                     challenge: AuthChallenge::OAuthUrl {
                         authorization_url: authorization_url("https://provider.example/oauth"),
                         expires_at,
@@ -749,6 +751,7 @@ async fn completed_unacknowledged_turn_gate_cleanup_emits_once_then_converges() 
             scope: owner.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
+            requester_extension: None,
             challenge: AuthChallenge::AccountSelectionRequired {
                 provider: provider(),
                 accounts: vec![account.projection()],
@@ -825,6 +828,7 @@ async fn expired_unacknowledged_turn_gate_cleanup_emits_once_then_converges() {
             scope: owner.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
+            requester_extension: None,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: OAuthAuthorizationUrl::new(
                     "https://example.com/oauth/authorize",
@@ -910,6 +914,7 @@ async fn uninstall_cancels_lifecycle_package_flows_regardless_of_provider() {
         scope: owner.clone(),
         kind: AuthFlowKind::IntegrationCredential,
         provider: provider(),
+        requester_extension: None,
         challenge: AuthChallenge::OAuthUrl {
             authorization_url: OAuthAuthorizationUrl::new("https://example.com/oauth/authorize")
                 .unwrap(),

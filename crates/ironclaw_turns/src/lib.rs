@@ -12,17 +12,13 @@ mod checkpoint_state;
 mod coordinator;
 pub mod events;
 mod external_tool_catalog;
-mod ids;
+pub mod host_managed_ports;
 pub mod loop_exit;
-mod origin;
 pub mod process_projection;
-pub mod product_adapter;
 pub mod product_context;
 mod request;
 mod response;
-pub mod run_profile;
 pub mod runner;
-pub mod scope;
 mod status;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -38,8 +34,7 @@ pub use agent_turn_runtime::{
     active_run_ref_state,
 };
 pub use checkpoint_state::{
-    GetLoopCheckpointRequest, LoopCheckpointRecord, LoopCheckpointStore,
-    MAX_CHECKPOINT_STATE_PAYLOAD_BYTES, PutLoopCheckpointRequest, RedactedCheckpointPayload,
+    GetLoopCheckpointRequest, LoopCheckpointRecord, LoopCheckpointStore, PutLoopCheckpointRequest,
 };
 pub use coordinator::{
     AllowAllTurnAdmissionPolicy, DefaultTurnCoordinator, NoopTurnRunWakeNotifier,
@@ -47,7 +42,7 @@ pub use coordinator::{
     TurnSpawnTreePort,
 };
 pub use events::{
-    EventCursor, InMemoryTurnEventSink, MAX_TURN_EVENT_PROJECTION_LIMIT, TurnBlockedGateKind,
+    InMemoryTurnEventSink, MAX_TURN_EVENT_PROJECTION_LIMIT, TurnBlockedGateKind,
     TurnBlockedGateMetadata, TurnCommittedEventObserver, TurnEventKind, TurnEventPage,
     TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
     TurnEventProjectionService, TurnEventProjectionSnapshot, TurnEventProjectionSource,
@@ -58,23 +53,27 @@ pub use external_tool_catalog::{
     ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, ExternalToolSpecError,
     InMemoryExternalToolCatalog, PendingExternalCall,
 };
-pub use ids::{
-    AcceptedMessageRef, CapabilityActivityId, GateRef, IdempotencyKey, LoopExitId, LoopGateRef,
-    LoopMessageRef, LoopResultRef, ReplyTargetBindingRef, RunProfileId, RunProfileRequest,
-    RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId,
-    TurnRunnerId,
-};
+// The turn vocabulary itself is `ironclaw_host_api::turn`'s, not this crate's:
+// ids, refs, scope/actor/owner, status and its gate correspondence, the event
+// cursor, the run-origin adapter identity, and the sanitized failure/cancel
+// shapes. This crate names them because it coordinates turns; it re-exports
+// them only so its own consumers keep one import for the kernel API they
+// already depend on. A crate that needs *only* vocabulary must depend on
+// `ironclaw_host_api` directly — see this crate's CLAUDE.md.
+pub use host_managed_ports::{HostManagedLoopModelPort, HostManagedLoopPromptPort};
 pub use ironclaw_host_api::turn::{
-    ModelInvalidOutputDetailReason, SanitizedCancelReason, SanitizedFailure, TurnOwner,
+    AcceptedMessageRef, BlockedReason, CapabilityActivityId, EventCursor, GateKind,
+    GateResumeDisposition, IdempotencyKey, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef,
+    ModelInvalidOutputDetailReason, ProductTurnContext, ReplyTargetBindingRef, RunOriginAdapter,
+    RunProfileId, RunProfileRequest, RunProfileVersion, SanitizedCancelReason, SanitizedFailure,
+    SourceBindingRef, TurnActor, TurnCheckpointId, TurnGateRef, TurnId, TurnLeaseToken,
+    TurnOriginKind, TurnOwner, TurnRunId, TurnRunnerId, TurnScope, TurnStatus, TurnSurfaceType,
 };
 pub use loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
-    FinalCheckpointEvidenceRequest, LoopBlocked, LoopBlockedKind, LoopCancelled,
-    LoopCancelledReasonKind, LoopCompleted, LoopCompletionKind, LoopExit, LoopExitApplier,
-    LoopExitEvidencePort, LoopExitMapping, LoopExitValidationDecision, LoopExitViolation,
-    LoopExitViolationKind, LoopFailed, LoopFailureKind,
+    FinalCheckpointEvidenceRequest, LoopExitApplier, LoopExitEvidencePort, LoopExitMapping,
+    LoopExitValidationDecision, LoopExitViolation, LoopExitViolationKind,
 };
-pub use origin::{ProductTurnContext, RunOriginAdapter, TurnOriginKind, TurnSurfaceType};
 pub use process_projection::{
     AGENT_TURN_PROCESS_KIND, AgentTurnProcessCommitObserver, AgentTurnProcessMetadata,
     AgentTurnProcessRuntime, AgentTurnProcessStateMetadata, ProcessJournalStoreTurnAdapter,
@@ -82,29 +81,13 @@ pub use process_projection::{
     claimed_turn_run_from_process_claim, turn_run_state_from_process_snapshot,
 };
 pub use request::{
-    CancelRunRequest, GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition,
-    ResumeTurnRequest, RetryTurnRequest, SubmitChildRunRequest, SubmitTurnRequest, TurnTimestamp,
+    CancelRunRequest, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
+    RetryTurnRequest, SubmitChildRunRequest, SubmitTurnRequest, TurnTimestamp,
 };
 pub use response::{
     CancelRunResponse, ResumeTurnResponse, RetryTurnResponse, SubmitTurnResponse, ThreadBusy,
 };
-pub use run_profile::{
-    AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
-    AgentLoopDriverRunRequest, CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy,
-    CheckpointSchemaId, CommunicationRuntimeContext, ConcurrencyClass, ConnectedChannelSummary,
-    ConnectedChannelsState, ContextProfileId, DeliveryTargetState, DeliveryTargetSummary,
-    EmptyMemoryPromptContextService, InMemoryRunProfileRegistry, InMemoryRunProfileResolver,
-    LoopCheckpointKind, LoopCheckpointStateRef, LoopDriverId, MemoryPromptContextRequest,
-    MemoryPromptContextService, ModelProfileId, PrivilegedRunProfileDimension,
-    RedactedRunProfileProvenance, RedactedRunProfileSource, ResolvedRunProfile,
-    ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
-    RunProfileRegistryError, RunProfileRequestAuthority, RunProfileResolutionError,
-    RunProfileResolutionRequest, RunProfileResolver, RunProfileSourceLayer, RunProfileSourceRef,
-    RunnerPoolId, RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
-};
-pub use scope::{TurnActor, TurnScope};
 pub use status::{
-    AdmissionRejection, AdmissionRejectionReason, BlockedReason, GateKind, TurnActiveRunRefState,
-    TurnCapacityResource, TurnError, TurnErrorCategory, TurnRunProfile, TurnRunState, TurnStatus,
-    is_recoverability_critical,
+    AdmissionRejection, AdmissionRejectionReason, TurnActiveRunRefState, TurnCapacityResource,
+    TurnError, TurnErrorCategory, TurnRunProfile, TurnRunState, is_recoverability_critical,
 };

@@ -653,7 +653,12 @@ impl WasmRuntimeAdapter {
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let module_path = match &request.package.manifest.runtime {
             ExtensionRuntime::Wasm { module } => module
-                .resolve_under(&request.package.root)
+                .resolve_under(request.package.materialized_root().map_err(|_| {
+                    DispatchError::Wasm {
+                        kind: RuntimeDispatchErrorKind::Manifest,
+                        model_visible_cause: None,
+                    }
+                })?)
                 .map_err(|_| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Manifest,
                     model_visible_cause: None,

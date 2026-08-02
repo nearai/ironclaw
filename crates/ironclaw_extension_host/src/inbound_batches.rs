@@ -13,6 +13,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, TimeDelta, Utc};
+use ironclaw_extension_contracts::channel_adapter::NormalizedInboundMessage;
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelAttachmentRef, InboundBatchFragment, ProductTriggerReason,
+};
+use ironclaw_extension_contracts::external::{
+    ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
+};
 use ironclaw_filesystem::{
     CasApply, CasUpdateError, ContentType, Entry, FilesystemError, RootFilesystem,
     ScopedFilesystem, cas_update,
@@ -23,11 +30,6 @@ use ironclaw_host_api::{
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, ScopedPath, VirtualPath},
     resource::{ResourceScope, resource_scope_path_segment},
-};
-use ironclaw_product::{
-    ChannelAttachmentRef, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-    InboundBatchFragment, NormalizedInboundMessage, ProductAttachmentDescriptor,
-    ProductTriggerReason,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -832,8 +834,8 @@ fn store_unavailable() -> InboundBatchStoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_extension_contracts::external::ProductAttachmentKind;
     use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_product::ProductAttachmentKind;
 
     fn store() -> FilesystemInboundBatchStore {
         FilesystemInboundBatchStore::new(

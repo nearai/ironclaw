@@ -8,14 +8,12 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_host_api::ids::ThreadId;
+use ironclaw_loop_contracts::{LoopCapabilityPort, LoopModelUsage};
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse,
 };
-use ironclaw_turns::{
-    TurnRunId, TurnStatus,
-    run_profile::{LoopCapabilityPort, LoopModelUsage},
-};
+use ironclaw_turns::{TurnRunId, TurnStatus};
 
 use crate::runtime::{AssistantReply, ConversationId};
 

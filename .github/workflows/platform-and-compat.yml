@@ -106,7 +106,18 @@ jobs:
           printf '%s\n' "$CHANGED_FILES" | scripts/ci/classify-test-scope.sh >> "$GITHUB_OUTPUT"
 
           has_direct_wasm_abi_risk=false
-          if has_match '^(wit/|crates/ironclaw_common/|crates/ironclaw_wasm/|crates/ironclaw_wasm_product_adapters/|crates/ironclaw_first_party_extensions/assets/.*/(manifest\.toml|wasm-src/)|registry/|scripts/build-wasm-extensions\.sh$|scripts/check-version-bumps\.sh$|\.github/workflows/(platform-and-compat|nightly-deep-ci)\.yml$)'; then
+          # Crate scopes are matched by NAME at any depth: `crates/([^/]+/)*<name>/`
+          # keeps matching once crates move into family directories
+          # (crates/<family>/ironclaw_*, PROPOSAL §5). A flat `crates/<name>/`
+          # prefix stops matching there, `has_direct_wasm_abi_risk` goes false,
+          # and every WASM ABI check silently skips — the WS10 failure mode
+          # (#6963). `crates/ironclaw_wasm_product_adapters/` was also dropped:
+          # that crate no longer exists, so the alternative had been matching
+          # nothing. scripts/ci/ws12_workflow_contracts.py pins this regex
+          # against the real crate inventory and against a real first-party
+          # extension manifest path, so a renamed, moved or deleted crate fails
+          # loudly here instead of quietly falling out of scope.
+          if has_match '^(wit/|crates/([^/]+/)*ironclaw_common/|crates/([^/]+/)*ironclaw_wasm/|crates/([^/]+/)*ironclaw_first_party_extensions/assets/.*/(manifest\.toml|wasm-src/)|registry/|scripts/build-wasm-extensions\.sh$|scripts/check-version-bumps\.sh$|\.github/workflows/(platform-and-compat|nightly-deep-ci)\.yml$)'; then
             has_direct_wasm_abi_risk=true
           fi
           echo "has_direct_wasm_abi_risk=$has_direct_wasm_abi_risk" >> "$GITHUB_OUTPUT"

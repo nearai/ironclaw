@@ -4,14 +4,15 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::product_adapter::test_support::conformance::{
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelAdapter, ChannelContext, ChannelError, InboundOutcome, OutboundEnvelope, OutboundPart,
+    OutboundTarget, VerifiedInbound,
+};
+use ironclaw_extension_contracts::external::ExternalConversationRef;
+use ironclaw_extension_contracts::test_support::conformance::{
     ChannelAdapterConformance, ConformanceInbound, run_channel_adapter_conformance,
 };
-use ironclaw_host_api::product_adapter::{
-    ChannelAdapter, ChannelContext, ChannelError, ExternalConversationRef, InboundOutcome,
-    OutboundEnvelope, OutboundPart, OutboundTarget, VerifiedInbound,
-};
-use ironclaw_host_api::tool_adapter::{
+use ironclaw_extension_contracts::tool_adapter::{
     RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
 };
 use ironclaw_telegram_extension::{

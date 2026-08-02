@@ -17,136 +17,14 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::attachment::WorkspaceFile;
-use serde::{Deserialize, Serialize};
 
 use ironclaw_threads::ThreadScope;
 
-/// Coarse filesystem entry kind exposed to product/WebUI consumers.
-///
-/// A wire projection of `ironclaw_filesystem::FileType`: this one is
-/// serialized into product/WebUI responses and must stay stable independently
-/// of the substrate enum, which is free to grow variants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProjectFsEntryKind {
-    File,
-    Directory,
-    Symlink,
-    Other,
-}
-
-/// A single entry in a project directory listing.
-///
-/// `path` is the scoped path (`/workspace/...`) the consumer passes back to
-/// [`ProjectFilesystemReader::read_file`] / [`ProjectFilesystemReader::stat`] —
-/// reconstructed by the implementation from the request directory plus the
-/// entry name so a host or virtual path is never serialized.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProjectFsEntry {
-    pub name: String,
-    pub path: String,
-    pub kind: ProjectFsEntryKind,
-}
-
-/// Metadata for a single scoped project path.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProjectFsStat {
-    pub path: String,
-    pub kind: ProjectFsEntryKind,
-    pub size_bytes: u64,
-    /// Best-effort MIME type derived from the path extension — mirrors the
-    /// download `Content-Type`. Lets the WebUI choose a preview representation
-    /// (image/pdf/text/…) before fetching the bytes. `application/octet-stream`
-    /// when the extension is unknown.
-    pub mime_type: String,
-}
-
-/// Materialized file bytes plus the metadata a download response needs.
-///
-/// Product-surface commands carry this through the host JSON envelope before
-/// WebUI streams the bytes as the HTTP body.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProjectFsFile {
-    pub path: String,
-    pub filename: Option<String>,
-    pub mime_type: String,
-    pub size_bytes: u64,
-    pub bytes: Vec<u8>,
-}
-
-/// Renders the byte length, never the bytes. This is the wire type crossing
-/// the product-surface command envelope, so a derived `Debug` would put whole
-/// user files into any diagnostic that formats a command.
-impl std::fmt::Debug for ProjectFsFile {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ProjectFsFile")
-            .field("path", &self.path)
-            .field("filename", &self.filename)
-            .field("mime_type", &self.mime_type)
-            .field("size_bytes", &self.size_bytes)
-            .finish()
-    }
-}
-
-/// Errors a project-filesystem read may produce.
-///
-/// Deliberately coarse and free of host paths / backend strings: the service
-/// maps each variant to a sanitized [`ProductSurfaceError`](crate::ProductSurfaceError)
-/// at the boundary. Implementations outside this crate construct these instead
-/// of reaching for the service error's `pub(super)` constructors.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ProjectFsError {
-    #[error("path not found")]
-    NotFound,
-    #[error("path is not a regular file")]
-    NotAFile,
-    #[error("path is not a directory")]
-    NotADirectory,
-    #[error("path is not permitted")]
-    Denied,
-    #[error("invalid path")]
-    InvalidPath,
-    #[error("file exceeds the maximum readable size")]
-    TooLarge { size: u64, max: u64 },
-    #[error("project filesystem temporarily unavailable")]
-    Unavailable,
-    #[error("internal project filesystem error")]
-    Internal,
-}
-
-/// Request to list a directory under a thread's project workspace.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornProjectFsListRequest {
-    pub thread_id: String,
-    pub path: String,
-}
-
-/// Directory listing response.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornProjectFsListResponse {
-    pub entries: Vec<ProjectFsEntry>,
-}
-
-/// Request to stat a path under a thread's project workspace.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornProjectFsStatRequest {
-    pub thread_id: String,
-    pub path: String,
-}
-
-/// Path metadata response.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornProjectFsStatResponse {
-    pub stat: ProjectFsStat,
-}
-
-/// Request to read (download) a file under a thread's project workspace.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornProjectFsReadRequest {
-    pub thread_id: String,
-    pub path: String,
-}
+pub use ironclaw_product_contracts::workspace_views::{
+    ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat,
+    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
+    RebornProjectFsStatRequest, RebornProjectFsStatResponse,
+};
 
 /// Read-only access to a thread's project workspace filesystem.
 ///

@@ -5,7 +5,7 @@
 //! `input` JSON, its [`ResourceEstimate`], the prior-approval identity, the
 //! input ref, and the correlation id — currently rides *in-band* through the
 //! untrusted loop on [`CapabilityApprovalResume`] /
-//! [`CapabilityAuthResume`](ironclaw_turns::run_profile::CapabilityAuthResume)
+//! [`CapabilityAuthResume`](ironclaw_loop_contracts::CapabilityAuthResume)
 //! and is stashed in the loop's own serialized checkpoint. The
 //! capability-result collapse (arch-simplification §5.3) makes the loop-facing
 //! `Resolution` carry only an opaque resume token (equal to the
@@ -49,15 +49,15 @@ use ironclaw_host_api::{
     path::ScopedPath,
     resource::{ResourceEstimate, ResourceScope},
 };
-use ironclaw_turns::run_profile::{AuthResumeApprovalIdentity, CapabilityInputRef};
+use ironclaw_loop_contracts::{AuthResumeApprovalIdentity, CapabilityInputRef};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Host-private replay payload for a gate/auth resume, keyed by [`InvocationId`].
 ///
 /// Reuses the exact field types carried by
-/// [`CapabilityApprovalResume`](ironclaw_turns::run_profile::CapabilityApprovalResume)
-/// / [`CapabilityAuthResume`](ironclaw_turns::run_profile::CapabilityAuthResume)
+/// [`CapabilityApprovalResume`](ironclaw_loop_contracts::CapabilityApprovalResume)
+/// / [`CapabilityAuthResume`](ironclaw_loop_contracts::CapabilityAuthResume)
 /// so a later resume-read slice reconstitutes them without any lossy re-typing.
 ///
 /// **Never model-visible.** Unlike a

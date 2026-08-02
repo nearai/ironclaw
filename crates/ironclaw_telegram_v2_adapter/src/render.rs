@@ -5,12 +5,16 @@
 //! adapter's egress credential handle (the host resolves it to the bot
 //! token at request time).
 
-use ironclaw_host_api::product_adapter::{
-    AuthPromptView, DeclaredEgressHost, EgressCredentialHandle, EgressHeader, EgressMethod,
-    EgressPath, EgressRequest, ExternalConversationRef, FinalReplyView, GatePromptView,
-    ProductOutboundTarget, ProgressKind, ProgressUpdateView,
+use ironclaw_extension_contracts::auth_prompt::AuthPromptView;
+use ironclaw_extension_contracts::egress::{
+    DeclaredEgressHost, EgressCredentialHandle, EgressHeader, EgressMethod, EgressPath,
+    EgressRequest,
 };
+use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_host_api::turn::ReplyTargetBindingRef;
+use ironclaw_product_contracts::outbound::{
+    FinalReplyView, GatePromptView, ProductOutboundTarget, ProgressKind, ProgressUpdateView,
+};
 use thiserror::Error;
 
 use crate::payload::TELEGRAM_API_HOST;
@@ -240,7 +244,7 @@ pub fn render_auth_prompt(
 /// Render a `BlockedApproval` prompt as `sendMessage` requests. The copy
 /// advertises the in-chat reply because inbound genuinely parses it — the
 /// channel-neutral grammar in
-/// `ironclaw_host_api::product_adapter::interaction_commands`, the same one the
+/// `ironclaw_product_contracts::interaction_commands`, the same one the
 /// shared busy hint advertises. Keep copy and grammar in lockstep.
 pub fn render_gate_prompt(
     reply: &TelegramReplyTarget,

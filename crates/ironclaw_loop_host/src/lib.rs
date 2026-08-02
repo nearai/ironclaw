@@ -93,7 +93,7 @@ pub use identity_context::{
 };
 pub use input_port::HostQueueLoopInputPort;
 pub use input_queue::{HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError};
-pub use ironclaw_turns::run_profile::PromptContextTokenBudget;
+pub use ironclaw_loop_contracts::PromptContextTokenBudget;
 pub use model_visible_scrub::scrub_model_visible_detail;
 pub use result_read::{RESULT_READ_CAPABILITY_ID, result_read_capability};
 #[cfg(feature = "test-support")]
@@ -137,8 +137,6 @@ pub const ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT: &str = concat!(
     "\n\n",
     include_str!("../prompts/active_task_compaction_append.md"),
 );
-pub const FAILURE_EXPLANATION_SYSTEM_PROMPT: &str =
-    include_str!("../prompts/failure_explanation.md");
 pub use token_estimator::{
     CHARS_PER_TOKEN_DEFAULT, EstimatedTokenCount, estimate_tokens_from_chars,
 };
@@ -147,6 +145,20 @@ use tokio::sync::{Mutex, OnceCell};
 
 use async_trait::async_trait;
 use ironclaw_host_api::ids::RunId;
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
+    AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
+    CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
+    LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind,
+    LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
+    LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink,
+    LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
+    LoopModelUsage, LoopPromptBundleAuthority, LoopRequest, LoopRequestBatch, LoopRunContext,
+    LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, MemoryPromptContextService,
+    ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
+    sort_instruction_snippets_for_prompt,
+};
 use ironclaw_outbound::{
     OutboundError, ReplyAttachmentHandle, ReplyAttachmentIntent, ReplyAttachmentIntentPort,
 };
@@ -159,24 +171,7 @@ use ironclaw_threads::{
     ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
     ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
-use ironclaw_turns::{
-    LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnScope,
-    run_profile::ModelProfileId,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
-        AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
-        CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
-        LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind,
-        LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
-        LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink,
-        LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
-        LoopModelUsage, LoopPromptBundleAuthority, LoopRequest, LoopRequestBatch, LoopRunContext,
-        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, MemoryPromptContextService,
-        ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
-        sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
-    },
-};
+use ironclaw_turns::{LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
 
 const EMPTY_SURFACE_VERSION: &str = "empty:v1";
@@ -1060,7 +1055,7 @@ fn reply_attachment_seal_error(error: OutboundError) -> AgentLoopHostError {
 pub struct EmptyLoopCapabilityPort;
 
 #[async_trait]
-impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort {
+impl ironclaw_loop_contracts::LoopCapabilityPort for EmptyLoopCapabilityPort {
     async fn visible_capabilities(
         &self,
         _request: VisibleCapabilityRequest,
@@ -1836,7 +1831,7 @@ pub struct HostManagedModelRequest {
 /// host-managed model requests. This intentionally preserves the turn-owned
 /// wire shape across the loop-host boundary instead of defining a duplicate
 /// snapshot DTO here.
-pub type HostManagedModelRouteSnapshot = ironclaw_turns::run_profile::LoopModelRouteSnapshot;
+pub type HostManagedModelRouteSnapshot = ironclaw_loop_contracts::LoopModelRouteSnapshot;
 
 /// An image attachment read back as raw bytes, ready to become a multimodal
 /// content part for a vision-capable model. The bytes are carried undecorated;
@@ -1977,7 +1972,7 @@ impl HostManagedModelResponse {
     }
 
     pub fn capability_calls(
-        calls: Vec<ironclaw_turns::run_profile::CapabilityCallCandidate>,
+        calls: Vec<ironclaw_loop_contracts::CapabilityCallCandidate>,
         safe_text_delta: impl Into<String>,
     ) -> Self {
         let safe_text_delta = sanitize_model_visible_text(safe_text_delta);
@@ -1995,7 +1990,7 @@ impl HostManagedModelResponse {
     }
 
     pub fn capability_calls_with_reasoning(
-        calls: Vec<ironclaw_turns::run_profile::CapabilityCallCandidate>,
+        calls: Vec<ironclaw_loop_contracts::CapabilityCallCandidate>,
         safe_text_delta: impl Into<String>,
         reasoning: Option<String>,
     ) -> Self {
@@ -2084,7 +2079,7 @@ pub struct HostManagedModelError {
     /// snippet). Unlike `safe_summary`, this carries the original message so the
     /// failure explainer can describe the real fault. Secret VALUES must be
     /// redacted by the producer via
-    /// [`ironclaw_turns::run_profile::sanitize_model_visible_text`]; the
+    /// [`ironclaw_loop_contracts::sanitize_model_visible_text`]; the
     /// summary word/delimiter ban is NOT applied here.
     pub detail: Option<String>,
 }
@@ -2347,7 +2342,7 @@ fn invalid_transcript_ref_error() -> AgentLoopHostError {
 }
 
 fn provider_call_reference_to_envelope(
-    provider_call: ironclaw_turns::run_profile::ProviderToolCallReference,
+    provider_call: ironclaw_loop_contracts::ProviderToolCallReference,
 ) -> ProviderToolCallReferenceEnvelope {
     let capability_id = provider_call.capability_id;
     let replay = provider_call.replay;
@@ -2978,12 +2973,12 @@ mod tests {
     #[test]
     fn every_recovery_hint_the_loop_can_emit_survives_persistence() {
         use ironclaw_host_api::result_meta::{CapabilityRecoveryHint, SameCallRetryConstraint};
-        use ironclaw_threads::{ToolResultReferenceEnvelope, ToolResultSafeSummary};
-        use ironclaw_turns::run_profile::{
+        use ironclaw_loop_contracts::{
             MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
             ObservationTrust, ToolObservationDetail, ToolObservationStatus,
             ToolRecoveryObservation,
         };
+        use ironclaw_threads::{ToolResultReferenceEnvelope, ToolResultSafeSummary};
 
         for hint in CapabilityRecoveryHint::ALL {
             let observation = ModelVisibleToolObservation {

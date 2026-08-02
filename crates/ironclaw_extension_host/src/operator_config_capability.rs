@@ -27,8 +27,10 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_product::{
     OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
-    OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID, RebornOperatorToolCatalog,
-    RebornOperatorToolInfo,
+    OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID,
+};
+use ironclaw_product_contracts::operator_tools::{
+    RebornOperatorToolCatalog, RebornOperatorToolInfo,
 };
 
 pub fn extend_builtin_first_party_package(
@@ -39,7 +41,13 @@ pub fn extend_builtin_first_party_package(
         .manifest
         .capabilities
         .push(tool_permission_manifest()?);
-    ExtensionPackage::from_manifest(package.manifest, package.root)
+    let root = package
+        .materialized_root()
+        .map_err(|error| ExtensionError::InvalidManifest {
+            reason: format!("built-in package requires a materialized root: {error}"),
+        })?
+        .clone();
+    ExtensionPackage::from_manifest(package.manifest, root)
 }
 
 pub fn insert_handler(

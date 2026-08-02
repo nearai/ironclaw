@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use ironclaw_turns::run_profile::LoopRunContext;
+use ironclaw_loop_contracts::LoopRunContext;
 
 pub(super) fn started_at() -> Option<Instant> {
     tracing::enabled!(target: "ironclaw_latency", tracing::Level::TRACE).then(Instant::now)

@@ -41,7 +41,12 @@ pub enum HostApiError {
 }
 
 impl HostApiError {
-    pub(crate) fn invalid_id(
+    /// Public because contracts crates carved out of this one keep reporting
+    /// their validation failures as `HostApiError` — `ironclaw_extension_contracts`
+    /// is the first, and re-inlining the variant at every carve-out is how the
+    /// message text drifts apart. The variant itself is public already; this is
+    /// its canonical constructor, not new surface area.
+    pub fn invalid_id(
         kind: &'static str,
         value: impl Into<String>,
         reason: impl Into<String>,

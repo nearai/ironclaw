@@ -1,7 +1,6 @@
 use async_trait::async_trait;
-use ironclaw_turns::{
-    LoopExit, LoopFailureKind,
-    run_profile::{LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole},
+use ironclaw_loop_contracts::{
+    LoopExit, LoopFailureKind, LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole,
 };
 
 use crate::{

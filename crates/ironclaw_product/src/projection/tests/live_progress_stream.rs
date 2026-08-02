@@ -1,12 +1,10 @@
 use super::*;
 use ironclaw_host_api::runtime::RuntimeKind;
-use ironclaw_turns::{
-    CapabilityActivityId, LoopCompletionKind, LoopExitId, TurnId,
-    run_profile::{
-        InMemoryLoopHostMilestoneSink, LoopDriverId, LoopHostMilestone, LoopHostMilestoneKind,
-        LoopHostMilestoneSink, LoopSafeSummary,
-    },
+use ironclaw_loop_contracts::{
+    InMemoryLoopHostMilestoneSink, LoopCompletionKind, LoopDriverId, LoopHostMilestone,
+    LoopHostMilestoneKind, LoopHostMilestoneSink, LoopSafeSummary,
 };
+use ironclaw_turns::{CapabilityActivityId, LoopExitId, TurnId};
 use std::sync::Arc;
 
 struct LiveProjectionFixture {
@@ -309,10 +307,8 @@ async fn fresh_product_event_stream_preserves_text_phases_and_clears_terminal_ru
             safe_text: "I’ll research this first.".to_string(),
         },
         LoopHostMilestoneKind::ModelCompleted {
-            effective_model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new(
-                "test-model",
-            )
-            .unwrap(),
+            effective_model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("test-model")
+                .unwrap(),
         },
         LoopHostMilestoneKind::ModelStarted {
             requested_model_profile_id: None,

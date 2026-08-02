@@ -1,0 +1,42 @@
+[package]
+name = "ironclaw_loop_contracts"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "The loop-tier contract for IronClaw Reborn: the Loop*Port set, driver/host vocabulary, run-profile shapes, and the LoopExit claim"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "contracts"
+
+[dependencies]
+async-trait = "0.1"
+blake3 = "1"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+hex = "0.4.3"
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+serde_jcs = "0.2"
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+# `rt` only, and only for `CommunicationContextFetch::Spawned`, which carries a
+# `JoinHandle` for an in-flight communication-context fetch. That is the one
+# runtime type in this crate; PROPOSAL §11.2.3's "no tokio beyond sync-free
+# usage where feasible" is waived for it and pinned by the contracts-purity
+# allowlist, which denies every other framework outright.
+tokio = { version = "1", features = ["rt"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+serde_json = "1"
+sha2 = "0.11"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "test-util", "time"] }

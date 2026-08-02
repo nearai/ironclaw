@@ -1,12 +1,13 @@
 use std::{path::PathBuf, sync::Arc};
 
 use ironclaw_filesystem::RootFilesystem;
+use ironclaw_host_api::turn::TurnGateRef;
 use ironclaw_host_api::{
     http::RuntimeHttpEgressRequest, ids::CapabilityId, resource::ResourceScope,
 };
+use ironclaw_loop_contracts::LoopRequest;
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_resources::ResourceGovernor;
-use ironclaw_turns::{GateRef, run_profile::LoopRequest};
 
 use super::super::doubles::RecordingTestCapabilityPort;
 use super::{HarnessResult, HostRuntimeCapabilityHarness};
@@ -122,7 +123,10 @@ impl HarnessCapabilityRecorder {
         }
     }
 
-    pub(crate) async fn approve_standalone_gate(&self, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub(crate) async fn approve_standalone_gate(
+        &self,
+        gate_ref: &TurnGateRef,
+    ) -> HarnessResult<()> {
         match self {
             Self::Recording(_) => {
                 Err("recording capability port has no local-dev approvals".into())
@@ -131,7 +135,7 @@ impl HarnessCapabilityRecorder {
         }
     }
 
-    pub(crate) async fn deny_standalone_gate(&self, gate_ref: &GateRef) -> HarnessResult<()> {
+    pub(crate) async fn deny_standalone_gate(&self, gate_ref: &TurnGateRef) -> HarnessResult<()> {
         match self {
             Self::Recording(_) => {
                 Err("recording capability port has no local-dev approvals".into())

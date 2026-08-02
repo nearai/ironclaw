@@ -19,7 +19,7 @@ use ironclaw_turns::{
     TurnCommittedEventObserver, TurnCoordinator, TurnError, TurnRunId, TurnScope,
 };
 
-use ironclaw_turns::run_profile::AgentLoopHostError;
+use ironclaw_loop_contracts::AgentLoopHostError;
 
 /// Retryable rejection returned by [`AwaitEdgeWriter::check_scope_recovered`]
 /// when a scope's boot/lazy recovery task is in flight (§5.3). Callers treat

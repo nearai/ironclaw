@@ -27,15 +27,11 @@ use axum::http::{HeaderName, Method, Request, StatusCode, header};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use http_body_util::BodyExt;
+use ironclaw_extension_contracts::state::LifecyclePublicState;
 use ironclaw_host_api::{
     ids::{
         ActivityId, AgentId, CapabilityId, ExtensionId, GateRef, InvocationId, ProjectId,
         ResultRef, TenantId, ThreadId, UserId,
-    },
-    product_surface::{
-        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-        ProductSurfaceErrorKind, ProductSurfaceEventSubscription, ProductSurfaceStreamResponse,
-        ProductSurfaceValidationCode,
     },
     resolution::{
         Blocked, GateWaypoint, Outcome, OutcomeRefs, Resolution, ResultPreviewMeta, ToolVerdict,
@@ -43,14 +39,13 @@ use ironclaw_host_api::{
     result_meta::{ResultProgress, TerminateHint},
     runtime::RuntimeKind,
     safe_summary::SafeSummary,
-    state::LifecyclePublicState,
 };
 use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
     ADMIN_USER_SET_ROLE_CAPABILITY_ID, ADMIN_USER_SET_STATUS_CAPABILITY_ID,
     ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW, ADMIN_USERS_VIEW, AUTOMATIONS_VIEW,
-    AdminUserRecord, AdminUserRole, AdminUserSecretMeta, AdminUserStatus, CodexLoginStart,
-    EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW,
+    CodexLoginStart, EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
+    EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW,
     EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
     EXTENSIONS_VIEW, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW,
     LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
@@ -104,13 +99,12 @@ use ironclaw_product::{
     RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornSubmitTurnResponse, RebornThreadArtifact, RebornThreadArtifactRequest,
     RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeProductRequest, RebornTraceHoldAuthorizeResponse, RebornViewPage,
-    RebornViewQuery, RunArtifactLogs, RunArtifactRedaction,
-    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
-    SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW,
-    SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW, THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW,
-    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
-    TRACE_CREDITS_VIEW, rejecting_product_surface_error,
+    RebornTraceHoldAuthorizeProductRequest, RebornTraceHoldAuthorizeResponse, RunArtifactLogs,
+    RunArtifactRedaction, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW,
+    THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW,
+    TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, rejecting_product_surface_error,
 };
 use ironclaw_product::{
     AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
@@ -118,6 +112,15 @@ use ironclaw_product::{
     ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
+use ironclaw_product_contracts::admin_users::{
+    AdminUserRecord, AdminUserRole, AdminUserSecretMeta, AdminUserStatus,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ProductSurfaceEventSubscription, ProductSurfaceStreamResponse,
+    ProductSurfaceValidationCode,
+};
+use ironclaw_product_contracts::views::{RebornViewPage, RebornViewQuery};
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
     AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
@@ -1741,9 +1744,11 @@ impl ProductSurface for StubServices {
     async fn invoke(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse, ProductSurfaceError>
-    {
+        request: ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
+        ProductSurfaceError,
+    > {
         if let Some(call_id) = ProductSurfaceCallId::parse(request.operation_id.as_str()) {
             let output = self
                 .record_product_surface_call(
@@ -1752,7 +1757,9 @@ impl ProductSurface for StubServices {
                 )
                 .await?
                 .into_value()?;
-            return Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output });
+            return Ok(
+                ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output },
+            );
         }
 
         let output = StubServices::invoke(
@@ -1764,14 +1771,14 @@ impl ProductSurface for StubServices {
         )
         .await?;
         let output = serde_json::to_value(output).map_err(ProductSurfaceError::internal_from)?;
-        Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
+        Ok(ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output })
     }
 
     async fn query(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+        request: ironclaw_product_contracts::surface::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_product_contracts::surface::ProductSurfaceQueryPage, ProductSurfaceError>
     {
         let page = StubServices::query(
             self,
@@ -1784,7 +1791,7 @@ impl ProductSurface for StubServices {
         )
         .await?;
         Ok(
-            ironclaw_host_api::product_surface::ProductSurfaceQueryPage {
+            ironclaw_product_contracts::surface::ProductSurfaceQueryPage {
                 items: vec![page.payload],
                 next_cursor: page.next_cursor,
             },
@@ -1794,9 +1801,11 @@ impl ProductSurface for StubServices {
     async fn stream_events(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceStreamResponse, ProductSurfaceError>
-    {
+        request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
+        ProductSurfaceError,
+    > {
         let thread_id = request.stream_id.ok_or_else(|| {
             ProductSurfaceError::validation("stream_id", ProductSurfaceValidationCode::MissingField)
         })?;
@@ -1857,7 +1866,7 @@ impl ProductSurface for StubServices {
             None
         };
         Ok(
-            ironclaw_host_api::product_surface::ProductSurfaceStreamResponse {
+            ironclaw_product_contracts::surface::ProductSurfaceStreamResponse {
                 events,
                 next_cursor: None,
                 subscription,
@@ -5483,6 +5492,82 @@ async fn install_extension_invokes_lifecycle_capability_with_body_package_ref() 
     assert_eq!(queries.len(), 2);
     assert_eq!(queries[0].view_id, EXTENSIONS_VIEW.id);
     assert_eq!(queries[1].view_id, EXTENSIONS_VIEW.id);
+}
+
+#[tokio::test]
+async fn register_hosted_mcp_uses_closed_wire_without_extension_readback() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/register-hosted-mcp")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"desired_id":"linear","desired_name":"Linear MCP","endpoint":"https://mcp.linear.app/mcp","auth_selection":{"kind":"oauth","client_profile_id":"linear-default"}}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["success"], true);
+    assert_eq!(body["package_ref"]["id"], "mcp-linear");
+    assert!(body.get("phase").is_none());
+
+    let calls = services.invoke_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].0.as_str(),
+        EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID
+    );
+    assert_eq!(
+        calls[0].1,
+        serde_json::json!({
+            "desired_id": "linear",
+            "desired_name": "Linear MCP",
+            "endpoint": "https://mcp.linear.app/mcp",
+            "auth_selection": { "kind": "oauth", "client_profile_id": "linear-default" },
+        })
+    );
+    assert!(
+        services.view_queries.lock().expect("lock").is_empty(),
+        "registration is admission only and must not read an installation projection"
+    );
+}
+
+#[tokio::test]
+async fn register_hosted_mcp_sanitizes_missing_and_forbidden_fields() {
+    for body in [
+        r#"{"desired_id":"linear","endpoint":"https://mcp.linear.app/mcp"}"#,
+        r#"{"desired_id":"linear","desired_name":"Linear MCP","endpoint":"https://mcp.linear.app/mcp","secrets":{"token":"must-not-cross"}}"#,
+    ] {
+        let services = Arc::new(StubServices::default());
+        let response = router_with(services.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/extensions/register-hosted-mcp")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response_body = read_json(response).await;
+        assert_eq!(response_body["error"], "invalid_request");
+        assert_eq!(response_body["field"], "request");
+        assert_eq!(response_body["validation_code"], "invalid_value");
+        assert!(services.invoke_calls.lock().expect("lock").is_empty());
+        assert!(!response_body.to_string().contains("token"));
+    }
 }
 
 #[tokio::test]
