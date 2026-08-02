@@ -2037,48 +2037,42 @@ async fn observer_replays_when_a_second_writer_leaves_a_cursor_gap() {
     // Committing again now starts past the gap, forcing the replay.
     let after_the_gap = submit(&store).await;
 
-    let observed = tokio::time::timeout(Duration::from_secs(5), async {
+    // Nothing either side of the gap may be lost: the entry before it arrived
+    // on the fast path, the entry after it through the replay, and the replay
+    // must not skip past what it was catching up on.
+    //
+    // Waiting for all three rather than just the other writer's, because the
+    // replay records the entries it catches up on one at a time -- seeing that
+    // one has landed says nothing about the next.
+    //
+    // Deliberately a subset rather than an exact count. Redelivery is permitted
+    // here by design -- `deliver_committed_batch` says the entries above a gap
+    // "may be delivered twice, which every replay path already permits" -- and
+    // registration primes the cursor from a spawned task, so a slow enough
+    // runner can legitimately replay the first entry on top of its live
+    // delivery. Asserting an exact count would pin scheduling, not the contract.
+    let expected = [before_the_gap, unseen_by_the_fast_path, after_the_gap];
+    let delivered = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let seen = observer
+            let delivered = observer
                 .commits
                 .lock()
                 .expect("observer mutex")
                 .iter()
-                .any(|commit| commit.state.process_id == unseen_by_the_fast_path);
-            if seen {
-                return true;
+                .map(|commit| commit.state.process_id)
+                .collect::<std::collections::HashSet<_>>();
+            if expected
+                .iter()
+                .all(|process_id| delivered.contains(process_id))
+            {
+                return delivered;
             }
             tokio::task::yield_now().await;
         }
     })
     .await
-    .unwrap_or(false);
+    .unwrap_or_default();
 
-    assert!(
-        observed,
-        "the other writer's commit must reach the observer through the durable \
-         replay; the in-memory path carries only this instance's own batches, \
-         so delivering across the gap would drop it"
-    );
-
-    // Nothing either side of the gap may be lost: the entry before it arrived
-    // on the fast path, the entry after it through the replay, and the replay
-    // must not skip past what it was catching up on.
-    //
-    // Deliberately a subset check rather than an exact count. Redelivery is
-    // permitted here by design -- `deliver_committed_batch` says the entries
-    // above a gap "may be delivered twice, which every replay path already
-    // permits" -- and registration primes the cursor from a spawned task, so a
-    // slow enough runner can legitimately replay the first entry on top of its
-    // live delivery. Asserting an exact count would pin scheduling, not the
-    // contract.
-    let delivered = observer
-        .commits
-        .lock()
-        .expect("observer commits")
-        .iter()
-        .map(|commit| commit.state.process_id)
-        .collect::<std::collections::HashSet<_>>();
     for (label, process_id) in [
         ("before the gap", before_the_gap),
         ("the other writer's", unseen_by_the_fast_path),
@@ -2087,7 +2081,9 @@ async fn observer_replays_when_a_second_writer_leaves_a_cursor_gap() {
         assert!(
             delivered.contains(&process_id),
             "{label} commit never reached the observer; crossing the fast path \
-             and the durable replay must lose nothing"
+             and the durable replay must lose nothing. The other writer's entry \
+             is the one the in-memory path cannot carry, so a delivery that \
+             skipped the gap drops it"
         );
     }
 }
