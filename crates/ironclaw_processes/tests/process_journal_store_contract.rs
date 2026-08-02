@@ -1974,6 +1974,94 @@ async fn observer_cursor_never_rewinds_from_a_stale_cache() {
     );
 }
 
+/// Another writer's entries push this observer onto the authoritative replay.
+///
+/// The in-memory delivery path may only hand a batch straight to an observer
+/// when the batch starts exactly one past what this process acknowledged.
+/// A second instance committing in between leaves a gap, and delivering across
+/// it would skip that instance's entries entirely — the observer would never
+/// see them, because the fast path carries only what this process committed.
+///
+/// This case exists to pin that fallback deterministically. Registration primes
+/// the cursor from a *spawned* task, so a freshly subscribed observer reaches
+/// the gap branch only when the first commit beats that task — a race that
+/// silently stops covering the branch whenever the scheduler goes the other
+/// way. Driving the gap through a real second writer does not depend on
+/// scheduling at all.
+#[tokio::test]
+async fn observer_replays_when_a_second_writer_leaves_a_cursor_gap() {
+    let filesystem = in_memory_backed_processes_filesystem();
+    let store = ProcessJournalStore::new(Arc::clone(&filesystem));
+    let other_writer = ProcessJournalStore::new(Arc::clone(&filesystem));
+    let scope = scope();
+    let submit = async |store: &ProcessJournalStore<_>| {
+        let process_id = ProcessId::new();
+        store
+            .submit_process(SubmitProcessRequest {
+                process_id,
+                process_kind: ProcessKind::Internal,
+                scope: scope.clone(),
+                exclusive_within_scope: false,
+                operation_id: None,
+                owner_user_id: Some(scope.user_id.clone()),
+                concurrency_class: None,
+                parent_process_id: None,
+                root_process_id: None,
+                spawn_tree_descendant_cap: None,
+                dependency: None,
+                checkpoint_ref: None,
+                input: None,
+                created_at: Utc::now(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .expect("submit");
+        process_id
+    };
+
+    let observer = Arc::new(RecordingProcessObserver::default());
+    store
+        .subscribe_process_observer(observer.clone())
+        .expect("subscribe observer");
+
+    // Let this instance acknowledge a cursor of its own first, so the gap below
+    // is a genuine discontinuity rather than the cold-cache case.
+    submit(&store).await;
+    let cursor_path = observer_cursor_path();
+    await_observer_cursor(&filesystem, &cursor_path).await;
+
+    // The gap: entries this observer's instance never committed and so can
+    // never deliver from memory.
+    let unseen_by_the_fast_path = submit(&other_writer).await;
+
+    // Committing again now starts past the gap, forcing the replay.
+    submit(&store).await;
+
+    let observed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let seen = observer
+                .commits
+                .lock()
+                .expect("observer mutex")
+                .iter()
+                .any(|commit| commit.state.process_id == unseen_by_the_fast_path);
+            if seen {
+                return true;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or(false);
+
+    assert!(
+        observed,
+        "the other writer's commit must reach the observer through the durable \
+         replay; the in-memory path carries only this instance's own batches, \
+         so delivering across the gap would drop it"
+    );
+}
+
 fn observer_cursor_path() -> ScopedPath {
     let digest = blake3::hash(b"recording-process-observer").to_hex();
     ScopedPath::new(format!("/processes/materialized/observer-cursor/{digest}"))
