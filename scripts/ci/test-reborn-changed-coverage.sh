@@ -134,6 +134,59 @@ check_text "line denominator is reported" "Changed line coverage: 100.00% (3/3)"
 check_text "branch denominator is reported" "Changed branch coverage: 100.00% (2/2)"
 check_report_text "machine report preserves the branch denominator" '"instrumented_branches": 2'
 
+echo "▶ restored original changed-line floor"
+cat >"${work}/policy.toml" <<'TOML'
+[policy]
+line_percent = 90.0
+branch_percent = 0.0
+TOML
+threshold_lines=20
+: >"${case_root}/${source_path}"
+: >"${work}/change.diff"
+printf '%s\n' \
+  "diff --git a/${source_path} b/${source_path}" \
+  "--- /dev/null" \
+  "+++ b/${source_path}" \
+  "@@ -0,0 +1,${threshold_lines} @@" >>"${work}/change.diff"
+for line in $(seq 1 "${threshold_lines}"); do
+  printf 'pub fn threshold_line_%s() {}\n' "${line}" >>"${case_root}/${source_path}"
+  printf '+pub fn threshold_line_%s() {}\n' "${line}" >>"${work}/change.diff"
+done
+write_threshold_lcov() {
+  local line_18_hits="$1"
+  printf 'SF:%s\n' "${case_root}/${source_path}" >"${work}/coverage.lcov"
+  for line in $(seq 1 17); do
+    printf 'DA:%s,1\n' "${line}" >>"${work}/coverage.lcov"
+  done
+  printf 'DA:18,%s\nDA:19,0\nDA:20,0\n' "${line_18_hits}" \
+    >>"${work}/coverage.lcov"
+  for line in $(seq 1 20); do
+    printf 'BRDA:%s,0,0,0\n' "${line}" >>"${work}/coverage.lcov"
+  done
+  printf 'LF:20\nBRF:20\nend_of_record\n' >>"${work}/coverage.lcov"
+}
+
+write_threshold_lcov 1
+run_gate
+check_rc "90% changed lines pass at the original floor" 0
+check_text "line floor denominator is reported" "Changed line coverage: 90.00% (18/20)"
+check_text "ungated branch coverage remains visible" "Changed branch coverage: 0.00% (0/20)"
+check_text "uncovered branch detail remains visible" "${source_path}:1 branch 0/0"
+check_report_text "machine report records the 90% line floor" '"threshold_percent": 90.0'
+check_report_text "machine report records the zero branch floor" '"branch_threshold_percent": 0.0'
+
+write_threshold_lcov 0
+run_gate
+check_rc "changed-line coverage below 90% fails" 1
+check_text "line-floor failure names the original threshold" "line coverage 85.00% is below 90.0%"
+
+printf '%s\n' 'pub fn classify(value: bool) -> bool {' '    value' '}' >"${case_root}/${source_path}"
+cat >"${work}/policy.toml" <<'TOML'
+[policy]
+line_percent = 100.0
+branch_percent = 100.0
+TOML
+
 echo "▶ diff markers inside hunk content are parsed by their first byte"
 cat >"${work}/change.diff" <<'DIFF'
 diff --git a/crates/ironclaw_demo/src/lib.rs b/crates/ironclaw_demo/src/lib.rs

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Workflow-contract tests for strict changed-line and branch coverage."""
+"""Workflow-contract tests for thresholded changed-line and branch coverage."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import ast
 import re
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -16,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class ChangedCoverageWorkflowTests(unittest.TestCase):
-    def test_strict_gate_sabotage_harness_passes(self):
+    def test_gate_sabotage_harness_passes(self):
         result = subprocess.run(
             ["bash", "scripts/ci/test-reborn-changed-coverage.sh"],
             cwd=ROOT,
@@ -32,7 +33,16 @@ class ChangedCoverageWorkflowTests(unittest.TestCase):
         )
         self.assertIsNotNone(success, result.stdout)
 
-    def test_reborn_workflow_runs_strict_gate_and_preserves_machine_report(self):
+    def test_committed_policy_restores_original_line_floor(self):
+        with (ROOT / "tests/integration/changed-coverage-exemptions.toml").open(
+            "rb"
+        ) as handle:
+            policy = tomllib.load(handle)["policy"]
+
+        self.assertEqual(policy["line_percent"], 90.0)
+        self.assertEqual(policy["branch_percent"], 0.0)
+
+    def test_reborn_workflow_runs_gate_and_preserves_machine_report(self):
         workflow = (ROOT / ".github/workflows/reborn-tests.yml").read_text(
             encoding="utf-8"
         )
@@ -53,7 +63,7 @@ class ChangedCoverageWorkflowTests(unittest.TestCase):
         self.assertNotIn(
             "--threshold",
             gate_step,
-            "the strict line/branch gate has no threshold CLI and must gate every denominator",
+            "thresholds come from the reviewed manifest, not a workflow override",
         )
         self.assertRegex(
             workflow,
