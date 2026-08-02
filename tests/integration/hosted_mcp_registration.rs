@@ -899,7 +899,7 @@ async fn bearer_registration_stays_setup_needed_until_the_existing_auth_continua
     let rejected_retry = install_fixture(&services, scope.clone()).await;
     assert_eq!(
         rejected_retry.phase,
-        ironclaw_host_api::state::InstallationState::Installed,
+        ironclaw_extension_contracts::state::InstallationState::Installed,
         "a rejected bearer token keeps the install in setup-needed state"
     );
     assert_eq!(
@@ -910,7 +910,7 @@ async fn bearer_registration_stays_setup_needed_until_the_existing_auth_continua
     assert!(
         rejected_retry.blockers.iter().any(|blocker| matches!(
             blocker,
-            ironclaw_host_api::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
+            ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
         )),
         "a rejected bearer token must retain the credential blocker: {rejected_retry:#?}"
     );
