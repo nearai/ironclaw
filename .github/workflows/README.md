@@ -51,6 +51,9 @@ ordinary PRs avoid consuming 20-plus runners for unrelated lanes. Pull-request
 parallelism is capped at three crate buckets, one root partition, and one
 integration lane; merge queue and main retain full matrix parallelism so this
 feedback optimization does not serialize the production gate.
+Full-coverage crate buckets run one multi-package `cargo llvm-cov` invocation
+per bucket, preserving every package test and the bucket LCOV artifact while
+sharing dependency compilation across packages in the same job.
 
 History: the slim-vs-full clippy matrix violated this — the queue linted only
 `--all-features` while push linted a broader matrix, so feature-gated dead code

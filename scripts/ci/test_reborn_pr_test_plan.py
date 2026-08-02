@@ -240,6 +240,12 @@ class RebornPrTestPlanTests(unittest.TestCase):
             workflow,
         )
         self.assertIn(
+            'cargo llvm-cov --branch --skip-functions \\\n'
+            '                "${package_args[@]}" "${feature_args[@]}"',
+            workflow,
+        )
+        self.assertNotIn('coverage/${package}.lcov', workflow)
+        self.assertIn(
             "max-parallel: ${{ github.event_name == 'pull_request' && 3 || 14 }}",
             workflow,
         )

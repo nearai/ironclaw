@@ -321,63 +321,40 @@ jobs:
 
           scripts/ci/run-hermetic-deterministic-suite.sh prepare-command
           export IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1
+          package_args=()
+          feature_args=()
+          incremental_env=()
+          while IFS= read -r package; do
+            package_args+=(-p "$package")
+            feature_flags="$(scripts/ci/package-feature-flags.sh "$package")"
+            if [[ -n "${feature_flags}" ]]; then
+              features="${feature_flags#--features }"
+              IFS=, read -ra package_features <<< "${features}"
+              for feature in "${package_features[@]}"; do
+                feature_args+=(--features "${package}/${feature}")
+              done
+            fi
+            if [[ "$package" == "ironclaw_reborn_composition" ]]; then
+              incremental_env=(env CARGO_INCREMENTAL=0)
+            fi
+          done < <(printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[]')
+
           if [[ "${COLLECT_COVERAGE}" == "true" ]]; then
-            mkdir -p coverage
-            while IFS= read -r package; do
-              feature_flags="$(scripts/ci/package-feature-flags.sh "$package")"
-
-              # Scoped to this invocation only (never `export`) so it can't leak
-              # onto later packages in the same bucket iteration if
-              # composition-core ever stops being single-package.
-              incremental_env=()
-              if [ "$package" = "ironclaw_reborn_composition" ]; then
-                echo "Disabling incremental compilation for ironclaw_reborn_composition to keep runner disk usage bounded."
-                incremental_env=(env CARGO_INCREMENTAL=0)
-              fi
-
-              echo "::group::cargo llvm-cov -p ${package} ${feature_flags} test"
-              # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
-              scripts/ci/run-hermetic-deterministic-suite.sh command \
-                timeout --signal=INT --kill-after=30s 40m \
-                "${incremental_env[@]}" cargo llvm-cov --branch --skip-functions -p "$package" ${feature_flags} --all-targets \
-                  --lcov --output-path "coverage/${package}.lcov" \
-                  test --ignore-rust-version -- --nocapture
-              echo "::endgroup::"
-            done < <(printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[]')
+            echo "::group::cargo llvm-cov bucket ${BUCKET_NAME}"
+            scripts/ci/run-hermetic-deterministic-suite.sh command \
+              timeout --signal=INT --kill-after=30s 40m \
+              "${incremental_env[@]}" cargo llvm-cov --branch --skip-functions \
+                "${package_args[@]}" "${feature_args[@]}" --all-targets \
+                --lcov --output-path "bucket-${BUCKET_NAME}.lcov" \
+                test --ignore-rust-version -- --nocapture
+            echo "::endgroup::"
           else
-            package_args=()
-            feature_args=()
-            incremental_env=()
-            while IFS= read -r package; do
-              package_args+=(-p "$package")
-              feature_flags="$(scripts/ci/package-feature-flags.sh "$package")"
-              if [[ -n "${feature_flags}" ]]; then
-                features="${feature_flags#--features }"
-                IFS=, read -ra package_features <<< "${features}"
-                for feature in "${package_features[@]}"; do
-                  feature_args+=(--features "${package}/${feature}")
-                done
-              fi
-              if [[ "$package" == "ironclaw_reborn_composition" ]]; then
-                incremental_env=(env CARGO_INCREMENTAL=0)
-              fi
-            done < <(printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[]')
-
             echo "::group::cargo test affected bucket ${BUCKET_NAME}"
             scripts/ci/run-hermetic-deterministic-suite.sh command \
               timeout --signal=INT --kill-after=30s 28m \
               "${incremental_env[@]}" cargo test "${package_args[@]}" \
                 "${feature_args[@]}" --ignore-rust-version --all-targets -- --nocapture
             echo "::endgroup::"
-          fi
-
-          if [[ "${COLLECT_COVERAGE}" == "true" ]]; then
-            # Keep reports separate: llvm-cov does not guarantee a trailing
-            # newline, so raw concatenation can corrupt record boundaries.
-            package_parts=(coverage/*.lcov)
-            scripts/ci/reborn-coverage-merge-lcov.sh \
-              "bucket-${BUCKET_NAME}.lcov" \
-              "${package_parts[@]}"
           fi
 
       - name: Upload bucket lcov artifact
