@@ -14,14 +14,20 @@ use ironclaw_host_api::{
     product_adapter::AdapterInstallationId,
 };
 use ironclaw_outbound::{
+    AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendRequest,
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    CommunicationPreferenceVersion, DeliveryDefaultScope, OutboundDeliveryAttempt, OutboundError,
-    OutboundPolicyService, OutboundStateStore, OutboundStateStorePort, ReplyTargetBindingClaim,
-    ReplyTargetBindingValidator, RunNotificationContext, RunNotificationEventKind,
-    RunNotificationOrigin, ThreadProjectionAccessClaim, ThreadProjectionAccessPolicy,
+    CommunicationPreferenceVersion, DeliveryDefaultScope, LoadSubscriptionCursorRequest,
+    OutboundDeliveryAttempt, OutboundError, OutboundPolicyService, OutboundPushPlan,
+    OutboundPushTargetRequest, OutboundStateStore, OutboundStateStorePort,
+    ProjectionSubscriptionRecord, RecoverInterruptedDeliveryRequest, ReplyTargetBindingClaim,
+    ReplyTargetBindingValidator, RunDeliveryCleanupRecord, RunDeliveryCleanupRequest,
+    RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord, RunFinalReplyTargetRequest,
+    RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin,
+    ThreadNotificationPolicy, ThreadProjectionAccessClaim, ThreadProjectionAccessPolicy,
     ThreadProjectionAccessRequest, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
-    VersionedCommunicationPreferenceRecord, WriteCommunicationPreferenceRequest,
+    UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
+    WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product::{ExternalActorRef, ExternalConversationRef};
 use ironclaw_product::{
@@ -252,6 +258,7 @@ fn preference_record(scope: &TurnScope) -> CommunicationPreferenceRecord {
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+use ironclaw_event_projections::ProjectionCursor;
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_product::{
     ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, PartDeliveryOutcome,
@@ -264,6 +271,181 @@ use ironclaw_product::{
 use ironclaw_product_contracts::delivery::{
     ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
 };
+use tokio::sync::Notify;
+
+struct PausingRecoveryStore {
+    inner: Arc<OutboundStateStore<InMemoryBackend>>,
+    snapshot_listed: Arc<Notify>,
+    resume_recovery: Arc<Notify>,
+}
+
+#[async_trait]
+impl OutboundStateStorePort for PausingRecoveryStore {
+    async fn put_run_delivery_cleanup(
+        &self,
+        record: RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.put_run_delivery_cleanup(record).await
+    }
+
+    async fn load_run_delivery_cleanup(
+        &self,
+        request: RunDeliveryCleanupRequest,
+    ) -> Result<Vec<RunDeliveryCleanupRecord>, OutboundError> {
+        self.inner.load_run_delivery_cleanup(request).await
+    }
+
+    async fn complete_run_delivery_cleanup(
+        &self,
+        record: &RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.complete_run_delivery_cleanup(record).await
+    }
+
+    async fn put_run_final_reply_handoff(
+        &self,
+        record: RunFinalReplyHandoffRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.put_run_final_reply_handoff(record).await
+    }
+
+    async fn list_pending_run_final_reply_handoffs(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<RunFinalReplyHandoffRecord>, OutboundError> {
+        self.inner
+            .list_pending_run_final_reply_handoffs(limit)
+            .await
+    }
+
+    async fn list_pending_run_final_reply_handoffs_after(
+        &self,
+        after: Option<&RunFinalReplyHandoffRecord>,
+        limit: usize,
+    ) -> Result<Vec<RunFinalReplyHandoffRecord>, OutboundError> {
+        self.inner
+            .list_pending_run_final_reply_handoffs_after(after, limit)
+            .await
+    }
+
+    async fn complete_run_final_reply_handoff(
+        &self,
+        record: &RunFinalReplyHandoffRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.complete_run_final_reply_handoff(record).await
+    }
+
+    async fn load_run_final_reply_handoff_cursor(
+        &self,
+    ) -> Result<ironclaw_host_api::turn::EventCursor, OutboundError> {
+        self.inner.load_run_final_reply_handoff_cursor().await
+    }
+
+    async fn advance_run_final_reply_handoff_cursor(
+        &self,
+        cursor: ironclaw_host_api::turn::EventCursor,
+    ) -> Result<(), OutboundError> {
+        self.inner
+            .advance_run_final_reply_handoff_cursor(cursor)
+            .await
+    }
+
+    async fn put_run_final_reply_target(
+        &self,
+        record: RunFinalReplyTargetRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.put_run_final_reply_target(record).await
+    }
+
+    async fn load_run_final_reply_target(
+        &self,
+        request: RunFinalReplyTargetRequest,
+    ) -> Result<Option<RunFinalReplyTargetRecord>, OutboundError> {
+        self.inner.load_run_final_reply_target(request).await
+    }
+
+    async fn put_thread_notification_policy(
+        &self,
+        policy: ThreadNotificationPolicy,
+    ) -> Result<(), OutboundError> {
+        self.inner.put_thread_notification_policy(policy).await
+    }
+
+    async fn load_thread_notification_policy(
+        &self,
+        scope: TurnScope,
+    ) -> Result<ThreadNotificationPolicy, OutboundError> {
+        self.inner.load_thread_notification_policy(scope).await
+    }
+
+    async fn plan_push_targets(
+        &self,
+        request: OutboundPushTargetRequest,
+    ) -> Result<OutboundPushPlan, OutboundError> {
+        self.inner.plan_push_targets(request).await
+    }
+
+    async fn upsert_subscription(
+        &self,
+        record: ProjectionSubscriptionRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.upsert_subscription(record).await
+    }
+
+    async fn load_subscription_cursor(
+        &self,
+        request: LoadSubscriptionCursorRequest,
+    ) -> Result<Option<ProjectionCursor>, OutboundError> {
+        self.inner.load_subscription_cursor(request).await
+    }
+
+    async fn advance_subscription_cursor(
+        &self,
+        request: AdvanceSubscriptionCursorRequest,
+    ) -> Result<(), OutboundError> {
+        self.inner.advance_subscription_cursor(request).await
+    }
+
+    async fn record_delivery_attempt(
+        &self,
+        attempt: OutboundDeliveryAttempt,
+    ) -> Result<(), OutboundError> {
+        self.inner.record_delivery_attempt(attempt).await
+    }
+
+    async fn claim_delivery_attempt_for_send(
+        &self,
+        request: ClaimDeliveryAttemptForSendRequest,
+    ) -> Result<bool, OutboundError> {
+        self.inner.claim_delivery_attempt_for_send(request).await
+    }
+
+    async fn recover_interrupted_delivery_attempt(
+        &self,
+        request: RecoverInterruptedDeliveryRequest,
+    ) -> Result<bool, OutboundError> {
+        self.inner
+            .recover_interrupted_delivery_attempt(request)
+            .await
+    }
+
+    async fn update_delivery_status(
+        &self,
+        request: UpdateDeliveryStatusRequest,
+    ) -> Result<(), OutboundError> {
+        self.inner.update_delivery_status(request).await
+    }
+
+    async fn list_delivery_attempts(
+        &self,
+        scope: TurnScope,
+    ) -> Result<Vec<OutboundDeliveryAttempt>, OutboundError> {
+        let attempts = self.inner.list_delivery_attempts(scope).await?;
+        self.snapshot_listed.notify_one();
+        self.resume_recovery.notified().await;
+        Ok(attempts)
+    }
+}
 
 struct CoordinatorDenyAllEgress;
 
@@ -1603,6 +1785,95 @@ async fn coordinator_recovery_marks_interrupted_sending_attempts_unknown() {
         ironclaw_outbound::OutboundDeliveryStatus::Unknown
     );
     assert_eq!(adapter.deliver_calls(), 1, "adapter never called again");
+}
+
+#[tokio::test]
+async fn coordinator_recovery_never_clobbers_a_concurrent_delivered_status() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let attempt = OutboundDeliveryAttempt {
+        delivery_id: ironclaw_outbound::OutboundDeliveryId::new(),
+        scope: scope.clone(),
+        candidate: ironclaw_outbound::OutboundPushCandidate {
+            tenant_id: scope.tenant_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            thread_id: scope.thread_id.clone(),
+            turn_run_id: None,
+            target: validated_reply_target(),
+            kind: ironclaw_outbound::OutboundPushKind::DeliveryStatus,
+            projection_ref: ironclaw_outbound::ProjectionUpdateRef::new(
+                "projection:concurrent-delivery",
+            )
+            .expect("projection ref"),
+            requires_reply_target_revalidation: false,
+        },
+        status: ironclaw_outbound::OutboundDeliveryStatus::Sending,
+        attempted_at: Utc::now(),
+        failure_kind: None,
+    };
+    store
+        .record_delivery_attempt(attempt.clone())
+        .await
+        .expect("seed sending attempt");
+
+    let snapshot_listed = Arc::new(Notify::new());
+    let resume_recovery = Arc::new(Notify::new());
+    let pausing_store = Arc::new(PausingRecoveryStore {
+        inner: Arc::clone(&store),
+        snapshot_listed: Arc::clone(&snapshot_listed),
+        resume_recovery: Arc::clone(&resume_recovery),
+    });
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        Vec::new(),
+    ));
+    let coordinator = DeliveryCoordinator::new(
+        pausing_store as Arc<dyn OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter,
+            unavailable: false,
+        }),
+        Arc::new(FixedReplyContext(Vec::new())),
+        DeliveryRetryPolicy::default(),
+    );
+
+    let recovery_scope = scope.clone();
+    let recovery = tokio::spawn(async move {
+        coordinator
+            .recover_interrupted_deliveries(recovery_scope)
+            .await
+    });
+    snapshot_listed.notified().await;
+
+    store
+        .update_delivery_status(UpdateDeliveryStatusRequest {
+            delivery_id: attempt.delivery_id,
+            scope: scope.clone(),
+            status: ironclaw_outbound::OutboundDeliveryStatus::Delivered,
+            updated_at: Utc::now(),
+            failure_kind: None,
+        })
+        .await
+        .expect("concurrent worker commits delivered");
+    resume_recovery.notify_one();
+
+    let recovered = recovery
+        .await
+        .expect("recovery task joins")
+        .expect("recovery scans");
+    assert_eq!(recovered, 0, "terminal attempt was not recovered");
+    let attempts = store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("load final attempt");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Delivered,
+        "stale recovery must preserve the concurrent terminal transition"
+    );
 }
 
 #[tokio::test]
