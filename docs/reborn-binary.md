@@ -387,11 +387,15 @@ Expected fields include:
 - `v1_state: not-used`
 - `driver_registry: initialized`
 
-When one or more ambient proxy environment variables are present, `doctor`
-also reports a `host_mediated_ambient_proxy` check. The check reports only that
+When one or more of `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `http_proxy`,
+`https_proxy`, or `all_proxy` are present, `doctor` also reports a
+`host_mediated_ambient_proxy` check. Presence is enough to trigger the check,
+including when the variable's value is empty. The check reports only that
 ambient proxy configuration is present; it never emits proxy URLs, credentials,
 or other environment-variable values. When none of those variables are present,
-the check is omitted.
+the check is omitted. `NO_PROXY` and `no_proxy` specify proxy bypass rules, not
+proxy endpoints, so they are deliberately excluded; they are irrelevant to the
+host-mediated transport because it disables ambient proxy discovery.
 
 The diagnostic reflects the host-mediated network behavior established by
 #7016: `ReqwestNetworkTransport` ignores ambient proxy discovery so an approved,
