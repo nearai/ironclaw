@@ -176,22 +176,92 @@ impl DeliveryReplyContextSource for IngressReplyContextSource {
 mod tests {
     use super::*;
 
+    #[derive(Clone, Default)]
+    struct SharedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    struct SharedLogWriterGuard(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedLogWriterGuard {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogWriter {
+        type Writer = SharedLogWriterGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriterGuard(std::sync::Arc::clone(&self.0))
+        }
+    }
+
+    impl SharedLogWriter {
+        fn contents(&self) -> String {
+            String::from_utf8(
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone(),
+            )
+            .expect("tracing output is UTF-8")
+        }
+    }
+
     /// The only way an unusable id reaches this seam is a durable
     /// installation record that predates — or violates — the boundary
     /// vocabulary, which is exactly when guessing is worst: the alternative to
     /// refusing is addressing an envelope to an identity nothing validated.
+    ///
+    /// Refusing is also **silent to the caller** — it is the same `None` a
+    /// deactivated channel produces — so the debug event is the only thing
+    /// that tells an operator "this channel has a corrupted installation row"
+    /// apart from "this channel is not installed". A subscriber has to be
+    /// installed for that half to mean anything: `tracing` short-circuits on
+    /// the null dispatcher, so without one the macro body never runs and the
+    /// test could not tell "logged it" from "dropped it". Scoped with
+    /// `with_default` so parallel tests are unaffected.
     #[test]
-    fn delivery_identity_refuses_ids_the_boundary_vocabulary_rejects() {
+    fn delivery_identity_refuses_ids_the_boundary_vocabulary_rejects_and_says_which() {
         let (extension, installation) =
             delivery_identity("slack", "inst-1").expect("both ids are valid vocabulary");
         assert_eq!(extension.as_str(), "slack");
         assert_eq!(installation.as_str(), "inst-1");
 
-        // `ExtensionId` is a name segment: uppercase and spaces are out.
-        assert!(delivery_identity("Slack Channel", "inst-1").is_none());
-        // `AdapterInstallationId` is permissive but not empty.
-        assert!(delivery_identity("slack", "").is_none());
-        // Both bad is still one refusal, not a partial resolve.
-        assert!(delivery_identity("", "").is_none());
+        let logs = SharedLogWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(logs.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            // `ExtensionId` is a name segment: uppercase and spaces are out.
+            assert!(delivery_identity("Slack Channel", "inst-1").is_none());
+            // `AdapterInstallationId` is permissive but not empty.
+            assert!(delivery_identity("slack", "").is_none());
+            // Both bad is still one refusal, not a partial resolve.
+            assert!(delivery_identity("", "").is_none());
+        });
+
+        let rendered = logs.contents();
+        assert_eq!(
+            rendered.lines().count(),
+            3,
+            "every refusal is announced, not just the first: {rendered}"
+        );
+        assert!(
+            rendered.contains("Slack Channel"),
+            "the event must name the id it rejected, or an operator cannot tell a \
+             corrupted installation row from an uninstalled channel: {rendered}"
+        );
     }
 }
