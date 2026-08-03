@@ -271,6 +271,17 @@ fn workspace_materialization_failure_kind(error: &CoordinatedDeliveryError) -> D
     }
 }
 
+fn is_permanent_preflight_failure_kind(failure_kind: DeliveryFailureKind) -> bool {
+    match failure_kind {
+        DeliveryFailureKind::AuthorizationRevoked
+        | DeliveryFailureKind::Rejected
+        | DeliveryFailureKind::Unknown => true,
+        DeliveryFailureKind::TransientValidatorError
+        | DeliveryFailureKind::TransportUnavailable
+        | DeliveryFailureKind::RateLimited => false,
+    }
+}
+
 /// Retry policy for retryable per-part outcomes (bounded, jitter-free by
 /// default — tests inject zero delays).
 #[derive(Debug, Clone)]
@@ -523,7 +534,7 @@ impl DeliveryCoordinator {
             Err(error) => {
                 let kind =
                     crate::outbound_delivery::delivery_failure_kind_for_surface_error(&error);
-                if kind == DeliveryFailureKind::TransportUnavailable {
+                if !is_permanent_preflight_failure_kind(kind) {
                     return Err(CoordinatedDeliveryError::Workflow(error));
                 }
                 return match self.fail_prepared(&attempt, kind).await? {
@@ -555,7 +566,7 @@ impl DeliveryCoordinator {
             Ok(parts) => parts,
             Err(error) => {
                 let failure_kind = workspace_materialization_failure_kind(&error);
-                if failure_kind == DeliveryFailureKind::TransportUnavailable {
+                if !is_permanent_preflight_failure_kind(failure_kind) {
                     return Err(error);
                 }
                 return match self.fail_prepared(&attempt, failure_kind).await? {
