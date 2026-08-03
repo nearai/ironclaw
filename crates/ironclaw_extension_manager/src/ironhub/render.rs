@@ -1,4 +1,5 @@
 use super::model::{IronHubPhase, IronHubResponse};
+use crate::terminal_render::{push_line, terminal_safe};
 
 pub fn render_reborn_ironhub_response(label: &str, response: &IronHubResponse) -> String {
     let mut output = String::new();
@@ -54,15 +55,4 @@ pub fn render_reborn_ironhub_response(label: &str, response: &IronHubResponse) -
         }
     }
     output
-}
-
-fn terminal_safe(value: &str) -> String {
-    value.chars().flat_map(char::escape_default).collect()
-}
-
-fn push_line(output: &mut String, args: std::fmt::Arguments<'_>) {
-    use std::fmt::Write as _;
-    #[allow(clippy::let_underscore_must_use)]
-    let _ = output.write_fmt(args);
-    output.push('\n');
 }

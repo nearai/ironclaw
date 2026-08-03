@@ -107,6 +107,7 @@ jq -c -n --argjson packages "${packages_json}" '
 
       ironclaw_extension_contracts: "extension-operator",
       ironclaw_extension_host: "extension-operator",
+      ironclaw_extension_manager: "extension-operator",
       ironclaw_extensions: "extension-operator",
       ironclaw_operator: "extension-operator",
 

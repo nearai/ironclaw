@@ -190,6 +190,23 @@ impl ExternalConversationRef {
         self.reply_target_message_id.as_deref()
     }
 
+    /// The same conversation route with the reply-target hint dropped.
+    ///
+    /// The reply target is a per-event hint, never part of the route's
+    /// identity — which is why [`Self::conversation_fingerprint`], `PartialEq`
+    /// and `Hash` all exclude it. Durable binding records store the route, so
+    /// they store this form: persisting the hint would pin a binding to the one
+    /// message that happened to create it. Infallible by construction: every
+    /// surviving field was validated by [`Self::new`].
+    pub fn without_reply_target(&self) -> Self {
+        Self {
+            space_id: self.space_id.clone(),
+            conversation_id: self.conversation_id.clone(),
+            topic_id: self.topic_id.clone(),
+            reply_target_message_id: None,
+        }
+    }
+
     /// Canonical conversation fingerprint. Length-prefixed segments prevent
     /// delimiter collisions and the reply-target hint is deliberately excluded.
     pub fn conversation_fingerprint(&self) -> String {

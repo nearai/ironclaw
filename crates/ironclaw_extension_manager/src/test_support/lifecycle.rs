@@ -43,12 +43,12 @@ use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_secrets::{SecretStore, SecretStorePort};
 use ironclaw_trust::{AdminConfig, HostTrustPolicy, InvalidationBus};
 
-use crate::extension_lifecycle::{
-    RebornLocalExtensionManagementPort, RebornProductAuthCredentialCleanup,
-};
 use crate::extension_lifecycle_capabilities;
 use crate::lifecycle_product_service::ExtensionHostLifecycleProductService;
-use crate::{
+use ironclaw_extension_host::extension_lifecycle::{
+    RebornLocalExtensionManagementPort, RebornProductAuthCredentialCleanup,
+};
+use ironclaw_extension_host::{
     ActiveExtensionPublisher, AvailableExtensionCatalog, ExtensionLifecycleManager,
     ExtensionRemovalCleanupRegistry, ProviderInstanceReadinessInput, boot_installation_records,
     build_generic_extension_host, first_party_reserved_extension_ids, hosted_http_mcp_runtime,
@@ -232,7 +232,7 @@ async fn build_lifecycle_test_services_over_backing(
         .try_with_default_wasm_runtime()
         .expect("test Wasm runtime wires");
 
-    let bundles = crate::test_support::first_party_bundles_from_inventory();
+    let bundles = ironclaw_extension_host::test_support::first_party_bundles_from_inventory();
     let first_party_reserved_ids = first_party_reserved_extension_ids(&bundles);
     let mut available_extensions =
         AvailableExtensionCatalog::from_first_party_assets_with_nearai_mcp_config(None, &bundles)
@@ -277,8 +277,8 @@ async fn build_lifecycle_test_services_over_backing(
     )
     .await
     .expect("extension lifecycle restore");
-    let mut extension_management =
-        ExtensionLifecycleManager::new(crate::ExtensionLifecycleManagerDependencies {
+    let mut extension_management = ExtensionLifecycleManager::new(
+        ironclaw_extension_host::ExtensionLifecycleManagerDependencies {
             filesystem: Arc::clone(&extension_filesystem),
             catalog: available_extensions,
             installation_store: Arc::clone(&installation_store),
@@ -288,15 +288,16 @@ async fn build_lifecycle_test_services_over_backing(
                 Arc::clone(&product_auth),
             ))),
             tenant_operator_user_id: owner_user_id,
-            hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies {
+            hosted_mcp_dependencies: ironclaw_extension_host::HostedMcpPreparationDependencies {
                 runtime_ports,
-                catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
+                catalog_safety: ironclaw_extension_host::McpCatalogAdmissionPolicy::new(Arc::new(
                     ironclaw_safety::Sanitizer::new(),
                 )),
                 oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
             },
-        })
-        .with_removal_cleanup_registry(Arc::new(ExtensionRemovalCleanupRegistry::empty()));
+        },
+    )
+    .with_removal_cleanup_registry(Arc::new(ExtensionRemovalCleanupRegistry::empty()));
     if google_oauth_configured {
         extension_management = extension_management.with_provider_instance_readiness(
             provider_instance_readiness_map([ProviderInstanceReadinessInput {
@@ -329,30 +330,31 @@ async fn build_lifecycle_test_services_over_backing(
         .expect("insert bundled first-party handlers");
     host_services = host_services.with_first_party_capabilities(Arc::new(first_party_registry));
 
-    let generic = build_generic_extension_host(crate::GenericExtensionHostParams {
-        binder: host_services.extension_lane_tool_binder(),
-        native_factories: Vec::new(),
-        channel_adapters: Vec::new(),
-        installation_store: Arc::clone(&installation_store),
-        boot_installations: boot_installation_records(&installation_store, None)
-            .await
-            .expect("boot installation records"),
-        governor: Arc::new(InMemoryResourceGovernor::new()),
-        assembly: ExtensionHostAssemblyConfig::new(
-            first_party_reserved_ids
-                .iter()
-                .filter_map(|id| CapabilityId::new(id).ok())
-                .collect(),
-            Default::default(),
-            std::time::Duration::from_secs(30),
-        ),
-        channel_egress_transport: None,
-    })
-    .await;
+    let generic =
+        build_generic_extension_host(ironclaw_extension_host::GenericExtensionHostParams {
+            binder: host_services.extension_lane_tool_binder(),
+            native_factories: Vec::new(),
+            channel_adapters: Vec::new(),
+            installation_store: Arc::clone(&installation_store),
+            boot_installations: boot_installation_records(&installation_store, None)
+                .await
+                .expect("boot installation records"),
+            governor: Arc::new(InMemoryResourceGovernor::new()),
+            assembly: ExtensionHostAssemblyConfig::new(
+                first_party_reserved_ids
+                    .iter()
+                    .filter_map(|id| CapabilityId::new(id).ok())
+                    .collect(),
+                Default::default(),
+                std::time::Duration::from_secs(30),
+            ),
+            channel_egress_transport: None,
+        })
+        .await;
     extension_management.attach_generic_host(Arc::clone(&generic.host));
-    host_services.set_extension_tool_resolver(Arc::new(crate::SnapshotToolResolver::new(
-        generic.host.snapshot_watch(),
-    )));
+    host_services.set_extension_tool_resolver(Arc::new(
+        ironclaw_extension_host::SnapshotToolResolver::new(generic.host.snapshot_watch()),
+    ));
 
     let approval_mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/approvals").expect("valid approvals alias"),

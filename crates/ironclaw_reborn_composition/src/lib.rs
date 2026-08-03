@@ -38,7 +38,6 @@ mod filesystem_assembly;
 mod google_oauth_secret_store;
 mod host_access_assembly;
 mod input;
-mod ironhub_capabilities;
 mod ironhub_link_serve;
 mod llm_admin;
 mod memory_binding;
@@ -213,12 +212,10 @@ pub use runtime_input::{
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
 
 /// Re-exported IronHub command vocabulary for the `ironclaw` binary's
-/// `ironhub` subcommand and serve wiring. The CLI's exact dependency
-/// allowlist (`reborn_cli_binary_crate_stays_separate_from_v1_root`) closes
-/// the direct path to `ironclaw_ironhub`, so the binary reaches the catalog
-/// client only through this facade.
+/// `ironhub` subcommand and serve wiring. This facade keeps runtime input
+/// construction independent of the manager's wider public surface.
 pub mod ironhub {
-    pub use ironclaw_ironhub::{
+    pub use ironclaw_extension_manager::ironhub::{
         IronHubCommand, IronHubEntryKind, IronHubInstallOptions, IronHubResponse,
         IronhubManifestUrl, IronhubSharedKey, IronhubSharedKeyError,
         execute_reborn_ironhub_command, render_reborn_ironhub_response, validated_manifest_url,

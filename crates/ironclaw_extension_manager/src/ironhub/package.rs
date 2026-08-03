@@ -6,8 +6,8 @@ use ironclaw_extension_host::{
     AvailableExtensionPackage, parse_imported_manifest, registry_extension_package,
 };
 
-use crate::catalog::validate_hub_name;
-use crate::model::{IronHubCommandError, IronHubToolEntry};
+use super::catalog::validate_hub_name;
+use super::model::{IronHubCommandError, IronHubToolEntry};
 
 /// Assemble a registry tool package around the manifest the registry published.
 ///
@@ -122,8 +122,8 @@ fn validate_manifest_asset_path(path: &str) -> Result<(), IronHubCommandError> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::model::{IronHubArtifact, IronHubProvenance};
     use super::*;
-    use crate::model::{IronHubArtifact, IronHubProvenance};
 
     /// A real WASI component; `registry_extension_package` rejects core modules.
     fn component() -> Vec<u8> {
@@ -383,8 +383,8 @@ access_token = "/access_token""#
             .sha256 = "b".repeat(64);
 
         assert_ne!(
-            crate::catalog::tool_artifact_digest(&original),
-            crate::catalog::tool_artifact_digest(&changed),
+            super::super::catalog::tool_artifact_digest(&original),
+            super::super::catalog::tool_artifact_digest(&changed),
         );
     }
 

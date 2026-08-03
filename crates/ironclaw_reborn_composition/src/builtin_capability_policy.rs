@@ -442,7 +442,9 @@ fn constraint_terms(
     let network = match source.network() {
         CapabilityNetworkProfile::Default => NetworkPolicy::default(),
         CapabilityNetworkProfile::DevWildcard => dev_wildcard_network_policy(),
-        CapabilityNetworkProfile::IronhubArtifacts => ironclaw_ironhub::artifact_network_policy(),
+        CapabilityNetworkProfile::IronhubArtifacts => {
+            ironclaw_extension_manager::ironhub::artifact_network_policy()
+        }
     };
     let mut allowed_effects = source.effects().to_vec();
     if let Some(effect) = required_effect
@@ -758,7 +760,7 @@ mod tests {
 
     #[test]
     fn ironhub_artifact_policy_is_https_only_and_host_scoped() {
-        let policy = ironclaw_ironhub::artifact_network_policy();
+        let policy = ironclaw_extension_manager::ironhub::artifact_network_policy();
 
         assert!(policy.deny_private_ip_ranges);
         assert!(policy.allowed_targets.iter().all(|target| {

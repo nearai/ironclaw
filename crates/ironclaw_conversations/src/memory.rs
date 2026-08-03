@@ -16,16 +16,18 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
-    AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind, ConditionalUnpairOutcome,
-    ConversationActorPairingService, ConversationBindingResolution, ConversationBindingService,
-    ConversationRouteKind, ExpectedExternalActorOwner, ExternalActorBindingEpoch, ExternalActorRef,
-    ExternalConversationIdentity, ExternalConversationRef, InboundTurnError,
+    AcceptConversationMessageRequest, AcceptedConversationMessage,
+    AcceptedConversationMessageLookup, AcceptedConversationMessageReplay, AdapterInstallationId,
+    AdapterKind, ConditionalUnpairOutcome, ConversationActorPairingService,
+    ConversationBindingResolution, ConversationBindingService, ConversationMessageRecord,
+    ConversationRouteKind, ExpectedExternalActorOwner, ExternalActorBindingEpoch,
+    ExternalConversationIdentity, InboundConversationService, InboundTurnError,
     LinkConversationRequest, LinkedConversationBinding, MessageIdempotencyStatus,
     ReplyTargetBinding, ResolveConversationRequest, ResolveStoredReplyTargetRequest,
-    SessionThreadService, StoredReplyTargetAccess, StoredReplyTargetBinding, ThreadAccessDecision,
-    ThreadMessageRecord, ValidateReplyTargetRequest,
+    StoredReplyTargetAccess, StoredReplyTargetBinding, ThreadAccessDecision,
+    ValidateReplyTargetRequest,
 };
+use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
 
 #[derive(Clone)]
 pub struct InMemoryConversationServices {
@@ -190,7 +192,7 @@ impl InMemoryConversationServices {
         self.persist_state(old_state, snapshot).await
     }
 
-    pub async fn accepted_messages(&self) -> Vec<ThreadMessageRecord> {
+    pub async fn accepted_messages(&self) -> Vec<ConversationMessageRecord> {
         match self.state.lock() {
             Ok(state) => state.messages.clone(),
             Err(_) => Vec::new(),
@@ -463,7 +465,8 @@ impl ConversationBindingService for InMemoryConversationServices {
             &request.external_actor_ref,
         )?;
         let binding_key = BindingKey::from_request(&request);
-        let external_conversation_identity = request.external_conversation_ref.identity();
+        let external_conversation_identity =
+            ExternalConversationIdentity::from_ref(&request.external_conversation_ref);
         state.ensure_external_event_route(
             &request.tenant_id,
             &request.adapter_kind,
@@ -522,7 +525,9 @@ impl ConversationBindingService for InMemoryConversationServices {
                 tenant_id: request.tenant_id.clone(),
                 adapter_kind: request.adapter_kind.clone(),
                 adapter_installation_id: request.adapter_installation_id.clone(),
-                external_conversation_identity: request.external_conversation_ref.identity(),
+                external_conversation_identity: ExternalConversationIdentity::from_ref(
+                    &request.external_conversation_ref,
+                ),
             };
             if state.bindings.contains_key(&binding_key) {
                 let existing = state
@@ -739,7 +744,8 @@ impl InMemoryConversationServices {
                 &request.external_actor_ref,
             )?;
             let binding_key = BindingKey::from_request(&request);
-            let external_conversation_identity = request.external_conversation_ref.identity();
+            let external_conversation_identity =
+                ExternalConversationIdentity::from_ref(&request.external_conversation_ref);
             state.ensure_external_event_route(
                 &request.tenant_id,
                 &request.adapter_kind,
@@ -851,11 +857,11 @@ impl InMemoryConversationServices {
 }
 
 #[async_trait]
-impl SessionThreadService for InMemoryConversationServices {
+impl InboundConversationService for InMemoryConversationServices {
     async fn accept_inbound_message(
         &self,
-        request: AcceptInboundMessageRequest,
-    ) -> Result<AcceptedInboundMessage, InboundTurnError> {
+        request: AcceptConversationMessageRequest,
+    ) -> Result<AcceptedConversationMessage, InboundTurnError> {
         let _mutation = self.mutation_lock.lock().await;
         self.refresh_state_from_repository().await?;
         let old_state = self.lock_state()?.clone();
@@ -897,7 +903,8 @@ impl SessionThreadService for InMemoryConversationServices {
                 .ok_or_else(|| InboundTurnError::ThreadNotFound {
                     thread_id: request.source_binding_ref.as_str().to_string(),
                 })?;
-            let external_conversation_identity = request.external_conversation_ref.identity();
+            let external_conversation_identity =
+                ExternalConversationIdentity::from_ref(&request.external_conversation_ref);
             if source_binding.external_conversation_identity != external_conversation_identity {
                 return Err(InboundTurnError::AccessDenied {
                     actor_id: request.actor.user_id.to_string(),
@@ -956,7 +963,7 @@ impl SessionThreadService for InMemoryConversationServices {
                         request.external_conversation_ref.clone(),
                     ),
                 );
-                let accepted = AcceptedInboundMessage {
+                let accepted = AcceptedConversationMessage {
                     tenant_id: request.tenant_id,
                     thread_id: request.thread_id,
                     actor: request.actor.clone(),
@@ -974,7 +981,7 @@ impl SessionThreadService for InMemoryConversationServices {
                     replay_key,
                     StoredAcceptedMessageReplay {
                         external_conversation_identity,
-                        replay: AcceptedInboundMessageReplay {
+                        replay: AcceptedConversationMessageReplay {
                             resolution: source_binding.resolution(
                                 accepted.actor.user_id.clone(),
                                 binding_epoch,
@@ -984,7 +991,7 @@ impl SessionThreadService for InMemoryConversationServices {
                         },
                     },
                 );
-                state.messages.push(ThreadMessageRecord {
+                state.messages.push(ConversationMessageRecord {
                     accepted: accepted.clone(),
                     actor: request.actor,
                     external_event_id: request.external_event_id,
@@ -1000,8 +1007,8 @@ impl SessionThreadService for InMemoryConversationServices {
 
     async fn replay_accepted_inbound_message(
         &self,
-        lookup: AcceptedInboundMessageLookup,
-    ) -> Result<Option<AcceptedInboundMessageReplay>, InboundTurnError> {
+        lookup: AcceptedConversationMessageLookup,
+    ) -> Result<Option<AcceptedConversationMessageReplay>, InboundTurnError> {
         let _mutation = self.mutation_lock.lock().await;
         self.refresh_state_from_repository().await?;
         let state = self.lock_state()?;
@@ -1015,7 +1022,9 @@ impl SessionThreadService for InMemoryConversationServices {
         let Some(stored) = state.message_replays.get(&key) else {
             return Ok(None);
         };
-        if stored.external_conversation_identity != lookup.external_conversation_ref.identity() {
+        if stored.external_conversation_identity
+            != ExternalConversationIdentity::from_ref(&lookup.external_conversation_ref)
+        {
             return Err(InboundTurnError::AccessDenied {
                 actor_id: lookup.external_actor_ref.id().to_string(),
                 thread_id: "external_event_route_mismatch".to_string(),
@@ -1123,11 +1132,11 @@ pub(crate) struct InMemoryState {
     pub(crate) reply_targets: HashMap<String, ReplyTargetRecord>,
     pub(crate) threads: HashMap<ThreadKey, ThreadRecord>,
     pub(crate) external_event_routes: HashMap<ExternalEventRouteKey, ExternalConversationIdentity>,
-    pub(crate) message_idempotency: HashMap<MessageIdempotencyKey, AcceptedInboundMessage>,
+    pub(crate) message_idempotency: HashMap<MessageIdempotencyKey, AcceptedConversationMessage>,
     pub(crate) message_replays: HashMap<AcceptedMessageReplayKey, StoredAcceptedMessageReplay>,
     pub(crate) submission_keys: HashMap<AcceptedMessageRef, IdempotencyKey>,
     pub(crate) submitted_message_responses: HashMap<AcceptedMessageRef, SubmitTurnResponse>,
-    pub(crate) messages: Vec<ThreadMessageRecord>,
+    pub(crate) messages: Vec<ConversationMessageRecord>,
 }
 
 impl InMemoryState {
@@ -1429,7 +1438,9 @@ impl BindingKey {
             tenant_id: request.tenant_id.clone(),
             adapter_kind: request.adapter_kind.clone(),
             adapter_installation_id: request.adapter_installation_id.clone(),
-            external_conversation_identity: request.external_conversation_ref.identity(),
+            external_conversation_identity: ExternalConversationIdentity::from_ref(
+                &request.external_conversation_ref,
+            ),
         }
     }
 }
@@ -1513,6 +1524,7 @@ pub(crate) struct ReplyTargetRecord {
     pub(crate) tenant_id: TenantId,
     pub(crate) adapter_kind: AdapterKind,
     pub(crate) adapter_installation_id: AdapterInstallationId,
+    #[serde(with = "crate::stored_refs::conversation_ref")]
     pub(crate) external_conversation_ref: ExternalConversationRef,
     pub(crate) thread_id: ThreadId,
     pub(crate) source_binding_ref: SourceBindingRef,
@@ -1584,6 +1596,7 @@ pub(crate) struct BindingRecord {
     pub(crate) tenant_id: TenantId,
     pub(crate) adapter_kind: AdapterKind,
     pub(crate) adapter_installation_id: AdapterInstallationId,
+    #[serde(with = "crate::stored_refs::conversation_ref")]
     pub(crate) external_conversation_ref: ExternalConversationRef,
     pub(crate) external_conversation_identity: ExternalConversationIdentity,
     pub(crate) thread_id: ThreadId,
@@ -1610,12 +1623,13 @@ impl BindingRecord {
         let reply_target_binding_ref =
             ReplyTargetBindingRef::new(format!("reply:{}", Uuid::new_v4()))
                 .map_err(|reason| InboundTurnError::InvalidCanonicalRef { reason })?;
-        let external_conversation_identity = external_conversation_ref.identity();
+        let external_conversation_identity =
+            ExternalConversationIdentity::from_ref(&external_conversation_ref);
         Ok(Self {
             tenant_id,
             adapter_kind,
             adapter_installation_id,
-            external_conversation_ref: external_conversation_ref.without_message_id(),
+            external_conversation_ref: external_conversation_ref.without_reply_target(),
             external_conversation_identity,
             thread_id: target.thread_id,
             agent_id: target.agent_id,
@@ -1663,7 +1677,7 @@ impl BindingRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StoredAcceptedMessageReplay {
     pub(crate) external_conversation_identity: ExternalConversationIdentity,
-    pub(crate) replay: AcceptedInboundMessageReplay,
+    pub(crate) replay: AcceptedConversationMessageReplay,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

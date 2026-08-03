@@ -27,7 +27,7 @@ use ironclaw_llm::registry::{ProviderDefinition, ProviderProtocol, ProviderRegis
 use ironclaw_llm::{
     NearWalletSignedMessage, OpenAiCodexConfig, OpenAiCodexSessionManager, default_nearai_base_url,
 };
-use ironclaw_product::{
+use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
     LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
     NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult,

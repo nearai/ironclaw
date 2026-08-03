@@ -120,6 +120,19 @@ has_core_code=true
 has_legacy_tests=false
 has_reborn_tests=true"
 
+# The WS2.4 split: the extension-management product face lives in its own crate
+# now, and its arm in `is_reborn_test_path` was added with the split. Without a
+# case here a manager-only diff would classify `has_reborn_tests=false` and the
+# `reborn-tests` roll-up would pass fast having skipped every Reborn lane — the
+# exact failure #6947 records for the stale `crates/ironclaw_product_*/*` arm.
+assert_scope \
+  "extension-manager product face (WS2.4 split)" \
+  "crates/ironclaw_extension_manager/src/lifecycle_product_service.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
 assert_scope \
   "reborn root test runner script" \
   "scripts/ci/run-reborn-root-partition.sh" \

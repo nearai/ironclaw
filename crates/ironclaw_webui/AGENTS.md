@@ -68,8 +68,12 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 `ironclaw_product` (wire DTOs and product command/view descriptors),
 `ironclaw_host_api` (`ProductSurface`, caller/error vocabulary, identity
 newtypes, and ingress descriptors), `ironclaw_host_ingress` (Axum route-mount
-carriers), and `ironclaw_reborn_openai_compat`. Plus infra crates: `axum`, `tokio`, `tower*`,
-`tracing`, `thiserror`, `async-trait`, `secrecy`, `subtle`, `jsonwebtoken`, etc.
+carriers), `ironclaw_reborn_openai_compat`, and `ironclaw_attachments` (the
+advertised attachment ceilings only — WS5 gave the size limits one home, so the
+transport reads the same constants the landing routine enforces rather than
+keeping a second copy; PROPOSAL §6.4.9). Plus infra crates: `axum`, `tokio`,
+`tower*`, `tracing`, `thiserror`, `async-trait`, `secrecy`, `subtle`,
+`jsonwebtoken`, etc.
 
 Any other workspace-crate edge requires an `ironclaw_architecture` boundary-test
 update (`tests/reborn_dependency_boundaries.rs`) plus explicit PR rationale.

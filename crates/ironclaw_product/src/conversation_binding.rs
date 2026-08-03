@@ -427,7 +427,7 @@ impl ProductConversationBindingService {
         let tenant_id = installation_scope.tenant_id.clone();
         let adapter_kind = conversation_adapter_kind(&request.adapter_id)?;
         let installation_id = conversation_installation_id(&request.installation_id)?;
-        let external_actor_ref = conversation_actor_ref(&request.external_actor_ref)?;
+        let external_actor_ref = request.external_actor_ref.clone();
         match resolved_actor.binding_epoch.clone() {
             Some(binding_epoch) => {
                 actor_pairings
@@ -488,7 +488,7 @@ impl ProductConversationBindingService {
                 &installation_scope.tenant_id,
                 &conversation_adapter_kind(&request.adapter_id)?,
                 &conversation_installation_id(&request.installation_id)?,
-                &conversation_actor_ref(&request.external_actor_ref)?,
+                &request.external_actor_ref,
                 &ironclaw_conversations::ExpectedExternalActorOwner {
                     user_id: expected_actor.user_id.clone(),
                     binding_epoch: expected_actor.binding_epoch.clone(),
@@ -737,10 +737,8 @@ fn conversation_request(
         tenant_id,
         adapter_kind: conversation_adapter_kind(&request.adapter_id)?,
         adapter_installation_id: conversation_installation_id(&request.installation_id)?,
-        external_actor_ref: conversation_actor_ref(&request.external_actor_ref)?,
-        external_conversation_ref: conversation_conversation_ref(
-            &request.external_conversation_ref,
-        )?,
+        external_actor_ref: request.external_actor_ref.clone(),
+        external_conversation_ref: request.external_conversation_ref.clone(),
         external_event_id: conversation_event_id(&request.external_event_id)?,
         route_kind: conversation_route_kind(request.route_kind),
         requested_agent_id: None,
@@ -765,25 +763,6 @@ fn conversation_event_id(
     event_id: &crate::ExternalEventId,
 ) -> Result<ironclaw_conversations::ExternalEventId, ProductSurfaceFailure> {
     ironclaw_conversations::ExternalEventId::new(event_id.as_str()).map_err(map_conversation_error)
-}
-
-fn conversation_actor_ref(
-    actor_ref: &crate::ExternalActorRef,
-) -> Result<ironclaw_conversations::ExternalActorRef, ProductSurfaceFailure> {
-    ironclaw_conversations::ExternalActorRef::new(actor_ref.kind(), actor_ref.id())
-        .map_err(map_conversation_error)
-}
-
-fn conversation_conversation_ref(
-    conversation_ref: &crate::ExternalConversationRef,
-) -> Result<ironclaw_conversations::ExternalConversationRef, ProductSurfaceFailure> {
-    ironclaw_conversations::ExternalConversationRef::new(
-        conversation_ref.space_id(),
-        conversation_ref.conversation_id(),
-        conversation_ref.topic_id(),
-        conversation_ref.reply_target_message_id(),
-    )
-    .map_err(map_conversation_error)
 }
 
 fn conversation_route_kind(

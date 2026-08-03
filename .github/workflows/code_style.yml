@@ -62,7 +62,7 @@ jobs:
         run: |
           CHANGED_FILES="$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA")"
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|\.gitignore$|scripts/ci/|\.githooks/|scripts/check_no_panics\.py$|scripts/no_panics_reborn_baseline\.txt$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/code_style\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|\.gitignore$|scripts/ci/|\.githooks/|scripts/check_no_panics\.py$|scripts/no_panics_reborn_baseline\.txt$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/(code_style|main-ci-slack-alerts)\.yml$)'; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
@@ -132,10 +132,12 @@ jobs:
         run: |
           scripts/ci/test-check-include-str-paths.sh
           scripts/ci/test-check-hermetic-env.sh
+          scripts/ci/test-ci-comm-locale-pin.sh
           scripts/ci/test-classify-test-scope.sh
           scripts/ci/test-build-wasm-extensions.sh
           scripts/ci/test-package-feature-flags.sh
           scripts/ci/test-reborn-crate-test-buckets.sh
+          scripts/ci/test-main-ci-slack-alerts.sh
           python3 scripts/ci/test_ws12_suite_shards.py
           python3 scripts/ci/test_ws12_workflow_contracts.py
           scripts/ci/test-hermetic-test-process.sh

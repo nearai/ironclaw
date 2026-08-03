@@ -35,6 +35,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 hmac = "0.13"
 hex = "0.4.3"
 ironclaw_auth = { path = "../ironclaw_auth" }
+# `InboundAttachmentLander` — the channel host lands inbound attachment bytes
+# before accepting a message.
+ironclaw_attachments = { path = "../ironclaw_attachments" }
 ironclaw_approvals = { path = "../ironclaw_approvals" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
@@ -105,9 +108,13 @@ http-body-util = "0.1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 tower = { version = "0.5", features = ["util"] }
-# Installs a DEBUG-level subscriber so a `tracing::debug!` body actually runs
-# under test. Without one, `tracing` short-circuits on the null dispatcher and
-# the log a sanitization test needs to inspect is never formatted.
+# Installs a level-appropriate subscriber so a `tracing` body actually runs
+# under test: `tracing` short-circuits on the null dispatcher, so without one
+# the log a sanitization test needs to inspect is never formatted, and a test
+# cannot tell "logged the cause" apart from "dropped it". Both halves of this
+# crate's log guards depend on that distinction — the DEBUG-level lifecycle
+# sanitization tests and the WARN-level transient-cause test, whose 503 body is
+# deliberately sanitized.
 tracing-subscriber = "0.3"
 
 [[test]]

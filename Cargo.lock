@@ -3464,6 +3464,7 @@ dependencies = [
  "ironclaw_common",
  "ironclaw_extension_contracts",
  "ironclaw_extension_host",
+ "ironclaw_extension_manager",
  "ironclaw_filesystem",
  "ironclaw_first_party_extensions",
  "ironclaw_host_api",
@@ -3547,11 +3548,16 @@ dependencies = [
 name = "ironclaw_attachments"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "chrono",
  "ironclaw_common",
  "ironclaw_extractors",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_product_contracts",
+ "ironclaw_threads",
  "serde",
+ "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.19",
  "tokio",
@@ -3658,6 +3664,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "ironclaw_extension_contracts",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_safety",
@@ -3751,6 +3758,7 @@ dependencies = [
  "hmac 0.13.0",
  "http-body-util",
  "ironclaw_approvals",
+ "ironclaw_attachments",
  "ironclaw_auth",
  "ironclaw_authorization",
  "ironclaw_capabilities",
@@ -3800,6 +3808,51 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "zip",
+]
+
+[[package]]
+name = "ironclaw_extension_manager"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.23.0",
+ "chrono",
+ "ed25519-dalek",
+ "hex",
+ "hmac 0.13.0",
+ "ironclaw_approvals",
+ "ironclaw_auth",
+ "ironclaw_authorization",
+ "ironclaw_extension_contracts",
+ "ironclaw_extension_host",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_first_party_extensions",
+ "ironclaw_host_api",
+ "ironclaw_host_runtime",
+ "ironclaw_loop_contracts",
+ "ironclaw_network",
+ "ironclaw_processes",
+ "ironclaw_product",
+ "ironclaw_product_contracts",
+ "ironclaw_reborn_config",
+ "ironclaw_resources",
+ "ironclaw_safety",
+ "ironclaw_secrets",
+ "ironclaw_skills",
+ "ironclaw_triggers",
+ "ironclaw_trust",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "toml 1.1.3+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -4046,33 +4099,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_ironhub"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "chrono",
- "ed25519-dalek",
- "hex",
- "hmac 0.13.0",
- "ironclaw_extension_contracts",
- "ironclaw_extension_host",
- "ironclaw_extensions",
- "ironclaw_filesystem",
- "ironclaw_host_api",
- "ironclaw_product",
- "ironclaw_product_contracts",
- "ironclaw_skills",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "thiserror 2.0.19",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
 name = "ironclaw_libsql_runtime"
 version = "0.1.0"
 dependencies = [
@@ -4290,8 +4316,8 @@ dependencies = [
  "ironclaw_common",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_host_ingress",
  "ironclaw_llm",
- "ironclaw_product",
  "ironclaw_product_contracts",
  "ironclaw_reborn_config",
  "ironclaw_safety",
@@ -4498,6 +4524,7 @@ dependencies = [
  "ironclaw_events",
  "ironclaw_extension_contracts",
  "ironclaw_extension_host",
+ "ironclaw_extension_manager",
  "ironclaw_extensions",
  "ironclaw_filesystem",
  "ironclaw_first_party_extension_ports",
@@ -4506,7 +4533,6 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_host_ingress",
  "ironclaw_host_runtime",
- "ironclaw_ironhub",
  "ironclaw_libsql_runtime",
  "ironclaw_llm",
  "ironclaw_loop_contracts",
@@ -4651,6 +4677,7 @@ dependencies = [
  "ironclaw_events",
  "ironclaw_extension_contracts",
  "ironclaw_extension_host",
+ "ironclaw_extension_manager",
  "ironclaw_extensions",
  "ironclaw_filesystem",
  "ironclaw_first_party_extensions",
@@ -5161,6 +5188,7 @@ dependencies = [
  "hmac 0.13.0",
  "http 1.4.2",
  "http-body-util",
+ "ironclaw_attachments",
  "ironclaw_auth",
  "ironclaw_common",
  "ironclaw_extension_contracts",

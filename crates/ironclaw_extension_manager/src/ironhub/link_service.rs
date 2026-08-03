@@ -64,7 +64,7 @@ pub struct RebornIronhubLinkService {
     state: Arc<IronhubLinkStateStore>,
     shared_key: IronhubSharedKey,
     install_capability: CapabilityId,
-    manifest_url: crate::IronhubManifestUrl,
+    manifest_url: super::service::IronhubManifestUrl,
     manifest_verify_keys: &'static [(&'static str, &'static str)],
 }
 
@@ -85,12 +85,12 @@ impl RebornIronhubLinkService {
             state,
             shared_key,
             install_capability,
-            manifest_url: crate::IronhubManifestUrl::default(),
-            manifest_verify_keys: crate::model::MANIFEST_VERIFY_KEYS,
+            manifest_url: super::service::IronhubManifestUrl::default(),
+            manifest_verify_keys: super::model::MANIFEST_VERIFY_KEYS,
         })
     }
 
-    pub fn with_manifest_url(mut self, manifest_url: crate::IronhubManifestUrl) -> Self {
+    pub fn with_manifest_url(mut self, manifest_url: super::service::IronhubManifestUrl) -> Self {
         self.manifest_url = manifest_url;
         self
     }

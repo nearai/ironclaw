@@ -46,6 +46,7 @@ pub mod interaction_commands;
 pub mod ironhub;
 pub mod lifecycle_service;
 pub mod operator_llm;
+pub mod operator_service;
 pub mod operator_tools;
 pub mod outbound;
 pub mod package_lifecycle;

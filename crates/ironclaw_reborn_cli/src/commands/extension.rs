@@ -1,6 +1,6 @@
 use anyhow::Context;
 use clap::{Args, Subcommand};
-use ironclaw_extension_host::extension_lifecycle_command::{
+use ironclaw_extension_manager::extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, execute_reborn_extension_lifecycle_command,
     render_reborn_extension_lifecycle_response,
 };

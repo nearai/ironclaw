@@ -22,11 +22,13 @@ use serde::Deserialize;
 
 use ironclaw_extension_host::ExtensionLifecycleManager;
 
-use ironclaw_ironhub::{
-    IRONHUB_INFO_CAPABILITY_ID, IRONHUB_INSTALL_CAPABILITY_ID, IRONHUB_SEARCH_CAPABILITY_ID,
-    IronHubCommand, IronHubCommandError, IronHubEntryKind, IronHubInstallOptions,
-    IronhubLinkStateStore, IronhubManifestUrl, execute_reborn_ironhub_service_command,
-};
+use super::link_service::IronhubLinkStateStore;
+use super::model::{IronHubCommand, IronHubCommandError, IronHubEntryKind, IronHubInstallOptions};
+use super::service::{IronhubManifestUrl, execute_reborn_ironhub_service_command};
+
+pub const IRONHUB_SEARCH_CAPABILITY_ID: &str = "builtin.ironhub_search";
+pub const IRONHUB_INFO_CAPABILITY_ID: &str = "builtin.ironhub_info";
+pub const IRONHUB_INSTALL_CAPABILITY_ID: &str = "builtin.ironhub_install";
 
 const IRONHUB_CAPABILITY_IDS: [&str; 3] = [
     IRONHUB_SEARCH_CAPABILITY_ID,
@@ -34,7 +36,7 @@ const IRONHUB_CAPABILITY_IDS: [&str; 3] = [
     IRONHUB_INSTALL_CAPABILITY_ID,
 ];
 
-pub(crate) fn extend_builtin_first_party_package(
+pub fn extend_builtin_first_party_package(
     mut package: ExtensionPackage,
 ) -> Result<ExtensionPackage, ExtensionError> {
     package.manifest.capabilities.extend(manifests()?);
@@ -47,7 +49,7 @@ pub(crate) fn extend_builtin_first_party_package(
     ExtensionPackage::from_manifest(package.manifest, root)
 }
 
-pub(crate) fn insert_handlers(
+pub fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
     skill_management: Arc<ScopedSkillManagementPort>,
     extension_management: Arc<ExtensionLifecycleManager>,

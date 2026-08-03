@@ -153,7 +153,7 @@ impl FirstPartyCapabilityHandler for SetAutoApproveHandler {
             })
             .await
             .map_err(|error| {
-                tracing::warn!(%error, "operator auto-approve setting mutation failed");
+                tracing::debug!(%error, "operator auto-approve setting mutation failed");
                 dispatch_error(RuntimeDispatchErrorKind::Backend, started)
             })?;
         Ok(dispatch_result(
@@ -372,11 +372,31 @@ async fn apply_tool_permission_state(
                 ))
                 .await
                 .map_err(|error| {
-                    tracing::warn!(%error, "operator tool permission override clear failed");
+                    tracing::debug!(%error, "operator tool permission override clear failed");
                     dispatch_error(RuntimeDispatchErrorKind::Backend, started)
                 })?;
         }
         ToolPermissionUpdate::State(ToolPermissionState::AlwaysAllow) => {
+            // Clear the contradicting override BEFORE minting the grant. These are
+            // two stores and the pair is not atomic, so the order decides what a
+            // partial failure leaves behind. Granting first and failing to clear
+            // would persist a live `Dispatch` grant underneath a stale
+            // `ToolPermissionOverride::Disabled`: the gate honours the explicit
+            // override, so the tool reads as disabled while carrying auto-approval
+            // authority that takes effect the moment anything else clears the
+            // override. Clearing first can only ever leave *less* authority than
+            // the operator asked for (the tool falls back to its default), which is
+            // the fail-closed direction.
+            overrides
+                .clear(&ToolPermissionOverrideKey::new(
+                    &operator_scope,
+                    tool.capability_id.clone(),
+                ))
+                .await
+                .map_err(|error| {
+                    tracing::debug!(%error, "operator tool permission override clear failed");
+                    dispatch_error(RuntimeDispatchErrorKind::Backend, started)
+                })?;
             persistent_policies
                 .allow(PersistentApprovalPolicyInput {
                     scope: operator_scope.clone(),
@@ -397,17 +417,7 @@ async fn apply_tool_permission_state(
                 })
                 .await
                 .map_err(|error| {
-                    tracing::warn!(%error, "operator persistent approval policy write failed");
-                    dispatch_error(RuntimeDispatchErrorKind::Backend, started)
-                })?;
-            overrides
-                .clear(&ToolPermissionOverrideKey::new(
-                    &operator_scope,
-                    tool.capability_id.clone(),
-                ))
-                .await
-                .map_err(|error| {
-                    tracing::warn!(%error, "operator tool permission override clear failed");
+                    tracing::debug!(%error, "operator persistent approval policy write failed");
                     dispatch_error(RuntimeDispatchErrorKind::Backend, started)
                 })?;
         }
@@ -433,7 +443,7 @@ async fn apply_tool_permission_state(
                 })
                 .await
                 .map_err(|error| {
-                    tracing::warn!(%error, "operator tool permission override write failed");
+                    tracing::debug!(%error, "operator tool permission override write failed");
                     dispatch_error(RuntimeDispatchErrorKind::Backend, started)
                 })?;
         }
@@ -453,7 +463,7 @@ async fn revoke_persistent_policy(
     {
         Ok(_) | Err(PersistentApprovalPolicyError::UnknownPolicy) => Ok(()),
         Err(error) => {
-            tracing::warn!(%error, "operator persistent approval policy revoke failed");
+            tracing::debug!(%error, "operator persistent approval policy revoke failed");
             Err(dispatch_error(RuntimeDispatchErrorKind::Backend, started))
         }
     }
@@ -513,9 +523,7 @@ fn resource_usage(started: Instant) -> ResourceUsage {
 #[cfg(test)]
 mod tests {
     use ironclaw_approvals::{
-        AutoApproveSettingStore, CapabilityPermissionOverrideStorePort as _,
-        PersistentApprovalPolicyStore, PersistentApprovalPolicyStorePort as _,
-        ToolPermissionOverrideStore,
+        AutoApproveSettingStore, PersistentApprovalPolicyStore, ToolPermissionOverrideStore,
     };
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
@@ -566,8 +574,17 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn tool_permission_handler_writes_persistent_policy_and_override() {
+    /// The approvals stores plus the tool-permission handler, wired over one
+    /// in-memory filesystem so a test can assert on what the handler actually
+    /// persisted.
+    #[allow(clippy::type_complexity)]
+    fn tool_permission_fixture(
+        tools: Vec<RebornOperatorToolInfo>,
+    ) -> (
+        Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+        Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort>,
+        Arc<dyn FirstPartyCapabilityHandler>,
+    ) {
         let scoped = Arc::new(ironclaw_filesystem::ScopedFilesystem::with_fixed_view(
             Arc::new(InMemoryBackend::new()),
             ironclaw_host_api::mount::MountView::new(vec![
@@ -581,19 +598,12 @@ mod tests {
             ])
             .expect("test mount view"),
         ));
-        let overrides = Arc::new(ToolPermissionOverrideStore::new(Arc::clone(&scoped)));
-        let persistent_policies = Arc::new(PersistentApprovalPolicyStore::new(Arc::clone(&scoped)));
+        let overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort> =
+            Arc::new(ToolPermissionOverrideStore::new(Arc::clone(&scoped)));
+        let persistent_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStorePort> =
+            Arc::new(PersistentApprovalPolicyStore::new(Arc::clone(&scoped)));
         let auto_approve = Arc::new(AutoApproveSettingStore::new(scoped));
-        let capability_id = CapabilityId::new("ext.search").expect("capability id");
-        let provider = ExtensionId::new("ext").expect("provider id");
-        let tool_catalog: Arc<dyn RebornOperatorToolCatalog> =
-            Arc::new(StaticToolCatalog(vec![RebornOperatorToolInfo {
-                capability_id: capability_id.clone(),
-                provider: provider.clone(),
-                description: Arc::from("Search"),
-                default_permission: PermissionMode::Ask,
-                effects: Arc::<[EffectKind]>::from(vec![EffectKind::Network]),
-            }]));
+        let tool_catalog: Arc<dyn RebornOperatorToolCatalog> = Arc::new(StaticToolCatalog(tools));
         let mut registry = FirstPartyCapabilityRegistry::new();
         insert_handler(
             &mut registry,
@@ -606,6 +616,21 @@ mod tests {
         let handler = registry
             .get(&CapabilityId::new(OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID).expect("id"))
             .expect("tool permission handler");
+        (overrides, persistent_policies, handler)
+    }
+
+    #[tokio::test]
+    async fn tool_permission_handler_writes_persistent_policy_and_override() {
+        let capability_id = CapabilityId::new("ext.search").expect("capability id");
+        let provider = ExtensionId::new("ext").expect("provider id");
+        let (overrides, persistent_policies, handler) =
+            tool_permission_fixture(vec![RebornOperatorToolInfo {
+                capability_id: capability_id.clone(),
+                provider: provider.clone(),
+                description: Arc::from("Search"),
+                default_permission: PermissionMode::Ask,
+                effects: Arc::<[EffectKind]>::from(vec![EffectKind::Network]),
+            }]);
         let user = UserId::new("operator").expect("user id");
         let scope = ResourceScope::local_default(user.clone(), InvocationId::new())
             .expect("resource scope");
@@ -680,6 +705,213 @@ mod tests {
                 .expect("override lookup")
                 .map(|record| record.state),
             Some(ToolPermissionOverride::Disabled)
+        );
+    }
+
+    /// The hard floor, driven through `handler.dispatch` rather than through
+    /// `hard_floor_tool`/`tool_permission_locked` directly.
+    ///
+    /// Those predicates gate a persistent authority write, and a wrapper plus a
+    /// catalog lookup sit between them and that write — so a unit test on the
+    /// predicate alone would not catch a wrong `matches!` arm or an inverted
+    /// `==` in the caller (`.claude/rules/testing.md`, "Test through the
+    /// caller"). Every locked shape must be refused *and* leave both stores
+    /// untouched: a refusal that still wrote would be the dangerous outcome.
+    #[tokio::test]
+    async fn locked_tools_are_refused_and_write_nothing() {
+        let user = UserId::new("operator").expect("user id");
+        let provider = ExtensionId::new("ext").expect("provider id");
+
+        // One case per reason a tool is locked: the three hard-floor effects,
+        // and a `Deny` default with an otherwise innocuous effect.
+        let cases: Vec<(&str, PermissionMode, EffectKind)> = vec![
+            ("ext.pay", PermissionMode::Ask, EffectKind::Financial),
+            (
+                "ext.approve",
+                PermissionMode::Ask,
+                EffectKind::ModifyApproval,
+            ),
+            ("ext.budget", PermissionMode::Ask, EffectKind::ModifyBudget),
+            ("ext.denied", PermissionMode::Deny, EffectKind::Network),
+        ];
+
+        for (tool_id, default_permission, effect) in cases {
+            let capability_id = CapabilityId::new(tool_id).expect("capability id");
+            let (overrides, persistent_policies, handler) =
+                tool_permission_fixture(vec![RebornOperatorToolInfo {
+                    capability_id: capability_id.clone(),
+                    provider: provider.clone(),
+                    description: Arc::from("Locked"),
+                    default_permission,
+                    effects: Arc::<[EffectKind]>::from(vec![effect]),
+                }]);
+            let scope = ResourceScope::local_default(user.clone(), InvocationId::new())
+                .expect("resource scope");
+
+            for state in ["always_allow", "ask_each_time", "disabled", "default"] {
+                let mut request = FirstPartyCapabilityRequest::request_for_test(
+                    CapabilityId::new(OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID)
+                        .expect("capability id"),
+                    scope.clone(),
+                    serde_json::json!({
+                        "capability_id": capability_id.as_str(),
+                        "state": state,
+                    }),
+                    None,
+                );
+                request.authenticated_actor_user_id = Some(user.clone());
+                let error = handler
+                    .dispatch(request)
+                    .await
+                    .expect_err(&format!("{tool_id} -> {state} must be refused"));
+                assert_eq!(
+                    error.kind(),
+                    Some(RuntimeDispatchErrorKind::PolicyDenied),
+                    "{tool_id} -> {state} must be refused as a policy denial, not another kind"
+                );
+            }
+
+            let operator_scope = ResourceScope::local_default(user.clone(), InvocationId::new())
+                .expect("resource scope")
+                .tenant_user_settings_scope();
+            let policy_key = PersistentApprovalPolicyKey::new(
+                &operator_scope,
+                PersistentApprovalAction::Dispatch,
+                capability_id.clone(),
+                Principal::Extension(provider.clone()),
+            );
+            assert!(
+                persistent_policies
+                    .lookup(&policy_key)
+                    .await
+                    .expect("policy lookup")
+                    .and_then(|policy| policy.active_grant())
+                    .is_none(),
+                "{tool_id}: a refused request must not mint a persistent grant"
+            );
+            assert!(
+                overrides
+                    .get(&ToolPermissionOverrideKey::new(
+                        &operator_scope,
+                        capability_id
+                    ))
+                    .await
+                    .expect("override lookup")
+                    .is_none(),
+                "{tool_id}: a refused request must not write an override"
+            );
+        }
+    }
+
+    /// An override store whose `clear` always fails, so a test can observe what
+    /// a partial failure of the two-store `always_allow` write leaves behind.
+    struct ClearFailsOverrideStore {
+        inner: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort>,
+    }
+
+    #[async_trait]
+    impl ironclaw_approvals::CapabilityPermissionOverrideStorePort for ClearFailsOverrideStore {
+        async fn set(
+            &self,
+            input: ironclaw_approvals::CapabilityPermissionOverrideInput,
+        ) -> Result<
+            ironclaw_approvals::CapabilityPermissionOverrideRecord,
+            ironclaw_approvals::CapabilityPermissionStoreError,
+        > {
+            self.inner.set(input).await
+        }
+
+        async fn get(
+            &self,
+            key: &ironclaw_approvals::CapabilityPermissionOverrideKey,
+        ) -> Result<
+            Option<ironclaw_approvals::CapabilityPermissionOverrideRecord>,
+            ironclaw_approvals::CapabilityPermissionStoreError,
+        > {
+            self.inner.get(key).await
+        }
+
+        async fn clear(
+            &self,
+            _key: &ironclaw_approvals::CapabilityPermissionOverrideKey,
+        ) -> Result<(), ironclaw_approvals::CapabilityPermissionStoreError> {
+            Err(
+                ironclaw_approvals::CapabilityPermissionStoreError::Filesystem(
+                    "injected clear failure".to_string(),
+                ),
+            )
+        }
+    }
+
+    /// `always_allow` writes two stores and the pair is not atomic, so the
+    /// order decides what a partial failure leaves behind.
+    ///
+    /// Granting first and then failing to clear would persist a live `Dispatch`
+    /// grant underneath the operator's earlier `Disabled` override — auto-approval
+    /// authority the operator never sees, waiting for anything else to clear the
+    /// override. Clearing first can only ever leave *less* authority than was
+    /// asked for. This pins the fail-closed direction: after a failed
+    /// `always_allow`, there must be no persistent grant.
+    #[tokio::test]
+    async fn a_failed_always_allow_never_leaves_a_grant_behind() {
+        let capability_id = CapabilityId::new("ext.search").expect("capability id");
+        let provider = ExtensionId::new("ext").expect("provider id");
+        let tool = RebornOperatorToolInfo {
+            capability_id: capability_id.clone(),
+            provider: provider.clone(),
+            description: Arc::from("Search"),
+            default_permission: PermissionMode::Ask,
+            effects: Arc::<[EffectKind]>::from(vec![EffectKind::Network]),
+        };
+        let (overrides, persistent_policies, _) = tool_permission_fixture(vec![tool.clone()]);
+        let failing_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStorePort> =
+            Arc::new(ClearFailsOverrideStore {
+                inner: Arc::clone(&overrides),
+            });
+        let user = UserId::new("operator").expect("user id");
+        let scope = ResourceScope::local_default(user.clone(), InvocationId::new())
+            .expect("resource scope");
+        let operator_scope = scope.tenant_user_settings_scope();
+
+        // The operator had previously disabled the tool.
+        overrides
+            .set(ToolPermissionOverrideInput {
+                scope: operator_scope.clone(),
+                capability_id: capability_id.clone(),
+                state: ToolPermissionOverride::Disabled,
+                updated_by: Principal::User(user.clone()),
+            })
+            .await
+            .expect("seed disabled override");
+
+        let error = apply_tool_permission_state(
+            failing_overrides.as_ref(),
+            persistent_policies.as_ref(),
+            &scope,
+            &user,
+            &tool,
+            ToolPermissionUpdate::State(ToolPermissionState::AlwaysAllow),
+            Instant::now(),
+        )
+        .await
+        .expect_err("the failing override clear must surface");
+        assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::Backend));
+
+        let policy_key = PersistentApprovalPolicyKey::new(
+            &operator_scope,
+            PersistentApprovalAction::Dispatch,
+            capability_id,
+            Principal::Extension(provider),
+        );
+        assert!(
+            persistent_policies
+                .lookup(&policy_key)
+                .await
+                .expect("policy lookup")
+                .and_then(|policy| policy.active_grant())
+                .is_none(),
+            "a failed always_allow must not leave a live Dispatch grant under the stale \
+             Disabled override"
         );
     }
 

@@ -55,6 +55,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_wasm_limiter` | `ironclaw_wasm_limiter` | Shared `wasmtime::ResourceLimiter` used by WASM tool and hook runtimes so memory/table/instance limits do not drift. |
 | `ironclaw_extensions` | `ironclaw_extensions` | Extension manifest, lifecycle, and registration contracts. Owns install/readiness/remove semantics; runtime crates consume validated descriptors from here. |
 | `ironclaw_extension_host` | `ironclaw_extension_host` | Generic channel-host assembly: binds installed extensions to inbound/outbound channel surfaces (ingress registration, delivery, per-extension idempotency ledgers) for the Reborn product surface. |
+| `ironclaw_extension_manager` | `ironclaw_extension_manager` | The product face of extensions: lifecycle capabilities and commands, the lifecycle product service, admin/operator/skill capability handlers, credential views, and the IronHub extension hub. Calls the host's authority; the host never calls back. |
 | `ironclaw_host_runtime` | `ironclaw_host_runtime` | Narrow service upper Reborn services depend on. Provides `HostRuntime` plus production composition around capability hosting. |
 
 ### Durable state, eventing, and read models
