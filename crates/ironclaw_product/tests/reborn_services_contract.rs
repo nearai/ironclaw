@@ -150,6 +150,10 @@ use ironclaw_product_contracts::admin_users::{
     AdminUserSecretMeta, AdminUserService, AdminUserStatus,
 };
 use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
+use ironclaw_product_contracts::ironhub::{
+    IRONHUB_DELIVER_INSTALL_COMMAND_ID, IronhubInstallDeliveryRequest,
+    IronhubInstallDeliveryResult, IronhubLinkError, IronhubLinkService, IronhubRegisterRequest,
+};
 use ironclaw_product_contracts::lifecycle_service::{
     LifecycleProductContext, LifecycleProductService,
 };
@@ -16718,6 +16722,115 @@ async fn execute_user_audience_commands_succeed_without_admin_directory_but_admi
     );
     assert_eq!(admin_audience_error.status_code, 503);
     assert!(admin_audience_error.retryable);
+}
+
+#[derive(Default)]
+struct RecordingIronhubLinkService {
+    deliveries: Mutex<Vec<(ProductSurfaceCaller, IronhubInstallDeliveryRequest)>>,
+}
+
+#[async_trait]
+impl IronhubLinkService for RecordingIronhubLinkService {
+    async fn register(&self, _request: IronhubRegisterRequest) -> Result<(), IronhubLinkError> {
+        Ok(())
+    }
+
+    async fn deliver_install(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: IronhubInstallDeliveryRequest,
+    ) -> Result<IronhubInstallDeliveryResult, IronhubLinkError> {
+        let slug = request.slug.clone();
+        self.deliveries
+            .lock()
+            .expect("lock")
+            .push((caller, request));
+        Ok(IronhubInstallDeliveryResult {
+            installed: true,
+            slug,
+            message: "installed".to_string(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn ironhub_delivery_command_forwards_authenticated_product_surface_caller() {
+    let link = Arc::new(RecordingIronhubLinkService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_ironhub_link_service(link.clone());
+    let authenticated_caller =
+        caller_for_user_with_project("user-ironhub", Some("project-ironhub"));
+
+    let response = ProductSurface::invoke(
+        &services,
+        authenticated_caller.clone(),
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
+            operation_id: CapabilityId::new(IRONHUB_DELIVER_INSTALL_COMMAND_ID)
+                .expect("operation id"),
+            input: serde_json::json!({
+                "slug": "private-skill",
+                "version": "1.2.3",
+                "uid": "body-user-is-not-authority",
+                "aid": "agent-alpha",
+                "ts": 1_700_000_000_u64,
+                "nonce": "nonce-1",
+                "artifact_digest": "sha256:deadbeef",
+                "sig": "signature",
+                "private_manifest_url": "https://catalog.example/private/repo?token=rotating"
+            }),
+            activity_id: ActivityId::new(),
+        },
+    )
+    .await
+    .expect("delivery command");
+
+    let output: IronhubInstallDeliveryResult =
+        serde_json::from_value(response.output).expect("typed output");
+    assert!(output.installed);
+    assert_eq!(output.slug, "private-skill");
+
+    let deliveries = link.deliveries.lock().expect("lock");
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].0, authenticated_caller);
+    assert_eq!(deliveries[0].1.uid, "body-user-is-not-authority");
+}
+
+#[tokio::test]
+async fn ironhub_delivery_command_fails_closed_when_link_service_is_unwired() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let error = ProductSurface::invoke(
+        &services,
+        caller(),
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
+            operation_id: CapabilityId::new(IRONHUB_DELIVER_INSTALL_COMMAND_ID)
+                .expect("operation id"),
+            input: serde_json::json!({
+                "slug": "private-skill",
+                "version": "1.2.3",
+                "uid": "body-user-is-not-authority",
+                "aid": "agent-alpha",
+                "ts": 1_700_000_000_u64,
+                "nonce": "nonce-1",
+                "artifact_digest": "sha256:deadbeef",
+                "sig": "signature"
+            }),
+            activity_id: ActivityId::new(),
+        },
+    )
+    .await
+    .expect_err("unwired IronHub link service must fail closed");
+
+    assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
+    assert_eq!(error.kind, ProductSurfaceErrorKind::ServiceUnavailable);
+    assert_eq!(error.status_code, 503);
+    assert!(!error.retryable);
 }
 
 /// The three vendor-login paths, driven through `RebornServices`, on their

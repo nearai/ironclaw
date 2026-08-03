@@ -492,6 +492,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "phase",
                 "total_entries",
                 "returned_entries",
+                "catalog_total",
                 "truncated",
                 "entries"
             ],
@@ -1005,6 +1006,10 @@ mod tests {
                 .expect("IronHub search output schema is registered");
 
         assert!(input["properties"].get("acknowledge_unverified").is_none());
+        assert!(
+            input["properties"].get("private_manifest_url").is_none(),
+            "model-visible IronHub install must not choose a private manifest source"
+        );
         assert_eq!(input["additionalProperties"], false);
         assert_eq!(
             install_output["properties"]["phase"]["enum"],
@@ -1016,6 +1021,7 @@ mod tests {
                 "phase",
                 "total_entries",
                 "returned_entries",
+                "catalog_total",
                 "truncated",
                 "entries"
             ])
@@ -1026,6 +1032,10 @@ mod tests {
         );
         assert_eq!(
             search_output["properties"]["returned_entries"]["type"],
+            "integer"
+        );
+        assert_eq!(
+            search_output["properties"]["catalog_total"]["type"],
             "integer"
         );
         assert_eq!(search_output["properties"]["truncated"]["type"], "boolean");

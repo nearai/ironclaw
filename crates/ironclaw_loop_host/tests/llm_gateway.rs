@@ -4686,6 +4686,7 @@ impl GatewayCapabilityPort {
             capability_id: CapabilityId::new("demo.echo").unwrap(),
             name: provider_name("demo__echo"),
             description: "Echo input".to_string(),
+            description_trust: Default::default(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -4709,6 +4710,7 @@ impl GatewayCapabilityPort {
             capability_id: CapabilityId::new("builtin.spawn_subagent").unwrap(),
             name: provider_name("builtin__spawn_subagent"),
             description: "Spawn a subagent".to_string(),
+            description_trust: Default::default(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -4736,6 +4738,7 @@ impl GatewayCapabilityPort {
             capability_id: CapabilityId::new("demo.extra").unwrap(),
             name: provider_name("demo__extra"),
             description: "Extra input".to_string(),
+            description_trust: Default::default(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -4753,6 +4756,7 @@ impl GatewayCapabilityPort {
             capability_id: CapabilityId::new("demo.hidden").unwrap(),
             name: provider_name("demo__hidden"),
             description: "Hidden input".to_string(),
+            description_trust: Default::default(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -4768,6 +4772,7 @@ impl GatewayCapabilityPort {
             capability_id: CapabilityId::new("builtin.shell").unwrap(),
             name: provider_name("builtin_shell"),
             description: "Run shell commands".to_string(),
+            description_trust: Default::default(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

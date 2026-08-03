@@ -57,6 +57,142 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
+path = "crates/ironclaw_extension_host/src/product_lifecycle.rs"
+lines = [263]
+branch_lines = [229, 261]
+owner = "@serrrfirat"
+reason = "Concurrent install tests execute both permit acquisition states and waiter notification; rustc assigns zero-hit synthetic counters to the Arc identity guard and async await continuation that cannot be selected independently."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_host/src/available_extension_import.rs"
+lines = [191, 192, 193, 194, 195, 196, 197, 198, 199, 200]
+owner = "@serrrfirat"
+reason = "Import tests execute both static registry constructors through successful and rejected manifests; their error closures require duplicate entries in the compile-time host-port or contract definitions, which cannot be injected while the same definitions remain valid for the test process."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_host_api/src/credential_redaction.rs"
+branch_lines = [64, 111, 120]
+owner = "@serrrfirat"
+reason = "Boundary tests cover delimited, embedded, leading, trailing, and repeated credential markers; these remaining BRDA arms are rustc short-circuit bookkeeping without an independently reachable input outcome."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_contracts/src/recipe.rs"
+lines = [197, 310, 314, 501, 505]
+owner = "@serrrfirat"
+reason = "These serde declaration and container-closing lines produce no LLVM DA records; recipe variant and setup-metadata round trips execute the generated serializers and deserializers."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_manager/src/ironhub/agent_link.rs"
+lines = [95]
+branch_lines = [94]
+owner = "@serrrfirat"
+reason = "HMAC-SHA256 accepts arbitrary key lengths, while IronhubSharedKey also validates the key first; the constructor-error let-else is a defensive arm with no constructible input."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_manager/src/ironhub/catalog.rs"
+lines = [277, 283]
+branch_lines = [351, 406]
+owner = "@serrrfirat"
+reason = "Catalog tests execute capabilities, optional manifests, allowed/disallowed hosts, and username/password rejection; rustc leaves counters on multiline call continuations and short-circuit subexpressions that do not represent additional outcomes."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_manager/src/ironhub/package.rs"
+lines = [55, 74]
+branch_lines = [52, 70]
+owner = "@serrrfirat"
+reason = "Package tests install tools with and without published schemas and setup instructions; LLVM leaves zero-hit counters on the multiline Option mapping continuations after both observable outcomes execute."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_manager/src/ironhub/link_service.rs"
+lines = [143, 144, 145, 410, 411, 412, 428, 429, 430]
+owner = "@serrrfirat"
+reason = "ConsumedNonce, PrivateManifestState, and PublicManifestState contain only infallibly serializable strings and DateTime values; serde_json::to_vec cannot reach these defensive error closures for any value of the fixed records."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_manager/src/ironhub/link_service.rs"
+lines = [196, 253]
+branch_lines = [155, 174, 182, 198, 238, 240]
+owner = "@serrrfirat"
+reason = "Durable replay tests execute nonce success/replay/backend failure and private/public absent, idempotent, conflict, stale, and newer CAS outcomes; rustc leaves zero-hit records on the let-else/call closers and synthetic expression branches with no additional observable outcome."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_manager/src/ironhub/service.rs"
+lines = [285, 286, 287, 288, 289]
+owner = "@serrrfirat"
+reason = "Private URL validation constructs private_origin through Option::map(...).transpose(), so the two Options are correlated and the mixed Some/None match arm is structurally unreachable; lines 285 and 289 are tuple/expression closers LLVM groups with that arm."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_extension_manager/src/ironhub/service.rs"
+branch_lines = [487, 506, 733]
+owner = "@serrrfirat"
+reason = "Public/private manifest tests execute both fetch functions through valid, invalid, replay, and retry paths, and runtime wrapper tests execute IronhubManifestUrl::into_inner; these remaining BRDA records are rustc async-entry or return-expression bookkeeping without an independent input outcome."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_cli/src/commands/ironhub.rs"
+lines = [138, 219, 231]
+branch_lines = [203]
+owner = "@serrrfirat"
+reason = "CLI tests read private URL files, assemble and shut down the real runtime without network access, and cover all command/shutdown result combinations; the remaining records are multiline closers and the synthetic Option branch counter."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_cli/src/commands/serve.rs"
+lines = [592, 593, 594, 595, 596, 597]
+branch_lines = [592]
+owner = "@serrrfirat"
+reason = "The blocking serve adapter cannot return after mounting without running the HTTP server; composition tests execute both optional mount construction and the public IronHub route through its handler and strict policy."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/ironhub_link_serve.rs"
+lines = [61, 66, 67, 69, 70, 72, 73, 93]
+owner = "@serrrfirat"
+reason = "Route tests execute mount creation, policy inspection, valid/invalid JSON, success, and service failure; the error arms construct NonZero values from fixed nonzero literals and the other records are nested Result closing lines."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/runtime.rs"
+lines = [4068, 4069, 4070, 4071, 4072, 4073, 4082, 4083]
+owner = "@serrrfirat"
+reason = "The runtime integration test executes shared-key wiring with mediated egress; normal assembly always supplies that egress, and the fixed host capability identifier is compile-time-valid, leaving only defensive impossible error mappings."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
+path = "crates/ironclaw_skills/src/management/install_bundle.rs"
+lines = [134, 135, 182, 184]
+branch_lines = [119, 180, 182, 197]
+owner = "@serrrfirat"
+reason = "Snapshot tests execute file/count/total caps, unsupported entries, complete restoration, write failure, cleanup success, and cleanup failure; remaining counters are match/async continuations or impossible parent/short-circuit bookkeeping for normalized bundle paths."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+review_after = "2026-10-31"
+
+[[exemption]]
 path = "crates/ironclaw_product/src/approval_prompt.rs"
 lines = [58]
 owner = "@nearai/reborn"

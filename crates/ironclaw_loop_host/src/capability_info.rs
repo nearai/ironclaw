@@ -95,6 +95,7 @@ pub(super) fn tool_definition() -> Result<ProviderToolDefinition, AgentLoopHostE
         name: provider_tool_name()?,
         description: "Get names, summary, or schema details for a currently visible capability."
             .to_string(),
+        description_trust: Default::default(),
         parameters: schema(),
     })
 }

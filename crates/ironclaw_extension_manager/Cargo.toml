@@ -62,6 +62,7 @@ ironclaw_triggers = { path = "../ironclaw_triggers", optional = true }
 ironclaw_trust = { path = "../ironclaw_trust", optional = true }
 ed25519-dalek = "2.2.0"
 hex = "0.4.3"
+hmac = "0.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"

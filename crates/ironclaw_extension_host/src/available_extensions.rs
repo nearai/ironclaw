@@ -579,14 +579,23 @@ impl AvailableExtensionCatalog {
         &self,
         package_ref: &LifecyclePackageRef,
     ) -> Result<Arc<AvailableExtensionPackage>, ProductOperationFailure> {
+        self.resolve_optional(package_ref)?.ok_or_else(|| {
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "available extension was not found".to_string(),
+            }
+        })
+    }
+
+    pub fn resolve_optional(
+        &self,
+        package_ref: &LifecyclePackageRef,
+    ) -> Result<Option<Arc<AvailableExtensionPackage>>, ProductOperationFailure> {
         package_ref.require_kind(LifecyclePackageKind::Extension)?;
-        self.packages
+        Ok(self
+            .packages
             .iter()
             .find(|package| &package.package_ref == package_ref)
-            .cloned()
-            .ok_or_else(|| ProductOperationFailure::InvalidBindingRequest {
-                reason: "available extension was not found".to_string(),
-            })
+            .cloned())
     }
 
     /// Project deployment-owned configuration directly from every available

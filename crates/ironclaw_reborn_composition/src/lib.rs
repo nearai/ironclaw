@@ -38,6 +38,7 @@ mod filesystem_assembly;
 mod google_oauth_secret_store;
 mod host_access_assembly;
 mod input;
+mod ironhub_link_serve;
 mod llm_admin;
 mod memory_binding;
 mod memory_provider_factory;
@@ -166,6 +167,9 @@ pub use ironclaw_host_api::user_identity::{
     RebornUserIdentityBindingStore, RebornUserIdentityLookup, RebornUserIdentityLookupError,
     installation_scoped_provider_user_id,
 };
+pub use ironhub_link_serve::{
+    IRONHUB_REGISTER_PATH, IronhubRegisterRouteState, ironhub_register_route_mount,
+};
 pub use observability::budget::build_default_budget_accountant;
 pub use observability::budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
 pub use observability::hooks::{
@@ -206,6 +210,17 @@ pub use runtime_input::{
     TurnRunnerSettings,
 };
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
+
+/// Re-exported IronHub command vocabulary for the `ironclaw` binary's
+/// `ironhub` subcommand and serve wiring. This facade keeps runtime input
+/// construction independent of the manager's wider public surface.
+pub mod ironhub {
+    pub use ironclaw_extension_manager::ironhub::{
+        IronHubCommand, IronHubEntryKind, IronHubInstallOptions, IronHubResponse,
+        IronhubManifestUrl, IronhubSharedKey, IronhubSharedKeyError,
+        execute_reborn_ironhub_command, render_reborn_ironhub_response, validated_manifest_url,
+    };
+}
 
 /// Re-exported identity vocabulary host binaries need to construct
 /// public runtime/WebUI types whose signatures mention a host-api identity.
