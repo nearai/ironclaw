@@ -722,7 +722,8 @@ Rules — kept short on purpose:
   `Unavailable` leaves the attempt `Prepared` and retryable. Permanent
   preflight failure uses a guarded `Prepared`→`Failed` transition; a missing
   or uninstalled channel reports caller `ChannelUnavailable` and records
-  terminal `Rejected` pending a typed resolver taxonomy. Neither transition
+  terminal `Failed` with durable `Rejected` failure kind pending a typed
+  resolver taxonomy. Neither transition
   can consume a claim or terminal settlement written by another coordinator,
   so there is no status ABA. There is no external coordinator shutdown/drain
   surface. —

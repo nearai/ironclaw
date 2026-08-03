@@ -402,9 +402,10 @@ signed vendor POST → verified → normalized → turn admitted.
   `Unavailable` return to the caller while leaving `Prepared` retryable.
   Permanent preflight failure uses guarded `Prepared`→`Failed`; missing or
   uninstalled channel resolution returns caller `ChannelUnavailable` and
-  records durable `Rejected` pending typed resolver taxonomy. Neither path can
-  overwrite a concurrent claim or terminal settlement, so the lifecycle has
-  no status ABA. Persist the structured adapter report and own
+  records terminal `Failed` with durable `Rejected` failure kind pending typed
+  resolver taxonomy. Neither path can overwrite a concurrent claim or terminal
+  settlement, so the lifecycle has no status ABA. Persist the structured
+  adapter report and own
   retry/backoff/dedupe/shutdown-drain. `Sending` records durable egress
   ownership at the adapter/vendor ambiguity boundary, not vendor contact: a
   crash may occur immediately before adapter contact or after possible vendor
