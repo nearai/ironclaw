@@ -803,8 +803,8 @@ review_after = "2026-11-01"
 
 [[exemption]]
 path = "crates/ironclaw_threads/src/filesystem_service.rs"
-lines = [1639, 1640, 1656, 1668]
-branch_lines = [1592]
+lines = [1732, 1733, 1749, 1761]
+branch_lines = [1685]
 owner = "@nearai/reborn"
 reason = "read_thread_message miss/error arms: the reconcile point-read only runs after a mark_message_queued failure, which integration cannot inject. Crate-tier service tests cover the read."
 issue = "https://github.com/nearai/ironclaw/issues/7006"
