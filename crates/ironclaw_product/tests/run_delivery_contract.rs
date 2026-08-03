@@ -1366,6 +1366,193 @@ async fn observer_records_gate_route_after_approval_prompt() {
     );
 }
 
+/// A run can block on more than one approval or auth gate of the same kind.
+/// The durable projection identity must therefore include the bounded gate
+/// reference. The gate reference is hashed with a domain-separated,
+/// length-framed SHA-256 input so the persisted metadata neither leaks the ref
+/// nor admits ambiguous concatenations. Replaying the *same* gate must still
+/// address the original delivery and remain duplicate-suppressed.
+#[tokio::test]
+async fn observer_delivers_distinct_same_kind_gates_once_each_and_suppresses_replays() {
+    const APPROVAL_A: &str = "gate:approval-00000000000000000000000000000001";
+    const APPROVAL_B: &str = "gate:approval-00000000000000000000000000000002";
+    const AUTH_A: &str = "gate:auth-vector";
+    const AUTH_B: &str = "gate:auth-vector-next";
+
+    let harness = build_harness(
+        vec![
+            // The observer's existence guard consumes this first state.
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::BlockedApproval, Some(APPROVAL_A)),
+            scripted_state(TurnStatus::BlockedApproval, Some(APPROVAL_B)),
+            scripted_state(TurnStatus::BlockedAuth, Some(AUTH_A)),
+            scripted_state(TurnStatus::BlockedAuth, Some(AUTH_B)),
+            // Replays must resolve to the same identity as their first
+            // appearance and therefore produce no second vendor egress.
+            scripted_state(TurnStatus::BlockedApproval, Some(APPROVAL_A)),
+            scripted_state(TurnStatus::BlockedAuth, Some(AUTH_A)),
+            scripted_state(TurnStatus::Completed, None),
+        ],
+        false,
+        Some("https://provider.example/oauth"),
+        Duration::from_secs(5),
+    );
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "all gates resolved").await;
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-sequential-gates"),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts.len(),
+        5,
+        "two distinct approvals, two distinct auth gates, and one final reply must reach egress"
+    );
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| text.contains("Approval needed"))
+            .count(),
+        2,
+        "same-kind approval gates with distinct refs must not collide"
+    );
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| text.contains("Authentication required"))
+            .count(),
+        2,
+        "same-kind auth gates with distinct refs must not collide"
+    );
+
+    let attempts = harness
+        .store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("attempts");
+    assert_eq!(
+        attempts.len(),
+        5,
+        "same-gate replays reuse their original rows while distinct gates own distinct rows"
+    );
+    assert!(
+        attempts
+            .iter()
+            .any(|attempt| attempt.candidate.projection_ref.as_str()
+                == format!("run-notification:final:{run_id}")),
+        "the non-gate final-reply identity must remain byte-for-byte unchanged"
+    );
+}
+
+async fn assert_gate_projection_digest_vector(
+    status: TurnStatus,
+    gate_ref: &str,
+    expected_suffix: &str,
+    expected_digest: &str,
+) {
+    let harness = build_harness(
+        vec![
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(status, Some(gate_ref)),
+            scripted_state(TurnStatus::Completed, None),
+        ],
+        false,
+        Some("https://provider.example/oauth"),
+        Duration::from_secs(5),
+    );
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "gate resolved").await;
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-gate-digest-vector"),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let attempts = harness
+        .store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("attempts");
+    let projection_refs: Vec<&str> = attempts
+        .iter()
+        .map(|attempt| attempt.candidate.projection_ref.as_str())
+        .collect();
+    let expected = format!("run-notification:{expected_suffix}:{run_id}:{expected_digest}");
+    assert!(
+        projection_refs.contains(&expected.as_str()),
+        "gate identity must hash the three u64-BE-length-framed parts \
+         (`ironclaw_product:run_notification_gate_projection:v1`, `{expected_suffix}`, \
+         canonical gate_ref) with full lowercase SHA-256; expected {expected}, got \
+         {projection_refs:?}"
+    );
+}
+
+#[tokio::test]
+async fn approval_gate_projection_identity_matches_the_pinned_digest_vector() {
+    assert_gate_projection_digest_vector(
+        TurnStatus::BlockedApproval,
+        "gate:approval-00000000000000000000000000000001",
+        "approval",
+        "e3206a38703ea974fc4f5902051fcf48593081aa6c025dcb21db98bf886d8c25",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn auth_gate_projection_identity_matches_the_pinned_digest_vector() {
+    assert_gate_projection_digest_vector(
+        TurnStatus::BlockedAuth,
+        "gate:auth-vector",
+        "auth",
+        "876c0617c31155ca02b78fb0934d45d0dde148fe65fa2a11baf58eac34c72084",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn observer_fails_closed_when_a_gate_kind_has_no_gate_ref() {
+    for status in [TurnStatus::BlockedApproval, TurnStatus::BlockedAuth] {
+        let harness = build_harness(
+            vec![scripted_state(status, None)],
+            false,
+            Some("https://provider.example/oauth"),
+            Duration::from_millis(40),
+        );
+        let run_id = TurnRunId::new();
+
+        harness
+            .observer
+            .observe_ack(
+                user_message_envelope(ProductTriggerReason::DirectChat, "evt-missing-gate-ref"),
+                accepted_ack(run_id),
+            )
+            .await;
+
+        assert!(
+            harness.adapter.texts().is_empty(),
+            "{status:?} without a gate_ref must not synthesize a weaker delivery identity"
+        );
+        assert!(
+            harness
+                .store
+                .list_delivery_attempts(binding_scope())
+                .await
+                .expect("attempts")
+                .is_empty(),
+            "{status:?} without a gate_ref must fail before durable delivery preparation"
+        );
+    }
+}
+
 #[tokio::test]
 async fn observer_records_gate_route_without_a_vendor_ref_that_cannot_key_a_route() {
     // `vendor_message_ref` is an unvalidated vendor string, so a channel can

@@ -256,6 +256,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn non_gate_run_notification_projection_ids_remain_byte_for_byte_stable() {
+        let run_id = TurnRunId::new();
+
+        for (kind, suffix) in [
+            (RunNotificationEventKind::FinalReplyReady, "final"),
+            (RunNotificationEventKind::ProgressUpdate, "progress"),
+            (RunNotificationEventKind::RunBlocked, "blocked"),
+            (RunNotificationEventKind::DeliveryStatus, "delivery-status"),
+        ] {
+            assert_eq!(
+                run_notification_projection_id(run_id, kind),
+                format!("run-notification:{suffix}:{run_id}"),
+                "gate identity hardening must not rewrite legacy non-gate delivery identities"
+            );
+        }
+    }
+
     /// A pairing challenge is completable from a chat surface, so it must not
     /// be denied like a credential-entry challenge. Regression for #6616,
     /// whose merge resolution dropped every consumer of `challenge_kind` and
