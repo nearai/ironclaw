@@ -285,9 +285,16 @@ struct RecoveryTestStore {
     fail_recovery_for: Option<ironclaw_outbound::OutboundDeliveryId>,
     claim_ordered_recovery: Option<ClaimOrderedRecovery>,
     fail_prepared_existing: Option<(OutboundDeliveryStatus, Option<DeliveryFailureKind>)>,
+    settlement_failure: Option<SettlementFailureTiming>,
     authoritative_attempts:
         Mutex<HashMap<ironclaw_outbound::OutboundDeliveryId, OutboundDeliveryAttempt>>,
     list_calls: AtomicU8,
+}
+
+#[derive(Clone, Copy)]
+enum SettlementFailureTiming {
+    BeforeCommit,
+    AfterCommit,
 }
 
 struct ClaimOrderedRecovery {
@@ -455,6 +462,17 @@ impl OutboundStateStorePort for RecoveryTestStore {
         &self,
         request: FailPreparedDeliveryAttemptRequest,
     ) -> Result<FailPreparedDeliveryAttemptOutcome, OutboundError> {
+        if let Some(timing) = self.settlement_failure {
+            if matches!(timing, SettlementFailureTiming::AfterCommit) {
+                assert!(matches!(
+                    self.inner
+                        .fail_prepared_delivery_attempt(request.clone())
+                        .await?,
+                    FailPreparedDeliveryAttemptOutcome::Settled
+                ));
+            }
+            return Err(OutboundError::Backend);
+        }
         let Some((status, failure_kind)) = self.fail_prepared_existing else {
             return self.inner.fail_prepared_delivery_attempt(request).await;
         };
@@ -995,6 +1013,39 @@ fn coordinator_with_existing_preflight_settlement(
         fail_recovery_for: None,
         claim_ordered_recovery: None,
         fail_prepared_existing: Some((status, failure_kind)),
+        settlement_failure: None,
+        authoritative_attempts: Mutex::new(HashMap::new()),
+        list_calls: AtomicU8::new(0),
+    });
+    let coordinator = DeliveryCoordinator::new(
+        Arc::clone(&decorated) as Arc<dyn OutboundStateStorePort>,
+        Arc::new(StaticChannelResolver {
+            adapter: Arc::clone(adapter),
+            unavailable: channel_unavailable,
+        }),
+        Arc::new(FixedReplyContext(b"vendor-reply-ctx".to_vec())),
+        DeliveryRetryPolicy {
+            max_attempts: 1,
+            backoff: std::time::Duration::ZERO,
+        },
+    );
+    (decorated, coordinator)
+}
+
+fn coordinator_with_settlement_failure(
+    store: &Arc<OutboundStateStore<InMemoryBackend>>,
+    adapter: &Arc<ScriptedChannelAdapter>,
+    timing: SettlementFailureTiming,
+    channel_unavailable: bool,
+) -> (Arc<PausingRecoveryStore>, DeliveryCoordinator) {
+    let decorated = Arc::new(PausingRecoveryStore {
+        inner: Arc::clone(store),
+        snapshot_listed: Arc::new(Barrier::new(1)),
+        resume_recovery: Arc::new(Barrier::new(1)),
+        pause_recovery: false,
+        claim_ordered_recovery: None,
+        fail_prepared_existing: None,
+        settlement_failure: Some(timing),
         authoritative_attempts: Mutex::new(HashMap::new()),
         list_calls: AtomicU8::new(0),
     });
@@ -1491,6 +1542,217 @@ async fn missing_channel_preflight_loser_preserves_authoritative_unknown_as_non_
     assert_eq!(adapter.deliver_calls(), 0);
 }
 
+fn assert_combined_settlement_error(
+    error: &CoordinatedDeliveryError,
+    assert_preflight: impl FnOnce(&CoordinatedDeliveryError),
+) {
+    let CoordinatedDeliveryError::PreflightSettlementFailed {
+        preflight,
+        settlement,
+    } = error
+    else {
+        panic!("expected combined preflight/settlement error, got {error:?}");
+    };
+    assert_preflight(preflight);
+    assert!(matches!(settlement, OutboundError::Backend));
+    assert!(matches!(
+        std::error::Error::source(error).and_then(|source| source.downcast_ref::<OutboundError>()),
+        Some(OutboundError::Backend)
+    ));
+}
+
+async fn assert_ambiguous_settlement_state(
+    store: &OutboundStateStore<InMemoryBackend>,
+    scope: TurnScope,
+    timing: SettlementFailureTiming,
+) {
+    let attempts = store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("load ambiguous settlement attempt");
+    assert_eq!(attempts.len(), 1);
+    match timing {
+        SettlementFailureTiming::BeforeCommit => {
+            assert_eq!(attempts[0].status, OutboundDeliveryStatus::Prepared);
+            assert_eq!(attempts[0].failure_kind, None);
+        }
+        SettlementFailureTiming::AfterCommit => {
+            assert_eq!(attempts[0].status, OutboundDeliveryStatus::Failed);
+            assert_eq!(
+                attempts[0].failure_kind,
+                Some(DeliveryFailureKind::Rejected)
+            );
+        }
+    }
+}
+
+#[test]
+fn combined_settlement_error_keeps_preflight_inspectable_but_sources_the_store_failure() {
+    let error = CoordinatedDeliveryError::PreflightSettlementFailed {
+        preflight: Box::new(CoordinatedDeliveryError::ChannelUnavailable {
+            extension_id: "vendorx".to_string(),
+        }),
+        settlement: OutboundError::Backend,
+    };
+
+    assert_combined_settlement_error(&error, |preflight| {
+        assert!(matches!(
+            preflight,
+            CoordinatedDeliveryError::ChannelUnavailable { extension_id }
+                if extension_id == "vendorx"
+        ));
+    });
+}
+
+#[tokio::test]
+async fn target_resolution_keeps_original_error_when_permanent_settlement_fails() {
+    for timing in [
+        SettlementFailureTiming::BeforeCommit,
+        SettlementFailureTiming::AfterCommit,
+    ] {
+        let scope = scope();
+        let store =
+            Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+        let validator = FakeReplyTargetBindingValidator::default();
+        validator.allow(validated_reply_target());
+        let preferences = FakePreferenceRepository::default();
+        seed_preference(&preferences, &scope);
+        let adapter = Arc::new(ScriptedChannelAdapter::new(
+            Arc::clone(&store),
+            scope.clone(),
+            Vec::new(),
+        ));
+        let (decorated, coordinator) =
+            coordinator_with_settlement_failure(&store, &adapter, timing, false);
+        let policy = OutboundPolicyService::new(decorated.as_ref(), &ACCESS_POLICY, &validator);
+        let thread_scope = project_thread_scope();
+        let mut request = coordinated_final_reply(scope.clone(), "vendorx", &thread_scope);
+        request.require_direct_message_target = true;
+
+        let error = coordinator
+            .deliver(
+                &policy,
+                &preferences,
+                &DmRequiringTargetResolver,
+                &NO_PROJECT_FILESYSTEM,
+                request,
+            )
+            .await
+            .expect_err("settlement failure must retain the target-resolution failure");
+
+        assert_combined_settlement_error(&error, |preflight| {
+            assert!(matches!(
+                preflight,
+                CoordinatedDeliveryError::Workflow(
+                    ProductSurfaceFailure::OutboundTargetNotDirectMessage
+                )
+            ));
+        });
+        assert_eq!(adapter.deliver_calls(), 0);
+        assert_ambiguous_settlement_state(store.as_ref(), scope, timing).await;
+    }
+}
+
+#[tokio::test]
+async fn workspace_materialization_keeps_original_error_when_permanent_settlement_fails() {
+    for timing in [
+        SettlementFailureTiming::BeforeCommit,
+        SettlementFailureTiming::AfterCommit,
+    ] {
+        let scope = scope();
+        let store =
+            Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+        let validator = FakeReplyTargetBindingValidator::default();
+        validator.allow(validated_reply_target());
+        let preferences = FakePreferenceRepository::default();
+        seed_preference(&preferences, &scope);
+        let adapter = Arc::new(ScriptedChannelAdapter::new(
+            Arc::clone(&store),
+            scope.clone(),
+            Vec::new(),
+        ));
+        let (decorated, coordinator) =
+            coordinator_with_settlement_failure(&store, &adapter, timing, false);
+        let policy = OutboundPolicyService::new(decorated.as_ref(), &ACCESS_POLICY, &validator);
+        let files = ScriptedProjectFilesystem::default();
+        let thread_scope = project_thread_scope();
+        let mut request = coordinated_final_reply(scope.clone(), "vendorx", &thread_scope);
+        request.attachments = vec![workspace_attachment_ref(
+            "missing",
+            "/workspace/missing.pdf",
+            "missing.pdf",
+            "application/pdf",
+            1,
+        )];
+
+        let error = coordinator
+            .deliver(
+                &policy,
+                &preferences,
+                &FakeProductOutboundTargetResolver,
+                &files,
+                request,
+            )
+            .await
+            .expect_err("settlement failure must retain the workspace failure");
+
+        assert_combined_settlement_error(&error, |preflight| {
+            assert!(matches!(
+                preflight,
+                CoordinatedDeliveryError::WorkspaceAttachmentRead(ProjectFsError::NotFound)
+            ));
+        });
+        assert_eq!(adapter.deliver_calls(), 0);
+        assert_ambiguous_settlement_state(store.as_ref(), scope, timing).await;
+    }
+}
+
+#[tokio::test]
+async fn missing_channel_keeps_original_error_when_permanent_settlement_fails() {
+    for timing in [
+        SettlementFailureTiming::BeforeCommit,
+        SettlementFailureTiming::AfterCommit,
+    ] {
+        let scope = scope();
+        let store =
+            Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+        let validator = FakeReplyTargetBindingValidator::default();
+        validator.allow(validated_reply_target());
+        let preferences = FakePreferenceRepository::default();
+        seed_preference(&preferences, &scope);
+        let adapter = Arc::new(ScriptedChannelAdapter::new(
+            Arc::clone(&store),
+            scope.clone(),
+            Vec::new(),
+        ));
+        let (decorated, coordinator) =
+            coordinator_with_settlement_failure(&store, &adapter, timing, true);
+        let policy = OutboundPolicyService::new(decorated.as_ref(), &ACCESS_POLICY, &validator);
+        let thread_scope = project_thread_scope();
+
+        let error = coordinator
+            .deliver(
+                &policy,
+                &preferences,
+                &FakeProductOutboundTargetResolver,
+                &NO_PROJECT_FILESYSTEM,
+                coordinated_final_reply(scope.clone(), "vendorx", &thread_scope),
+            )
+            .await
+            .expect_err("settlement failure must retain the missing-channel failure");
+
+        assert_combined_settlement_error(&error, |preflight| {
+            assert!(matches!(
+                preflight,
+                CoordinatedDeliveryError::ChannelUnavailable { extension_id }
+                    if extension_id == "vendorx"
+            ));
+        });
+        assert_eq!(adapter.deliver_calls(), 0);
+        assert_ambiguous_settlement_state(store.as_ref(), scope, timing).await;
+    }
+}
+
 #[tokio::test]
 async fn concurrent_coordinators_claim_one_durable_delivery_before_egress() {
     let scope = scope();
@@ -1515,6 +1777,7 @@ async fn concurrent_coordinators_claim_one_durable_delivery_before_egress() {
             is_owner: true,
         }),
         fail_prepared_existing: None,
+        settlement_failure: None,
         authoritative_attempts: Mutex::new(HashMap::new()),
         list_calls: AtomicU8::new(0),
     });
@@ -1528,6 +1791,7 @@ async fn concurrent_coordinators_claim_one_durable_delivery_before_egress() {
             is_owner: false,
         }),
         fail_prepared_existing: None,
+        settlement_failure: None,
         authoritative_attempts: Mutex::new(HashMap::new()),
         list_calls: AtomicU8::new(0),
     });
@@ -2835,6 +3099,7 @@ async fn assert_coordinator_recovery_preserves_concurrent_terminal_status(
         fail_recovery_for: None,
         claim_ordered_recovery: None,
         fail_prepared_existing: None,
+        settlement_failure: None,
         authoritative_attempts: Mutex::new(HashMap::new()),
         list_calls: AtomicU8::new(0),
     });

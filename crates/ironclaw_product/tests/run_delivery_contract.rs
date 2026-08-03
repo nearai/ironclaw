@@ -337,6 +337,14 @@ impl ChannelDeliveryResolver for StaticResolver {
     }
 }
 
+struct UnavailableResolver;
+
+impl ChannelDeliveryResolver for UnavailableResolver {
+    fn resolve_channel_delivery(&self, _extension_id: &str) -> Option<ResolvedChannelDelivery> {
+        None
+    }
+}
+
 struct NoStoredReplyContext;
 
 #[async_trait]
@@ -364,6 +372,8 @@ struct ClaimLossStore {
     targeted_claim_calls: AtomicUsize,
     authoritative_attempts: Mutex<HashMap<OutboundDeliveryId, OutboundDeliveryAttempt>>,
     list_calls: AtomicUsize,
+    fail_first_prepared_with_backend: bool,
+    fail_prepared_calls: AtomicUsize,
 }
 
 #[async_trait]
@@ -559,6 +569,11 @@ impl OutboundStateStorePort for ClaimLossStore {
         &self,
         request: FailPreparedDeliveryAttemptRequest,
     ) -> Result<FailPreparedDeliveryAttemptOutcome, OutboundError> {
+        if self.fail_first_prepared_with_backend
+            && self.fail_prepared_calls.fetch_add(1, Ordering::SeqCst) == 0
+        {
+            return Err(OutboundError::Backend);
+        }
         self.inner.fail_prepared_delivery_attempt(request).await
     }
 
@@ -1036,6 +1051,8 @@ fn build_claim_loss_observer_harness(
         targeted_claim_calls: AtomicUsize::new(0),
         authoritative_attempts: Mutex::new(HashMap::new()),
         list_calls: AtomicUsize::new(0),
+        fail_first_prepared_with_backend: false,
+        fail_prepared_calls: AtomicUsize::new(0),
     });
     let coordinator = Arc::new(DeliveryCoordinator::new(
         Arc::clone(&claim_loss_store) as Arc<dyn OutboundStateStorePort>,
@@ -2903,6 +2920,8 @@ fn build_claim_loss_triggered_harness(
         targeted_claim_calls: AtomicUsize::new(0),
         authoritative_attempts: Mutex::new(HashMap::new()),
         list_calls: AtomicUsize::new(0),
+        fail_first_prepared_with_backend: false,
+        fail_prepared_calls: AtomicUsize::new(0),
     });
     let coordinator = Arc::new(DeliveryCoordinator::new(
         Arc::clone(&claim_loss_store) as Arc<dyn OutboundStateStorePort>,
@@ -2962,6 +2981,99 @@ fn build_claim_loss_triggered_harness(
         },
         run_notification_claim_calls,
     )
+}
+
+fn build_settlement_failure_triggered_harness(
+    state: ScriptedRunState,
+    auth_url: Option<&str>,
+    personal_dm_target: bool,
+    channel_unavailable: bool,
+) -> TriggeredHarness {
+    let adapter = Arc::new(RecordingChannelAdapter::new());
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let route_store =
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let delivery_store =
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let turns = Arc::new(ScriptedTurnCoordinator::with_states(vec![state]));
+    let threads = Arc::new(InMemorySessionThreadService::default());
+    let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
+    let settlement_failure_store = Arc::new(ClaimLossStore {
+        inner: Arc::clone(&store),
+        observed_status: OutboundDeliveryStatus::Prepared,
+        failure_kind: None,
+        run_notification_claim_calls: Arc::new(AtomicUsize::new(0)),
+        claim_loss_projection_prefix: "never-match:",
+        targeted_claim_calls: AtomicUsize::new(0),
+        authoritative_attempts: Mutex::new(HashMap::new()),
+        list_calls: AtomicUsize::new(0),
+        fail_first_prepared_with_backend: true,
+        fail_prepared_calls: AtomicUsize::new(0),
+    });
+    let resolver: Arc<dyn ChannelDeliveryResolver> = if channel_unavailable {
+        Arc::new(UnavailableResolver)
+    } else {
+        Arc::new(StaticResolver {
+            adapter: Arc::clone(&adapter),
+        })
+    };
+    let coordinator = Arc::new(DeliveryCoordinator::new(
+        Arc::clone(&settlement_failure_store) as Arc<dyn OutboundStateStorePort>,
+        resolver,
+        Arc::new(NoStoredReplyContext),
+        DeliveryRetryPolicy {
+            max_attempts: 2,
+            backoff: Duration::ZERO,
+        },
+    ));
+    let services = RunDeliveryServices {
+        binding_service: Arc::new(StaticBindingService {
+            binding: binding(),
+            fail: true,
+        }),
+        thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
+        turn_coordinator: Arc::clone(&turns) as Arc<dyn TurnCoordinator>,
+        outbound_store: settlement_failure_store as Arc<dyn OutboundStateStorePort>,
+        route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
+        communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
+        project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
+        coordinator,
+        extension_id: EXTENSION_ID.to_string(),
+        fallback_notice_scope: fallback_scope(),
+        approval_context: None,
+        blocked_auth_prompts: auth_url.map(|url| {
+            Arc::new(OAuthPromptSource {
+                authorization_url: Some(url.to_string()),
+            }) as Arc<dyn BlockedAuthPromptSource>
+        }),
+        auth_flow_cancel: None,
+    };
+    let driver = TriggeredRunDeliveryDriver::with_settings(
+        services,
+        RunDeliverySettings {
+            poll_interval: Duration::from_millis(1),
+            max_wait: Duration::from_millis(60),
+            max_concurrent_deliveries: NonZeroUsize::new(4).expect("nz"),
+            max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
+        },
+        Arc::clone(&delivery_store) as Arc<dyn TriggeredRunDeliveryStore>,
+        Arc::new(StaticCodec {
+            conversation: ExternalConversationRef::new(Some("space-1"), "dm-creator", None, None)
+                .expect("conversation"),
+            personal_dm: personal_dm_target,
+        }),
+        agent(),
+    );
+    TriggeredHarness {
+        driver,
+        adapter,
+        store,
+        route_store,
+        delivery_store,
+        turns,
+        threads,
+        project_files,
+    }
 }
 
 async fn seed_preference(store: &OutboundStateStore<ironclaw_filesystem::InMemoryBackend>) {
@@ -3380,4 +3492,130 @@ async fn triggered_oauth_prompt_to_non_dm_target_cancels_and_notifies() {
     assert_eq!(texts.len(), 1, "only the auth-unavailable notice");
     assert!(!texts[0].contains("Setup link:"), "{}", texts[0]);
     assert!(texts[0].contains("Ironclaw web app"), "{}", texts[0]);
+}
+
+#[tokio::test]
+async fn triggered_oauth_non_dm_settlement_failure_still_cancels_and_sends_only_safe_replacement() {
+    const GATE_REF: &str = "gate:auth-settlement-failure";
+    const OAUTH_SECRET: &str = "https://provider.example/oauth?code=must-not-leak";
+    let harness = build_settlement_failure_triggered_harness(
+        scripted_state(TurnStatus::BlockedAuth, Some(GATE_REF)),
+        Some(OAUTH_SECRET),
+        false,
+        false,
+    );
+    seed_preference(&harness.store).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Delivered,
+        "the safe replacement, not the failed OAuth prompt, owns terminal success"
+    );
+    assert_eq!(
+        harness.turns.cancel_call_count(),
+        1,
+        "the nested target failure must retain the OAuth non-DM classification"
+    );
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1, "only the safe replacement may reach egress");
+    assert!(texts[0].contains("Ironclaw web app"), "{}", texts[0]);
+    assert!(!texts[0].contains("Setup link:"), "{}", texts[0]);
+    assert!(!texts[0].contains(OAUTH_SECRET), "{}", texts[0]);
+    assert!(
+        harness
+            .route_store
+            .load_delivered_gate_route(&tenant(), &user(), GATE_REF)
+            .await
+            .expect("route lookup")
+            .is_none(),
+        "the OAuth prompt was never confirmed delivered"
+    );
+    let attempts = harness
+        .store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("delivery attempts");
+    assert_eq!(
+        attempts.len(),
+        2,
+        "failed OAuth prompt plus safe replacement"
+    );
+    assert!(attempts.iter().any(|attempt| {
+        attempt
+            .candidate
+            .projection_ref
+            .as_str()
+            .starts_with("run-notification:auth:")
+            && attempt.status == OutboundDeliveryStatus::Prepared
+    }));
+    assert!(attempts.iter().any(|attempt| {
+        attempt
+            .candidate
+            .projection_ref
+            .as_str()
+            .starts_with("run-notification:final:")
+            && attempt.status == OutboundDeliveryStatus::Delivered
+    }));
+    assert!(attempts.iter().all(|attempt| {
+        !attempt
+            .candidate
+            .projection_ref
+            .as_str()
+            .starts_with("system-notice:cleanup:")
+    }));
+}
+
+#[tokio::test]
+async fn other_combined_settlement_errors_remain_generic_non_success_without_side_effects() {
+    const GATE_REF: &str = "gate:approval-settlement-failure";
+    let harness = build_settlement_failure_triggered_harness(
+        scripted_state(TurnStatus::BlockedApproval, Some(GATE_REF)),
+        None,
+        true,
+        true,
+    );
+    seed_preference(&harness.store).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Failed,
+        "a non-OAuth combined failure must not be promoted to delivery success"
+    );
+    assert_eq!(harness.turns.cancel_call_count(), 0);
+    assert!(harness.adapter.envelopes().is_empty(), "zero vendor egress");
+    assert!(
+        harness
+            .route_store
+            .load_delivered_gate_route(&tenant(), &user(), GATE_REF)
+            .await
+            .expect("route lookup")
+            .is_none(),
+        "a failed settlement cannot authorize a gate route"
+    );
+    let attempts = harness
+        .store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("delivery attempts");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].status, OutboundDeliveryStatus::Prepared);
+    assert!(attempts.iter().all(|attempt| {
+        !attempt
+            .candidate
+            .projection_ref
+            .as_str()
+            .starts_with("system-notice:cleanup:")
+    }));
 }
