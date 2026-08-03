@@ -371,6 +371,8 @@ struct ClaimLossStore {
     targeted_claim_calls: AtomicUsize,
     authoritative_attempts: Mutex<HashMap<OutboundDeliveryId, OutboundDeliveryAttempt>>,
     list_calls: Arc<AtomicUsize>,
+    fail_first_prepared_with_backend: bool,
+    fail_prepared_calls: AtomicUsize,
 }
 
 #[async_trait]
@@ -1046,6 +1048,8 @@ fn build_claim_loss_observer_harness(
         targeted_claim_calls: AtomicUsize::new(0),
         authoritative_attempts: Mutex::new(HashMap::new()),
         list_calls: Arc::clone(&list_calls),
+        fail_first_prepared_with_backend: false,
+        fail_prepared_calls: AtomicUsize::new(0),
     });
     let coordinator = Arc::new(DeliveryCoordinator::new(
         Arc::clone(&claim_loss_store) as Arc<dyn OutboundStateStorePort>,
@@ -2892,6 +2896,8 @@ fn build_claim_loss_triggered_harness(
         targeted_claim_calls: AtomicUsize::new(0),
         authoritative_attempts: Mutex::new(HashMap::new()),
         list_calls: Arc::clone(&list_calls),
+        fail_first_prepared_with_backend: false,
+        fail_prepared_calls: AtomicUsize::new(0),
     });
     let coordinator = Arc::new(DeliveryCoordinator::new(
         Arc::clone(&claim_loss_store) as Arc<dyn OutboundStateStorePort>,
@@ -2977,7 +2983,7 @@ fn build_settlement_failure_triggered_harness(
         claim_loss_projection_prefix: "never-match:",
         targeted_claim_calls: AtomicUsize::new(0),
         authoritative_attempts: Mutex::new(HashMap::new()),
-        list_calls: AtomicUsize::new(0),
+        list_calls: Arc::new(AtomicUsize::new(0)),
         fail_first_prepared_with_backend: true,
         fail_prepared_calls: AtomicUsize::new(0),
     });
