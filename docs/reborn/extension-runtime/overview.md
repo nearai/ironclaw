@@ -533,10 +533,11 @@ the idempotency attempt; permanent failures settle it.
 
 For final and triggered outbound replies, the coordinator recognizes confined
 `/workspace/...` file references, preflights and reads them through the
-turn-scoped project filesystem, and appends transient `OutboundPart::File`
-values. Callers cannot inject pre-materialized file parts. The adapter owns the
-vendor upload; raw bytes never enter attempts, events, projections, or
-transcripts.
+turn-scoped project filesystem after acquiring the durable delivery claim and
+resolving the target/channel, then appends transient `OutboundPart::File`
+values before vendor egress. Callers cannot inject pre-materialized file parts.
+The adapter owns the vendor upload; raw bytes never enter attempts, events,
+projections, or transcripts.
 
 ### 4.3 Auth — one host engine, recipes, no adapter
 
@@ -713,14 +714,21 @@ Every user-visible channel output is a semantic intent, not an API call:
 user is on. One delivery, end to end:
 
 1. An intent is emitted ("FinalReply for run X").
-2. The coordinator resolves the target: reply where the message came from
-   (via the stored `reply_context`) or a stored preference target for
-   proactive sends. Unauthorized or unavailable targets fail closed.
-3. It persists a delivery attempt (`Prepared` → `Sending`) **before** any
-   network call.
-4. It resolves the bound channel adapter from the active snapshot
-   (generation-pinned; an in-flight delivery survives an upgrade).
-5. `adapter.deliver(envelope, egress)` renders and sends; the host injects
+2. The coordinator authorizes the candidate target binding and persists a
+   `Prepared` delivery attempt. Notices persist their source-conversation
+   attempt through the same lifecycle.
+3. It atomically claims the durable attempt (`Prepared` → `Sending`) **before**
+   any fallible target/channel resolution, attachment materialization, or
+   vendor egress. The store is authoritative across coordinator processes; a
+   claim loser returns duplicate suppression without performing any of that
+   downstream work.
+4. It resolves the trusted target metadata and bound channel adapter from the
+   active snapshot. Reply targets use stored `reply_context`; proactive sends
+   use a stored preference target. Unauthorized or unavailable targets fail
+   closed. The adapter is generation-pinned, so an in-flight delivery survives
+   an upgrade.
+5. Final and triggered replies materialize recognized workspace attachments,
+   then `adapter.deliver(envelope, egress)` renders and sends; the host injects
    credentials.
 6. The adapter returns a structured per-part report (sent + vendor message
    ref / retryable / permanent). It has no store access and cannot mark
@@ -728,13 +736,19 @@ user is on. One delivery, end to end:
 7. The coordinator records the outcome, schedules retries, dedupes, and
    drains on shutdown.
 
-The **sole-writer rule** is what makes the crash story tractable: if the
-process dies after the vendor accepted a message but before the result was
-recorded, the attempt is found in `Sending` and becomes `Unknown` — never
-blindly resent (that is how users get duplicate messages) unless the vendor
-supports an idempotency key that makes a resend provably safe. This works only
-because exactly one component owns delivery truth, which is why "no direct
-product send path" is an architecture-gated rule.
+The **sole-writer rule** is what makes the crash story tractable, but
+`Sending` records ownership rather than proof of vendor contact. Because the
+durable claim precedes all fallible pre-egress work, the process can die before
+target/channel resolution, attachment materialization, or any vendor contact;
+it can also die after the vendor accepted a message but before the result was
+recorded. Recovery cannot distinguish those cases, so an interrupted `Sending`
+attempt becomes `Unknown` and is never blindly resent (that is how users get
+duplicate messages) unless a vendor idempotency key makes a resend provably
+safe. The claim suppresses concurrent egress for one durable delivery fact; it
+does not provide provider exactly-once delivery. Notice attempts retain fresh
+random ids and their separate dedupe contract. This works only because exactly
+one component owns delivery truth, which is why "no direct product send path"
+is an architecture-gated rule.
 
 The coordinator is **not folded into `ChannelAdapter`** for the same reason
 the dispatcher is not folded into `ToolAdapter` and the ingress router is not

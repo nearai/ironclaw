@@ -14,8 +14,11 @@
 //! - An attempt is persisted (`Prepared`→`Sending`) **before** any vendor
 //!   egress (OUT-3); the coordinator is the sole delivery-state writer —
 //!   adapters get no store and cannot mark anything delivered (OUT-4).
-//! - A crash after possible vendor success leaves `Sending`; recovery marks
-//!   it `Unknown` and never blindly resends (OUT-6).
+//! - `Sending` means durable egress ownership was claimed before fallible
+//!   target/channel resolution and attachment materialization. A crash can
+//!   therefore happen before vendor contact or after possible vendor success;
+//!   recovery cannot distinguish those cases, marks the attempt `Unknown`, and
+//!   never blindly resends (OUT-6).
 //! - Once any part of a multipart delivery is sent, a later retryable part
 //!   failure is terminal — a whole-envelope retry would duplicate the parts
 //!   the vendor already accepted (OUT-7).
@@ -321,10 +324,13 @@ impl DeliveryCoordinator {
     }
 
     /// Crash recovery (OUT-6): every attempt still `Sending` in this scope
-    /// crashed between vendor egress and the result write. Mark each
-    /// `Unknown`; never blindly resend. A per-attempt failure does not abandon
-    /// the captured snapshot: recovery continues, then returns the first
-    /// typed store error after all remaining attempts have been guarded.
+    /// held the durable egress claim when its coordinator stopped. Because the
+    /// claim precedes fallible target/channel resolution, attachment
+    /// materialization, and vendor egress, recovery cannot tell whether the
+    /// vendor was never contacted or may have accepted the message. Mark each
+    /// `Unknown`; never blindly resend. A per-attempt recovery failure does not
+    /// abandon the captured snapshot: recovery continues, then returns the
+    /// first typed store error after all remaining attempts have been guarded.
     pub async fn recover_interrupted_deliveries(
         &self,
         scope: ironclaw_turns::TurnScope,

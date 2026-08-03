@@ -193,16 +193,20 @@ pub enum OutboundDeliveryStatus {
     /// Coordinator lifecycle: the attempt is persisted, no vendor egress has
     /// happened yet (crash here → safe to retry).
     Prepared,
-    /// Coordinator lifecycle: vendor egress is in flight. An attempt found in
-    /// this state after a crash becomes [`Self::Unknown`] — never blindly
-    /// resent (the vendor may have accepted the message).
+    /// Coordinator lifecycle: durable sole-egress ownership was claimed before
+    /// fallible target/channel resolution and attachment materialization. This
+    /// state does not prove that the vendor was contacted. After a crash it
+    /// becomes [`Self::Unknown`] because the vendor may still have accepted the
+    /// message; never blindly resend it.
     Sending,
     /// Legacy pre-coordinator state (kept for persisted rows).
     Pending,
     Delivered,
     Failed,
-    /// Terminal-ambiguous: the process died after possible vendor success.
-    /// Resend only when a vendor idempotency key makes it provably safe.
+    /// Terminal-ambiguous: the process died after claiming egress ownership,
+    /// either before vendor contact or after possible vendor success. Recovery
+    /// cannot distinguish those cases. Resend only when a vendor idempotency
+    /// key makes it provably safe.
     Unknown,
     DeadLettered,
 }

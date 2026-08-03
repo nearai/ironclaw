@@ -724,8 +724,11 @@ Rules — kept short on purpose:
   fact. The claim does not provide provider exactly-once delivery: notice
   attempts still mint fresh random delivery ids, and run-notice dedupe remains
   the existing separate contract.
-- [x] OUT-6 Crash after possible vendor success records `Unknown`; no blind
-  resend without a vendor idempotency key. —
+- [x] OUT-6 `Sending` means durable egress ownership was claimed, not that the
+  vendor was contacted. A crash can occur during fallible target/channel
+  resolution or attachment materialization, or after possible vendor success;
+  recovery cannot distinguish those cases, records `Unknown`, and never
+  blindly resends without a vendor idempotency key. —
   `coordinator_recovery_marks_interrupted_sending_attempts_unknown` and
   `coordinator_lazily_recovers_interrupted_attempts_before_a_scopes_first_delivery`
   (`outbound_delivery_contract.rs`): interrupted `Sending` attempts from a

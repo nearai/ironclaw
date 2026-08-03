@@ -398,12 +398,15 @@ signed vendor POST → verified → normalized → turn admitted.
   without resolving, materializing, or sending. After claiming, resolve the
   target (source-route reply default, preference targets, fail-closed on
   unauthorized/unavailable), call `channel.deliver(envelope, egress)`, persist
-  the structured report, and own retry/backoff/dedupe/shutdown-drain. Crash
-  after possible vendor success → `Unknown`, never blind resend. Sole
-  delivery-state writer — adapters get no store. Production construction
-  rejects a no-op sink. This is not a provider exactly-once guarantee: notice
-  attempts retain fresh random delivery ids, and their existing dedupe contract
-  is not redesigned by the per-attempt claim.
+  the structured report, and own retry/backoff/dedupe/shutdown-drain. `Sending`
+  records durable egress ownership, not vendor contact: a crash may occur
+  during target/channel resolution or attachment materialization, or after
+  possible vendor success. Recovery cannot distinguish those cases, so it
+  records `Unknown` and never blindly resends. Sole delivery-state writer —
+  adapters get no store. Production construction rejects a no-op sink. This is
+  not a provider exactly-once guarantee: notice attempts retain fresh random
+  delivery ids, and their existing dedupe contract is not redesigned by the
+  per-attempt claim.
 - For final and triggered replies, the coordinator materializes recognized
   `/workspace/...` references through the turn-scoped project filesystem after
   the durable claim and target/channel resolution, but before vendor egress. It
@@ -429,7 +432,8 @@ signed vendor POST → verified → normalized → turn admitted.
 (every intent enters; attempt persisted before egress observed; retry/backoff/
 dedupe; partial multipart rule — once any part sends, a later retryable part
 failure is terminal unless the adapter supplied a vendor idempotency key;
-crash→`Unknown`; drain; both DBs). Egress security tests: undeclared host,
+crash after a durable claim (before vendor contact or after possible success)
+→ `Unknown`; drain; both DBs). Egress security tests: undeclared host,
 adapter-supplied auth header, redirect/private-IP escape, oversized response —
 rejected before network. Slack/Telegram rendering is fixture-unit-tested in
 their crates; one outbound integration proof each through the real coordinator.
