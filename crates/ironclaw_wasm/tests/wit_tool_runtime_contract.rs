@@ -858,21 +858,36 @@ fn guest_response_error_size_boundary_is_fail_closed() {
 #[test]
 fn guest_trap_preserves_sanitized_log_snapshot_and_safe_trap_cause() {
     let secret = format!("sk-{}", "T".repeat(24));
-    let error = execute_diagnostic_tool(
+    let guest_function_name = "guest-owned-private-execute-marker";
+    let component = diagnostic_tool_wat(
         &[(4, format!("before trap {secret}; operation=write"))],
         None,
         true,
     )
-    .unwrap_err();
+    .replace("$execute", &format!("${guest_function_name}"));
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+    let prepared = runtime
+        .prepare("diagnostic-boundary", &tool_component(&component))
+        .unwrap();
+    let error = runtime
+        .execute(
+            &prepared,
+            WitToolHost::deny_all(),
+            WitToolRequest::new("{}"),
+        )
+        .unwrap_err();
 
     let display = error.to_string();
+    assert!(!display.contains(guest_function_name));
     assert!(!display.contains(&secret));
-    assert!(
-        display.contains("unreachable"),
-        "trap cause was lost: {display}"
-    );
     match error {
         WasmError::ExecutionFailed { message, logs, .. } => {
+            assert_eq!(
+                message,
+                wasmtime::Trap::UnreachableCodeReached.to_string(),
+                "the typed trap cause should remain useful without exposing its cause chain"
+            );
+            assert!(!message.contains(guest_function_name));
             assert!(!message.contains(&secret));
             assert_eq!(logs.len(), 1);
             assert!(!logs[0].message.contains(&secret));

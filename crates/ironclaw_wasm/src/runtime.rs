@@ -84,7 +84,10 @@ impl WitToolRuntime {
                 let message = if store.data().deadline_exceeded() {
                     "WASM execution deadline exceeded".to_string()
                 } else {
-                    format!("{error:#}")
+                    error.downcast_ref::<wasmtime::Trap>().map_or_else(
+                        || "WASM component execution failed".to_string(),
+                        ToString::to_string,
+                    )
                 };
                 return Err(execution_failed_with_usage(message, &store, started));
             }
