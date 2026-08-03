@@ -3676,14 +3676,23 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
             expected_pending_manifest_ref,
         )
         .await?;
-        let core = self
+        let core = match self
             .finish_v2_preparation_checkpoint(
                 installation_id,
                 incarnation_id,
                 expected_pending_manifest_ref,
                 &next_pending_manifest,
             )
-            .await?;
+            .await
+        {
+            Ok(core) => core,
+            Err(rejection) => {
+                // The lease was committed above. Keep the pending aggregate
+                // immediately visible if the checkpoint CAS fails.
+                let _ = self.clear_v2_lease(installation_id).await;
+                return Err(rejection);
+            }
+        };
         let installation = self.reconstruct_v2_installation(&core).await?;
         let _ = self
             .put_manifest(&next_pending_manifest, CasExpectation::Any)
@@ -4435,7 +4444,7 @@ fn map_extension_state_cas_error(
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
     use ironclaw_host_api::{host_port::HostPortCatalog, ids::ExtensionId, path::VirtualPath};
 
     use super::*;
@@ -5132,6 +5141,73 @@ mod tests {
         assert_eq!(checkpointed.incarnation_id(), Some(&incarnation));
         assert_eq!(
             checkpointed
+                .manifest_ref()
+                .manifest_hash()
+                .map(ManifestHash::as_str),
+            Some("hash-two")
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_checkpoint_releases_its_preparation_lease() {
+        let backend = Arc::new(
+            FaultInjecting::new(InMemoryBackend::new()).with_fault(
+                Fault::on(FilesystemOperation::WriteFile)
+                    .path("/v2/installations/")
+                    .nth(3)
+                    .backend("interrupt checkpoint commit"),
+            ),
+        );
+        let store = ExtensionInstallationStore::load_at(
+            backend,
+            VirtualPath::new("/system/extensions/.installations/checkpoint-failure")
+                .expect("valid root"),
+            HostPortCatalog::empty(),
+            capability_provider_contracts(),
+        )
+        .await
+        .expect("filesystem store");
+        let pending = pending_installation("fixture", Some("hash-one"));
+        let installation_id = pending.installation_id().clone();
+        let incarnation = pending.incarnation_id().cloned().expect("incarnation");
+        let expected_ref = pending.manifest_ref().clone();
+        store
+            .upsert_manifest_and_installation(
+                pending_manifest_record("fixture", Some("hash-one")),
+                pending.clone(),
+            )
+            .await
+            .expect("seed pending");
+
+        store
+            .checkpoint_preparation(
+                &installation_id,
+                &incarnation,
+                &expected_ref,
+                pending_manifest_record("fixture", Some("hash-two")),
+            )
+            .await
+            .expect_err("the injected checkpoint commit failure surfaces");
+        let visible = store
+            .get_installation(&installation_id)
+            .await
+            .expect("load after failed checkpoint")
+            .expect("a failed checkpoint must release its durable lease immediately");
+        assert_eq!(visible.manifest_ref(), pending.manifest_ref());
+        assert_eq!(visible.incarnation_id(), pending.incarnation_id());
+        assert_eq!(visible.owner(), pending.owner());
+
+        let retry = store
+            .checkpoint_preparation(
+                &installation_id,
+                &incarnation,
+                &expected_ref,
+                pending_manifest_record("fixture", Some("hash-two")),
+            )
+            .await
+            .expect("the checkpoint remains retryable without reopening the store");
+        assert_eq!(
+            retry
                 .manifest_ref()
                 .manifest_hash()
                 .map(ManifestHash::as_str),
