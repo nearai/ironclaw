@@ -55,7 +55,30 @@ any other consumer — there is deliberately **no re-export** (the port half of
 `admin_users::{AdminUserService, AdminUser*, AdminCreate*}` ·
 `operator_tools::{RebornOperatorToolCatalog, RebornOperatorToolInfo}` ·
 `subject_route::{ProductConversationSubjectRouteResolver, ProductConversationSubjectRouteResolutionRequest, ProductConversationRouteKey}` (WS2.2) ·
-`error::ProductOperationFailure` (WS2.2 — the boundary error, not a port).
+`error::ProductOperationFailure` (WS2.2 — the boundary error, not a port) ·
+`llm_config::{LlmConfigService, ActiveModelReader, + 15 DTOs}` and
+`operator_service::{OperatorStatusService, OperatorLogsService, OperatorServiceLifecycleService, + 12 DTOs, normalize_operator_log_context_value}`
+(WS5 operator row — implemented by `ironclaw_operator`, except readiness status
+which is composition's; pinned by the sibling gate
+`reborn_operator_port_inversion.rs`).
+
+**Two of those were the last things `ironclaw_operator` needed from this
+crate.** Its `ironclaw_product` dependency is gone from the manifest, which is
+the point: operator is this crate's *sibling*, not its consumer. If you find
+yourself wanting to declare a trait here for the operator to implement, that is
+the inversion coming back — declare it in `ironclaw_product_contracts` and add
+a row to `INVERTED_PORTS` in that gate.
+
+What this crate kept from the operator move, and why: the frozen view
+descriptors (`LLM_CONFIG_VIEW`, `LOGS_VIEW`, `OPERATOR_LOGS_VIEW`) because the
+concrete inventory is product's; the fail-closed `Unsupported*` services and the
+`Static*` doubles because a default *implementation* is not a contract; the
+and the
+`RebornOperator*` command-plane envelope that wraps the moved DTOs. The
+`LlmConfigServiceError` → `ProductSurfaceError` status table has one home, the
+`impl From` in `ironclaw_product_contracts::operator_llm`; call sites here use
+`.map_err(ProductSurfaceError::from)` directly, with no product-local alias in
+between.
 
 What stayed, and why: the **implementations** (`DeliveryCoordinator`,
 `NoReplyContext`, `ExtensionAccountSetupRegistry`, `UnsupportedLifecycleProductService`,

@@ -42,7 +42,7 @@ where
         let snapshot = llm_config
             .snapshot(caller)
             .await
-            .map_err(llm_config::map_llm_config_error)?;
+            .map_err(ProductSurfaceError::from)?;
         Ok(setup_response_from_llm_snapshot(
             snapshot,
             Vec::new(),

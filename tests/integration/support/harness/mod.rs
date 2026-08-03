@@ -309,7 +309,7 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// trait than `attachment_test_support`'s `LoopAttachmentReadPort`, though
     /// the same concrete reader implements both. `Some` only for
     /// `new_with_options`-built harnesses.
-    inbound_attachment_reader: Option<Arc<dyn ironclaw_product::InboundAttachmentReader>>,
+    inbound_attachment_reader: Option<Arc<dyn ironclaw_attachments::InboundAttachmentReader>>,
     /// Backing handles for the synthetic outbound target list/set test seam.
     /// `Some` only for `outbound_target_tools()`; route-current stays on the
     /// normal first-party lane and uses the composed product service/store.
@@ -1628,7 +1628,7 @@ impl HostRuntimeCapabilityHarness {
     /// `RebornServices::with_inbound_attachment_reader`.
     pub(crate) fn inbound_attachment_reader_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product::InboundAttachmentReader>> {
+    ) -> Option<Arc<dyn ironclaw_attachments::InboundAttachmentReader>> {
         self.inbound_attachment_reader.clone()
     }
 

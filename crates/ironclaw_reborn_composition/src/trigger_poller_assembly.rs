@@ -37,7 +37,7 @@ pub(crate) fn build_trigger_poller_services<C>(
 ) -> Result<TriggerPollerServices, RebornRuntimeError>
 where
     C: ironclaw_conversations::ConversationBindingService
-        + ironclaw_conversations::SessionThreadService
+        + ironclaw_conversations::InboundConversationService
         + ironclaw_conversations::ConversationActorPairingService
         + Clone
         + 'static,

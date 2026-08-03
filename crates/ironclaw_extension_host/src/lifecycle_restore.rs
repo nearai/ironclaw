@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use ironclaw_extensions::{
-    CapabilityVisibility, ExtensionError, ExtensionInstallation, ExtensionInstallationError,
+    CapabilityVisibility, ExtensionInstallation, ExtensionInstallationError,
     ExtensionInstallationId, ExtensionInstallationStorePort, ExtensionLifecycleService,
     ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage, InstallationOwner,
     ManifestHash, ManifestSource, canonicalize_installation_rows,
@@ -16,6 +16,8 @@ use crate::{
     ActiveExtensionPublisher, AvailableExtensionCatalog, AvailableExtensionPackage,
     materialize_available_extension, product_extension_host_api_contract_registry,
 };
+// One classifier for `ExtensionError` — see the note in `active_publication.rs`.
+use crate::product_lifecycle::map_extension_error;
 
 const RETIRED_SLACK_USER_EXTENSION_ID: &str = "slack_user";
 
@@ -424,19 +426,6 @@ pub fn package_visible_capability_ids(package: &ExtensionPackage) -> Vec<String>
         .collect()
 }
 
-fn map_extension_error(error: ExtensionError) -> ProductOperationFailure {
-    match error {
-        ExtensionError::Filesystem(_) | ExtensionError::LifecycleEventSink { .. } => {
-            ProductOperationFailure::Transient {
-                reason: error.to_string(),
-            }
-        }
-        _ => ProductOperationFailure::InvalidBindingRequest {
-            reason: error.to_string(),
-        },
-    }
-}
-
 fn map_extension_installation_error(error: ExtensionInstallationError) -> ProductOperationFailure {
     match error {
         error @ ExtensionInstallationError::StoreUnavailable { .. } => {
@@ -452,10 +441,154 @@ fn map_extension_installation_error(error: ExtensionInstallationError) -> Produc
 
 #[cfg(test)]
 mod tests {
-    use super::RETIRED_SLACK_USER_EXTENSION_ID;
+    use super::{
+        RETIRED_SLACK_USER_EXTENSION_ID, map_extension_error, map_extension_installation_error,
+    };
+    use ironclaw_extensions::{ExtensionError, ExtensionInstallationError, InstallationOwner};
+    use ironclaw_product_contracts::error::ProductOperationFailure;
 
     #[test]
     fn retired_slack_user_id_remains_stable() {
         assert_eq!(RETIRED_SLACK_USER_EXTENSION_ID, "slack_user");
+    }
+
+    /// Restore runs at boot over every persisted installation. Misclassifying
+    /// an infrastructure failure as a malformed request would make restore
+    /// abandon a recoverable row instead of retrying it, so the split between
+    /// "retry" and "this row is broken" is pinned on both sides.
+    #[test]
+    fn restore_keeps_infrastructure_failures_retryable() {
+        assert!(
+            matches!(
+                map_extension_error(ExtensionError::Filesystem(
+                    ironclaw_filesystem::FilesystemError::MountNotFound {
+                        path: ironclaw_host_api::path::VirtualPath::new("/system/extensions")
+                            .expect("valid path"),
+                    }
+                )),
+                ProductOperationFailure::Transient { .. }
+            ),
+            "a filesystem failure during restore is retryable"
+        );
+        assert!(
+            matches!(
+                map_extension_error(ExtensionError::InvalidManifest {
+                    reason: "missing runtime".to_string(),
+                }),
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "a manifest that cannot be parsed is not fixed by retrying"
+        );
+
+        assert!(
+            matches!(
+                map_extension_installation_error(ExtensionInstallationError::StoreUnavailable {
+                    reason: "backend unreachable".to_string(),
+                }),
+                ProductOperationFailure::Transient { .. }
+            ),
+            "a store outage during restore is retryable"
+        );
+        assert!(
+            matches!(
+                map_extension_installation_error(ExtensionInstallationError::EmptyOwnerMembers),
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "a structurally invalid installation row is not retryable"
+        );
+    }
+
+    fn fixture_record(id: &str, description: &str) -> super::ExtensionManifestRecord {
+        let raw = format!(
+            r#"schema_version = "reborn.extension_manifest.v3"
+id = "{id}"
+name = "{id} fixture"
+version = "0.1.0"
+description = "{description}"
+trust = "third_party"
+
+[mcp]
+server = "https://mcp.example.test/{id}"
+namespace = "{id}"
+max_tools = 32
+default_permission = "ask"
+effects = ["network", "use_secret"]
+"#
+        );
+        let manifest_hash = ironclaw_extensions::ManifestHash::new(
+            ironclaw_host_api::approval::sha256_digest_token(raw.as_bytes()),
+        )
+        .expect("manifest hash");
+        super::ExtensionManifestRecord::from_toml_with_root_binding(
+            raw,
+            ironclaw_extensions::ManifestSource::UserRegistered,
+            &ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+            Some(manifest_hash),
+            &crate::product_extension_host_api_contract_registry().expect("host contracts"),
+            ironclaw_extensions::PackageRootBinding::Virtual,
+        )
+        .expect("fixture manifest parses")
+    }
+
+    /// Install may reuse a definition already registered in the catalog, but
+    /// only when it is byte-for-byte the same definition. A *different*
+    /// registered definition for the same id must be refused rather than
+    /// silently preferred — otherwise a stale or tampered registration would
+    /// survive a reinstall. Both halves are asserted so the refusal cannot pass
+    /// because `prepare_install` fails for some unrelated reason.
+    #[test]
+    fn install_refuses_a_retained_definition_that_disagrees_with_the_catalog() {
+        let record = fixture_record("mcp-restore-fixture", "fixture: restore prepare_install");
+        let available = crate::hosted_mcp_manifest::available_package(&record)
+            .expect("fixture record projects to an available package");
+        let owner = ironclaw_host_api::ids::UserId::new("restore-owner").expect("valid user");
+
+        let plan = super::prepare_install(&available, InstallationOwner::user(owner.clone()), None)
+            .expect("install with no retained definition uses the catalog record");
+        assert_eq!(
+            plan.installation.extension_id().as_str(),
+            "mcp-restore-fixture"
+        );
+        assert!(
+            super::prepare_install(
+                &available,
+                InstallationOwner::user(owner.clone()),
+                Some(record.clone()),
+            )
+            .is_ok(),
+            "an identical retained definition is reused, not refused"
+        );
+
+        let conflicting = fixture_record("mcp-restore-fixture", "fixture: a different definition");
+        let failure = match super::prepare_install(
+            &available,
+            InstallationOwner::user(owner.clone()),
+            Some(conflicting),
+        ) {
+            Ok(_) => panic!("a disagreeing retained definition must be refused"),
+            Err(failure) => failure,
+        };
+        assert_eq!(
+            failure,
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "extension mcp-restore-fixture has a conflicting registered definition"
+                    .to_string(),
+            },
+        );
+
+        // Migration reuses the existing row's identity and owner while taking
+        // the catalog's manifest hash — the boot-time upgrade path.
+        let migrated = super::prepare_manifest_migration(&available, &plan.installation)
+            .expect("migration plans against the existing installation");
+        assert_eq!(
+            migrated.installation.installation_id(),
+            plan.installation.installation_id(),
+            "migration must not mint a new installation identity"
+        );
+        assert_eq!(
+            migrated.installation.owner(),
+            plan.installation.owner(),
+            "migration must not change who owns the installation"
+        );
     }
 }

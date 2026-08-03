@@ -29,7 +29,7 @@ check_rc() {
 }
 check_text() {
   local label="$1" needle="$2"
-  if grep -Fq "${needle}" <<<"${CAP_OUT}"; then
+  if grep -Fq -e "${needle}" <<<"${CAP_OUT}"; then
     echo "  ok   ${label}"
     passes=$((passes + 1))
   else
@@ -40,13 +40,24 @@ check_text() {
 }
 check_report_text() {
   local label="$1" needle="$2"
-  if grep -Fq "${needle}" "${work}/report.json"; then
+  if grep -Fq -e "${needle}" "${work}/report.json"; then
     echo "  ok   ${label}"
     passes=$((passes + 1))
   else
     echo "  FAIL ${label}: report missing ${needle}" >&2
     cat "${work}/report.json" >&2
     failures=$((failures + 1))
+  fi
+}
+check_no_report_text() {
+  local label="$1" needle="$2"
+  if grep -Fq -e "${needle}" "${work}/report.json"; then
+    echo "  FAIL ${label}: report unexpectedly contains ${needle}" >&2
+    cat "${work}/report.json" >&2
+    failures=$((failures + 1))
+  else
+    echo "  ok   ${label}"
+    passes=$((passes + 1))
   fi
 }
 
@@ -807,6 +818,402 @@ capture python3 "${gate}" \
   --repo-root "${short_root}"
 check_rc "a crate inventory below the discovery floor fails closed" 1
 check_text "short crate tree is actionable" "crate discovery failed"
+
+echo "▶ lines already uncovered at base leave the denominator; nothing else does"
+# The rule: a changed line whose pre-image was uncovered at the base commit is
+# pre-existing debt, not debt this change introduced. Everything below pins one
+# of the four ways a line can relate to base, because the value of the rule is
+# entirely in what it refuses to forgive.
+pre_crate="crates/ironclaw_preimage"
+pre_path="${pre_crate}/src/lib.rs"
+write_crate_manifest "${pre_crate}"
+# Written here rather than inherited: every assertion below is an exact
+# denominator, so an exemption left over from an earlier section would move the
+# numbers without failing anything.
+cat >"${work}/policy.toml" <<'TOML'
+[policy]
+line_percent = 100.0
+branch_percent = 100.0
+TOML
+printf '%s\n' \
+  'pub fn alpha(value: bool) -> bool {' \
+  '    value' \
+  '}' \
+  'pub fn beta(value: bool) -> bool {' \
+  '    !value' \
+  '}' >"${case_root}/${pre_path}"
+
+# Two lines modified in place, 1:1 — the rename / rustfmt-re-wrap shape that
+# made 135 of PR #7000's 137 flagged lines pre-existing.
+cat >"${work}/change.diff" <<DIFF
+diff --git a/${pre_path} b/${pre_path}
+--- a/${pre_path}
++++ b/${pre_path}
+@@ -2 +2 @@
+-    old_value
++    value
+@@ -5 +5 @@
+-    !old_value
++    !value
+DIFF
+cat >"${work}/coverage.lcov" <<EOF
+SF:${case_root}/${pre_path}
+DA:2,0
+DA:5,1
+BRDA:5,0,0,1
+BRDA:5,0,1,1
+LF:2
+LH:1
+BRF:2
+BRH:2
+end_of_record
+EOF
+# Line 2 uncovered at base; line 5 covered at base and still covered.
+cat >"${work}/base.lcov" <<EOF
+SF:${case_root}/${pre_path}
+DA:2,0
+DA:5,1
+LF:2
+LH:1
+end_of_record
+EOF
+run_gate_base() {
+  capture python3 "${gate}" \
+    --lcov "${work}/coverage.lcov" \
+    --manifest "${work}/policy.toml" \
+    --diff-file "${work}/change.diff" \
+    --repo-root "${case_root}" \
+    --json "${work}/report.json" \
+    "$@"
+}
+run_gate_base --base-lcov "${work}/base.lcov"
+check_rc "a line uncovered at base and uncovered now is excluded, not gated" 0
+check_text "the subtraction count is reported" \
+  "Pre-existing uncovered lines excluded from the denominator: 1"
+check_text "the excluded line names its base pre-image for audit" \
+  "${pre_path}:2 (uncovered at base as ${pre_path}:2)"
+check_text "only the genuinely measurable line remains in the denominator" \
+  "Changed line coverage: 100.00% (1/1)"
+check_report_text "the machine report carries the exclusion count" \
+  '"preexisting_uncovered_excluded": 1'
+check_report_text "the machine report records that base coverage was applied" \
+  '"base_coverage_applied": true'
+
+# Uncovered at base but covered now: someone paid off the debt in this change.
+# Excluding it would strip a hit from the numerator and shrink the denominator,
+# i.e. quietly penalise adding the missing test, so only currently-uncovered
+# lines are ever candidates for subtraction.
+cat >"${work}/coverage.lcov" <<EOF
+SF:${case_root}/${pre_path}
+DA:2,3
+DA:5,1
+BRDA:5,0,0,1
+BRDA:5,0,1,1
+LF:2
+LH:2
+BRF:2
+BRH:2
+end_of_record
+EOF
+run_gate_base --base-lcov "${work}/base.lcov"
+check_rc "a pre-existing hole this change filled still passes" 0
+check_text "the newly covered line stays in the denominator" \
+  "Changed line coverage: 100.00% (2/2)"
+check_text "a line that is covered now is never subtracted" \
+  "Pre-existing uncovered lines excluded from the denominator: 0"
+cat >"${work}/coverage.lcov" <<EOF
+SF:${case_root}/${pre_path}
+DA:2,0
+DA:5,1
+BRDA:5,0,0,1
+BRDA:5,0,1,1
+LF:2
+LH:1
+BRF:2
+BRH:2
+end_of_record
+EOF
+
+# The regression this whole gate exists for: covered before, uncovered now.
+cat >"${work}/base.lcov" <<EOF
+SF:${case_root}/${pre_path}
+DA:2,1
+DA:5,1
+LF:2
+LH:2
+end_of_record
+EOF
+run_gate_base --base-lcov "${work}/base.lcov"
+check_rc "a line covered at base and uncovered now still fails" 1
+check_text "the covered-at-base regression is named" "${pre_path}:2"
+check_text "nothing is excluded when base coverage says the line was covered" \
+  "Pre-existing uncovered lines excluded from the denominator: 0"
+
+# A pure addition has no pre-image, so it can inherit nothing. The base lcov
+# deliberately marks the *same line number* uncovered: a gate that keyed on the
+# line number rather than the diff's pre-image would wrongly forgive this.
+cat >"${work}/change.diff" <<DIFF
+diff --git a/${pre_path} b/${pre_path}
+--- a/${pre_path}
++++ b/${pre_path}
+@@ -1,0 +2 @@
++    value
+DIFF
+cat >"${work}/base.lcov" <<EOF
+SF:${case_root}/${pre_path}
+DA:2,0
+DA:5,0
+LF:2
+LH:0
+end_of_record
+EOF
+run_gate_base --base-lcov "${work}/base.lcov"
+check_rc "a genuinely new uncovered line still fails" 1
+check_text "the genuinely new line is named" "${pre_path}:2"
+check_text "a line with no pre-image is never excluded" \
+  "Pre-existing uncovered lines excluded from the denominator: 0"
+
+echo "▶ pre-images resolve across a rename"
+moved_from="${pre_crate}/src/moved_from.rs"
+moved_to="${pre_crate}/src/moved_to.rs"
+printf '%s\n' \
+  'pub fn one(value: bool) -> bool {' \
+  '    value' \
+  '}' \
+  'pub fn two(value: bool) -> bool {' \
+  '    !value' \
+  '}' >"${case_root}/${moved_from}"
+fixture_git add "${moved_from}"
+fixture_git \
+  -c user.name=coverage-test -c user.email=coverage@example.invalid -c commit.gpgsign=false \
+  commit -qm preimage-baseline
+preimage_base="$(fixture_git rev-parse HEAD)"
+fixture_git mv "${moved_from}" "${moved_to}"
+printf '%s\n' \
+  'pub fn one(value: bool) -> bool {' \
+  '    value && true' \
+  '}' \
+  'pub fn two(value: bool) -> bool {' \
+  '    !value || false' \
+  '}' >"${case_root}/${moved_to}"
+fixture_git add "${moved_to}"
+fixture_git \
+  -c user.name=coverage-test -c user.email=coverage@example.invalid -c commit.gpgsign=false \
+  commit -qm preimage-renamed
+preimage_head="$(fixture_git rev-parse HEAD)"
+cat >"${work}/coverage.lcov" <<EOF
+SF:${case_root}/${moved_to}
+DA:2,0
+DA:5,0
+BRDA:2,0,0,1
+BRDA:2,0,1,1
+LF:2
+LH:0
+BRF:2
+BRH:2
+end_of_record
+EOF
+# At the OLD path: line 2 covered, line 5 uncovered.
+cat >"${work}/base.lcov" <<EOF
+SF:${case_root}/${moved_from}
+DA:2,1
+DA:5,0
+LF:2
+LH:1
+end_of_record
+EOF
+capture python3 "${gate}" \
+  --lcov "${work}/coverage.lcov" \
+  --manifest "${work}/policy.toml" \
+  --base "${preimage_base}" \
+  --head "${preimage_head}" \
+  --repo-root "${case_root}" \
+  --json "${work}/report.json" \
+  --base-lcov "${work}/base.lcov"
+check_rc "a renamed file's covered-at-base line still gates" 1
+check_text "the renamed covered-at-base line is named" "${moved_to}:2"
+check_report_text "the covered-at-base line is in the machine report's holes" \
+  "\"${moved_to}:2\""
+# The uncovered-at-base sibling must be excluded, not merely absent because the
+# rename lost its pre-image: the next assertion pins that it resolved to the old
+# path, so the two together separate "forgiven" from "never seen".
+check_no_report_text "the renamed uncovered-at-base line is not gated" \
+  "\"${moved_to}:5\""
+check_text "the rename's pre-image is resolved to the old path" \
+  "${moved_to}:5 (uncovered at base as ${moved_from}:5)"
+
+echo "▶ unobtainable base coverage falls back to counting every changed line"
+# The fallback is the whole safety argument: the subtraction may only ever come
+# from coverage the gate positively read. Every failure mode below must land on
+# *current* behaviour — stricter, never looser — and say so out loud.
+cat >"${work}/change.diff" <<DIFF
+diff --git a/${pre_path} b/${pre_path}
+--- a/${pre_path}
++++ b/${pre_path}
+@@ -2 +2 @@
+-    old_value
++    value
+@@ -5 +5 @@
+-    !old_value
++    !value
+DIFF
+cat >"${work}/coverage.lcov" <<EOF
+SF:${case_root}/${pre_path}
+DA:2,0
+DA:5,1
+BRDA:5,0,0,1
+BRDA:5,0,1,1
+LF:2
+LH:1
+BRF:2
+BRH:2
+end_of_record
+EOF
+run_gate_base --base-lcov "${work}/absent.lcov"
+check_rc "a missing base lcov counts every changed line" 1
+check_text "the missing base lcov is announced, not swallowed" "Base coverage: NOT APPLIED"
+check_text "the fallback explains itself" "--base-lcov not found"
+check_text "the fallback says every changed line counts" \
+  "every changed line counts, including lines that were already uncovered"
+check_text "the previously excluded line is back in the denominator" "${pre_path}:2"
+check_report_text "the machine report records the fallback" \
+  '"base_coverage_applied": false'
+
+printf '%s\n' 'TN:' 'SF:/nowhere.rs' 'end_of_record' >"${work}/empty.lcov"
+run_gate_base --base-lcov "${work}/empty.lcov"
+check_rc "a base lcov with no DA records counts every changed line" 1
+check_text "an lcov that measured nothing is refused as base coverage" \
+  "contains no DA records"
+
+run_gate_base
+check_rc "no base coverage requested is the strict denominator" 1
+check_text "the un-requested case is still announced" "Base coverage: NOT APPLIED"
+check_text "the subtraction count is reported even when nothing is subtracted" \
+  "Pre-existing uncovered lines excluded from the denominator: 0"
+
+# Two sources of base coverage is an operator error, not a precedence question:
+# silently preferring one would make which lcov was consulted unknowable.
+run_gate_base --base-lcov "${work}/base.lcov" --fetch-base-coverage
+check_rc "asking for two base-coverage sources is refused outright" 1
+check_text "the conflicting flags are named" \
+  "--base-lcov cannot be combined with --fetch-base-coverage"
+
+echo "▶ the artifact lookup is exercised, not just the local-file shortcut"
+# `--fetch-base-coverage` is the mode CI runs. Testing only `--base-lcov` would
+# leave the whole resolution path — the one that can silently stop working —
+# unexercised, which is the "a check that cannot fail is not a check" trap.
+fake_gh="${work}/fake-gh"
+mkdir -p "${fake_gh}"
+cat >"${fake_gh}/gh" <<EOF
+#!/usr/bin/env bash
+url="\$2"
+case "\${url}" in
+  *"/actions/workflows/reborn-tests.yml/runs"*) cat "${work}/gh-runs.json" ;;
+  *"/actions/runs/"*"/artifacts"*) cat "${work}/gh-artifacts.json" ;;
+  *"/actions/artifacts/"*"/zip") cat "${work}/gh-artifact.zip" ;;
+  *) echo "unexpected gh call: \${url}" >&2; exit 9 ;;
+esac
+EOF
+chmod +x "${fake_gh}/gh"
+cat >"${work}/base.lcov" <<EOF
+SF:${case_root}/${pre_path}
+DA:2,0
+DA:5,1
+LF:2
+LH:1
+end_of_record
+EOF
+python3 - "${work}" <<'PY'
+import pathlib, sys, zipfile
+work = pathlib.Path(sys.argv[1])
+with zipfile.ZipFile(work / "gh-artifact.zip", "w") as archive:
+    archive.write(work / "base.lcov", "reborn-integration-merged.lcov")
+PY
+printf '%s\n' '{"workflow_runs": [{"id": 4242, "event": "merge_group", "status": "completed"}]}' \
+  >"${work}/gh-runs.json"
+printf '%s\n' '{"artifacts": [{"id": 77, "name": "reborn-integration-coverage-merged", "expired": false}]}' \
+  >"${work}/gh-artifacts.json"
+run_gate_fetch() {
+  capture env PATH="${fake_gh}:${PATH}" GITHUB_REPOSITORY=nearai/ironclaw \
+    python3 "${gate}" \
+    --lcov "${work}/coverage.lcov" \
+    --manifest "${work}/policy.toml" \
+    --base "${preimage_base}" \
+    --head "${preimage_head}" \
+    --repo-root "${case_root}" \
+    --json "${work}/report.json" \
+    --fetch-base-coverage
+}
+# Drive the real diff/rename path against the fetched artifact, so the fetch is
+# proved end to end rather than only up to the download.
+cat >"${work}/coverage.lcov" <<EOF
+SF:${case_root}/${moved_to}
+DA:2,1
+DA:5,0
+BRDA:2,0,0,1
+BRDA:2,0,1,1
+LF:2
+LH:1
+BRF:2
+BRH:2
+end_of_record
+EOF
+cat >"${work}/base.lcov" <<EOF
+SF:${case_root}/${moved_from}
+DA:2,1
+DA:5,0
+LF:2
+LH:1
+end_of_record
+EOF
+python3 - "${work}" <<'PY'
+import pathlib, sys, zipfile
+work = pathlib.Path(sys.argv[1])
+with zipfile.ZipFile(work / "gh-artifact.zip", "w") as archive:
+    archive.write(work / "base.lcov", "reborn-integration-merged.lcov")
+PY
+run_gate_fetch
+check_rc "a downloaded base artifact excludes the pre-existing line" 0
+check_text "the fetched run is named for audit" "run 4242"
+check_text "the fetched artifact drives the same subtraction" \
+  "Pre-existing uncovered lines excluded from the denominator: 1"
+
+printf '%s\n' '{"workflow_runs": []}' >"${work}/gh-runs.json"
+run_gate_fetch
+check_rc "no run for the base commit counts every changed line" 1
+check_text "the empty run list is explained" "no completed reborn-tests.yml run exists"
+
+printf '%s\n' '{"workflow_runs": [{"id": 4242, "event": "push", "status": "completed"}]}' \
+  >"${work}/gh-runs.json"
+printf '%s\n' '{"artifacts": [{"id": 77, "name": "reborn-integration-coverage-merged", "expired": true}]}' \
+  >"${work}/gh-artifacts.json"
+run_gate_fetch
+check_rc "an expired artifact counts every changed line" 1
+check_text "artifact expiry is explained" "no unexpired"
+
+printf '%s\n' '{"artifacts": [{"id": 77, "name": "reborn-integration-coverage-merged", "expired": false}]}' \
+  >"${work}/gh-artifacts.json"
+printf '%s' 'not a zip' >"${work}/gh-artifact.zip"
+run_gate_fetch
+check_rc "an unreadable artifact counts every changed line" 1
+check_text "a corrupt artifact is explained" "unreadable"
+
+cat >"${fake_gh}/gh" <<'EOF'
+#!/usr/bin/env bash
+echo "gh: HTTP 403" >&2
+exit 1
+EOF
+chmod +x "${fake_gh}/gh"
+run_gate_fetch
+check_rc "an API failure counts every changed line" 1
+check_text "the API failure is surfaced verbatim" "HTTP 403"
+check_text "an API failure never silently subtracts" \
+  "Pre-existing uncovered lines excluded from the denominator: 0"
+
+rm -f "${fake_gh}/gh"
+run_gate_fetch
+check_rc "a missing gh binary counts every changed line" 1
+check_text "the missing binary is explained" "Base coverage: NOT APPLIED"
 
 echo
 if [ "${failures}" -ne 0 ]; then

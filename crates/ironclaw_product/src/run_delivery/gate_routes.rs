@@ -37,51 +37,48 @@ pub(crate) async fn record_gate_route_if_needed(
         // Space-qualified refs (matches inbound events that carry the
         // vendor space id), threaded on the prompt and at conversation root.
         if let Some(space) = space {
-            if let Ok(conv_ref) = ironclaw_conversations::ExternalConversationRef::new(
-                Some(space),
-                conversation_id,
-                Some(vendor_ref),
-                None,
-            ) {
+            if let Ok(conv_ref) =
+                ExternalConversationRef::new(Some(space), conversation_id, Some(vendor_ref), None)
+            {
                 conversation_fingerprints.insert(conv_ref.conversation_fingerprint());
             }
-            if let Ok(conv_ref) = ironclaw_conversations::ExternalConversationRef::new(
-                Some(space),
-                conversation_id,
-                None,
-                None,
-            ) {
+            if let Ok(conv_ref) =
+                ExternalConversationRef::new(Some(space), conversation_id, None, None)
+            {
                 conversation_fingerprints.insert(conv_ref.conversation_fingerprint());
             }
         }
         // No-space fallbacks for events that omit the space id; the set
         // deduplicates when the two forms coincide.
-        if let Ok(conv_ref) = ironclaw_conversations::ExternalConversationRef::new(
-            None,
-            conversation_id,
-            Some(vendor_ref),
-            None,
-        ) {
+        if let Ok(conv_ref) =
+            ExternalConversationRef::new(None, conversation_id, Some(vendor_ref), None)
+        {
             conversation_fingerprints.insert(conv_ref.conversation_fingerprint());
         }
-        if let Ok(conv_ref) =
-            ironclaw_conversations::ExternalConversationRef::new(None, conversation_id, None, None)
-        {
+        if let Ok(conv_ref) = ExternalConversationRef::new(None, conversation_id, None, None) {
             conversation_fingerprints.insert(conv_ref.conversation_fingerprint());
         }
     }
 
     // The originating conversation (without its message ref) also routes:
     // a bare reply next to the prompt resolves the same gate.
+    //
+    // `None` for the reply target is the *route*, spelled explicitly. It is not
+    // load-bearing — `conversation_fingerprint` hashes space + conversation +
+    // topic and deliberately excludes the reply-target hint, so this is
+    // byte-identical to threading the source's own hint through. It is written
+    // this way because a per-event message id inside a stable route key reads
+    // like a bug on every future review, and the previous spelling had to be
+    // read together with the fingerprint function to be seen as correct.
     if let Some(source) = source_conversation
-        && let Ok(conv_ref) = ironclaw_conversations::ExternalConversationRef::new(
+        && let Ok(conv_ref) = ExternalConversationRef::new(
             source.space_id(),
             source.conversation_id(),
             source.topic_id(),
-            source.reply_target_message_id(),
+            None,
         )
     {
-        conversation_fingerprints.insert(conv_ref.without_message_id().conversation_fingerprint());
+        conversation_fingerprints.insert(conv_ref.conversation_fingerprint());
     }
 
     if conversation_fingerprints.is_empty() {

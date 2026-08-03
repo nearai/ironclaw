@@ -725,6 +725,11 @@ jobs:
       contents: read
       # The sticky coverage comment upserts a PR comment via the issues API.
       pull-requests: write
+      # The changed-line gate reads the base commit's own merged-lcov artifact
+      # to drop lines that were already uncovered before this PR. Without this
+      # scope the lookup 403s, which fails closed (every changed line counts)
+      # and says so — the gate stays correct, just stricter.
+      actions: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -794,6 +799,10 @@ jobs:
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          # `gh` resolves the base commit's merged-lcov artifact. The checkout
+          # runs with persist-credentials: false, so the token is passed here
+          # rather than inherited.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           python3 scripts/ci/reborn_changed_coverage.py \
@@ -801,6 +810,7 @@ jobs:
             --manifest tests/integration/changed-coverage-exemptions.toml \
             --base "$BASE_SHA" \
             --head "$HEAD_SHA" \
+            --fetch-base-coverage \
             --json reborn-changed-coverage.json \
             | tee -a "$GITHUB_STEP_SUMMARY"
 

@@ -24,9 +24,9 @@ use ironclaw_skills::{
     SkillManagementErrorKind,
 };
 
-use crate::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
-use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
 use ironclaw_auth::RuntimeCredentialAccountSelectionService;
+use ironclaw_extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
+use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 
 const SKILL_SEARCH_RESULT_LIMIT: usize = 50;
 
@@ -448,9 +448,7 @@ fn install_activation_error(
             Ok(install_response)
         }
         ProductOperationFailure::InvalidBindingRequest { reason }
-            if reason.starts_with("hosted MCP catalog preparation failed:")
-                || reason
-                    == "generic extension host rejected the activation: hosted MCP discovery published no callable tools" =>
+            if ironclaw_extension_host::hosted_mcp_discovery_left_the_install_usable(&reason) =>
         {
             tracing::debug!(
                 target: "ironclaw::reborn::extension_lifecycle",
@@ -765,6 +763,353 @@ mod tests {
         }
     }
 
+    fn installed_response() -> LifecycleProductResponse {
+        LifecycleProductResponse::projection(
+            Some(
+                LifecyclePackageRef::new(LifecyclePackageKind::Extension, "gmail")
+                    .expect("package ref"),
+            ),
+            InstallationState::Installed,
+            Vec::new(),
+        )
+    }
+
+    /// Install runs activation as a follow-on step, so this classifier decides
+    /// which activation failures are *swallowed* — reported to the caller as a
+    /// successful install — and which abort the whole operation. Swallowing the
+    /// wrong one hides a real failure behind a green install, so every arm is
+    /// pinned, and the discriminating input is the failure itself: the same
+    /// `installed_response()` goes in every time and only the error varies.
+    #[test]
+    fn post_install_activation_failures_are_swallowed_only_when_the_install_still_stands() {
+        // Provider misconfiguration must reach the caller: the extension is
+        // installed but unusable, and only an operator can fix it.
+        assert!(
+            install_activation_error(
+                ProductOperationFailure::ProviderInstanceNotConfigured {
+                    reason: "ironclaw config set google.client_id <id>".to_string(),
+                },
+                installed_response(),
+            )
+            .is_err(),
+            "an unconfigured provider must not be hidden behind a successful install"
+        );
+
+        // A transient reconciliation blip leaves the install itself intact.
+        assert_eq!(
+            install_activation_error(
+                ProductOperationFailure::Transient {
+                    reason: "db timeout".to_string(),
+                },
+                installed_response(),
+            )
+            .expect("a transient activation blip keeps the install"),
+            installed_response(),
+            "the caller must still see the state the install actually reached"
+        );
+
+        // Hosted-MCP discovery is best-effort at install time — but only for
+        // the two exact reasons this guard names.
+        assert_eq!(
+            install_activation_error(
+                ProductOperationFailure::InvalidBindingRequest {
+                    reason: "hosted MCP catalog preparation failed: upstream 500".to_string(),
+                },
+                installed_response(),
+            )
+            .expect("hosted MCP preparation is best-effort at install time"),
+            installed_response(),
+            "a hosted-MCP preparation failure still leaves a usable install"
+        );
+        assert!(
+            install_activation_error(
+                ProductOperationFailure::InvalidBindingRequest {
+                    reason: "some other rejection".to_string(),
+                },
+                installed_response(),
+            )
+            .is_err(),
+            "the guard is reason-specific: any other rejection must still surface"
+        );
+    }
+
+    /// Both unsupported projections must answer `Unsupported` with a runtime
+    /// blocker rather than an error — the WebUI renders the blocker, and an
+    /// error would render as a failed request instead.
+    #[test]
+    fn unwired_lifecycle_surfaces_project_unsupported_with_a_runtime_blocker() {
+        for response in [
+            unsupported_projection(None).expect("projection is infallible for a well-formed ref"),
+            unsupported_extension_auth_configure_projection(None)
+                .expect("projection is infallible for a well-formed ref"),
+        ] {
+            assert_eq!(response.phase, InstallationState::Unsupported);
+            assert!(
+                matches!(
+                    response.blockers.as_slice(),
+                    [LifecycleReadinessBlocker::Runtime { ref_id: Some(_) }]
+                ),
+                "an unwired surface must name why it is unavailable: {:?}",
+                response.blockers
+            );
+        }
+    }
+
+    /// The configure payload unions `fields` and `secrets`; a payload that is
+    /// not that shape is the caller's mistake, not an outage.
+    #[test]
+    fn a_configure_payload_decodes_both_maps_and_rejects_anything_else() {
+        assert_eq!(
+            parse_channel_config_payload(None).expect("an absent payload is empty, not invalid"),
+            Vec::<(String, String)>::new(),
+        );
+        assert_eq!(
+            parse_channel_config_payload(Some(&serde_json::json!({
+                "fields": {"channel": "#general"},
+                "secrets": {"token": "xoxb-1"},
+            })))
+            .expect("a well-formed payload decodes"),
+            vec![
+                ("channel".to_string(), "#general".to_string()),
+                ("token".to_string(), "xoxb-1".to_string()),
+            ],
+            "both maps must reach the service, not just `fields`"
+        );
+
+        let failure = parse_channel_config_payload(Some(&serde_json::json!({"fields": 7})))
+            .expect_err("`fields` must be a string map");
+        assert!(
+            matches!(
+                failure,
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "a malformed payload is a rejected request, not an outage: {failure:?}"
+        );
+    }
+
+    /// Storage trouble is retryable; every other configure-surface failure is
+    /// the caller's to fix. Collapsing the two would either make the WebUI
+    /// retry a permanent rejection or give up on a blip.
+    #[test]
+    fn configure_surface_failures_split_storage_from_caller_error() {
+        assert_eq!(
+            map_channel_config_error(ironclaw_extension_host::ChannelConfigError::Storage {
+                reason: "backend unreachable".to_string(),
+            }),
+            ProductOperationFailure::Transient {
+                reason: "backend unreachable".to_string(),
+            },
+            "storage trouble is retryable and keeps its reason"
+        );
+        for caller_error in [
+            ironclaw_extension_host::ChannelConfigError::NotInstalled {
+                extension_id: "slack".to_string(),
+            },
+            ironclaw_extension_host::ChannelConfigError::UnknownField {
+                handle: "nope".to_string(),
+            },
+            ironclaw_extension_host::ChannelConfigError::Reactivation {
+                reason: "restart refused".to_string(),
+            },
+        ] {
+            assert_eq!(
+                map_channel_config_error(caller_error.clone()),
+                ProductOperationFailure::InvalidBindingRequest {
+                    reason: caller_error.to_string(),
+                },
+                "{caller_error:?} is the caller's to fix, not ours to retry"
+            );
+        }
+    }
+
+    /// `FilesystemDenied` is an authorization outcome and must project as
+    /// `BindingAccessDenied` — projecting it as a generic invalid request would
+    /// tell the caller to retry a denial, and projecting it as `Transient`
+    /// would hide the denial entirely.
+    #[test]
+    fn skill_management_failures_keep_denial_separate_from_outage_and_bad_input() {
+        assert_eq!(
+            map_skill_error(SkillManagementError::new(
+                SkillManagementErrorKind::FilesystemDenied
+            )),
+            ProductOperationFailure::BindingAccessDenied,
+            "a filesystem denial is an authorization outcome"
+        );
+        assert_eq!(
+            map_skill_error(SkillManagementError::new(
+                SkillManagementErrorKind::Resource
+            )),
+            ProductOperationFailure::Transient {
+                reason: "skill management resource unavailable".to_string(),
+            },
+            "a resource shortage is retryable"
+        );
+        assert_eq!(
+            map_skill_error(SkillManagementError::with_reason(
+                SkillManagementErrorKind::NotFound,
+                "no such skill",
+            )),
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "no such skill".to_string(),
+            },
+            "a caller-fixable failure forwards its reason"
+        );
+        assert_eq!(
+            map_skill_error(SkillManagementError::new(
+                SkillManagementErrorKind::NotFound
+            )),
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "skill management request rejected".to_string(),
+            },
+            "a reasonless rejection still gets usable text"
+        );
+    }
+
+    /// The scoped wrapper must not flatten its two cases: a bad scope is the
+    /// caller's, and an inner skill failure keeps the inner classification
+    /// (including the `BindingAccessDenied` denial above).
+    #[test]
+    fn scoped_skill_failures_preserve_the_inner_classification() {
+        assert_eq!(
+            map_local_skill_management_error(ScopedSkillManagementError::InvalidContext {
+                reason: "no skills mount".to_string(),
+            }),
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "no skills mount".to_string(),
+            },
+        );
+        assert_eq!(
+            map_local_skill_management_error(ScopedSkillManagementError::Skill(
+                SkillManagementError::new(SkillManagementErrorKind::FilesystemDenied)
+            )),
+            ProductOperationFailure::BindingAccessDenied,
+            "wrapping a denial must not downgrade it to a generic rejection"
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    struct SharedLogWriterGuard(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedLogWriterGuard {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogWriter {
+        type Writer = SharedLogWriterGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriterGuard(std::sync::Arc::clone(&self.0))
+        }
+    }
+
+    impl SharedLogWriter {
+        fn contents(&self) -> String {
+            String::from_utf8(
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone(),
+            )
+            .expect("tracing output is UTF-8")
+        }
+    }
+
+    /// The transient warning is the *whole* reason this crate kept a local
+    /// projection wrapper instead of calling the contract's `From` directly,
+    /// so both halves of its contract are asserted together:
+    ///
+    /// - the caller's 503 is **sanitized** — the store's cause never crosses
+    ///   the membrane, because the wire contract has no free-text field; and
+    /// - the cause is **not discarded** — it reaches the warning where an
+    ///   operator can diagnose it.
+    ///
+    /// A subscriber has to be installed for this to mean anything: `tracing`
+    /// short-circuits on the null dispatcher, so without one the macro body
+    /// never runs and the test could not tell "logged it" from "dropped it" —
+    /// which is exactly the assertion that matters here. Scoped with
+    /// `with_default` rather than set globally, so parallel tests are
+    /// unaffected.
+    #[test]
+    fn a_transient_failure_is_sanitized_for_the_caller_and_still_diagnosable_in_the_log() {
+        let cause = "channel config backend refused the read";
+        let logs = SharedLogWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(logs.clone())
+            .finish();
+
+        let projected = tracing::subscriber::with_default(subscriber, || {
+            lifecycle_surface_error(ProductOperationFailure::Transient {
+                reason: cause.to_string(),
+            })
+        });
+
+        // Half one: nothing about the cause reaches the caller.
+        assert_eq!(projected.status_code, 503);
+        assert!(projected.retryable);
+        assert_eq!(projected.field, None);
+        assert_eq!(projected.validation_code, None);
+        let on_the_wire = serde_json::to_string(&projected).expect("surface error serializes");
+        assert!(
+            !on_the_wire.contains(cause),
+            "the transient cause must not cross the membrane: {on_the_wire}"
+        );
+
+        // Half two: the cause is not merely dropped — it is diagnosable.
+        let logged = logs.contents();
+        assert!(
+            logged.contains(cause),
+            "the transient cause must survive in the log, got {logged:?}"
+        );
+        assert!(
+            logged.contains("lifecycle action failed with a transient error"),
+            "the warning keeps its stable message, got {logged:?}"
+        );
+    }
+
+    /// The counterpart to the test above: a *rejection* carries no operational
+    /// cause, so it must not spend a warning. Without this, "log everything"
+    /// would pass the test above while turning every invalid request into
+    /// operator noise.
+    #[test]
+    fn a_rejected_request_does_not_emit_the_transient_warning() {
+        let logs = SharedLogWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(logs.clone())
+            .finish();
+
+        let projected = tracing::subscriber::with_default(subscriber, || {
+            lifecycle_surface_error(ProductOperationFailure::InvalidBindingRequest {
+                reason: "bad package ref".to_string(),
+            })
+        });
+
+        assert_eq!(projected.status_code, 400);
+        assert!(!projected.retryable);
+        assert!(
+            logs.contents().is_empty(),
+            "a rejection must not emit the transient warning, got {:?}",
+            logs.contents()
+        );
+    }
+
     /// The two statuses a caller acts on differently: a transient failure is
     /// retryable and a rejected request is not. Pinned separately from the
     /// table above so a change that made everything retryable would fail here
@@ -997,6 +1342,155 @@ mod tests {
             Some("project-alpha")
         );
         assert!(scope.thread_id.is_none());
+    }
+
+    /// A `LifecycleProductContext::Command` whose verified auth subject is
+    /// `subject`.
+    ///
+    /// ✎ An earlier revision of this branch waived `lifecycle_caller`'s Command
+    /// arm as untestable, on the reasoning that `VerifiedAuthClaim`'s
+    /// constructors are `pub(crate)` to `ironclaw_host_api`. That is true of
+    /// the constructors and **false of the barrier**: `ProtocolAuthEvidence`
+    /// exposes `test_verified` under `#[cfg(any(test, feature =
+    /// "test-support"))]`, and this crate's `[dev-dependencies]` already enable
+    /// `ironclaw_host_api/test-support`. `channel_command_roles.rs` in this
+    /// same crate has been building command contexts through that seam all
+    /// along. Raised by @serrrfirat on #7000; the waiver is deleted and the
+    /// path is tested instead.
+    fn command_context(subject: &str) -> LifecycleProductContext {
+        use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
+        use ironclaw_extension_contracts::external::{
+            ExternalActorRef, ExternalConversationRef, ExternalEventId,
+        };
+        use ironclaw_host_api::product_adapter::{
+            AdapterInstallationId, AuthRequirement, ProductAdapterId, ProtocolAuthEvidence,
+        };
+        use ironclaw_product_contracts::action::{
+            ActionFingerprintKey, ProductActionId, SourceBindingKey,
+        };
+        use ironclaw_product_contracts::command::ProductCommandContext;
+        use ironclaw_product_contracts::inbound::ProductInboundPayload;
+        use ironclaw_product_contracts::inbound::{
+            InboundCommandPayload, ParsedProductInbound, ProductInboundEnvelope,
+            TrustedInboundContext,
+        };
+
+        let adapter_id = ProductAdapterId::new("test_adapter").expect("valid adapter");
+        let installation_id =
+            AdapterInstallationId::new("install_alpha").expect("valid installation");
+        let evidence = ProtocolAuthEvidence::test_verified(
+            AuthRequirement::SharedSecretHeader {
+                header_name: "X-Secret".into(),
+            },
+            subject,
+        );
+        let trusted = TrustedInboundContext::from_verified_evidence(
+            adapter_id,
+            installation_id,
+            chrono::Utc::now(),
+            &evidence,
+        )
+        .expect("verified evidence yields a trusted context");
+        let parsed = ParsedProductInbound::new(
+            ExternalEventId::new("evt:lifecycle-caller").expect("valid event"),
+            ExternalActorRef::new("test", "actor-1", Option::<String>::None).expect("valid actor"),
+            ExternalConversationRef::new(None, "conv1", None, None).expect("valid conversation"),
+            ProductInboundPayload::Command(
+                InboundCommandPayload::new("extensions", "", ProductTriggerReason::DirectChat)
+                    .expect("valid command"),
+            ),
+        )
+        .expect("parsed inbound");
+        let envelope = ProductInboundEnvelope::from_trusted_parse(trusted, parsed)
+            .expect("trusted parse yields an envelope");
+        let source_binding_key =
+            SourceBindingKey::new(envelope.source_binding_key()).expect("valid binding key");
+        let fingerprint = ActionFingerprintKey::new(
+            envelope.adapter_id().clone(),
+            envelope.installation_id().clone(),
+            envelope.external_actor_ref().clone(),
+            source_binding_key,
+            envelope.external_event_id().clone(),
+        );
+        let context =
+            ProductCommandContext::from_envelope(&envelope, ProductActionId::new(), fingerprint)
+                .expect("command context");
+        LifecycleProductContext::Command(Box::new(context))
+    }
+
+    /// Commands must stay **owner-attributed**: the caller identity comes from
+    /// the verified auth claim minted by host authentication, and a subject that
+    /// is not a valid `UserId` is refused rather than silently falling back to
+    /// an ownerless scope.
+    ///
+    /// The subject is the discriminating input — the same context shape goes in
+    /// both times and only the claim's subject varies — so a `lifecycle_caller`
+    /// that ignored the claim, or that swallowed the validation error, fails
+    /// here rather than passing against a constant.
+    #[test]
+    fn a_command_caller_comes_from_the_auth_claim_and_an_invalid_subject_is_refused() {
+        let caller = lifecycle_caller(&command_context("user-alpha"))
+            .expect("a valid auth subject is a valid lifecycle caller");
+        assert_eq!(
+            caller.as_str(),
+            "user-alpha",
+            "the command caller must be the verified auth subject, not a default"
+        );
+
+        let failure = lifecycle_caller(&command_context("user/alpha"))
+            .expect_err("a subject with a path separator is not a valid UserId");
+        let ProductOperationFailure::InvalidBindingRequest { reason } = failure else {
+            panic!("an unusable auth subject is the caller's to fix, got {failure:?}");
+        };
+        assert!(
+            reason.contains("command auth subject is not a valid lifecycle caller identity"),
+            "the rejection must say which identity failed, got {reason:?}"
+        );
+    }
+
+    /// The Command arm's scope derives from that same claim: the caller becomes
+    /// the scope's user, and a claim carrying **no tenant** keeps the local
+    /// default scope rather than inventing a tenant — the behavior the function's
+    /// own comment promises ("just like the local command service"). Pinned
+    /// beside the Surface arm above so the two context sources cannot drift into
+    /// different scoping rules.
+    #[test]
+    fn lifecycle_resource_scope_uses_the_command_auth_claim_identity() {
+        use ironclaw_host_api::resource::{
+            LOCAL_DEFAULT_AGENT_ID, LOCAL_DEFAULT_PROJECT_ID, LOCAL_DEFAULT_TENANT_ID,
+        };
+
+        let scope = lifecycle_resource_scope(&command_context("user-beta")).expect("command scope");
+
+        assert_eq!(
+            scope.user_id.as_str(),
+            "user-beta",
+            "the scope's user must be the verified auth subject"
+        );
+        assert_eq!(
+            scope.tenant_id.as_str(),
+            LOCAL_DEFAULT_TENANT_ID,
+            "a claim with no tenant must keep the local default, not invent one"
+        );
+        assert_eq!(
+            scope.agent_id.as_ref().map(|id| id.as_str()),
+            Some(LOCAL_DEFAULT_AGENT_ID)
+        );
+        assert_eq!(
+            scope.project_id.as_ref().map(|id| id.as_str()),
+            Some(LOCAL_DEFAULT_PROJECT_ID)
+        );
+        assert!(scope.thread_id.is_none());
+
+        let refused = lifecycle_resource_scope(&command_context("user/beta"))
+            .expect_err("an unusable auth subject cannot produce a scope");
+        assert!(
+            matches!(
+                refused,
+                ProductOperationFailure::InvalidBindingRequest { .. }
+            ),
+            "an unusable auth subject is a rejection, not a retryable failure: {refused:?}"
+        );
     }
 
     #[tokio::test]

@@ -594,21 +594,6 @@ fn direct_base_binding_request(
     Ok(request)
 }
 
-fn delivered_route_conversation_ref(
-    envelope: &ProductInboundEnvelope,
-) -> Result<ironclaw_conversations::ExternalConversationRef, ProductSurfaceFailure> {
-    let external_ref = envelope.external_conversation_ref();
-    ironclaw_conversations::ExternalConversationRef::new(
-        external_ref.space_id(),
-        external_ref.conversation_id(),
-        external_ref.topic_id(),
-        None,
-    )
-    .map_err(|error| ProductSurfaceFailure::InvalidBindingRequest {
-        reason: error.to_string(),
-    })
-}
-
 async fn delivered_route_base_binding(
     envelope: &ProductInboundEnvelope,
     binding_service: &dyn ConversationBindingService,
@@ -730,17 +715,13 @@ async fn load_delivered_routes_for_envelope(
     // are not silently dropped before the predicate runs.
     gate_kind_filter: fn(&str) -> bool,
 ) -> Result<Vec<ironclaw_outbound::DeliveredGateRouteRecord>, ProductSurfaceFailure> {
-    let conversation_ref = match delivered_route_conversation_ref(envelope) {
-        Ok(conversation_ref) => conversation_ref,
-        Err(error) => {
-            debug!(
-                error = %error,
-                "delivered gate route fallback skipped because conversation reference was invalid"
-            );
-            return Ok(Vec::new());
-        }
-    };
-    let conversation_fingerprint = conversation_ref.conversation_fingerprint();
+    // The gate-route index is keyed by the *route* fingerprint, which already
+    // excludes the reply-target hint — the envelope's ref needs no rebuilding
+    // and, since the unification, no revalidation: it is the same validated
+    // type the recording side wrote.
+    let conversation_fingerprint = envelope
+        .external_conversation_ref()
+        .conversation_fingerprint();
     let now = Utc::now();
     let all_routes = match delivered_gate_routes
         .load_delivered_gate_route_by_conversation_fingerprint(

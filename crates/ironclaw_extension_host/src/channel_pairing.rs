@@ -27,8 +27,9 @@ use ironclaw_auth::{
     AuthSurface,
 };
 use ironclaw_conversations::{
-    AdapterKind, ConversationActorPairingService, ExpectedExternalActorOwner, ExternalActorRef,
+    AdapterKind, ConversationActorPairingService, ExpectedExternalActorOwner,
 };
+use ironclaw_extension_contracts::external::ExternalActorRef;
 use ironclaw_filesystem::{
     CasApply, ContentType, Entry, FilesystemError, RootFilesystem, ScopedFilesystem, cas_update,
 };
@@ -896,8 +897,14 @@ impl ChannelPairingService {
         // user id alone (accepted delta from the epoch-guarded host-state
         // shape this generalizes).
         for actor in cleanup {
-            let actor_ref = ExternalActorRef::new(&actor.actor_kind, &actor.external_actor_id)
-                .map_err(store_unavailable)?;
+            let actor_ref = ExternalActorRef::new(
+                &actor.actor_kind,
+                &actor.external_actor_id,
+                // Cleanup matches on identity only; the canonical ref excludes
+                // the display name from `PartialEq`/`Hash`.
+                None::<String>,
+            )
+            .map_err(store_unavailable)?;
             let installation_id =
                 ironclaw_conversations::AdapterInstallationId::new(actor.installation_id.as_str())
                     .map_err(store_unavailable)?;

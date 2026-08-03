@@ -73,6 +73,218 @@ class ChangedCoverageWorkflowTests(unittest.TestCase):
             ),
         )
 
+    def test_workflow_wires_the_base_coverage_lookup_it_needs(self):
+        """The subtraction is inert unless CI can actually reach the artifact.
+
+        `--fetch-base-coverage` fails closed, so a missing `actions: read` or a
+        missing token degrades to the strict denominator *silently as far as
+        the check colour goes* — green, just never subtracting. That is exactly
+        the shape (#6963, #6946) that must be pinned in a test rather than
+        trusted.
+        """
+
+        workflow = (ROOT / ".github/workflows/reborn-tests.yml").read_text(
+            encoding="utf-8"
+        )
+        job = workflow.split("\n  coverage-report:", maxsplit=1)[1].split(
+            "\n  critical-mutation:", maxsplit=1
+        )[0]
+        gate_step = job.split(
+            "- name: Gate changed Reborn lines and branches", maxsplit=1
+        )[1].split("\n      - name:", maxsplit=1)[0]
+
+        self.assertIn("--fetch-base-coverage", gate_step)
+        self.assertIn("GH_TOKEN:", gate_step)
+        permissions = job.split("permissions:", maxsplit=1)[1].split("steps:")[0]
+        self.assertIn("actions: read", permissions)
+
+    def test_base_coverage_workflow_constant_names_a_real_workflow(self):
+        """A renamed workflow file must trip a test, not go quietly dark.
+
+        The run lookup is scoped to this file name. If the workflow is renamed
+        and the constant is not, every lookup 404s, every run falls back to the
+        strict denominator, and nothing ever goes red to say so.
+        """
+
+        self.assertTrue(
+            (ROOT / ".github/workflows" / gate.BASE_COVERAGE_WORKFLOW).is_file(),
+            f"{gate.BASE_COVERAGE_WORKFLOW} does not exist; the base-coverage "
+            "run lookup would 404 on every PR and silently stop subtracting",
+        )
+
+    def test_base_coverage_artifact_constant_matches_what_ci_uploads(self):
+        """The artifact name and member must match the upload step verbatim."""
+
+        workflow = (ROOT / ".github/workflows/reborn-tests.yml").read_text(
+            encoding="utf-8"
+        )
+        upload = workflow.split("- name: Upload merged coverage report", maxsplit=1)[
+            1
+        ].split("\n  critical-mutation:", maxsplit=1)[0]
+
+        self.assertIn(f"name: {gate.BASE_COVERAGE_ARTIFACT}", upload)
+        self.assertIn(gate.BASE_COVERAGE_MEMBER, upload)
+
+
+class PreimageMappingTests(unittest.TestCase):
+    """A changed line may only inherit from the line it actually replaced."""
+
+    def _parse(self, diff: str) -> gate.DiffChanges:
+        return gate.parse_diff(diff, gate.ProductionPaths(ROOT))
+
+    PATH = "crates/ironclaw_product/src/lib.rs"
+
+    def test_modified_lines_pair_one_to_one(self):
+        changes = self._parse(
+            f"diff --git a/{self.PATH} b/{self.PATH}\n"
+            f"--- a/{self.PATH}\n"
+            f"+++ b/{self.PATH}\n"
+            "@@ -10,2 +10,2 @@\n"
+            "-old first\n"
+            "-old second\n"
+            "+new first\n"
+            "+new second\n"
+        )
+
+        self.assertEqual(changes.added, {self.PATH: {10, 11}})
+        self.assertEqual(
+            changes.preimage,
+            {(self.PATH, 10): (self.PATH, 10), (self.PATH, 11): (self.PATH, 11)},
+        )
+
+    def test_a_grown_region_inherits_only_as_far_as_it_replaced(self):
+        """One line re-wrapped into three: the surplus tail is genuinely new."""
+
+        changes = self._parse(
+            f"diff --git a/{self.PATH} b/{self.PATH}\n"
+            f"--- a/{self.PATH}\n"
+            f"+++ b/{self.PATH}\n"
+            "@@ -10 +10,3 @@\n"
+            "-one long line\n"
+            "+wrapped(\n"
+            "+    argument,\n"
+            "+)\n"
+        )
+
+        self.assertEqual(changes.preimage, {(self.PATH, 10): (self.PATH, 10)})
+        self.assertNotIn((self.PATH, 11), changes.preimage)
+        self.assertNotIn((self.PATH, 12), changes.preimage)
+
+    def test_a_pure_addition_has_no_preimage(self):
+        changes = self._parse(
+            f"diff --git a/{self.PATH} b/{self.PATH}\n"
+            "--- /dev/null\n"
+            f"+++ b/{self.PATH}\n"
+            "@@ -0,0 +1,2 @@\n"
+            "+pub fn added() {}\n"
+            "+pub fn also_added() {}\n"
+        )
+
+        self.assertEqual(changes.added, {self.PATH: {1, 2}})
+        self.assertEqual(changes.preimage, {})
+
+    def test_a_rename_resolves_the_preimage_to_the_old_path(self):
+        old = "crates/ironclaw_product/src/old_home.rs"
+        changes = self._parse(
+            f"diff --git a/{old} b/{self.PATH}\n"
+            "similarity index 92%\n"
+            f"rename from {old}\n"
+            f"rename to {self.PATH}\n"
+            f"--- a/{old}\n"
+            f"+++ b/{self.PATH}\n"
+            "@@ -7 +7 @@\n"
+            "-old body\n"
+            "+new body\n"
+        )
+
+        self.assertEqual(changes.preimage, {(self.PATH, 7): (old, 7)})
+
+    def test_hunk_content_that_looks_like_a_header_is_body_not_header(self):
+        """`--- a/…` inside a hunk is a removed line, not a new file header."""
+
+        changes = self._parse(
+            f"diff --git a/{self.PATH} b/{self.PATH}\n"
+            f"--- a/{self.PATH}\n"
+            f"+++ b/{self.PATH}\n"
+            "@@ -3 +3 @@\n"
+            "--- a/decoy\n"
+            "+++ b/decoy\n"
+        )
+
+        self.assertEqual(changes.added, {self.PATH: {3}})
+        self.assertEqual(changes.preimage, {(self.PATH, 3): (self.PATH, 3)})
+
+
+class BaseCoverageDecisionTests(unittest.TestCase):
+    """Only a positively observed uncovered pre-image may leave the gate."""
+
+    PATH = "crates/ironclaw_product/src/lib.rs"
+
+    def _base(self, hits: dict[int, int]) -> gate.Coverage:
+        return gate.Coverage(lines={self.PATH: dict(hits)}, branches={})
+
+    def test_uncovered_at_base_is_excluded(self):
+        origin = gate.preexisting_uncovered_origin(
+            {(self.PATH, 10): (self.PATH, 8)}, self._base({8: 0}), self.PATH, 10
+        )
+
+        self.assertEqual(origin, (self.PATH, 8))
+
+    def test_covered_at_base_still_gates(self):
+        origin = gate.preexisting_uncovered_origin(
+            {(self.PATH, 10): (self.PATH, 8)}, self._base({8: 1}), self.PATH, 10
+        )
+
+        self.assertIsNone(origin)
+
+    def test_a_preimage_with_no_da_record_still_gates(self):
+        """Not instrumented at base is not the same as uncovered at base."""
+
+        origin = gate.preexisting_uncovered_origin(
+            {(self.PATH, 10): (self.PATH, 8)}, self._base({9: 0}), self.PATH, 10
+        )
+
+        self.assertIsNone(origin)
+
+    def test_no_preimage_still_gates(self):
+        origin = gate.preexisting_uncovered_origin(
+            {}, self._base({10: 0}), self.PATH, 10
+        )
+
+        self.assertIsNone(origin)
+
+    def test_the_render_cap_never_shrinks_the_machine_record(self):
+        """Only the summary rendering is capped; the JSON keeps every line.
+
+        A cap on the audit record itself would be the rubber stamp this report
+        exists to prevent, so the limit is applied at the print site alone.
+        """
+
+        source = (ROOT / "scripts/ci/reborn_changed_coverage.py").read_text(
+            encoding="utf-8"
+        )
+        tree = ast.parse(source)
+        users = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and node.id == "PREEXISTING_PRINT_LIMIT"
+        ]
+
+        self.assertTrue(users, "the render cap must actually be used")
+        self.assertIn(
+            '"preexisting_uncovered": preexisting_uncovered',
+            source,
+            "the machine report must serialise the complete, uncapped list",
+        )
+
+    def test_an_lcov_with_no_da_records_is_refused_as_base_coverage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            empty = Path(temp) / "base.lcov"
+            empty.write_text("TN:\nSF:/nowhere.rs\nend_of_record\n", encoding="utf-8")
+
+            with self.assertRaises(gate.BaseCoverageUnavailable):
+                gate.load_base_coverage(empty, ROOT, "fixture")
+
 
 class ChangedCoverageDiscoveryTests(unittest.TestCase):
     """The gate must resolve production paths from the crate inventory.

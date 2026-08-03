@@ -27,7 +27,7 @@ use ironclaw_extension_contracts::hosted_mcp::{
     HostedMcpAuthSelection, HostedMcpEndpoint, RegisterHostedMcpRequest,
 };
 use ironclaw_extension_contracts::lifecycle_id::LifecyclePackageId;
-use ironclaw_extension_host::lifecycle_test_support::{
+use ironclaw_extension_manager::lifecycle_test_support::{
     build_lifecycle_test_services, build_lifecycle_test_services_with_auth_provider,
     invoke_with_standalone_approval, lifecycle_product_context,
     rebuild_lifecycle_test_services_with_auth_provider, webui_gate_resource_scope_for_owner,
@@ -136,7 +136,7 @@ fn fixture_package_ref() -> LifecyclePackageRef {
 }
 
 async fn install_fixture(
-    services: &ironclaw_extension_host::lifecycle_test_support::ExtensionLifecycleTestServices,
+    services: &ironclaw_extension_manager::lifecycle_test_support::ExtensionLifecycleTestServices,
     scope: ironclaw_host_api::resource::ResourceScope,
 ) -> ironclaw_product_contracts::package_lifecycle::LifecycleProductResponse {
     services
@@ -169,7 +169,7 @@ fn credential_provider_from_response(
 }
 
 async fn submit_fixture_bearer(
-    services: &ironclaw_extension_host::lifecycle_test_support::ExtensionLifecycleTestServices,
+    services: &ironclaw_extension_manager::lifecycle_test_support::ExtensionLifecycleTestServices,
     scope: ironclaw_host_api::resource::ResourceScope,
     provider: AuthProviderId,
     token: &str,
@@ -257,7 +257,7 @@ fn fixture_digest(value: &str) -> String {
 }
 
 async fn complete_fixture_oauth_callback(
-    services: &ironclaw_extension_host::lifecycle_test_support::ExtensionLifecycleTestServices,
+    services: &ironclaw_extension_manager::lifecycle_test_support::ExtensionLifecycleTestServices,
     scope: &ironclaw_host_api::resource::ResourceScope,
     provider: ironclaw_auth::AuthProviderId,
 ) -> Result<ironclaw_auth::RebornOAuthCallbackResponse, ironclaw_auth::RebornOAuthCallbackError> {

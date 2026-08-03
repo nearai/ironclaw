@@ -981,7 +981,7 @@ pub(super) async fn build_backend_production(
     extension_management.attach_channel_config(&admin_configuration_resolver);
     admin_configuration_credential_slot.fill(Arc::clone(&admin_configuration_resolver));
     let lifecycle_continuation_facade: Arc<dyn LifecycleProductService> = Arc::new(
-        ironclaw_extension_host::ExtensionHostLifecycleProductService::new(Arc::clone(
+        ironclaw_extension_manager::ExtensionHostLifecycleProductService::new(Arc::clone(
             &skill_management,
         ))
         .with_extension_management(Arc::clone(&extension_management))

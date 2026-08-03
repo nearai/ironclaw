@@ -1,27 +1,32 @@
-//! Project-scoped inbound attachment landing for product adapters.
+//! The default [`InboundAttachmentLander`] over a project-scoped workspace.
 //!
-//! Implements the [`InboundAttachmentLander`] port the facade calls before
-//! accepting a user message: it writes attachment bytes through the
-//! project-scoped workspace [`ScopedFilesystem`] — the same filesystem
-//! authority the agent's file tools resolve through — and returns the
-//! transcript references to persist. Going through that one authority is what
-//! makes a landed attachment readable by `file_read`/`list_dir` at the recorded
-//! `storage_key` in this and later turns.
+//! It writes attachment bytes through the project-scoped [`ScopedFilesystem`] —
+//! the same filesystem authority the agent's file tools resolve through — and
+//! returns the transcript references to persist. Going through that one
+//! authority is what makes a landed attachment readable by `file_read` /
+//! `list_dir` at the recorded `storage_key` in this and later turns.
+//!
+//! The read counterpart (`ProjectScopedAttachmentReader`) stays in
+//! `ironclaw_product`: it also implements `ironclaw_loop_host`'s
+//! `LoopAttachmentReadPort`, and `ironclaw_loop_host` is a `loops`-layer crate
+//! this substrate may not name. See PROPOSAL §6.4.9 and the WS5 `attachments`
+//! CHECKLIST row.
+//!
+//! [`ScopedFilesystem`]: ironclaw_filesystem::ScopedFilesystem
 
 use std::{collections::HashSet, sync::Arc};
 
-use crate::{AttachmentCleanupReport, InboundAttachmentLander, InboundAttachmentReader};
 use async_trait::async_trait;
-use ironclaw_attachments::{DEFAULT_MAX_ATTACHMENT_BYTES, land_inbound_attachments};
+use ironclaw_common::AttachmentRef;
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{attachment::InboundAttachment, path::ScopedPath, resource::ResourceScope};
-use ironclaw_loop_host::{LoopAttachmentReadError, LoopAttachmentReadPort};
-use ironclaw_product_contracts::surface::{
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-};
-use ironclaw_threads::{AttachmentRef, ThreadScope};
+use ironclaw_host_api::{attachment::InboundAttachment, path::ScopedPath};
+use ironclaw_product_contracts::surface::ProductSurfaceError;
+use ironclaw_threads::ThreadScope;
 
-use ironclaw_attachments::WORKSPACE_ALIAS;
+use crate::{
+    AttachmentCleanupReport, DEFAULT_MAX_ATTACHMENT_BYTES, InboundAttachmentLander,
+    WORKSPACE_ALIAS, land_inbound_attachments,
+};
 
 const STALE_RECONCILIATION_DAYS: i64 = 1;
 const STALE_CLEANUP_MAX_DATE_DIRS: usize = 32;
@@ -45,108 +50,6 @@ impl<F: RootFilesystem> ProjectScopedAttachmentLander<F> {
             project_alias: WORKSPACE_ALIAS.to_string(),
             max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
         }
-    }
-}
-
-/// Reads landed attachment bytes back through the same project-scoped workspace
-/// filesystem, so the loop model port can build multimodal image parts for a
-/// vision-capable model. The read re-scopes `storage_key` through the
-/// `MountView` authority (it is never treated as a host path), and is bounded so
-/// a corrupt/oversized key can't materialize unbounded bytes.
-pub struct ProjectScopedAttachmentReader<F: RootFilesystem> {
-    filesystem: Arc<ScopedFilesystem<F>>,
-    max_bytes: usize,
-}
-
-impl<F: RootFilesystem> ProjectScopedAttachmentReader<F> {
-    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
-        Self {
-            filesystem,
-            max_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
-        }
-    }
-
-    /// Construct a reader with an explicit read ceiling. Test-only: production
-    /// always uses [`DEFAULT_MAX_ATTACHMENT_BYTES`] via [`Self::new`], but the
-    /// oversized branch is only reachable in a test with a tiny ceiling.
-    #[cfg(test)]
-    fn with_max_bytes(filesystem: Arc<ScopedFilesystem<F>>, max_bytes: usize) -> Self {
-        Self {
-            filesystem,
-            max_bytes,
-        }
-    }
-}
-
-#[async_trait]
-impl<F: RootFilesystem> LoopAttachmentReadPort for ProjectScopedAttachmentReader<F> {
-    async fn read_attachment_bytes(
-        &self,
-        scope: &ResourceScope,
-        storage_key: &str,
-    ) -> Result<Vec<u8>, LoopAttachmentReadError> {
-        let path = ScopedPath::new(storage_key.to_string())
-            .map_err(|error| LoopAttachmentReadError::Backend(error.to_string()))?;
-        match self
-            .filesystem
-            .read_bytes_bounded(scope, &path, self.max_bytes)
-            .await
-        {
-            Ok(Some(bytes)) => Ok(bytes),
-            // `read_bytes_bounded` returns `Ok(None)` only when the file is
-            // larger than `max_bytes` — an oversized attachment we refuse to
-            // materialize, not a missing one.
-            Ok(None) => Err(LoopAttachmentReadError::Backend(format!(
-                "attachment exceeds the {}-byte read limit",
-                self.max_bytes
-            ))),
-            Err(FilesystemError::NotFound { .. }) => Err(LoopAttachmentReadError::NotFound),
-            Err(FilesystemError::PermissionDenied { .. }) => {
-                Err(LoopAttachmentReadError::Forbidden)
-            }
-            Err(error) => Err(LoopAttachmentReadError::Backend(error.to_string())),
-        }
-    }
-}
-
-/// Read counterpart wired into the product surface so the bytes endpoint can serve
-/// image thumbnails. It reuses the loop read port — the same bounded,
-/// `MountView`-re-scoped read — and translates the scope and error taxonomy to
-/// the product API surface. A missing/oversized/forbidden read becomes a sanitized
-/// product error rather than leaking a host path or backend string.
-#[async_trait]
-impl<F: RootFilesystem> InboundAttachmentReader for ProjectScopedAttachmentReader<F> {
-    async fn read(
-        &self,
-        thread_scope: &ThreadScope,
-        storage_key: &str,
-    ) -> Result<Vec<u8>, ProductSurfaceError> {
-        let scope = thread_scope.to_resource_scope();
-        self.read_attachment_bytes(&scope, storage_key)
-            .await
-            .map_err(|error| match error {
-                LoopAttachmentReadError::NotFound => ProductSurfaceError {
-                    code: ProductSurfaceErrorCode::NotFound,
-                    kind: ProductSurfaceErrorKind::NotFound,
-                    status_code: 404,
-                    retryable: false,
-                    field: None,
-                    validation_code: None,
-                },
-                LoopAttachmentReadError::Forbidden => ProductSurfaceError {
-                    code: ProductSurfaceErrorCode::Forbidden,
-                    kind: ProductSurfaceErrorKind::ParticipantDenied,
-                    status_code: 403,
-                    retryable: false,
-                    field: None,
-                    validation_code: None,
-                },
-                // Carry the cause to the log (sanitized 500 on the wire) rather
-                // than dropping it — see error-handling rule.
-                LoopAttachmentReadError::Backend(reason) => {
-                    ProductSurfaceError::internal_from(reason)
-                }
-            })
     }
 }
 
@@ -365,6 +268,7 @@ fn workspace_attachment_root() -> Result<ScopedPath, ProductSurfaceError> {
 mod tests {
     use super::*;
 
+    use ironclaw_common::AttachmentKind;
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
         ids::{AgentId, TenantId, UserId},
@@ -482,79 +386,99 @@ mod tests {
         ));
     }
 
+    /// Rollback deletes a whole batch directory, so it must refuse any
+    /// reference it cannot prove names one — otherwise a malformed
+    /// `storage_key` picks the delete target. Each row is a distinct
+    /// rejection: the first five are the guards in `attachment_batch_parent`
+    /// (no parent separator, outside the attachment root, then the three
+    /// batch-shape conditions), the last is the loop in `rollback` itself
+    /// meeting a later reference that was never landed.
+    ///
+    /// Driven through `rollback` rather than the helper directly, because
+    /// `rollback` is what decides whether a delete happens. `internal_from`
+    /// deliberately collapses every case to a sanitized `Internal` code, so
+    /// the input is what distinguishes them — and the assertion that matters
+    /// is that none of them reaches the delete.
     #[tokio::test]
-    async fn reader_reads_back_landed_attachment_bytes() {
-        // The reader is the producer side of the image-vision path: it must read
-        // back exactly what the lander wrote under the same workspace mount.
-        let fs = workspace_fs(MountPermissions::read_write());
+    async fn rollback_refuses_malformed_batch_references() {
+        let fs = workspace_fs(MountPermissions::read_write_list_delete());
         let lander = ProjectScopedAttachmentLander::new(Arc::clone(&fs));
-        let refs = lander
+        let scope = thread_scope();
+
+        // Land a real batch first: if a malformed reference ever fell through
+        // to the delete, this is what it would destroy.
+        let landed = lander
             .land(
-                &thread_scope(),
-                "msg1",
+                &scope,
+                "keep-me",
                 vec![InboundAttachment {
-                    id: "att-0".to_string(),
-                    mime_type: "image/png".to_string(),
-                    filename: Some("diagram.png".to_string()),
-                    bytes: vec![1, 2, 3, 4],
+                    id: "keep".to_string(),
+                    mime_type: "text/plain".to_string(),
+                    filename: Some("keep.txt".to_string()),
+                    bytes: b"keep".to_vec(),
                 }],
             )
             .await
-            .expect("landing succeeds through a read-write workspace mount");
-        let storage_key = refs[0].storage_key.as_deref().expect("storage_key set");
+            .expect("batch lands");
+        let landed_path =
+            ScopedPath::new(landed[0].storage_key.clone().expect("storage key")).unwrap();
 
-        let reader = ProjectScopedAttachmentReader::new(Arc::clone(&fs));
-        let bytes = reader
-            .read_attachment_bytes(&thread_scope().to_resource_scope(), storage_key)
-            .await
-            .expect("reading back the landed attachment succeeds");
-        assert_eq!(bytes, vec![1, 2, 3, 4]);
-    }
+        let root = workspace_attachment_root()
+            .expect("attachment root")
+            .as_str()
+            .to_string();
+        let cases: Vec<(&str, Vec<Option<String>>)> = vec![
+            (
+                "storage key has no batch parent",
+                vec![Some("no-separator".to_string())],
+            ),
+            (
+                "batch parent is outside the attachment root",
+                vec![Some("/elsewhere/2026-01-01/msg/f.txt".to_string())],
+            ),
+            (
+                "batch shape: empty filename",
+                vec![Some(format!("{root}/2026-01-01/msg/"))],
+            ),
+            (
+                "batch shape: wrong segment count",
+                vec![Some(format!("{root}/only-one/f.txt"))],
+            ),
+            (
+                "batch shape: empty segment",
+                vec![Some(format!("{root}/2026-01-01//f.txt"))],
+            ),
+            (
+                "a later reference carries no storage key",
+                vec![Some(format!("{root}/2026-01-01/msg/first.txt")), None],
+            ),
+        ];
 
-    #[tokio::test]
-    async fn reader_missing_attachment_maps_to_not_found() {
-        let reader =
-            ProjectScopedAttachmentReader::new(workspace_fs(MountPermissions::read_write()));
-        let err = reader
-            .read_attachment_bytes(
-                &thread_scope().to_resource_scope(),
-                "/workspace/attachments/2026-06-14/m1-0-missing.png",
-            )
-            .await
-            .expect_err("an absent attachment is a not-found, not bytes");
-        assert!(matches!(err, LoopAttachmentReadError::NotFound));
-    }
-
-    #[tokio::test]
-    async fn reader_oversized_attachment_is_a_backend_refusal_not_not_found() {
-        let fs = workspace_fs(MountPermissions::read_write());
-        let lander = ProjectScopedAttachmentLander::new(Arc::clone(&fs));
-        let refs = lander
-            .land(
-                &thread_scope(),
-                "msg1",
-                vec![InboundAttachment {
-                    id: "att-0".to_string(),
-                    mime_type: "image/png".to_string(),
-                    filename: Some("diagram.png".to_string()),
-                    bytes: vec![1, 2, 3, 4],
-                }],
-            )
-            .await
-            .expect("landing succeeds through a read-write workspace mount");
-        let storage_key = refs[0].storage_key.as_deref().expect("storage_key set");
-
-        // A 2-byte ceiling rejects the 4-byte attachment. The reader must not
-        // mislabel an oversized file as `NotFound`.
-        let reader = ProjectScopedAttachmentReader::with_max_bytes(Arc::clone(&fs), 2);
-        let err = reader
-            .read_attachment_bytes(&thread_scope().to_resource_scope(), storage_key)
-            .await
-            .expect_err("an oversized attachment is refused");
-        match err {
-            LoopAttachmentReadError::Backend(reason) => assert!(reason.contains("exceeds")),
-            other => panic!("expected a backend refusal, got {other}"),
+        for (case, keys) in cases {
+            let refs: Vec<AttachmentRef> = keys
+                .into_iter()
+                .enumerate()
+                .map(|(index, storage_key)| AttachmentRef {
+                    id: format!("att-{index}"),
+                    kind: AttachmentKind::Document,
+                    mime_type: "text/plain".to_string(),
+                    filename: Some("f.txt".to_string()),
+                    size_bytes: None,
+                    storage_key,
+                    extracted_text: None,
+                })
+                .collect();
+            let err = lander.rollback(&scope, &refs).await.expect_err(case);
+            assert_eq!(err.code, ProductSurfaceErrorCode::Internal, "{case}");
         }
+
+        // Nothing was deleted along the way.
+        assert!(
+            fs.stat(&scope.to_resource_scope(), &landed_path)
+                .await
+                .is_ok(),
+            "a refused rollback must not delete an unrelated landed batch"
+        );
     }
 
     #[tokio::test]
@@ -629,6 +553,13 @@ mod tests {
         );
     }
 
+    /// All three of `cleanup_stale`'s pre-scan exits, in one fixture, because
+    /// they share one guarantee: a snapshot this pass cannot trust deletes
+    /// nothing. The three differ in how loud they are, and that difference is
+    /// deliberate — an empty or wholly-unowned snapshot is a legitimate state
+    /// and returns an empty report, whereas an in-root reference of the wrong
+    /// depth is a malformed input this reconciler owns and aborts the pass
+    /// loudly rather than reclaiming against a key it cannot parse.
     #[tokio::test]
     async fn stale_cleanup_with_empty_or_unowned_snapshot_deletes_nothing() {
         let fs = workspace_fs(MountPermissions::read_write_list_delete());
@@ -672,6 +603,23 @@ mod tests {
         assert!(
             fs.stat(&scope.to_resource_scope(), &path).await.is_ok(),
             "incomplete cleanup snapshots must not delete the batch"
+        );
+
+        // An in-root reference whose relative depth is not `<date>/<message>/<file>`
+        // aborts the whole pass. One malformed key means the snapshot cannot be
+        // read as authoritative, and reclaiming from a partially-understood
+        // snapshot is how a live batch gets deleted.
+        let error = lander
+            .cleanup_stale(
+                &scope,
+                &["/workspace/attachments/2026-01-01/flat.txt".to_string()],
+            )
+            .await
+            .expect_err("an in-root reference of the wrong depth must fail loudly");
+        assert_eq!(error.code, ProductSurfaceErrorCode::Internal);
+        assert!(
+            fs.stat(&scope.to_resource_scope(), &path).await.is_ok(),
+            "an aborted pass must not delete anything"
         );
     }
 

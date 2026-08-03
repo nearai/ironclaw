@@ -38,12 +38,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use ratchet_support::{
-    TypeDefOccurrence, collect_type_defs, strip_comments_and_strings, workspace_root,
+    TypeDefOccurrence, cfg_test_only_files, collect_type_defs, names_crate, out_of_line_mod_decls,
+    production_rust_files, strip_comments_and_strings, workspace_root,
 };
 
 const PRODUCT: &str = "ironclaw_product";
 const PRODUCT_CONTRACTS: &str = "ironclaw_product_contracts";
 const EXTENSION_HOST: &str = "ironclaw_extension_host";
+const EXTENSION_MANAGER: &str = "ironclaw_extension_manager";
 
 /// Product-declared traits `ironclaw_extension_host` still implements, each
 /// with the reason the WS2 port-inversion row could not move it and the slice
@@ -85,10 +87,6 @@ const PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS: &[(&str, &str)] = 
          (WS2.2) — the DTOs do, and they move with the channel_host row",
     ),
     (
-        "ExtensionCredentialSetupService",
-        "request/response types are ironclaw_auth credential-account projections",
-    ),
-    (
         "ProductActorUserResolver",
         "resolves to ResolvedProductActorUser, which carries \
          ironclaw_conversations::ExternalActorBindingEpoch. The error no longer \
@@ -97,27 +95,60 @@ const PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS: &[(&str, &str)] = 
     ),
 ];
 
-/// The ports this row inverted: defined in `ironclaw_product_contracts`,
-/// implemented in `ironclaw_extension_host`. Enumerated so a rename or a
-/// relocation has to come through this file.
-const INVERTED_PORTS: &[&str] = &[
-    "AccountConnectionStatusSource",
-    "ApprovalPromptContextSource",
-    "BlockedAuthPromptSource",
-    "ChannelConfigProductService",
-    "ChannelDeliveryResolver",
-    "CommandActorRoleResolver",
-    "DeliveryReplyContextSource",
-    "LifecycleProductService",
+/// The ports this row inverted: defined in `ironclaw_product_contracts` and
+/// implemented **below** product, paired with the crate that implements each.
+/// Enumerated so a rename or a relocation has to come through this file.
+///
+/// **WS2.4 made the implementor explicit.** The list used to assert only that
+/// `ironclaw_extension_host` implements every inverted port, which was true
+/// while the extension host was one crate. The `ironclaw_extension_manager`
+/// split moved four implementations (the lifecycle product service, the admin
+/// configuration view provider, the channel-config product service, and — via
+/// the residue list above — the credential setup service) into the manager.
+/// Asserting "implemented in extension_host" would then have failed for a
+/// *correct* change, and the fix-it message the gate already carried says the
+/// right thing: "if the implementor moved, move this row with it rather than
+/// deleting the pin". That is what this pairing does. Both crates sit below
+/// the contract, which is the property the pin exists to protect.
+const INVERTED_PORT_IMPLEMENTORS: &[(&str, &str)] = &[
+    ("AccountConnectionStatusSource", EXTENSION_HOST),
+    ("ApprovalPromptContextSource", EXTENSION_HOST),
+    ("BlockedAuthPromptSource", EXTENSION_HOST),
+    // WS2.4: `RebornChannelConfigProductService` is the product projection over
+    // the host's `ChannelConfigService`; the service core stayed (§6.8.2), the
+    // projection moved (§6.8.3).
+    ("ChannelConfigProductService", EXTENSION_MANAGER),
+    ("ChannelDeliveryResolver", EXTENSION_HOST),
+    ("CommandActorRoleResolver", EXTENSION_HOST),
+    ("DeliveryReplyContextSource", EXTENSION_HOST),
+    // WS2.4: the lifecycle product service is the manager's headline surface.
+    ("LifecycleProductService", EXTENSION_MANAGER),
     // WS2.2: inverted once `ProductOperationFailure` gave it a contracts-legal
     // error. Its request type and route key moved with it.
-    "ProductConversationSubjectRouteResolver",
-    "RebornViewProvider",
+    ("ProductConversationSubjectRouteResolver", EXTENSION_HOST),
+    // WS2.4: the admin-configuration view provider is a credential/admin view.
+    ("RebornViewProvider", EXTENSION_MANAGER),
 ];
 
 /// Ceiling on the residue. Only ever moves down. (WS2.1 froze it at 6; WS2.2
-/// inverted `ProductConversationSubjectRouteResolver`.)
-const WS2_PRODUCT_DEFINED_TRAIT_RESIDUE_BASELINE: usize = 5;
+/// inverted `ProductConversationSubjectRouteResolver`; WS2.4 moved
+/// `ExtensionCredentialSetupService`'s implementation out of the crate.)
+const WS2_PRODUCT_DEFINED_TRAIT_RESIDUE_BASELINE: usize = 4;
+
+/// The manager twin of the host list above. WS2.4 moved
+/// `ExtensionCredentialSetupService`'s implementation out of the host, which
+/// removed it from the host's frozen residue — but the trait is still declared
+/// in `ironclaw_product`, so the inverted edge now runs from the *manager* and
+/// needs its own freeze: without one, any product-declared trait could quietly
+/// gain a manager implementation at file granularity the residue list in
+/// `reborn_extension_manager_split.rs` cannot see.
+const PRODUCT_DEFINED_TRAITS_EXTENSION_MANAGER_STILL_IMPLEMENTS: &[(&str, &str)] = &[(
+    "ExtensionCredentialSetupService",
+    "implemented in webui_extension_credentials.rs; the port stays declared in \
+     ironclaw_product because its vocabulary is ironclaw_auth credential-account \
+     projections — it moves to ironclaw_product_contracts when that vocabulary \
+     is narrowed out (the same blocker as the host's AuthChallengeProvider row)",
+)];
 
 fn crate_src(root: &Path, name: &str) -> PathBuf {
     root.join("crates").join(name).join("src")
@@ -152,35 +183,6 @@ fn traits_defined_in(root: &Path, crate_name: &str) -> BTreeSet<String> {
 /// scan that silently shrinks its input passes while enforcing nothing, which
 /// is the failure mode this whole file exists to prevent. A missing directory,
 /// an unreadable entry, or a permission error must red the gate, not thin it.
-fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = std::fs::read_dir(dir)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", dir.display()));
-    for entry in entries {
-        let entry = entry.unwrap_or_else(|error| {
-            panic!("cannot read an entry under {}: {error}", dir.display())
-        });
-        let path = entry.path();
-        if path.is_dir() {
-            if matches!(
-                path.file_name().and_then(|name| name.to_str()),
-                Some("target") | Some("node_modules") | Some("tests")
-            ) {
-                continue;
-            }
-            rust_files(&path, out);
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
-            if name == "tests.rs" || name.ends_with("_tests.rs") {
-                continue;
-            }
-            out.push(path);
-        }
-    }
-}
-
 /// Remove `#[cfg(test)]`-gated items. Only the *production* edge blocks the
 /// layer flip: a test double may implement a product trait through the crate's
 /// dev-dependency without the shipped artifact depending on product. Same
@@ -308,31 +310,62 @@ fn implemented_trait_names(source: &str) -> BTreeSet<String> {
     names
 }
 
-fn traits_implemented_by(root: &Path, crate_name: &str) -> BTreeSet<String> {
-    let mut files = Vec::new();
-    rust_files(&crate_src(root, crate_name), &mut files);
+/// Traits implemented by `crate_name`'s production code, counted only in files
+/// whose (comment/string/`#[cfg(test)]`-stripped) code names `referenced_crate`
+/// as a whole token.
+///
+/// The qualification exists because `implemented_trait_names` records
+/// *unqualified* final path segments: without it, a crate-local trait that
+/// merely shares an inverted port's name would satisfy the implementor pin
+/// while the contracts trait went unimplemented — the pin would fail open. A
+/// real implementation must have the trait in scope, which spells the owning
+/// crate's name in the file.
+///
+/// Files reachable only through `#[cfg(test)] mod …;` chains are excluded up
+/// front: they are test code wearing a production filename, and a test double
+/// in one of them must satisfy nothing (see `cfg_test_only_files`).
+fn traits_implemented_by(
+    root: &Path,
+    crate_name: &str,
+    referenced_crate: &str,
+    minimum_files: usize,
+) -> BTreeSet<String> {
+    let src = crate_src(root, crate_name);
+    let files = production_rust_files(&src);
     assert!(
-        files.len() > 20,
-        "expected to walk {crate_name}'s source tree; found {} files",
+        files.len() >= minimum_files,
+        "expected to walk {crate_name}'s source tree; found {} files (floor {minimum_files}) — \
+         a broken path must fail loudly rather than yield an empty, vacuously passing set",
         files.len()
     );
     let mut names = BTreeSet::new();
     for file in files {
         let source = std::fs::read_to_string(&file)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", file.display()));
+        let cleaned = strip_cfg_test_blocks(&strip_comments_and_strings(&source));
+        if !names_crate(&cleaned, referenced_crate) {
+            continue;
+        }
         names.extend(implemented_trait_names(&source));
     }
     names
 }
 
-#[test]
-fn extension_host_implements_only_the_frozen_residue_of_product_defined_traits() {
+/// Shared body of the host/manager residue checks: the crate implements
+/// exactly the frozen set of product-declared traits, no more (a new inverted
+/// edge) and no fewer (a stale row).
+fn assert_product_trait_residue_is_exact(
+    crate_name: &str,
+    minimum_files: usize,
+    residue: &[(&str, &str)],
+    baseline: usize,
+) {
     let root = workspace_root();
     let product_traits = traits_defined_in(&root, PRODUCT);
-    let implemented = traits_implemented_by(&root, EXTENSION_HOST);
+    let implemented = traits_implemented_by(&root, crate_name, PRODUCT, minimum_files);
 
     let found: BTreeSet<String> = implemented.intersection(&product_traits).cloned().collect();
-    let frozen: BTreeSet<String> = PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS
+    let frozen: BTreeSet<String> = residue
         .iter()
         .map(|(name, _)| (*name).to_string())
         .collect();
@@ -340,14 +373,14 @@ fn extension_host_implements_only_the_frozen_residue_of_product_defined_traits()
     let mut violations = Vec::new();
     for name in found.difference(&frozen) {
         violations.push(format!(
-            "{EXTENSION_HOST} implements {PRODUCT}::{name}, which re-inverts the \
-             extension_host -> product edge. Define the port in {PRODUCT_CONTRACTS} \
+            "{crate_name} implements {PRODUCT}::{name}, which re-inverts the \
+             {crate_name} -> product edge. Define the port in {PRODUCT_CONTRACTS} \
              (PROPOSAL §6.1.3) instead of adding a row here"
         ));
     }
     for name in frozen.difference(&found) {
         violations.push(format!(
-            "{name} is listed as residue but {EXTENSION_HOST} no longer implements a \
+            "{name} is listed as residue but {crate_name} no longer implements a \
              {PRODUCT}-defined trait by that name — delete its row in the same change"
         ));
     }
@@ -358,10 +391,30 @@ fn extension_host_implements_only_the_frozen_residue_of_product_defined_traits()
         violations.join("\n")
     );
     assert!(
-        found.len() <= WS2_PRODUCT_DEFINED_TRAIT_RESIDUE_BASELINE,
+        found.len() <= baseline,
         "the product-defined trait residue is shrink-only: {} > baseline {}",
         found.len(),
-        WS2_PRODUCT_DEFINED_TRAIT_RESIDUE_BASELINE
+        baseline
+    );
+}
+
+#[test]
+fn extension_host_implements_only_the_frozen_residue_of_product_defined_traits() {
+    assert_product_trait_residue_is_exact(
+        EXTENSION_HOST,
+        21,
+        PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS,
+        WS2_PRODUCT_DEFINED_TRAIT_RESIDUE_BASELINE,
+    );
+}
+
+#[test]
+fn extension_manager_implements_only_the_frozen_residue_of_product_defined_traits() {
+    assert_product_trait_residue_is_exact(
+        EXTENSION_MANAGER,
+        10,
+        PRODUCT_DEFINED_TRAITS_EXTENSION_MANAGER_STILL_IMPLEMENTS,
+        PRODUCT_DEFINED_TRAITS_EXTENSION_MANAGER_STILL_IMPLEMENTS.len(),
     );
 }
 
@@ -370,10 +423,11 @@ fn inverted_ports_are_declared_in_contracts_and_implemented_below_product() {
     let root = workspace_root();
     let contract_traits = traits_defined_in(&root, PRODUCT_CONTRACTS);
     let product_traits = traits_defined_in(&root, PRODUCT);
-    let implemented = traits_implemented_by(&root, EXTENSION_HOST);
+    let host_impls = traits_implemented_by(&root, EXTENSION_HOST, PRODUCT_CONTRACTS, 21);
+    let manager_impls = traits_implemented_by(&root, EXTENSION_MANAGER, PRODUCT_CONTRACTS, 10);
 
     let mut violations = Vec::new();
-    for port in INVERTED_PORTS {
+    for (port, implementor) in INVERTED_PORT_IMPLEMENTORS {
         if !contract_traits.contains(*port) {
             violations.push(format!(
                 "{port} must be declared in {PRODUCT_CONTRACTS}; the WS2 inversion moved it there"
@@ -384,10 +438,34 @@ fn inverted_ports_are_declared_in_contracts_and_implemented_below_product() {
                 "{port} is declared again in {PRODUCT} — the inversion gives it exactly one home"
             ));
         }
+        let implemented = match *implementor {
+            EXTENSION_HOST => &host_impls,
+            EXTENSION_MANAGER => &manager_impls,
+            other => panic!("{port} names an unknown implementor crate {other}"),
+        };
         if !implemented.contains(*port) {
             violations.push(format!(
-                "{port} has no implementation in {EXTENSION_HOST}; if the implementor moved, \
-                 move this row with it rather than deleting the pin"
+                "{port} has no implementation in {implementor}; if the implementor moved, \
+                 repoint this row rather than deleting the pin"
+            ));
+        }
+        // The pin is only meaningful if the port has exactly one home below the
+        // contract: a second implementation in the other crate would mean the
+        // WS2.4 split duplicated a surface rather than moving it.
+        let other = match *implementor {
+            EXTENSION_HOST => (&manager_impls, EXTENSION_MANAGER),
+            _ => (&host_impls, EXTENSION_HOST),
+        };
+        // Scope note: "exactly one" is asserted between the two split crates
+        // only. Impls elsewhere (product's own Unsupported*/Unavailable*
+        // fallbacks, composition doubles) are legal downward edges this gate
+        // deliberately does not police.
+        if other.0.contains(*port) {
+            violations.push(format!(
+                "{port} is implemented in both {implementor} and {} — within the split \
+                 pair a port has exactly one home; the split moves a surface, it does \
+                 not fork it",
+                other.1
             ));
         }
     }
@@ -435,13 +513,18 @@ const EXTENSION_HOST_FILES_STILL_NAMING_THE_WORKFLOW_ERROR: &[(&str, &str)] = &[
 ///
 /// An unreadable file is fatal, not skipped — a silent skip is how this scan
 /// would go quietly vacuous.
-fn production_files_naming(root: &Path, crate_name: &str, type_name: &str) -> BTreeSet<String> {
+fn production_files_naming(
+    root: &Path,
+    crate_name: &str,
+    type_name: &str,
+    minimum_files: usize,
+) -> BTreeSet<String> {
     let src = crate_src(root, crate_name);
-    let mut files = Vec::new();
-    rust_files(&src, &mut files);
+    let files = production_rust_files(&src);
     assert!(
-        files.len() > 20,
-        "expected to walk {crate_name}'s source tree; found {} files",
+        files.len() >= minimum_files,
+        "expected to walk {crate_name}'s source tree; found {} files (floor {minimum_files}) — \
+         a broken path must fail loudly rather than report an empty, vacuously passing set",
         files.len()
     );
     let mut named = BTreeSet::new();
@@ -461,7 +544,7 @@ fn production_files_naming(root: &Path, crate_name: &str, type_name: &str) -> BT
 #[test]
 fn extension_host_speaks_the_contract_error_everywhere_but_the_frozen_residue_files() {
     let root = workspace_root();
-    let found = production_files_naming(&root, EXTENSION_HOST, "ProductSurfaceFailure");
+    let found = production_files_naming(&root, EXTENSION_HOST, "ProductSurfaceFailure", 21);
     let frozen: BTreeSet<String> = EXTENSION_HOST_FILES_STILL_NAMING_THE_WORKFLOW_ERROR
         .iter()
         .map(|(file, _)| (*file).to_string())
@@ -489,12 +572,29 @@ fn extension_host_speaks_the_contract_error_everywhere_but_the_frozen_residue_fi
 
     // The other half of the claim: the contract error is actually the one in
     // use, so the scan above cannot pass by the crate simply not having errors.
-    let contract_users = production_files_naming(&root, EXTENSION_HOST, "ProductOperationFailure");
+    //
+    // **Counted across both halves of the split (WS2.4).** The lifecycle
+    // surface that spoke `ProductOperationFailure` in 17 files was cut in two;
+    // holding `extension_host` alone to the old floor would have made a
+    // correct move look like a regression, and lowering the floor to fit
+    // would have relaxed the guard. Summing the halves keeps the original
+    // claim exactly: the boundary error is still the vocabulary of the whole
+    // lifecycle surface, wherever that surface now lives. Each half is also
+    // held above zero so the sum cannot be satisfied by one crate alone.
+    let host_users = production_files_naming(&root, EXTENSION_HOST, "ProductOperationFailure", 21);
+    let manager_users =
+        production_files_naming(&root, EXTENSION_MANAGER, "ProductOperationFailure", 10);
     assert!(
-        contract_users.len() >= 15,
-        "expected the contract error across the extension host's lifecycle surface; \
-         found only {} files: {contract_users:?}",
-        contract_users.len()
+        !host_users.is_empty() && !manager_users.is_empty(),
+        "both halves of the lifecycle surface must speak the contract error; \
+         host={host_users:?} manager={manager_users:?}"
+    );
+    assert!(
+        host_users.len() + manager_users.len() >= 15,
+        "expected the contract error across the extension lifecycle surface; found only \
+         {} host + {} manager files: {host_users:?} {manager_users:?}",
+        host_users.len(),
+        manager_users.len()
     );
 }
 
@@ -601,5 +701,225 @@ fn impl_scanner_reads_the_trait_out_of_real_impl_shapes() {
     assert!(
         found.contains("ArrowBound"),
         "an `Fn(..) -> T` bound must not hide the trait: {found:?}"
+    );
+}
+
+/// The gate reads `cfg(test)` by walking *backwards* from the `mod` keyword
+/// over the contiguous `#[…]` run, so every token the language allows between
+/// the attribute and `mod` — i.e. the whole visibility grammar — has to be
+/// pinned here. A visibility qualifier the walk cannot step over ends the run
+/// early and the module reads as **ungated**, which is the fail-open direction:
+/// `cfg_test_only_files` then leaves a `#[cfg(test)]`-only file classified as
+/// production, and a test double in a production-named file can satisfy a
+/// residue row or an implementor pin. Raised by @serrrfirat on #7000.
+#[test]
+fn mod_decl_scanner_reads_gating_and_declaration_shapes() {
+    let source = r#"
+        #[cfg(test)]
+        mod gated;
+        #[allow(dead_code)]
+        #[cfg(test)]
+        mod stacked_attrs;
+        #[cfg(test)]
+        pub mod gated_public;
+        #[cfg(test)]
+        pub(crate) mod gated_crate;
+        #[cfg(test)]
+        pub(super) mod gated_super;
+        #[cfg(test)]
+        pub(in crate::a::b) mod gated_in_path;
+        #[allow(dead_code)]
+        #[cfg(test)]
+        pub(crate) mod gated_public_stacked;
+        mod plain;
+        pub mod public_plain;
+        pub(crate) mod crate_plain;
+        #[allow(dead_code)]
+        pub mod attributed_but_ungated;
+        mod inline_module { fn f() {} }
+        // mod commented_out;
+    "#;
+    let decls: BTreeMap<String, bool> = out_of_line_mod_decls(&strip_comments_and_strings(source))
+        .into_iter()
+        .collect();
+    assert_eq!(decls.get("gated"), Some(&true), "{decls:?}");
+    assert_eq!(
+        decls.get("stacked_attrs"),
+        Some(&true),
+        "cfg(test) anywhere in the contiguous attribute run gates the module: {decls:?}"
+    );
+    // Positive: every visibility form the language allows, gated. Reading any
+    // of these as ungated is the fail-open the doc comment above describes.
+    for gated_public in [
+        "gated_public",
+        "gated_crate",
+        "gated_super",
+        "gated_in_path",
+        "gated_public_stacked",
+    ] {
+        assert_eq!(
+            decls.get(gated_public),
+            Some(&true),
+            "a visibility qualifier must not hide the #[cfg(test)] gate \
+             ({gated_public}): {decls:?}"
+        );
+    }
+    // Negative: nothing above may be achieved by treating *any* preceding
+    // attribute — or an unrelated earlier gate — as gating.
+    assert_eq!(decls.get("plain"), Some(&false), "{decls:?}");
+    assert_eq!(decls.get("public_plain"), Some(&false), "{decls:?}");
+    assert_eq!(decls.get("crate_plain"), Some(&false), "{decls:?}");
+    assert_eq!(
+        decls.get("attributed_but_ungated"),
+        Some(&false),
+        "a non-cfg(test) attribute run must leave a pub module production: {decls:?}"
+    );
+    assert!(
+        !decls.contains_key("inline_module"),
+        "inline modules stay with their file: {decls:?}"
+    );
+    assert!(
+        !decls.contains_key("commented_out"),
+        "comments are stripped before scanning: {decls:?}"
+    );
+}
+
+/// The concrete in-tree shape that motivated the test-only exclusion:
+/// `channel_host.rs` declares `#[cfg(test)] mod e2e_tests;`, and
+/// `e2e_tests.rs` declares `mod e2e_auth_challenge;` — a file whose
+/// production-looking name evades every name-based rule while holding a fake
+/// `impl` of a product-declared port. Counting it would let the fake keep a
+/// residue row or an implementor pin satisfied after the real impl is gone.
+/// (If the fixture is ever renamed to `*_tests.rs` or moved under `tests/`,
+/// update or delete this pin in the same change.)
+#[test]
+fn files_reachable_only_through_cfg_test_modules_are_not_production() {
+    let root = workspace_root();
+    let src = crate_src(&root, EXTENSION_HOST);
+    let test_only = cfg_test_only_files(&src);
+    let evader = src.join("channel_host").join("e2e_auth_challenge.rs");
+    assert!(
+        evader.is_file(),
+        "{} is gone — point this pin at another cfg(test)-declared, \
+         production-named module file, or delete it if none remain",
+        evader.display()
+    );
+    assert!(
+        test_only.contains(&evader),
+        "channel_host/e2e_auth_challenge.rs is reachable only through a #[cfg(test)] \
+         module chain and must be classified test-only"
+    );
+}
+
+/// The two halves of `cfg_test_only_files` the in-tree pin above cannot reach,
+/// on a synthetic tree so nothing depends on a fixture staying put:
+///
+/// 1. **Direct `#[cfg(test)] mod …;` seeding.** The in-tree chain starts at
+///    `e2e_tests.rs`, whose *name* already seeds it via the `*_tests.rs` rule —
+///    so the seeding loop that reads the `cfg(test)` gate is never the reason
+///    that chain is classified. Verified by deleting that loop: the pin above
+///    stayed green. A production-named `fixture.rs` declared directly as
+///    `#[cfg(test)] mod fixture;` would therefore have become countable with no
+///    test failing.
+/// 2. **Default (non-`#[path]`) transitive resolution.** The in-tree child is
+///    reached through an explicit `#[path = "…"]`, so `resolve`'s ordinary
+///    `<dir>/<name>.rs` and `<dir>/<name>/mod.rs` lookups are unexercised.
+///
+/// 3. **A gated module carrying a visibility qualifier**
+///    (`#[cfg(test)] pub(crate) mod …;`) — the shape that actually ships in
+///    `ironclaw_reborn_cli/src/runtime/mod.rs`. The backwards attribute walk
+///    used to stop at `pub`, so the module read as ungated and its file stayed
+///    countable as production. This half is the caller-level half: it asserts
+///    through `production_rust_files`, the function the residue rows and
+///    implementor pins actually consume, not only the classifier.
+///
+/// 4. **Walk scope.** The shared walk prunes the non-source directories
+///    (`target/`, `node_modules/`) rather than only filtering them out of the
+///    production list afterwards, so vendored packages can neither be counted
+///    as production nor pollute the test-only set. `tests/` is deliberately
+///    *not* pruned — it is excluded from counting, while the walk still reads
+///    it so test-only-ness keeps propagating through it.
+///
+/// The first three are the shapes that let a test double keep a residue row or
+/// an implementor pin satisfied after the real impl is gone. Raised by
+/// @serrrfirat on #7003 and #7000.
+#[test]
+fn direct_cfg_test_module_and_default_child_are_test_only() {
+    let tree = tempfile::tempdir().expect("temp tree");
+    let src = tree.path().join("src");
+    std::fs::create_dir_all(src.join("fixture")).expect("fixture dir");
+
+    // Production-named, and reachable only through a cfg(test) gate. `double`
+    // adds the visibility qualifier between the gate and the `mod` keyword.
+    std::fs::write(
+        src.join("lib.rs"),
+        "pub mod real;\n#[cfg(test)]\nmod fixture;\n#[cfg(test)]\npub(crate) mod double;\n",
+    )
+    .expect("lib.rs");
+    std::fs::write(src.join("double.rs"), "// a test double\n").expect("double.rs");
+    // Declares BOTH default resolution shapes: `<dir>/<name>.rs` and
+    // `<dir>/<name>/mod.rs`. No `#[path]` anywhere.
+    std::fs::write(src.join("fixture.rs"), "mod child;\nmod nested;\n").expect("fixture.rs");
+    std::fs::write(src.join("fixture").join("child.rs"), "// child\n").expect("child.rs");
+    std::fs::create_dir_all(src.join("fixture").join("nested")).expect("nested dir");
+    std::fs::write(
+        src.join("fixture").join("nested").join("mod.rs"),
+        "// nested\n",
+    )
+    .expect("nested/mod.rs");
+    // Ungated sibling: must NOT be swept up, or the function would be
+    // classifying the whole tree rather than the cfg(test) reachable set.
+    std::fs::write(src.join("real.rs"), "// real production code\n").expect("real.rs");
+    // Vendored package: no first-party Rust lives here, so the walk must prune
+    // it outright — neither list may mention it, gated or not.
+    let vendored = src.join("node_modules").join("pkg");
+    std::fs::create_dir_all(&vendored).expect("node_modules dir");
+    std::fs::write(vendored.join("lib.rs"), "#[cfg(test)]\nmod inner;\n").expect("vendored lib.rs");
+    std::fs::write(vendored.join("inner.rs"), "// vendored\n").expect("vendored inner.rs");
+
+    let test_only = cfg_test_only_files(&src);
+
+    for expected in [
+        src.join("fixture.rs"),
+        src.join("fixture").join("child.rs"),
+        src.join("fixture").join("nested").join("mod.rs"),
+        src.join("double.rs"),
+    ] {
+        assert!(
+            test_only.contains(&expected),
+            "{} is reachable only through a `#[cfg(test)] mod …;` gate and must be \
+             test-only, got {test_only:?}",
+            expected.display()
+        );
+    }
+    assert!(
+        !test_only.contains(&src.join("real.rs")),
+        "an ungated production module must stay production, got {test_only:?}"
+    );
+    assert!(
+        !test_only.contains(&src.join("lib.rs")),
+        "the declaring file is production; only the gated target is not"
+    );
+    assert!(
+        !test_only.iter().any(|file| file.starts_with(&vendored)),
+        "the walk must prune node_modules/ outright, got {test_only:?}"
+    );
+
+    // Through the caller: `production_rust_files` is what the residue rows and
+    // implementor pins count. A `#[cfg(test)] pub(crate) mod …;` file reaching
+    // this list is the fail-open — a test double satisfying a production pin.
+    let production = production_rust_files(&src);
+    assert!(
+        !production.contains(&src.join("double.rs")),
+        "a `#[cfg(test)] pub(crate) mod …;` target must not count as production, \
+         got {production:?}"
+    );
+    assert!(
+        !production.iter().any(|file| file.starts_with(&vendored)),
+        "vendored packages are never production, got {production:?}"
+    );
+    assert!(
+        production.contains(&src.join("real.rs")) && production.contains(&src.join("lib.rs")),
+        "ungated production files must still be counted, got {production:?}"
     );
 }
