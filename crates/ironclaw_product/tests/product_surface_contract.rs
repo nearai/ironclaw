@@ -14,6 +14,7 @@ use ironclaw_conversations::{
     ConversationBindingService as ConversationBindingPort, ExternalActorBindingEpoch,
     InMemoryConversationServices,
 };
+use ironclaw_extension_contracts::external::{ExternalActorRef, ExternalConversationRef};
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, EventCursor, LoopGateRef, RunProfileId, RunProfileVersion, TurnActor,
@@ -45,15 +46,14 @@ use ironclaw_product::{
 };
 use ironclaw_product::{
     AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
-    AuthResolutionPayload, AuthResolutionResult, ExternalActorRef, ExternalConversationRef,
-    ExternalEventId, InboundCommandPayload, LinkedThreadActionPayload, ParsedProductInbound,
-    ProductAdapterError, ProductAdapterId, ProductControlActionPayload, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput,
-    ProductProjectionSubject, ProductProjectionSubscribeInput, ProductRejection,
-    ProductRejectionDisposition, ProductRejectionKind, ProductSurfaceRejectionKind,
-    ProductTriggerReason, ProjectionCursor, ProjectionReadPayload, ProjectionSubscriptionPayload,
-    ProtocolAuthEvidence, ScopedApprovalResolutionPayload, TrustedInboundContext,
-    UserMessagePayload,
+    AuthResolutionPayload, AuthResolutionResult, ExternalEventId, InboundCommandPayload,
+    LinkedThreadActionPayload, ParsedProductInbound, ProductAdapterError, ProductAdapterId,
+    ProductControlActionPayload, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+    ProductProjectionReadInput, ProductProjectionSubject, ProductProjectionSubscribeInput,
+    ProductRejection, ProductRejectionDisposition, ProductRejectionKind,
+    ProductSurfaceRejectionKind, ProductTriggerReason, ProjectionCursor, ProjectionReadPayload,
+    ProjectionSubscriptionPayload, ProtocolAuthEvidence, ScopedApprovalResolutionPayload,
+    TrustedInboundContext, UserMessagePayload,
 };
 use ironclaw_product_contracts::action::{
     ActionFingerprintKey, AuthRequestRef, LinkedThreadActionId, ProductCommandName,
@@ -1084,14 +1084,9 @@ fn auth_thread_reply_envelope(event_suffix: &str, gate_ref: &str) -> ProductInbo
 }
 
 fn delivered_gate_thread_fingerprint() -> String {
-    ironclaw_conversations::ExternalConversationRef::new(
-        None,
-        "conv1",
-        Some("delivered-gate-thread"),
-        None,
-    )
-    .expect("conversation route")
-    .conversation_fingerprint()
+    ExternalConversationRef::new(None, "conv1", Some("delivered-gate-thread"), None)
+        .expect("conversation route")
+        .conversation_fingerprint()
 }
 
 async fn record_conversation_route_for_gate_ref(
@@ -1343,7 +1338,7 @@ async fn auth_deny_from_threaded_direct_prompt_uses_base_direct_binding() {
             ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             ironclaw_conversations::AdapterInstallationId::new("install_alpha")
                 .expect("installation"),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -2155,14 +2150,9 @@ async fn scoped_approval_actor_mismatch_filtered_out() {
             ),
             recorded_at: Utc::now(),
             delivered_conversation_fingerprints: vec![
-                ironclaw_conversations::ExternalConversationRef::new(
-                    None,
-                    "conv1",
-                    Some("delivered-gate-thread"),
-                    None,
-                )
-                .expect("conversation route")
-                .conversation_fingerprint(),
+                ExternalConversationRef::new(None, "conv1", Some("delivered-gate-thread"), None)
+                    .expect("conversation route")
+                    .conversation_fingerprint(),
             ],
         })
         .await
@@ -2268,14 +2258,9 @@ async fn auth_two_live_routes_same_conversation_rejects_ambiguous() {
         ),
         recorded_at: Utc::now(),
         delivered_conversation_fingerprints: vec![
-            ironclaw_conversations::ExternalConversationRef::new(
-                None,
-                "conv1",
-                Some("delivered-gate-thread"),
-                None,
-            )
-            .expect("conversation ref")
-            .conversation_fingerprint(),
+            ExternalConversationRef::new(None, "conv1", Some("delivered-gate-thread"), None)
+                .expect("conversation ref")
+                .conversation_fingerprint(),
         ],
     };
     let expected_fingerprint = delivered_gate_thread_fingerprint();
@@ -3907,7 +3892,7 @@ async fn projection_subscription_requires_existing_conversation_binding() {
             TenantId::new("tenant:alpha").expect("tenant"),
             ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -4104,7 +4089,7 @@ async fn actor_user_resolver_rewrites_pairing_after_explicit_unpair() {
             &TenantId::new("tenant:alpha").expect("tenant"),
             &ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             &ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
-            &ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            &ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
         )
         .await;
 
@@ -4207,12 +4192,10 @@ async fn actor_user_resolver_rechecks_revocation_before_turn_submission() {
                 "install_alpha",
             )
             .expect("install"),
-            external_actor_ref: ironclaw_conversations::ExternalActorRef::new("test", "user1")
+            external_actor_ref: ExternalActorRef::new("test", "user1", None::<String>)
                 .expect("actor"),
-            external_conversation_ref: ironclaw_conversations::ExternalConversationRef::new(
-                None, "conv1", None, None,
-            )
-            .expect("conversation"),
+            external_conversation_ref: ExternalConversationRef::new(None, "conv1", None, None)
+                .expect("conversation"),
             external_event_id: ironclaw_conversations::ExternalEventId::new(
                 "evt:resolver-revoked-mid-resolution-lookup",
             )
@@ -4258,12 +4241,10 @@ async fn actor_user_resolver_revalidation_cannot_unpair_a_newer_generation() {
                 "install_alpha",
             )
             .expect("install"),
-            external_actor_ref: ironclaw_conversations::ExternalActorRef::new("test", "user1")
+            external_actor_ref: ExternalActorRef::new("test", "user1", None::<String>)
                 .expect("actor"),
-            external_conversation_ref: ironclaw_conversations::ExternalConversationRef::new(
-                None, "conv1", None, None,
-            )
-            .expect("conversation"),
+            external_conversation_ref: ExternalConversationRef::new(None, "conv1", None, None)
+                .expect("conversation"),
             external_event_id: ironclaw_conversations::ExternalEventId::new(
                 "evt:resolver-replaced-mid-resolution-lookup",
             )
@@ -4357,7 +4338,7 @@ async fn lookup_binding_with_actor_user_resolver_rejects_a_stale_actor_pairing()
             TenantId::new("tenant:alpha").expect("tenant"),
             ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:paired-bob").expect("user"),
         )
         .await;
@@ -4465,7 +4446,7 @@ async fn concrete_product_surface_accepts_user_message_for_trusted_installation(
             TenantId::new("tenant:alpha").expect("tenant"),
             ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -4534,7 +4515,7 @@ async fn concrete_product_surface_accepts_shared_route_participant_on_existing_t
             tenant_id.clone(),
             adapter_kind.clone(),
             installation_id.clone(),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -4543,7 +4524,7 @@ async fn concrete_product_surface_accepts_shared_route_participant_on_existing_t
             tenant_id.clone(),
             adapter_kind,
             installation_id,
-            ironclaw_conversations::ExternalActorRef::new("test", "user2").expect("actor"),
+            ExternalActorRef::new("test", "user2", None::<String>).expect("actor"),
             UserId::new("user:bob").expect("user"),
         )
         .await;
@@ -4631,7 +4612,7 @@ async fn concrete_product_surface_persists_first_bind_default_scope() {
             TenantId::new("tenant:alpha").expect("tenant"),
             ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -4714,7 +4695,7 @@ async fn concrete_product_surface_keeps_installations_tenant_isolated() {
                 TenantId::new(tenant).expect("tenant"),
                 ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
                 ironclaw_conversations::AdapterInstallationId::new(install).expect("install"),
-                ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+                ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
                 UserId::new(user).expect("user"),
             )
             .await;
@@ -4794,7 +4775,7 @@ async fn shared_route_without_configured_subject_requires_binding() {
             tenant_id.clone(),
             adapter_kind,
             installation_id,
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -4844,7 +4825,7 @@ async fn shared_route_uses_conversation_specific_subject_over_installation_defau
             tenant_id.clone(),
             adapter_kind,
             installation_id,
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -4906,7 +4887,7 @@ async fn static_shared_route_does_not_probe_existing_binding_before_resolve() {
             tenant_id.clone(),
             adapter_kind,
             installation_id,
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -4969,7 +4950,7 @@ async fn shared_route_uses_dynamic_subject_route_resolver_without_rebuilding_sco
             tenant_id.clone(),
             adapter_kind,
             installation_id,
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -5228,7 +5209,7 @@ async fn shared_route_can_disable_default_subject_for_unrouted_conversations() {
             tenant_id.clone(),
             adapter_kind,
             installation_id,
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -5433,7 +5414,7 @@ async fn shared_lookup_binding_rejects_existing_binding_when_resolved_actor_diff
             tenant_id.clone(),
             adapter_kind.clone(),
             installation_id.clone(),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -5455,9 +5436,9 @@ async fn shared_lookup_binding_rejects_existing_binding_when_resolved_actor_diff
             tenant_id: tenant_id.clone(),
             adapter_kind,
             adapter_installation_id: installation_id,
-            external_actor_ref: ironclaw_conversations::ExternalActorRef::new("test", "user1")
+            external_actor_ref: ExternalActorRef::new("test", "user1", None::<String>)
                 .expect("actor"),
-            external_conversation_ref: ironclaw_conversations::ExternalConversationRef::new(
+            external_conversation_ref: ExternalConversationRef::new(
                 Some("T-team"),
                 "C-eng",
                 Some("thread-1"),
@@ -5521,7 +5502,7 @@ async fn lookup_binding_does_not_backfill_legacy_ownerless_shared_route() {
             tenant_id.clone(),
             adapter_kind.clone(),
             installation_id.clone(),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -5531,9 +5512,9 @@ async fn lookup_binding_does_not_backfill_legacy_ownerless_shared_route() {
             tenant_id: tenant_id.clone(),
             adapter_kind,
             adapter_installation_id: installation_id,
-            external_actor_ref: ironclaw_conversations::ExternalActorRef::new("test", "user1")
+            external_actor_ref: ExternalActorRef::new("test", "user1", None::<String>)
                 .expect("actor"),
-            external_conversation_ref: ironclaw_conversations::ExternalConversationRef::new(
+            external_conversation_ref: ExternalConversationRef::new(
                 Some("T-team"),
                 "C-eng",
                 Some("thread-legacy"),
@@ -5614,7 +5595,7 @@ async fn direct_route_skips_dynamic_subject_route_resolver() {
             tenant_id.clone(),
             adapter_kind,
             installation_id,
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -5743,7 +5724,7 @@ async fn concrete_product_surface_reply_to_bot_requires_existing_binding() {
             TenantId::new("tenant:alpha").expect("tenant"),
             ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -5911,7 +5892,7 @@ async fn concrete_product_surface_rejects_unknown_installation_as_terminal() {
             TenantId::new("tenant:alpha").expect("tenant"),
             ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -6008,7 +5989,7 @@ async fn terminal_rejection_for_unpaired_actor_does_not_poison_other_actor_event
             TenantId::new("tenant:alpha").expect("tenant"),
             ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
-            ironclaw_conversations::ExternalActorRef::new("test", "user2").expect("actor"),
+            ExternalActorRef::new("test", "user2", None::<String>).expect("actor"),
             UserId::new("user:bob").expect("user"),
         )
         .await;
@@ -6085,7 +6066,7 @@ async fn accepted_message_replay_validates_current_actor_before_submit() {
             TenantId::new("tenant:alpha").expect("tenant"),
             ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -6150,7 +6131,7 @@ async fn concrete_product_surface_replays_binding_access_denied_rejection() {
             TenantId::new("tenant:alpha").expect("tenant"),
             ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
-            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             UserId::new("user:alice").expect("user"),
         )
         .await;
@@ -6186,7 +6167,7 @@ async fn concrete_product_surface_replays_binding_access_denied_rejection() {
             TenantId::new("tenant:alpha").expect("tenant"),
             ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
             ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
-            ironclaw_conversations::ExternalActorRef::new("test", "user2").expect("actor"),
+            ExternalActorRef::new("test", "user2", None::<String>).expect("actor"),
             UserId::new("user:bob").expect("user"),
         )
         .await;
@@ -6656,7 +6637,7 @@ impl ProductActorUserResolver for ReplacingProductActorUserResolver {
                     ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
                     ironclaw_conversations::AdapterInstallationId::new("install_alpha")
                         .expect("install"),
-                    ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+                    ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
                     self.user_id.clone(),
                     epoch.clone(),
                 )

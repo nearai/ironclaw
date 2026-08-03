@@ -29,11 +29,6 @@ use ironclaw_host_api::{
     ids::{ExtensionId, SecretHandle},
     resource::ResourceScope,
 };
-use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
-use ironclaw_product_contracts::package_lifecycle::ChannelConfigField;
-use ironclaw_product_contracts::surface::{
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-};
 use ironclaw_secrets::{SecretMaterial, SecretStorePort};
 
 use crate::{
@@ -190,6 +185,20 @@ impl ChannelConfigService {
     ) -> Result<Vec<RecipeSecretField>, ChannelConfigError> {
         let record = self.manifest(extension_id).await?;
         Ok(channel_config_fields(record.resolved()))
+    }
+
+    /// Whether the installed manifest declares `[admin_configuration]`.
+    ///
+    /// `pub` for the manager-side product service (§6.8.3): the
+    /// `ChannelConfigProductService` projection suppresses the field list for
+    /// such an extension. Only this yes/no leaves the crate — the manifest
+    /// read itself stays internal.
+    pub async fn declares_admin_configuration(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<bool, ChannelConfigError> {
+        let manifest = self.resolved_manifest(extension_id).await?;
+        Ok(!manifest.admin_configuration.is_empty())
     }
 
     async fn resolved_manifest(
@@ -663,100 +672,6 @@ fn channel_config_admin_idempotency_key(
     .map_err(|_| ChannelConfigError::Storage {
         reason: "administrator configuration idempotency key is invalid".to_string(),
     })
-}
-
-/// The production [`ChannelConfigProductService`] port
-/// over [`ChannelConfigService`] — the surface the WebUI setup service and
-/// the lifecycle configure action route through.
-pub struct RebornChannelConfigProductService {
-    service: Arc<ChannelConfigService>,
-}
-
-impl RebornChannelConfigProductService {
-    pub fn new(service: Arc<ChannelConfigService>) -> Self {
-        Self { service }
-    }
-}
-
-#[async_trait]
-impl ChannelConfigProductService for RebornChannelConfigProductService {
-    async fn field_status(
-        &self,
-        extension_id: &ExtensionId,
-    ) -> Result<Vec<ChannelConfigField>, ProductSurfaceError> {
-        if let Ok(manifest) = self.service.resolved_manifest(extension_id).await
-            && !manifest.admin_configuration.is_empty()
-        {
-            return Ok(Vec::new());
-        }
-        match self.service.status(extension_id).await {
-            Ok(statuses) => Ok(statuses
-                .into_iter()
-                .map(|status| ChannelConfigField {
-                    name: status.handle,
-                    label: status.label,
-                    secret: status.secret,
-                    provided: status.provided,
-                })
-                .collect()),
-            // A not-yet-installed extension has nothing to configure; the
-            // setup view renders for it, so this projection stays empty
-            // rather than erroring.
-            Err(ChannelConfigError::NotInstalled { .. }) => Ok(Vec::new()),
-            Err(error) => Err(map_channel_config_error(error)),
-        }
-    }
-
-    async fn save_values(
-        &self,
-        extension_id: &ExtensionId,
-        values: Vec<(String, String)>,
-    ) -> Result<(), ProductSurfaceError> {
-        self.service
-            .save(extension_id, values)
-            .await
-            .map_err(map_channel_config_error)
-    }
-}
-
-fn map_channel_config_error(error: ChannelConfigError) -> ProductSurfaceError {
-    match error {
-        ChannelConfigError::NotInstalled { .. } => ProductSurfaceError {
-            code: ProductSurfaceErrorCode::NotFound,
-            kind: ProductSurfaceErrorKind::NotFound,
-            status_code: 404,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        },
-        ChannelConfigError::UnknownField { .. } => ProductSurfaceError {
-            code: ProductSurfaceErrorCode::InvalidRequest,
-            kind: ProductSurfaceErrorKind::Validation,
-            status_code: 400,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        },
-        ChannelConfigError::Storage { .. } => ProductSurfaceError {
-            code: ProductSurfaceErrorCode::Unavailable,
-            kind: ProductSurfaceErrorKind::ServiceUnavailable,
-            status_code: 503,
-            retryable: true,
-            field: None,
-            validation_code: None,
-        },
-        // The save persisted but the §6.5 reactivate cycle failed: the host
-        // record is left per §6.1 with the typed reason; the operator fixes
-        // the value and saves again.
-        ChannelConfigError::Reactivation { .. } => ProductSurfaceError {
-            code: ProductSurfaceErrorCode::Conflict,
-            kind: ProductSurfaceErrorKind::Conflict,
-            status_code: 409,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        },
-    }
 }
 
 #[cfg(test)]

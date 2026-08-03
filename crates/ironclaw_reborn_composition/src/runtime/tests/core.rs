@@ -5145,7 +5145,7 @@ async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
     // this test resolves the same authority a vision-capable model would.
     let read_port =
         ironclaw_product::ProjectScopedAttachmentReader::new(Arc::clone(&read_write_filesystem));
-    let lander = ironclaw_product::ProjectScopedAttachmentLander::new(read_write_filesystem);
+    let lander = ironclaw_attachments::ProjectScopedAttachmentLander::new(read_write_filesystem);
 
     let thread_scope = ThreadScope {
         tenant_id: TenantId::new("runtime-attachment-mount-tenant").unwrap(),
@@ -5154,7 +5154,7 @@ async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
         owner_user_id: Some(UserId::new("runtime-attachment-mount-owner").unwrap()),
         mission_id: None,
     };
-    let refs = ironclaw_product::InboundAttachmentLander::land(
+    let refs = ironclaw_attachments::InboundAttachmentLander::land(
         &lander,
         &thread_scope,
         "msg-attachment-mount",
@@ -6265,7 +6265,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
 
     // Gateway state seeded after runtime build.
     struct LifecycleServiceHandle {
-        service: ironclaw_extension_host::ExtensionHostLifecycleProductService,
+        service: ironclaw_extension_manager::ExtensionHostLifecycleProductService,
     }
 
     impl std::fmt::Debug for LifecycleServiceHandle {
@@ -6431,9 +6431,9 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
 
     // Seed the lifecycle service before the model gateway runs.
     let extension_management = runtime.extension_management.clone();
-    let service = ironclaw_extension_host::ExtensionHostLifecycleProductService::new(Arc::clone(
-        &runtime.skill_management,
-    ))
+    let service = ironclaw_extension_manager::ExtensionHostLifecycleProductService::new(
+        Arc::clone(&runtime.skill_management),
+    )
     .with_extension_management(extension_management)
     .with_runtime_credential_accounts(Arc::new(MultiToolConfiguredCredentials));
     service_slot

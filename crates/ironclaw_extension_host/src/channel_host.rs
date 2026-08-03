@@ -23,6 +23,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
+use ironclaw_attachments::InboundAttachmentLander;
 use ironclaw_conversations::RebornFilesystemConversationServices;
 use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
 use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec;
@@ -46,10 +47,10 @@ use ironclaw_product::ProjectFilesystemReader;
 use ironclaw_product::{
     ApprovalInteractionService, AuthInteractionService, BlockedAuthFlowCanceller,
     ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
-    DeliveryCoordinator, IdempotencyLedger, InboundAttachmentLander,
-    ProductActorUserResolutionRequest, ProductActorUserResolver, ProductInstallationKey,
-    ProductInstallationScope, ProductSurfaceFailure, RebornFilesystemIdempotencyLedger,
-    ResolvedProductActorUser, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
+    DeliveryCoordinator, IdempotencyLedger, ProductActorUserResolutionRequest,
+    ProductActorUserResolver, ProductInstallationKey, ProductInstallationScope,
+    ProductSurfaceFailure, RebornFilesystemIdempotencyLedger, ResolvedProductActorUser,
+    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
     StaticProductInstallationResolver,
 };
 use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
@@ -1116,7 +1117,7 @@ impl GenericChannelHostAssembly {
 pub mod test_support {
     use std::sync::Arc;
 
-    use ironclaw_product::InboundAttachmentLander;
+    use ironclaw_attachments::InboundAttachmentLander;
 
     use super::GenericChannelHostAssembly;
 

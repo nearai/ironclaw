@@ -34,7 +34,12 @@ ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 # `Deserialize`-derived bodies that carry secret material on the wire —
 # `RebornOperatorSetupRequest` (`api_key`, `webui_access_token`),
 # `UpsertLlmProviderRequest` and `LlmProbeRequest` (`api_key`) — must not
-# degrade those fields to a `String` here.
+# degrade those fields to a `String` here. They are deserialize-only (there is
+# deliberately no `Serialize`: a request that carries a key must not be
+# serializable back out). Declared explicitly rather than inherited: a workspace
+# build unifies features with `ironclaw_product`, which already enables it, so
+# omitting it here compiles in CI's `--all-features` lane and fails a lone
+# `-p ironclaw_product_contracts` build.
 secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -1,4 +1,4 @@
-use crate::{AvailableExtensionPackage, registry_extension_package};
+use ironclaw_extension_host::{AvailableExtensionPackage, registry_extension_package};
 
 use super::catalog::validate_hub_name;
 use super::model::{

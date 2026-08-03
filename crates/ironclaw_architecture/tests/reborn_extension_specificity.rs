@@ -1098,6 +1098,31 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // WS5 port inversion: these three wire-DTO sites moved to the contracts
     // crate with their code (`NearAiAuthProvider`'s OAuth identity providers and
     // the project-metadata doc example). Same terms, same debt, new file.
+    //
+    // Repointed, not deleted and not added: the two entries moved with the
+    // `LlmConfigService` port from `ironclaw_product` to
+    // `ironclaw_product_contracts::operator_llm` (WS5 operator row). Same two
+    // terms, same count — the baseline is untouched.
+    //
+    // The terms are `NearAiAuthProvider::{Github, Google}`, the two SSO
+    // identity providers NEAR AI accepts, whose `as_path()` builds
+    // `/v1/auth/github` and `/v1/auth/google`. They are not extension package
+    // references; they are LLM-vendor admin vocabulary, which PROPOSAL §8.2's
+    // vendor rule sanctions for `ironclaw_operator` ("*this* is the LLM-vendor
+    // admin layer", §6.9.2).
+    //
+    // **Recorded finding, not resolved here.** §8.2's sanctioned-vendor list
+    // names `packages/*`, `llm` providers, `operator`, `webui::auth` login
+    // providers, and recipes-as-data — it does **not** name the contracts
+    // family. Declaring the port at the boundary therefore carries vendor
+    // vocabulary somewhere the rule does not cover, and this pair is only the
+    // visible tip: `LlmConfigService` has three vendor-named *methods*
+    // (`start_nearai_login`, `complete_nearai_wallet_login`,
+    // `start_codex_login`) and six vendor-named DTOs the scanner's inventory
+    // does not know to flag. Generifying that is a design change — NEAR AI SSO,
+    // NEAR wallet NEP-413, and OpenAI Codex device-code are three different
+    // protocols behind one port — and PLAN's operating principle 2 keeps
+    // semantic changes out of a move PR. The finding is in the WS5 row.
     (
         "crates/ironclaw_product_contracts/src/operator_llm.rs",
         "github",

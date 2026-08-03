@@ -30,6 +30,7 @@ use axum::response::{IntoResponse, Response};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::SinkExt;
 use futures::stream::Stream;
+use ironclaw_attachments::{AttachmentCapabilities, attachment_capabilities};
 use ironclaw_product::{
     ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_VIEW, ADMIN_USER_CREATE_COMMAND,
     ADMIN_USER_DELETE_CAPABILITY, ADMIN_USER_DELETE_SECRET_COMMAND,
@@ -53,14 +54,14 @@ use ironclaw_product::{
     PROJECT_CREATE_COMMAND, PROJECT_DELETE_CAPABILITY, PROJECT_FS_LIST_VIEW,
     PROJECT_FS_READ_COMMAND, PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY,
     PROJECT_MEMBER_REMOVE_CAPABILITY, PROJECT_MEMBER_UPDATE_CAPABILITY, PROJECT_MEMBERS_VIEW,
-    PROJECT_UPDATE_CAPABILITY, PROJECT_VIEW, PROJECTS_VIEW, ProductAttachmentCapabilities,
-    RESOLVE_GATE_COMMAND, RETRY_RUN_COMMAND, RebornCreateThreadResponse,
-    RebornExtensionListResponse, RebornListThreadsResponse, RebornTimelineResponse,
-    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY, SKILL_AUTO_ACTIVATE_SET_CAPABILITY,
-    SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY, SKILL_REMOVE_CAPABILITY, SKILL_SEARCH_VIEW,
-    SKILL_UPDATE_CAPABILITY, SKILLS_VIEW, SUBMIT_TURN_COMMAND, THREAD_DELETE_CAPABILITY,
-    THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_LOGIN_LINK_COMMAND, TRACE_ACCOUNT_TRACES_VIEW,
-    TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND, product_attachment_capabilities,
+    PROJECT_UPDATE_CAPABILITY, PROJECT_VIEW, PROJECTS_VIEW, RESOLVE_GATE_COMMAND,
+    RETRY_RUN_COMMAND, RebornCreateThreadResponse, RebornExtensionListResponse,
+    RebornListThreadsResponse, RebornTimelineResponse, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY,
+    SKILL_REMOVE_CAPABILITY, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY, SKILLS_VIEW,
+    SUBMIT_TURN_COMMAND, THREAD_DELETE_CAPABILITY, THREADS_VIEW, TIMELINE_VIEW,
+    TRACE_ACCOUNT_LOGIN_LINK_COMMAND, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
+    TRACE_HOLD_AUTHORIZE_COMMAND,
 };
 use ironclaw_product_contracts::admin_users::{
     RebornAdminCreateUserRequest, RebornAdminDeleteSecretProductRequest,
@@ -169,7 +170,7 @@ pub struct WebUiV2SessionResponse {
     /// the browser advertises on its file picker. Generated from the shared
     /// format registry so the picker can never drift from the server's
     /// allowed set; the send-message decode remains authoritative.
-    pub attachments: ProductAttachmentCapabilities,
+    pub attachments: AttachmentCapabilities,
 }
 
 /// Deployment-wide WebUI feature gates surfaced to the browser on
@@ -218,7 +219,7 @@ pub async fn get_session(
             regression_artifact_export: state.regression_artifact_export_enabled(),
             global_auto_approve,
         },
-        attachments: product_attachment_capabilities(),
+        attachments: attachment_capabilities(),
     })
 }
 

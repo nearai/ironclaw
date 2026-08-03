@@ -1,6 +1,6 @@
 use anyhow::Context;
 use clap::{Args, Subcommand, ValueEnum};
-use ironclaw_extension_host::ironhub::{
+use ironclaw_extension_manager::ironhub::{
     IronHubCommand as RebornIronHubCommand, IronHubEntryKind, IronHubInstallOptions,
     IronHubResponse, execute_reborn_ironhub_command, render_reborn_ironhub_response,
 };

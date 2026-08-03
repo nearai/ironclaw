@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use ironclaw_attachments::InboundAttachmentLander;
 use ironclaw_extension_contracts::extension::ExtensionHostAssemblyConfig;
 use ironclaw_extensions::ExtensionInstallationStorePort;
 use ironclaw_filesystem::{CompositeRootFilesystem, RootFilesystem, ScopedFilesystem};
@@ -11,8 +12,8 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{ExtensionLaneToolBinder, HostRuntimeHttpEgressPort};
 use ironclaw_product::{
     ApprovalInteractionService, AuthChallengeProvider, AuthInteractionService,
-    BlockedAuthFlowCanceller, ExtensionAccountSetupRegistry, InboundAttachmentLander,
-    ProjectFilesystemReader, RunDeliverySettings,
+    BlockedAuthFlowCanceller, ExtensionAccountSetupRegistry, ProjectFilesystemReader,
+    RunDeliverySettings,
 };
 use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
 use ironclaw_product_contracts::prompt_source::{
@@ -394,7 +395,7 @@ fn channel_host_source(services: &RebornRuntimeStores) -> Option<ChannelHostAsse
         inbound_mounts,
     ));
     let inbound_attachments: Arc<dyn InboundAttachmentLander> = Arc::new(
-        ironclaw_product::ProjectScopedAttachmentLander::new(inbound_filesystem),
+        ironclaw_attachments::ProjectScopedAttachmentLander::new(inbound_filesystem),
     );
     let project_filesystem: Arc<dyn ProjectFilesystemReader> = Arc::new(
         ironclaw_product::ProjectScopedFilesystemReader::with_max_read_bytes(

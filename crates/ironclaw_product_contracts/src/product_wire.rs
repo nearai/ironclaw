@@ -45,16 +45,39 @@ const OUTBOUND_DELIVERY_CHANNEL_MAX_BYTES: usize = 128;
 const OUTBOUND_DELIVERY_DISPLAY_NAME_MAX_BYTES: usize = 256;
 const OUTBOUND_DELIVERY_DESCRIPTION_MAX_BYTES: usize = 1024;
 
+/// Readiness verdict for one operator status check, and for the roll-up over
+/// all of them.
+///
+/// The roll-up (`RebornOperatorStatusResponse::overall`) is computed by
+/// precedence, not by worst-severity: any `Blocked` check makes the whole
+/// response `Blocked`; otherwise any `Degraded` *or* `NotConfigured` check makes
+/// it `Degraded`; otherwise `Ready`. `Unsupported` is deliberately excluded from
+/// that fold — see its variant note.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RebornOperatorStatusState {
+    /// The subsystem is wired and validated for its profile.
     Ready,
+    /// Usable, but not on a production footing — a dev-only or preview-storage
+    /// profile, or a non-blocking readiness diagnostic.
     Degraded,
+    /// A blocking readiness diagnostic. Wins the roll-up outright.
     Blocked,
+    /// **No probe exists for this subsystem yet** — a statement about this
+    /// build's coverage, not about the deployment. Reported today for the
+    /// `channels` and `extensions` checks, always at `Info` severity, and
+    /// excluded from the `overall` fold so an unwritten probe can never degrade
+    /// a healthy host.
     Unsupported,
+    /// A required service or worker is not wired, or the runtime profile is
+    /// disabled. Distinct from `Degraded` in cause but folded into it in the
+    /// roll-up.
     NotConfigured,
 }
 
+/// How loudly a status check should be surfaced. Independent of
+/// [`RebornOperatorStatusState`]: an `Unsupported` check is `Info`, while a
+/// `NotConfigured` one is `Warning`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RebornOperatorStatusSeverity {
@@ -63,23 +86,38 @@ pub enum RebornOperatorStatusSeverity {
     Critical,
 }
 
+/// One named readiness probe — its verdict, how loudly to surface it, a
+/// human-readable summary, and the operator action that would clear it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornOperatorStatusCheck {
+    /// Stable check identifier (`runtime`, `storage`, `secrets`,
+    /// `provider_model`, `webui`, `trigger_poller`, `channels`, `extensions`,
+    /// or a readiness diagnostic's own id).
     pub id: String,
     pub status: RebornOperatorStatusState,
     pub severity: RebornOperatorStatusSeverity,
+    /// One-line human-readable description of what was observed.
     pub summary: String,
+    /// The operator action that would clear this check, when one is known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remediation: Option<String>,
 }
 
+/// A full operator readiness snapshot: every check plus the precedence roll-up
+/// over them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornOperatorStatusResponse {
+    /// When this snapshot was taken. Status is computed per request, never
+    /// cached, so this is the observation time.
     pub generated_at: DateTime<Utc>,
+    /// Precedence roll-up over `checks` — see [`RebornOperatorStatusState`].
     pub overall: RebornOperatorStatusState,
     pub checks: Vec<RebornOperatorStatusCheck>,
 }
 
+/// Severity of an operator log entry, and the filter a log query narrows by.
+/// Serialized lowercase to match the `tracing` level vocabulary the ring
+/// captures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RebornLogLevel {
@@ -90,6 +128,14 @@ pub enum RebornLogLevel {
     Error,
 }
 
+/// A query against the operator log ring. Every field is an optional narrowing
+/// filter; the default value selects the most recent entries unfiltered.
+///
+/// Context-valued filters (`thread_id`, `run_id`, `turn_id`, `tool_call_id`,
+/// `tool_name`, `source`) must be bounded with
+/// [`normalize_operator_log_context_value`] before comparison — the ring
+/// normalizes on write, so an un-normalized filter would stop matching the
+/// entries it was meant to select.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornLogQueryRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -180,11 +226,16 @@ impl RebornLogQueryRequest {
     }
 }
 
+/// One captured operator log line, plus whatever turn-kernel context the
+/// `tracing` span carried when it was recorded. Every context field is optional
+/// because most log lines are emitted outside a turn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornLogEntry {
+    /// Ring-assigned identifier, also the cursor value for pagination.
     pub id: String,
     pub timestamp: DateTime<Utc>,
     pub level: RebornLogLevel,
+    /// The `tracing` target the line was emitted under (module path).
     pub target: String,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -201,16 +252,24 @@ pub struct RebornLogEntry {
     pub source: Option<String>,
 }
 
+/// A page of operator log entries, with the capabilities of the backing ring so
+/// a client can decide which controls to offer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornLogQueryResponse {
+    /// Which log source answered (identifies the ring behind this response).
     pub source: String,
     pub entries: Vec<RebornLogEntry>,
+    /// Cursor for the next page; absent when this page is the last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+    /// Whether this source honours `RebornLogQueryRequest::tail`.
     pub tail_supported: bool,
+    /// Whether this source honours `RebornLogQueryRequest::follow`.
     pub follow_supported: bool,
 }
 
+/// The OS-service operation an operator requests. `Status` is read-only; the
+/// other three mutate the host's service registration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RebornServiceLifecycleAction {
@@ -220,27 +279,52 @@ pub enum RebornServiceLifecycleAction {
     Status,
 }
 
+/// The service state observed after a lifecycle action.
+///
+/// Product folds these into surface availability, and the split is not the
+/// obvious one: `Installed`, `Running`, `Stopped`, **and `Unknown`** all mean
+/// the lifecycle surface is *available*; only `Unsupported` and `Failed` mark it
+/// unavailable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RebornServiceLifecycleState {
+    /// The unit or plist was written successfully.
     Installed,
+    /// The service manager reports the service active.
     Running,
+    /// The service manager reports the service inactive, or a stop succeeded.
     Stopped,
+    /// **This OS target has no supported local service manager** — a capability
+    /// statement, not a failure. The deployment is expected to be run under an
+    /// external process supervisor instead.
     Unsupported,
+    /// The operation failed, or the service manager reports the service failed.
+    /// Covers an unresolvable home directory or executable path, a command
+    /// failure, and a status query that errored or timed out.
     Failed,
+    /// The service manager answered, but with a state this build does not map.
+    /// Distinct from `Failed`, where the query itself did not succeed — and
+    /// treated as *available*, because the surface is working even though the
+    /// state string is unrecognized.
     Unknown,
 }
 
+/// Request to perform one OS-service lifecycle action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornServiceLifecycleRequest {
     pub action: RebornServiceLifecycleAction,
 }
 
+/// Outcome of a lifecycle action: the state observed afterwards, what happened,
+/// and the operator action that would clear a bad state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornServiceLifecycleResponse {
+    /// Echoes the requested action, so a response is self-describing.
     pub action: RebornServiceLifecycleAction,
     pub state: RebornServiceLifecycleState,
+    /// One-line human-readable description of what happened.
     pub message: String,
+    /// The operator action that would clear this state, when one is known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remediation: Option<String>,
 }

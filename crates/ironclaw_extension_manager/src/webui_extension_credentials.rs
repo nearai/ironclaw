@@ -39,6 +39,8 @@ impl ExtensionCredentialSetupService for ProductAuthExtensionCredentialSetup {
         let selector = self
             .product_auth
             .runtime_credential_account_selection_service();
+        let provider = request.provider.clone();
+        let requester_extension = request.requester_extension.clone();
         let account = selector
             .select_unique_configured_runtime_account(
                 RuntimeCredentialAccountSelectionRequest::new(
@@ -51,8 +53,45 @@ impl ExtensionCredentialSetupService for ProductAuthExtensionCredentialSetup {
             )
             .await
             .map_err(|error| match error {
+                // NOT a caller-scope refusal, despite the variant name, and
+                // deliberately not the 403 `map_auth_error` gives the same
+                // variant on the *submit* path. Every candidate account this
+                // selection can see already belongs to the calling user: the
+                // lookup scope is built from the authenticated caller and
+                // `CredentialAccountOwnerScope::matches` compares `tenant_id`
+                // and `user_id` for equality, so a foreign owner's account is
+                // filtered out before the requester gate ever runs. What
+                // survives to raise `CrossScopeDenied` is only "the caller owns
+                // an account for this provider, but none of them is granted to
+                // *this* extension" — a missing connection, not a denial.
+                //
+                // Reporting it as one would be worse on all three axes:
+                //   * it removes the caller's way out. `Ok(None)` renders the
+                //     connect affordance the user needs to attach their own
+                //     credential to this extension; a 403 strands them.
+                //   * it is not caller-local. Product collects per-extension
+                //     readiness with `try_collect`, so one non-retryable error
+                //     fails the whole extensions listing, not one card.
+                //   * it discloses more, not less: 403-instead-of-none is an
+                //     existence oracle for a credential the requester may not
+                //     use. `Ok(None)` is the closed answer.
+                //
+                // Enforcement lives on the runtime path, which maps the same
+                // variant to `CredentialStageError::AuthRequired` and gates the
+                // capability; this projection is a read-only status view and
+                // never grants access. Log it so the collapse is observable
+                // rather than silent -- `debug!`, because `info!`/`warn!`
+                // corrupt the REPL/TUI.
+                AuthProductError::CrossScopeDenied => {
+                    tracing::debug!(
+                        provider = %provider,
+                        requester_extension = %requester_extension,
+                        "credential status: owner has an account for this provider that is not \
+                         granted to the requesting extension; reporting it as unconfigured"
+                    );
+                    None
+                }
                 AuthProductError::CredentialMissing
-                | AuthProductError::CrossScopeDenied
                 | AuthProductError::AccountSelectionRequired => None,
                 other => Some(map_auth_error(other.into())),
             });
@@ -185,7 +224,7 @@ fn services_error(
 mod tests {
     use std::sync::Arc;
 
-    use super::ProductAuthExtensionCredentialSetup;
+    use super::{ProductAuthExtensionCredentialSetup, map_auth_error};
     use async_trait::async_trait;
     use ironclaw_auth::{
         AuthContinuationEvent, AuthProductError, AuthProductScope, AuthProviderId, AuthSurface,
@@ -253,8 +292,29 @@ mod tests {
         assert_eq!(account.label.as_str(), "notion secondary");
     }
 
+    /// `CrossScopeDenied` from the *status* selection is a missing connection,
+    /// not a refusal — and the 403 `map_auth_error` gives the same variant is
+    /// for a different operation. Both halves are asserted together, because
+    /// the divergence is the thing a reader (or a reviewer reading only
+    /// `map_auth_error`) will otherwise call a contradiction.
+    ///
+    /// The seeded account is the caller's own: admin-managed, granted to a
+    /// *different* extension. The selector filters it out at the requester
+    /// gate — never at an owner gate, which `accounts_for_owner` already
+    /// passed on exact `tenant_id`/`user_id` equality — so the only honest
+    /// answer for the `notion` extension is "not connected yet", which is what
+    /// renders the connect affordance. Turning it into a denial would strand a
+    /// user who can legitimately connect their own credential, and (because
+    /// product collects per-extension readiness with `try_collect`) would fail
+    /// the entire extensions listing on one ungranted account.
     #[tokio::test]
     async fn credential_status_treats_unauthorized_accounts_as_reconnectable() {
+        assert_eq!(
+            map_auth_error(AuthProductError::CrossScopeDenied.into()).status_code,
+            403,
+            "the submit path must still refuse a genuine cross-scope denial; if this ever \
+             stops being true, the status path below is no longer a deliberate divergence"
+        );
         let shared = Arc::new(InMemoryAuthProductServices::new());
         let service = ProductAuthExtensionCredentialSetup::new(Arc::new(
             RebornProductAuthServices::from_shared(shared.clone(), Arc::new(NoopDispatcher)),
@@ -285,9 +345,16 @@ mod tests {
                 requester_extension: ExtensionId::new("notion").expect("extension"),
             })
             .await
-            .expect("status lookup should not block setup");
+            .expect(
+                "an account the requester is not granted must read as unconfigured, not as a \
+                 denial: a denial removes the connect affordance and fails the whole listing",
+            );
 
-        assert!(status.is_none());
+        assert!(
+            status.is_none(),
+            "an ungranted account must not be projected to the requesting extension either — \
+             `Ok(None)` is the closed answer, and returning the account would be the real leak"
+        );
     }
 
     #[tokio::test]

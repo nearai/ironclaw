@@ -61,16 +61,6 @@ const OPENAI_COMPAT: &str = "ironclaw_reborn_openai_compat";
 const PRODUCT_SYMBOLS_WEBUI_STILL_NAMES: &[(&str, &str)] = &[
     // --- contract-purity residue ------------------------------------------
     (
-        "ProductAttachmentCapabilities",
-        "contract-purity: `budgets` is `ironclaw_attachments::AttachmentBudgets`; \
-         CHECKLIST WS5 `attachments widened … one home for size ceilings` owns the move",
-    ),
-    (
-        "product_attachment_capabilities",
-        "contract-purity: builds ProductAttachmentCapabilities from \
-         ironclaw_attachments + ironclaw_common::accept_tokens",
-    ),
-    (
         "RebornCreateThreadResponse",
         "contract-purity: carries ironclaw_threads::SessionThreadRecord",
     ),
@@ -214,7 +204,12 @@ const PRODUCT_SYMBOLS_OPENAI_COMPAT_STILL_NAMES: &[(&str, &str)] = &[
 ];
 
 /// Ceilings on the two residues. Only ever move down.
-const WEBUI_PRODUCT_SYMBOL_BASELINE: usize = 102;
+// 102 when the WS5 transport inversion landed; **100** after the WS5
+// `attachments widened` row moved `ProductAttachmentCapabilities` /
+// `product_attachment_capabilities` to `ironclaw_attachments` as
+// `AttachmentCapabilities` / `attachment_capabilities` — the two symbols this
+// list called out by name as that row's to own. Shrink-only.
+const WEBUI_PRODUCT_SYMBOL_BASELINE: usize = 100;
 const OPENAI_COMPAT_PRODUCT_SYMBOL_BASELINE: usize = 3;
 
 /// Boundary vocabulary this row moved: declared in `ironclaw_product_contracts`

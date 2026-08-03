@@ -28,7 +28,7 @@ use ironclaw_skills::{
 };
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::ExtensionLifecycleManager;
+use ironclaw_extension_host::ExtensionLifecycleManager;
 
 use super::catalog::{
     catalog, classify, classify_gate_and_digest, compact_skill_summary, compact_tool_summary,

@@ -21,9 +21,12 @@ fs4 = "1.1"
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+# Host-owned route-mount carriers. Operator owns the NEAR AI login callback
+# route; ingress owns the vocabulary that carries a router plus its policy
+# descriptors to whoever mounts it (PROPOSAL §6.9.2).
+ironclaw_host_ingress = { path = "../ironclaw_host_ingress" }
 ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version = "0.1.0" }
 ironclaw_llm = { path = "../ironclaw_llm", default-features = false, features = ["registry-provider-factory"] }
-ironclaw_product = { path = "../ironclaw_product" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }

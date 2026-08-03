@@ -20,7 +20,7 @@ use ironclaw_host_runtime::{
 use ironclaw_skills::ScopedSkillManagementPort;
 use serde::Deserialize;
 
-use crate::ExtensionLifecycleManager;
+use ironclaw_extension_host::ExtensionLifecycleManager;
 
 use super::model::{IronHubCommand, IronHubCommandError, IronHubEntryKind, IronHubInstallOptions};
 use super::service::execute_reborn_ironhub_service_command;

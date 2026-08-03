@@ -14,8 +14,9 @@ use ironclaw_product_contracts::package_lifecycle::{
 use ironclaw_product_contracts::surface::ProductSurfaceError;
 use thiserror::Error;
 
-use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::lifecycle_product_service::ExtensionHostLifecycleProductService;
+use crate::terminal_render::{push_line, terminal_safe};
+use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use ironclaw_skills::ScopedSkillManagementPort;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,17 +237,6 @@ fn extension_source_label(source: LifecycleExtensionSource) -> &'static str {
         LifecycleExtensionSource::Installed => "installed",
         LifecycleExtensionSource::Registry => "registry",
     }
-}
-
-fn terminal_safe(value: &str) -> String {
-    value.chars().flat_map(char::escape_default).collect()
-}
-
-fn push_line(output: &mut String, args: std::fmt::Arguments<'_>) {
-    use std::fmt::Write as _;
-    #[allow(clippy::let_underscore_must_use)] // writing to a String is infallible
-    let _ = output.write_fmt(args);
-    output.push('\n');
 }
 
 #[cfg(test)]
