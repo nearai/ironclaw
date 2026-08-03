@@ -50,6 +50,32 @@ fn build_outbound_store_for_backend(
     OutboundStateStore::new(build_scoped_fs(backend, TEST_OUTBOUND_ROOT))
 }
 
+fn prepared_delivery_attempt(
+    delivery_id: OutboundDeliveryId,
+    scope: TurnScope,
+    marker: &str,
+) -> OutboundDeliveryAttempt {
+    OutboundDeliveryAttempt {
+        delivery_id,
+        candidate: OutboundPushCandidate {
+            tenant_id: scope.tenant_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            thread_id: scope.thread_id.clone(),
+            turn_run_id: Some(TurnRunId::new()),
+            target: reply_ref(marker),
+            kind: OutboundPushKind::FinalReply,
+            projection_ref: ProjectionUpdateRef::new(format!("projection:{marker}"))
+                .expect("valid projection ref"),
+            requires_reply_target_revalidation: true,
+        },
+        scope,
+        status: OutboundDeliveryStatus::Prepared,
+        attempted_at: now(),
+        failure_kind: None,
+    }
+}
+
 fn build_outbound_store_with_permissions<F: RootFilesystem>(
     backend: Arc<F>,
     permissions: MountPermissions,
@@ -388,6 +414,7 @@ async fn outbound_state_store_satisfies_outbound_contract_on_in_memory_backend()
     subscription_cursor_rejects_backward_advancement(&store).await;
     delivery_status_rejects_inconsistent_failure_kind(&store).await;
     coordinator_delivery_lifecycle_round_trips(&store).await;
+    prepared_failure_is_permanent_scoped_and_source_guarded(&store).await;
     recovery_transition_never_clobbers_delivered(&store).await;
     notification_policy_rejects_excessive_targets(&store).await;
 }
@@ -437,6 +464,62 @@ async fn delivery_send_claim_is_atomic_across_store_instances() {
     let attempts = first.list_delivery_attempts(scope).await.unwrap();
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0].status, OutboundDeliveryStatus::Sending);
+}
+
+#[tokio::test]
+async fn prepared_failure_and_send_claim_are_one_atomic_decision_across_store_instances() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let first = Arc::new(build_outbound_store_for_backend(Arc::clone(&backend)));
+    let second = Arc::new(build_outbound_store_for_backend(backend));
+    let scope = turn_scope();
+    let delivery_id = OutboundDeliveryId::new();
+    first
+        .record_delivery_attempt(prepared_delivery_attempt(
+            delivery_id,
+            scope.clone(),
+            "reply-cross-instance-preflight",
+        ))
+        .await
+        .expect("seed prepared attempt");
+
+    let (claimed, failed) = tokio::join!(
+        first.claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+            delivery_id,
+            scope: scope.clone(),
+        }),
+        second.fail_prepared_delivery_attempt(FailPreparedDeliveryAttemptRequest {
+            delivery_id,
+            scope: scope.clone(),
+            updated_at: now(),
+            failure_kind: DeliveryFailureKind::Rejected,
+        }),
+    );
+    let transitions = [
+        claimed.expect("claim result"),
+        failed.expect("failure result"),
+    ];
+    assert_eq!(
+        transitions
+            .into_iter()
+            .filter(|transitioned| *transitioned)
+            .count(),
+        1,
+        "only one writer may consume Prepared"
+    );
+
+    let attempts = first
+        .list_delivery_attempts(scope)
+        .await
+        .expect("load settled attempt");
+    assert!(matches!(
+        attempts[0].status,
+        OutboundDeliveryStatus::Sending | OutboundDeliveryStatus::Failed
+    ));
+    assert_eq!(
+        attempts[0].failure_kind,
+        (attempts[0].status == OutboundDeliveryStatus::Failed)
+            .then_some(DeliveryFailureKind::Rejected)
+    );
 }
 
 // Legacy LibSqlOutboundStateStore / PostgresOutboundStateStore have been
@@ -1740,6 +1823,131 @@ async fn coordinator_delivery_lifecycle_round_trips(store: &impl OutboundStateSt
         .find(|attempt| attempt.delivery_id == delivery_id)
         .expect("attempt persisted");
     assert_eq!(attempt.status, OutboundDeliveryStatus::Unknown);
+}
+
+async fn prepared_failure_is_permanent_scoped_and_source_guarded(
+    store: &impl OutboundStateStorePort,
+) {
+    let scope = turn_scope();
+    let delivery_id = OutboundDeliveryId::new();
+    store
+        .record_delivery_attempt(prepared_delivery_attempt(
+            delivery_id,
+            scope.clone(),
+            "reply-preflight-failure",
+        ))
+        .await
+        .expect("seed prepared attempt");
+
+    let transient = store
+        .fail_prepared_delivery_attempt(FailPreparedDeliveryAttemptRequest {
+            delivery_id,
+            scope: scope.clone(),
+            updated_at: now(),
+            failure_kind: DeliveryFailureKind::TransportUnavailable,
+        })
+        .await;
+    assert!(matches!(
+        transient,
+        Err(OutboundError::InvalidRequest { .. })
+    ));
+    assert_eq!(
+        store
+            .list_delivery_attempts(scope.clone())
+            .await
+            .expect("load attempt after rejected transient settlement")[0]
+            .status,
+        OutboundDeliveryStatus::Prepared,
+        "a transient preflight failure must remain retryable"
+    );
+
+    let wrong_scope = store
+        .fail_prepared_delivery_attempt(FailPreparedDeliveryAttemptRequest {
+            delivery_id,
+            scope: sibling_turn_scope(),
+            updated_at: now(),
+            failure_kind: DeliveryFailureKind::Rejected,
+        })
+        .await;
+    assert!(matches!(
+        wrong_scope,
+        Err(OutboundError::DeliveryNotFound | OutboundError::SubscriptionScopeMismatch)
+    ));
+
+    assert!(
+        store
+            .fail_prepared_delivery_attempt(FailPreparedDeliveryAttemptRequest {
+                delivery_id,
+                scope: scope.clone(),
+                updated_at: now(),
+                failure_kind: DeliveryFailureKind::Rejected,
+            })
+            .await
+            .expect("settle permanent preflight failure")
+    );
+    assert!(
+        !store
+            .fail_prepared_delivery_attempt(FailPreparedDeliveryAttemptRequest {
+                delivery_id,
+                scope: scope.clone(),
+                updated_at: now(),
+                failure_kind: DeliveryFailureKind::Rejected,
+            })
+            .await
+            .expect("terminal replay is a no-op"),
+        "a terminal attempt cannot be failed again"
+    );
+    assert!(
+        !store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id,
+                scope: scope.clone(),
+            })
+            .await
+            .expect("terminal claim is a no-op"),
+        "a permanently failed preflight cannot later reach vendor egress"
+    );
+
+    let sending_id = OutboundDeliveryId::new();
+    store
+        .record_delivery_attempt(prepared_delivery_attempt(
+            sending_id,
+            scope.clone(),
+            "reply-post-adapter-source-guard",
+        ))
+        .await
+        .expect("seed second prepared attempt");
+    assert!(
+        store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id: sending_id,
+                scope: scope.clone(),
+            })
+            .await
+            .expect("claim second attempt")
+    );
+    assert!(
+        !store
+            .fail_prepared_delivery_attempt(FailPreparedDeliveryAttemptRequest {
+                delivery_id: sending_id,
+                scope: scope.clone(),
+                updated_at: now(),
+                failure_kind: DeliveryFailureKind::Rejected,
+            })
+            .await
+            .expect("non-Prepared source is a no-op"),
+        "preflight settlement must never rewrite an attempt that may have reached the adapter"
+    );
+    let attempts = store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("load source-guarded attempts");
+    let sending = attempts
+        .iter()
+        .find(|attempt| attempt.delivery_id == sending_id)
+        .expect("sending attempt persists");
+    assert_eq!(sending.status, OutboundDeliveryStatus::Sending);
+    assert_eq!(sending.failure_kind, None);
 }
 
 async fn recovery_transition_never_clobbers_delivered(store: &impl OutboundStateStorePort) {

@@ -18,15 +18,16 @@ use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
     CommunicationPreferenceVersion, DeliveryDefaultScope, DeliveryFailureKind,
-    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryStatus, OutboundError,
-    OutboundPolicyService, OutboundPushPlan, OutboundPushTargetRequest, OutboundStateStore,
-    OutboundStateStorePort, ProjectionSubscriptionRecord, RecoverInterruptedDeliveryRequest,
-    ReplyTargetBindingClaim, ReplyTargetBindingValidator, RunDeliveryCleanupRecord,
-    RunDeliveryCleanupRequest, RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord,
-    RunFinalReplyTargetRequest, RunNotificationContext, RunNotificationEventKind,
-    RunNotificationOrigin, ThreadNotificationPolicy, ThreadProjectionAccessClaim,
-    ThreadProjectionAccessPolicy, ThreadProjectionAccessRequest, TriggerFireSlot, TriggerOriginRef,
-    TriggerSourceKind, UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
+    FailPreparedDeliveryAttemptRequest, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
+    OutboundDeliveryStatus, OutboundError, OutboundPolicyService, OutboundPushPlan,
+    OutboundPushTargetRequest, OutboundStateStore, OutboundStateStorePort,
+    ProjectionSubscriptionRecord, RecoverInterruptedDeliveryRequest, ReplyTargetBindingClaim,
+    ReplyTargetBindingValidator, RunDeliveryCleanupRecord, RunDeliveryCleanupRequest,
+    RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord, RunFinalReplyTargetRequest,
+    RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin,
+    ThreadNotificationPolicy, ThreadProjectionAccessClaim, ThreadProjectionAccessPolicy,
+    ThreadProjectionAccessRequest, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
+    UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
     WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product::{ExternalActorRef, ExternalConversationRef};
@@ -436,6 +437,13 @@ impl OutboundStateStorePort for RecoveryTestStore {
         request: ClaimDeliveryAttemptForSendRequest,
     ) -> Result<bool, OutboundError> {
         self.inner.claim_delivery_attempt_for_send(request).await
+    }
+
+    async fn fail_prepared_delivery_attempt(
+        &self,
+        request: FailPreparedDeliveryAttemptRequest,
+    ) -> Result<bool, OutboundError> {
+        self.inner.fail_prepared_delivery_attempt(request).await
     }
 
     async fn recover_interrupted_delivery_attempt(
@@ -890,6 +898,51 @@ impl ProductOutboundTargetResolver for DmRequiringTargetResolver {
     }
 }
 
+struct ScriptedTargetResolver {
+    results: Mutex<VecDeque<Result<VerifiedProductOutboundTargetMetadata, ProductSurfaceFailure>>>,
+}
+
+impl ScriptedTargetResolver {
+    fn transient_then_success() -> Self {
+        Self {
+            results: Mutex::new(
+                vec![
+                    Err(ProductSurfaceFailure::Transient {
+                        reason: "target metadata temporarily unavailable".to_string(),
+                    }),
+                    Ok(VerifiedProductOutboundTargetMetadata {
+                        external_conversation_ref: ExternalConversationRef::new(
+                            None,
+                            "tg-chat-retry",
+                            None,
+                            None,
+                        )
+                        .expect("valid external conversation"),
+                        external_actor_ref: None,
+                    }),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        }
+    }
+}
+
+#[async_trait]
+impl ProductOutboundTargetResolver for ScriptedTargetResolver {
+    async fn resolve_product_outbound_target_metadata(
+        &self,
+        _target: &ironclaw_outbound::ValidatedReplyTargetBinding,
+        _require_direct_message: bool,
+    ) -> Result<VerifiedProductOutboundTargetMetadata, ProductSurfaceFailure> {
+        self.results
+            .lock()
+            .expect("scripted target resolver lock")
+            .pop_front()
+            .expect("scripted target resolver exhausted")
+    }
+}
+
 fn coordinated_final_reply<'a>(
     scope: TurnScope,
     extension_id: &'a str,
@@ -1045,6 +1098,96 @@ async fn coordinator_persists_sending_before_the_adapter_delivers() {
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::Delivered
     );
+}
+
+#[tokio::test]
+async fn transient_target_preflight_stays_prepared_and_replay_delivers() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let policy = configured_policy(&store, &validator);
+    let resolver = ScriptedTargetResolver::transient_then_success();
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-after-preflight-retry")],
+        })],
+    ));
+    let coordinator = coordinator_over(&store, &adapter);
+    let delivery = delivery_request(scope.clone());
+    let thread_scope = project_thread_scope();
+
+    let first = coordinator
+        .deliver(
+            &policy,
+            &preferences,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            CoordinatedDeliveryRequest {
+                intent: DeliveryIntent::FinalReply,
+                delivery: delivery.clone(),
+                parts: vec![ironclaw_product::OutboundPart::Text(
+                    "retry the same durable delivery".to_string(),
+                )],
+                attachments: Vec::new(),
+                thread_anchor: None,
+                require_direct_message_target: false,
+                extension_id: "vendorx",
+                thread_scope: &thread_scope,
+            },
+        )
+        .await;
+    assert!(matches!(
+        first,
+        Err(CoordinatedDeliveryError::Workflow(
+            ProductSurfaceFailure::Transient { .. }
+        ))
+    ));
+    assert_eq!(adapter.deliver_calls(), 0);
+    let attempts = store
+        .list_delivery_attempts(scope.clone())
+        .await
+        .expect("load prepared attempt");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].status, OutboundDeliveryStatus::Prepared);
+    assert_eq!(attempts[0].failure_kind, None);
+
+    let replay = coordinator
+        .deliver(
+            &policy,
+            &preferences,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            CoordinatedDeliveryRequest {
+                intent: DeliveryIntent::FinalReply,
+                delivery,
+                parts: vec![ironclaw_product::OutboundPart::Text(
+                    "retry the same durable delivery".to_string(),
+                )],
+                attachments: Vec::new(),
+                thread_anchor: None,
+                require_direct_message_target: false,
+                extension_id: "vendorx",
+                thread_scope: &thread_scope,
+            },
+        )
+        .await
+        .expect("replay reaches vendor egress after preflight recovers");
+    assert!(matches!(
+        replay,
+        CoordinatedDeliveryOutcome::Delivered { .. }
+    ));
+    assert_eq!(adapter.deliver_calls(), 1);
+    let attempts = store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("load delivered attempt");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].status, OutboundDeliveryStatus::Delivered);
 }
 
 #[tokio::test]
@@ -1342,6 +1485,8 @@ async fn coordinator_partial_multipart_failure_is_terminal_without_retry() {
         })],
     ));
     let coordinator = coordinator_over(&store, &adapter);
+    let delivery = delivery_request(scope.clone());
+    let thread_scope = project_thread_scope();
 
     let outcome = coordinator
         .deliver(
@@ -1349,7 +1494,18 @@ async fn coordinator_partial_multipart_failure_is_terminal_without_retry() {
             &preferences,
             &resolver,
             &NO_PROJECT_FILESYSTEM,
-            coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
+            CoordinatedDeliveryRequest {
+                intent: DeliveryIntent::FinalReply,
+                delivery: delivery.clone(),
+                parts: vec![ironclaw_product::OutboundPart::Text(
+                    "one multipart delivery".to_string(),
+                )],
+                attachments: Vec::new(),
+                thread_anchor: None,
+                require_direct_message_target: false,
+                extension_id: "vendorx",
+                thread_scope: &thread_scope,
+            },
         )
         .await
         .expect("delivery drives");
@@ -1368,6 +1524,37 @@ async fn coordinator_partial_multipart_failure_is_terminal_without_retry() {
     assert_eq!(
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::Failed
+    );
+
+    let replay = coordinator
+        .deliver(
+            &policy,
+            &preferences,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            CoordinatedDeliveryRequest {
+                intent: DeliveryIntent::FinalReply,
+                delivery,
+                parts: vec![ironclaw_product::OutboundPart::Text(
+                    "one multipart delivery".to_string(),
+                )],
+                attachments: Vec::new(),
+                thread_anchor: None,
+                require_direct_message_target: false,
+                extension_id: "vendorx",
+                thread_scope: &thread_scope,
+            },
+        )
+        .await
+        .expect("terminal replay is a semantic no-op");
+    assert!(matches!(
+        replay,
+        CoordinatedDeliveryOutcome::DuplicateSuppressed { .. }
+    ));
+    assert_eq!(
+        adapter.deliver_calls(),
+        1,
+        "a delivery that reached the adapter must never be made retryable again"
     );
 }
 
@@ -1691,22 +1878,55 @@ async fn coordinator_fails_closed_when_workspace_file_is_missing_or_denied() {
 }
 
 #[tokio::test]
-async fn coordinator_classifies_unavailable_workspace_reader_as_transport_unavailable() {
+async fn unavailable_workspace_preflight_stays_prepared_and_replay_delivers() {
     let files = ScriptedProjectFilesystem::default();
     files.insert_error("/workspace/report.pdf", ProjectFsError::Unavailable);
-    let (outcome, adapter, store, scope) = coordinate_workspace_reply(
-        &files,
-        "attachment: /workspace/report.pdf",
-        vec![workspace_attachment_ref(
-            "report",
-            "/workspace/report.pdf",
-            "report.pdf",
-            "application/pdf",
-            4,
-        )],
-        Vec::new(),
-    )
-    .await;
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let policy = configured_policy(&store, &validator);
+    let resolver = FakeProductOutboundTargetResolver;
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-after-workspace-retry")],
+        })],
+    ));
+    let coordinator = coordinator_over(&store, &adapter);
+    let delivery = delivery_request(scope.clone());
+    let attachment = workspace_attachment_ref(
+        "report",
+        "/workspace/report.pdf",
+        "report.pdf",
+        "application/pdf",
+        4,
+    );
+    let thread_scope = project_thread_scope();
+
+    let outcome = coordinator
+        .deliver(
+            &policy,
+            &preferences,
+            &resolver,
+            &files,
+            CoordinatedDeliveryRequest {
+                intent: DeliveryIntent::FinalReply,
+                delivery: delivery.clone(),
+                parts: vec![ironclaw_product::OutboundPart::Text(
+                    "attachment: /workspace/report.pdf".to_string(),
+                )],
+                attachments: vec![attachment.clone()],
+                thread_anchor: None,
+                require_direct_message_target: false,
+                extension_id: "vendorx",
+                thread_scope: &thread_scope,
+            },
+        )
+        .await;
 
     assert!(matches!(
         outcome,
@@ -1715,15 +1935,46 @@ async fn coordinator_classifies_unavailable_workspace_reader_as_transport_unavai
         ))
     ));
     assert_eq!(adapter.deliver_calls(), 0);
-    let attempts = store.list_delivery_attempts(scope).await.expect("attempts");
-    assert_eq!(
-        attempts[0].status,
-        ironclaw_outbound::OutboundDeliveryStatus::Failed
-    );
-    assert_eq!(
-        attempts[0].failure_kind,
-        Some(ironclaw_outbound::DeliveryFailureKind::TransportUnavailable)
-    );
+    let attempts = store
+        .list_delivery_attempts(scope.clone())
+        .await
+        .expect("attempts");
+    assert_eq!(attempts[0].status, OutboundDeliveryStatus::Prepared);
+    assert_eq!(attempts[0].failure_kind, None);
+
+    files.insert_file("/workspace/report.pdf", 4);
+    let replay = coordinator
+        .deliver(
+            &policy,
+            &preferences,
+            &resolver,
+            &files,
+            CoordinatedDeliveryRequest {
+                intent: DeliveryIntent::FinalReply,
+                delivery,
+                parts: vec![ironclaw_product::OutboundPart::Text(
+                    "attachment: /workspace/report.pdf".to_string(),
+                )],
+                attachments: vec![attachment],
+                thread_anchor: None,
+                require_direct_message_target: false,
+                extension_id: "vendorx",
+                thread_scope: &thread_scope,
+            },
+        )
+        .await
+        .expect("workspace replay delivers after the reader recovers");
+    assert!(matches!(
+        replay,
+        CoordinatedDeliveryOutcome::Delivered { .. }
+    ));
+    assert_eq!(adapter.deliver_calls(), 1);
+    let attempts = store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("delivered attempt");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].status, OutboundDeliveryStatus::Delivered);
 }
 
 #[tokio::test]
