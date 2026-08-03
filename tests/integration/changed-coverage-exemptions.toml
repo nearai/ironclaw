@@ -780,6 +780,241 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 # ---------------------------------------------------------------------------
+# PR #5981 queued-message steering. Every line below is one of four classes
+# the hermetic integration harness cannot execute (full class-by-class
+# breakdown in issue #7006): (1) fault-injection error paths (CAS conflict /
+# fs error / serialization failure / poisoned lock / best-effort flip-failure
+# logging / enqueue rollback) — crate-tier covered by scripted doubles and the
+# queue conformance suite; (2) serde legacy-row defaults that only run when
+# deserializing pre-feature rows; (3) default trait-impl stubs and Arc
+# forwarders whose production backends override them; (4) alternate-backend /
+# disabled-mode code (in-memory queue, RejectingInputEnqueue, compat mapping
+# arm) that integration deliberately does not wire.
+
+[[exemption]]
+path = "crates/ironclaw_loop_contracts/src/resolver.rs"
+lines = [234, 235, 236, 237]
+owner = "@nearai/reborn"
+reason = "with_steering_policy builds no-steering profiles; the integration harness runs the default steering-on profile. Covered by the product-tier allow_steering full-chain test."
+issue = "https://github.com/nearai/ironclaw/issues/7006"
+review_after = "2026-11-01"
+
+[[exemption]]
+path = "crates/ironclaw_loop_host/src/durable_input_queue.rs"
+lines = [
+  67, 68, 69, 70, 71, 72, 73, 116, 117, 129, 130, 131, 132, 133,
+  145, 146, 147, 167, 168, 173, 174, 176, 180, 189, 195, 196, 197, 201,
+  203, 204, 205, 210, 211, 213, 217, 221, 291, 292, 293, 294, 297, 298,
+  299, 300, 301, 303, 304, 305, 306, 307, 411, 412, 413, 414, 417, 418,
+  419, 420, 421, 423, 424, 425, 426, 427,
+]
+branch_lines = [179]
+owner = "@nearai/reborn"
+reason = "Debug impl plus CAS-conflict/fs-error/serialization/exhaustion mapping helpers, the already-consumed replay-repair arm, and the confirm_flips/retained-document reconcile fault arms: fault paths unreachable without storage fault injection; crate-tier durable-queue tests cover them (corrupt doc, CAS contention, retained/reclaimed document, replay repair)."
+issue = "https://github.com/nearai/ironclaw/issues/7006"
+review_after = "2026-11-01"
+
+[[exemption]]
+path = "crates/ironclaw_loop_host/src/input_port.rs"
+lines = [151, 152, 157, 158, 161, 162]
+owner = "@nearai/reborn"
+reason = "Queue-error mapping arm in the loop input port adapter; integration cannot make the composed durable queue fail. Crate-tier adapter tests cover it."
+issue = "https://github.com/nearai/ironclaw/issues/7006"
+review_after = "2026-11-01"
+
+[[exemption]]
+path = "crates/ironclaw_loop_host/src/input_queue.rs"
+lines = [
+  149, 151, 177, 179, 239, 299, 300, 313, 394, 395, 409, 410, 433, 434,
+  435, 436, 441, 449, 452, 455, 457, 458, 470, 471, 472, 473, 474, 492,
+  515, 538, 560, 561, 562, 564, 601, 602, 615, 618, 621, 622, 628, 636,
+  639, 642, 644, 645, 657, 658, 659, 660, 661, 680, 702, 722, 745, 759,
+  784, 798, 838, 839, 847, 852, 854, 855, 863, 868, 870, 871, 880, 881,
+]
+branch_lines = [238, 298, 312, 393, 432, 512, 513, 615, 617]
+owner = "@nearai/reborn"
+reason = "RejectingInputEnqueue (integration wires a real queue), watermark-compaction edge arms, best-effort flip-failure debug logging, poisoned-lock collapse, and the in-memory backend (integration runs the durable backend). All covered by the crate-tier conformance suite that runs over both backends."
+issue = "https://github.com/nearai/ironclaw/issues/7006"
+review_after = "2026-11-01"
+
+[[exemption]]
+path = "crates/ironclaw_loop_host/src/lib.rs"
+lines = [2287, 2288, 2289, 2290, 2291, 2292, 2293, 2294, 2295, 2296]
+branch_lines = [2301, 2302]
+owner = "@nearai/reborn"
+reason = "Coalesced-user-message ref error branch and can_merge short-circuit arms; the error requires an invalid hash-format ref that cannot be constructed through the harness. Crate-tier prompt-assembly tests cover the merge arms."
+issue = "https://github.com/nearai/ironclaw/issues/7006"
+review_after = "2026-11-01"
+
+[[exemption]]
+path = "crates/ironclaw_product/src/inbound_turn.rs"
+# Contiguous regions (error arm in the admit call site, error arm in the
+# readmit replay arm, the steering_admission_failure mapping fn): llvm's
+# line attribution for these arms wobbles between runs, so the whole region
+# is listed rather than chasing per-run exact lines.
+lines = [
+  1168, 1169, 1170, 1171, 1172, 1173, 1174, 1175, 1176,
+  1337, 1338, 1339, 1340, 1341, 1342, 1343, 1344, 1345,
+  1348, 1349, 1350, 1351, 1352, 1353, 1354, 1355, 1356, 1357, 1358, 1359,
+  1360, 1361, 1362, 1363, 1364, 1365, 1366, 1367, 1368, 1369, 1370, 1371,
+  1372, 1373, 1374, 1375, 1376, 1377, 1378,
+]
+owner = "@nearai/reborn"
+reason = "steering_admission_failure error-mapping fn and the admission-failure match arms: every arm requires an injected thread-service/queue fault; covered by the scripted inbound_turn_contract crate-tier tests (mark failure, settle failure, vanishing enqueue)."
+issue = "https://github.com/nearai/ironclaw/issues/7006"
+review_after = "2026-11-01"
+
+[[exemption]]
+path = "crates/ironclaw_product/src/reborn_services.rs"
+lines = [
+  3503, 3504, 3505, 3506, 3507, 3508, 3509, 3510, 3512, 3513, 3514, 3515,
+  3516, 3517, 3518, 6397, 6398, 6399, 6401, 6404, 6407, 6408,
+]
+owner = "@nearai/reborn"
+reason = "steering_admission_error mapping fn and queued-replay run-id parse failure arms: fault-only paths covered by the scripted reborn_services_contract crate-tier tests."
+issue = "https://github.com/nearai/ironclaw/issues/7006"
+review_after = "2026-11-01"
+
+[[exemption]]
+path = "crates/ironclaw_product/src/steering.rs"
+lines = [
+  121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134,
+  136, 137, 138, 139, 140, 163, 164, 165, 166, 167, 188, 189, 193, 194,
+  234, 235, 236, 241, 242, 243, 244, 247, 249, 251, 255, 256, 257, 259,
+  260, 264, 268, 295, 296, 307, 308, 310, 311, 312, 326, 327, 328,
+]
+branch_lines = [123, 124, 249, 257]
+owner = "@nearai/reborn"
+reason = "Admission gateway fault arms: enqueue-failure rollback, disabled-queue settle on replay, ScopeNotFound fallback, mark-failure point-read reconciliation, invalid message ref, enqueue error classification. All require injected faults; covered by the scripted crate-tier contract tests in both consuming surfaces."
+issue = "https://github.com/nearai/ironclaw/issues/7006"
+review_after = "2026-11-01"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_composition/src/factory/test_support.rs"
+lines = [356]
+owner = "@nearai/reborn"
+reason = "test-support-feature factory wiring line (RejectingInputEnqueue for the channel-host assembly); compiled only under the dev-only test-support feature."
+issue = "https://github.com/nearai/ironclaw/issues/7006"
+review_after = "2026-11-01"
+
+[[exemption]]
+path = "crates/ironclaw_reborn_openai_compat/src/ack_helpers.rs"
+lines = [
+  55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68,
+  69, 70, 77, 78, 80, 81, 82, 83,
+]
+owner = "@nearai/reborn"
+reason = "DeferredBusy ack mapping arm: the compat lane never submits into a busy thread in the integration harness. Crate-tier mapping test covers the arm."
+issue = "https://github.com/nearai/ironclaw/issues/7006"
+review_after = "2026-11-01"
+
+[[exemption]]
+path = "crates/ironclaw_runner/src/steering_reconcile.rs"
+lines = [
+  51, 53, 55, 57, 67, 69, 71, 73, 75, 89, 91, 237, 240, 241,
+  254, 255, 272, 274, 286, 288, 330, 332,
+]
+branch_lines = [236]
+owner = "@nearai/reborn"
+reason = "Cancel-reconcile decorator fault arms plus the transition-port decorator forwarders and reconcile-failure logging (reject_unconsumed failure, non-terminal passthrough); require an injected queue failure or transitions the harness does not drive. Crate-tier decorator tests cover every arm."
+issue = "https://github.com/nearai/ironclaw/issues/7006"
+review_after = "2026-11-01"
+
+[[exemption]]
+path = "crates/ironclaw_runner/src/runtime.rs"
+lines = [404, 405, 406, 407, 676]
+branch_lines = [664, 843]
+owner = "@nearai/reborn"
+reason = "input_queue_reconcile None arms of the observer subscription and transition-port decoration: this gate measures integration-tier lcov, and the integration harness (tests/integration/support/group.rs) always wires Some — the None arms run only in crate-tier compositions (e.g. ironclaw_product inbound_turn_contract), which this lcov cannot see. Plus the observer-subscription error arm (subscribe fails only on a duplicate observer id) and its build-error Display arm."
+issue = "https://github.com/nearai/ironclaw/issues/7006"
+review_after = "2026-11-01"
+
+[[exemption]]
+path = "crates/ironclaw_threads/src/contract.rs"
+lines = [721, 728]
+owner = "@nearai/reborn"
+reason = "should_reuse_assistant_run_message fallthrough arm and the finalized attachment-identity comparison for statuses/mismatches integration runs never present at finalize time; crate-tier backend tests cover every arm."
+issue = "https://github.com/nearai/ironclaw/issues/7006"
+review_after = "2026-11-01"
+
+[[exemption]]
+path = "crates/ironclaw_threads/src/filesystem_service.rs"
+lines = [1732, 1733, 1749, 1761]
+branch_lines = [1685]
+owner = "@nearai/reborn"
+reason = "read_thread_message miss/error arms: the reconcile point-read only runs after a mark_message_queued failure, which integration cannot inject. Crate-tier service tests cover the read."
+issue = "https://github.com/nearai/ironclaw/issues/7006"
+review_after = "2026-11-01"
+
+[[exemption]]
+path = "crates/ironclaw_threads/src/in_memory.rs"
+lines = [350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 360, 361, 362, 363]
+owner = "@nearai/reborn"
+reason = "In-memory backend read_thread_message: integration composes the filesystem thread service; the in-memory backend is exercised by crate-tier tests."
+issue = "https://github.com/nearai/ironclaw/issues/7006"
+review_after = "2026-11-01"
+
+[[exemption]]
+path = "crates/ironclaw_threads/src/service.rs"
+lines = [
+  56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68,
+  73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84,
+  425, 426, 427, 428, 429, 430, 431, 432, 433, 434, 435, 436,
+  437, 438, 439, 440, 441, 442, 443, 444, 445, 446,
+]
+owner = "@nearai/reborn"
+reason = "Default trait-impl Backend-error stubs for mark_message_queued/read_thread_message (both production backends override them) and the Arc<S> forwarding lines; crate-tier tests cover both."
+issue = "https://github.com/nearai/ironclaw/issues/7006"
+review_after = "2026-11-01"
+
+[[exemption]]
+path = "crates/ironclaw_turns/src/process_projection/metadata.rs"
+lines = [139, 140, 141]
+owner = "@nearai/reborn"
+reason = "serde default fn for legacy persisted rows missing steering_allowed; integration always writes the field. Crate-tier legacy-row deserialization test covers it."
+issue = "https://github.com/nearai/ironclaw/issues/7006"
+review_after = "2026-11-01"
+
+[[exemption]]
+path = "crates/ironclaw_turns/src/status.rs"
+lines = [168, 169, 170, 171, 172, 191, 192]
+owner = "@nearai/reborn"
+reason = "serde default fn for legacy persisted rows missing allow_steering; integration always writes the field. Crate-tier legacy-row deserialization test covers it."
+issue = "https://github.com/nearai/ironclaw/issues/7006"
+review_after = "2026-11-01"
+
+# The three files below are the gate's "contributed no instrumented lines"
+# arm: their added lines are signature/variant/match-arm churn from the
+# deferred-ack deletion and the DeferredBusy response variant, for which
+# llvm-cov emits no DA records in the integration lcov. Exempting the added
+# lines removes the empty denominator; the surrounding behavior is pinned by
+# the executor ordering tests and the busy-submit contract tests.
+
+[[exemption]]
+path = "crates/ironclaw_agent_loop/src/executor/budget.rs"
+lines = [19, 54]
+owner = "@nearai/reborn"
+reason = "Signature-churn lines from deleting the deferred-ack threading; no DA records emitted for them in the integration lcov."
+issue = "https://github.com/nearai/ironclaw/issues/7006"
+review_after = "2026-11-01"
+
+[[exemption]]
+path = "crates/ironclaw_agent_loop/src/executor/input.rs"
+lines = [47, 66, 80, 81, 82, 83, 84, 85, 87, 98, 231, 232, 233]
+owner = "@nearai/reborn"
+reason = "Signature/match-arm churn from making the ack lifecycle stage-local; no DA records emitted for them in the integration lcov. Drain/ack behavior is pinned by the executor ordering tests and the steering integration scenario."
+issue = "https://github.com/nearai/ironclaw/issues/7006"
+review_after = "2026-11-01"
+
+[[exemption]]
+path = "crates/ironclaw_product_contracts/src/product_wire.rs"
+lines = [392, 393, 394, 395, 396, 397, 398]
+owner = "@nearai/reborn"
+reason = "DeferredBusy response-variant field declarations (moved here by the WS5 product_wire inversion); no DA records emitted for enum variant bodies in the integration lcov."
+issue = "https://github.com/nearai/ironclaw/issues/7006"
+review_after = "2026-11-01"
+
+# ---------------------------------------------------------------------------
 # WS2.1 extension_host port inversion (PR #6998). One entry, for one line.
 #
 # The port move deleted `ironclaw_product`'s re-export of

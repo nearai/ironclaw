@@ -1443,6 +1443,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
         cancellation_factory: Some(adapters.cancellation_factory),
         skill_context_source: None,
         input_queue: Some(adapters.input_queue),
+        input_queue_reconcile: None,
         identity_context_source: adapters.identity_context_source,
         user_profile_source: Arc::new(EmptyUserProfileSource),
         memory_context_service: None,

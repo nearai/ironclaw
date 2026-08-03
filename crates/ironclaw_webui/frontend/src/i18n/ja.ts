@@ -118,6 +118,7 @@ registerPack("ja", {
   "chat.identityUser": "あなた",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "最新にジャンプ",
+  "chat.queued": "キュー待ち",
   "shortcuts.title": "キーボード ショートカット",
   "shortcuts.send": "メッセージの送信",
   "shortcuts.newline": "改行",

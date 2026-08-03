@@ -29,6 +29,7 @@ mod compaction_task;
 mod context_shadow;
 mod context_window_cache;
 mod driver_host_port_adapters;
+mod durable_input_queue;
 mod external_tool_capability;
 mod filesystem_skill_bundle_source;
 pub mod identity_context;
@@ -95,6 +96,7 @@ pub use driver_host_port_adapters::{
     HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, NoExtraLoopInputPort,
     turn_error_to_host_error,
 };
+pub use durable_input_queue::FilesystemHostInputQueue;
 pub use external_tool_capability::wrap_external_tools;
 pub use filesystem_skill_bundle_source::{FilesystemSkillBundleRoot, FilesystemSkillBundleSource};
 pub use identity_context::{
@@ -105,7 +107,11 @@ pub use identity_context::{
     identity_message_ref,
 };
 pub use input_port::HostQueueLoopInputPort;
-pub use input_queue::{HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError};
+pub use input_queue::{
+    EnqueueQueuedMessageRequest, HostInputBatch, HostInputEnqueuePort, HostInputEnvelope,
+    HostInputQueue, HostInputQueueError, HostInputQueueReconcile, InMemoryHostInputQueue,
+    MAX_QUEUED_INPUTS_PER_RUN, RejectingInputEnqueue,
+};
 pub use ironclaw_loop_contracts::PromptContextTokenBudget;
 pub use model_gateway::{
     LlmModelProfilePolicy, LlmProviderModelGateway, ModelRouteProviderPool,
@@ -1540,7 +1546,7 @@ where
                     image_parts,
                 });
             }
-            return Ok(messages);
+            return merge_consecutive_text_user_messages(messages);
         }
 
         let mut messages_by_ref = context_messages_by_ref(context.messages);
@@ -1703,7 +1709,7 @@ where
                 image_parts,
             });
         }
-        Ok(resolved)
+        merge_consecutive_text_user_messages(resolved)
     }
 
     async fn load_model_context_window(
@@ -2257,6 +2263,73 @@ fn validate_context_cursor(
         }
     }
     Ok(())
+}
+
+/// Coalesce runs of consecutive plain-text user messages into a single provider
+/// turn (some providers reject consecutive same-role turns). This is the final
+/// provider-API shaping step before the request leaves for the gateway.
+///
+/// A coalesced turn no longer corresponds to a single thread message, so it must
+/// not inherit the first contributor's `content_ref` — that would let downstream
+/// code mis-map the merged turn back to one transcript row. Instead the merged
+/// message gets a synthetic `msg:coalesced.*` ref. The durable transcript keeps
+/// the original rows separate; the only consumer past this point is the provider
+/// gateway, which reads role/content, not `content_ref`.
+fn merge_consecutive_text_user_messages(
+    messages: Vec<HostManagedModelMessage>,
+) -> Result<Vec<HostManagedModelMessage>, AgentLoopHostError> {
+    let mut merged: Vec<HostManagedModelMessage> = Vec::with_capacity(messages.len());
+    for message in messages {
+        if can_merge_text_user_message(&message)
+            && let Some(previous) = merged.last_mut()
+            && can_merge_text_user_message(previous)
+        {
+            previous.content.push('\n');
+            previous.content.push_str(&message.content);
+            previous.content_ref =
+                coalesced_user_message_ref(&previous.content_ref, &message.content_ref)?;
+            continue;
+        }
+        merged.push(message);
+    }
+    Ok(merged)
+}
+
+/// Build the synthetic content ref for a coalesced user turn. Deterministic in a
+/// turn and intentionally not a real `msg:<id>` ref so it cannot be parsed back
+/// into a transcript message identity. The ref is transient (never persisted),
+/// so non-cryptographic hashing is sufficient.
+fn coalesced_user_message_ref(
+    first: &LoopMessageRef,
+    next: &LoopMessageRef,
+) -> Result<LoopMessageRef, AgentLoopHostError> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    first.as_str().hash(&mut hasher);
+    next.as_str().hash(&mut hasher);
+    let hash = hasher.finish();
+    let candidate = format!("msg:coalesced.{hash:016x}");
+    LoopMessageRef::new(candidate.as_str()).map_err(|error| {
+        // Keep the concrete validation failure server-side; the candidate is a
+        // synthetic hash-derived ref, so logging it exposes no user content.
+        // The returned error stays sanitized.
+        tracing::debug!(
+            error = %error,
+            candidate = %candidate,
+            "coalesced user message ref failed loop-ref validation"
+        );
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            "coalesced user message reference could not be represented",
+        )
+    })
+}
+
+fn can_merge_text_user_message(message: &HostManagedModelMessage) -> bool {
+    message.role == HostManagedModelMessageRole::User
+        && message.tool_result_provider_call.is_none()
+        && message.tool_result_content.is_none()
+        && message.image_parts.is_empty()
 }
 
 fn context_messages_by_ref(messages: Vec<ContextMessage>) -> HashMap<String, ContextMessage> {

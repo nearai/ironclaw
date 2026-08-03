@@ -132,7 +132,7 @@ fn validate_cursor_for_run(
 }
 
 fn host_queue_error_into_host_error(error: HostInputQueueError) -> AgentLoopHostError {
-    tracing::warn!(
+    tracing::debug!(
         component = "host_input_queue",
         operation = "map_queue_error",
         error = %error,
@@ -146,6 +146,22 @@ fn host_queue_error_into_host_error(error: HostInputQueueError) -> AgentLoopHost
         HostInputQueueError::InvalidCursor { reason } => {
             AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, reason)
         }
+        // A disabled queue never reaches the loop port (a runtime without
+        // steering wires `NoExtraLoopInputPort`); mapped for exhaustiveness.
+        HostInputQueueError::Disabled => AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "input queue is not wired for this runtime",
+        ),
+        // Enqueue-side refusals (`RunClosed`, `CapacityExhausted`) never
+        // reach the loop's drain/ack port either; mapped for exhaustiveness.
+        HostInputQueueError::RunClosed => AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "input queue for the run is closed",
+        ),
+        HostInputQueueError::CapacityExhausted => AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "input queue for the run is full",
+        ),
         HostInputQueueError::Internal => AgentLoopHostError::new(
             AgentLoopHostErrorKind::Internal,
             "input queue internal error",

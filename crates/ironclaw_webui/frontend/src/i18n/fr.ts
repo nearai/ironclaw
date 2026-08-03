@@ -118,6 +118,7 @@ registerPack("fr", {
   "chat.identityUser": "Vous",
   "chat.identityAssistant": "IronClaw",
   "chat.jumpToLatest": "Aller aux dernières",
+  "chat.queued": "En file d'attente",
   "shortcuts.title": "Raccourcis clavier",
   "shortcuts.send": "Envoyer un message",
   "shortcuts.newline": "Nouvelle ligne",
