@@ -969,9 +969,10 @@ fn diagnostic_redaction_marker_is_idempotent() {
 
 #[test]
 fn guest_log_count_order_levels_and_total_scan_work_are_bounded() {
-    const _: () = assert!(
-        MAX_WASM_DIAGNOSTIC_BYTES.checked_mul(MAX_WASM_DIAGNOSTICS_PER_EXECUTION)
-            == Some(4_096_000)
+    assert_eq!(
+        MAX_WASM_DIAGNOSTIC_BYTES.checked_mul(MAX_WASM_DIAGNOSTICS_PER_EXECUTION),
+        Some(4_096_000),
+        "the count and per-record caps must bound total diagnostic scan work",
     );
 
     let max_sized = "z".repeat(MAX_WASM_DIAGNOSTIC_BYTES);
