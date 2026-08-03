@@ -18,17 +18,7 @@ pub(crate) struct DoctorCommand {
 
 impl DoctorCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
-        let ambient_proxy_present = [
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "ALL_PROXY",
-            "http_proxy",
-            "https_proxy",
-            "all_proxy",
-        ]
-        .into_iter()
-        .any(|name| std::env::var_os(name).is_some());
-        let dto = build_doctor_dto_with_ambient_proxy_presence(&context, ambient_proxy_present);
+        let dto = build_doctor_dto(&context);
         let mode = if self.json {
             OutputMode::Json
         } else {
@@ -38,9 +28,8 @@ impl DoctorCommand {
     }
 }
 
-#[cfg(test)]
 fn build_doctor_dto(context: &RebornCliContext) -> DoctorDto {
-    build_doctor_dto_with_ambient_proxy_presence(context, false)
+    build_doctor_dto_with_ambient_proxy_presence(context, context.ambient_proxy_present())
 }
 
 fn build_doctor_dto_with_ambient_proxy_presence(
