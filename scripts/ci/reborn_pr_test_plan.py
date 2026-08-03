@@ -21,6 +21,7 @@ MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
 IGNORED_PREFIXES = ("docs/", ".github/ISSUE_TEMPLATE/")
 DEDICATED_WORKFLOW_PREFIXES = ("tools/ironclaw_stress/",)
+DEDICATED_E2E_PREFIX = "tests/e2e/"
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
 PR_STATIC_CONTROL_PATHS = {
     "Cargo.toml",
@@ -334,6 +335,9 @@ def build_plan(
             continue
         if path.startswith(DEDICATED_WORKFLOW_PREFIXES):
             reasons.append(f"dedicated stress workflow owns: {path}")
+            continue
+        if path.startswith(DEDICATED_E2E_PREFIX):
+            reasons.append(f"dedicated Reborn E2E workflows own: {path}")
             continue
         if path == CHANGED_COVERAGE_MANIFEST:
             reasons.append("changed-coverage policy is statically validated")
