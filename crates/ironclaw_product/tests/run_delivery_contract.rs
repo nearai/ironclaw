@@ -526,9 +526,8 @@ impl OutboundStateStorePort for ClaimLossStore {
             .projection_ref
             .as_str()
             .to_string();
-        // Failure feedback is a separate system-notice delivery. Count and intercept only the
-        // policy/run-notification family selected by the fixture, so feedback still exercises
-        // the real Prepared -> Sending -> Delivered path.
+        // Count run notifications while non-target deliveries pass through normally. This keeps
+        // the owner-Failed control live while unconfirmed-loser cases prove zero feedback egress.
         if projection_ref.starts_with("run-notification:") {
             self.run_notification_claim_calls
                 .fetch_add(1, Ordering::SeqCst);

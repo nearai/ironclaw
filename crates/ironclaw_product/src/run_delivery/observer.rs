@@ -327,8 +327,9 @@ impl RunDeliveryObserver {
                 error = %error,
                 "final reply delivery failed after immediate ACK"
             );
-            // Best-effort feedback so the user is not left in silence. Skip
-            // if a blocked-state notification was already delivered.
+            // Best-effort feedback so the user is not left in silence. Skip it after a
+            // blocked-state notification and for an unconfirmed loser, which must not
+            // trigger another vendor egress.
             let feedback = match &error {
                 RunDeliveryError::RunWaitTimedOut { .. } => Some(prompts::DELIVERY_TIMEOUT_MESSAGE),
                 RunDeliveryError::RunWaitTimedOutAfterNotification { .. } => None,
