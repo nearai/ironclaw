@@ -286,6 +286,59 @@ class BaseCoverageDecisionTests(unittest.TestCase):
                 gate.load_base_coverage(empty, ROOT, "fixture")
 
 
+class UninstrumentableScaffoldingTests(unittest.TestCase):
+    """Lines LLVM cannot emit a coverage region for.
+
+    Both cases below are move-PR regressions: a file whose ONLY changed lines
+    are scaffolding must not read as "absent from coverage" or "contributed no
+    instrumented lines", because one unclassified line defeats the escape and
+    the gate then fails closed on a pure relocation.
+    """
+
+    def test_inner_attributes_are_scaffolding(self) -> None:
+        """`#![forbid(unsafe_code)]` — every crate root carries one.
+
+        The classifier matched outer `#[...]` but not the inner `#![...]`
+        form, so a moved `lib.rs` of pure `mod`/`pub use` declarations still
+        had exactly one unclassified line and stayed in the failure bucket.
+        """
+        source = (
+            "//! docs\n"
+            "\n"
+            "#![forbid(unsafe_code)]\n"
+            "#![allow(\n"
+            "    clippy::all\n"
+            ")]\n"
+            "\n"
+            "mod payload;\n"
+            "pub use payload::{A, B};\n"
+        )
+        self.assertEqual(
+            gate.mechanically_uninstrumentable_lines(source),
+            {1, 2, 3, 4, 5, 6, 7, 8, 9},
+        )
+
+    def test_const_and_static_items_are_scaffolding(self) -> None:
+        """A `const` initializer is compile-time; it has no coverage region.
+
+        Repointing an asset path is the entire content of a package move, and
+        it lands exclusively on `const X: &str = include_str!(...)` lines.
+        """
+        source = (
+            'const MANIFEST: &str = include_str!("../../../packages/x/manifest.toml");\n'
+            'pub(super) const WASM: &[u8] = include_bytes!("../wasm/x.wasm");\n'
+            "static TABLE: &[u8] = &[\n"
+            "    1, 2, 3,\n"
+            "];\n"
+            "fn live() -> u8 {\n"
+            "    1\n"
+            "}\n"
+        )
+        uninstrumentable = gate.mechanically_uninstrumentable_lines(source)
+        self.assertEqual(uninstrumentable & {1, 2, 3, 4, 5}, {1, 2, 3, 4, 5})
+        self.assertNotIn(7, uninstrumentable, "a real function body stays measurable")
+
+
 class ChangedCoverageDiscoveryTests(unittest.TestCase):
     """The gate must resolve production paths from the crate inventory.
 

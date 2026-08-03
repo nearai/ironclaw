@@ -629,13 +629,20 @@ def mechanically_uninstrumentable_lines(source: str) -> set[int]:
     uninstrumentable: set[int] = set()
     attribute_depth = 0
     in_use = False
+    in_const = False
     for line_number, line in enumerate(lexical_lines, start=1):
         stripped = line.strip()
         if attribute_depth:
             uninstrumentable.add(line_number)
             attribute_depth += stripped.count("[") - stripped.count("]")
             continue
-        if stripped.startswith("#["):
+        # Outer (`#[...]`) and INNER (`#![...]`) attributes alike. The inner
+        # form was missing, and it is the one every crate root carries:
+        # `#![forbid(unsafe_code)]` on its own kept a moved `lib.rs` of pure
+        # `mod`/`pub use` declarations in the "absent from coverage" bucket,
+        # because one unclassified line is enough to defeat the
+        # `candidate_lines <= uninstrumentable_lines` escape.
+        if stripped.startswith("#[") or stripped.startswith("#!["):
             uninstrumentable.add(line_number)
             attribute_depth = stripped.count("[") - stripped.count("]")
             continue
@@ -647,6 +654,25 @@ def mechanically_uninstrumentable_lines(source: str) -> set[int]:
         if re.match(r"^(?:pub(?:\([^)]*\))?\s+)?use\b", stripped):
             uninstrumentable.add(line_number)
             in_use = ";" not in stripped
+            continue
+        # A `const`/`static` item is evaluated at compile time and carries no
+        # LLVM coverage region — an `include_str!`/`include_bytes!` initializer
+        # least of all. Spans to the terminating `;` exactly like `use`, so a
+        # multi-line initializer is covered too. Without this, repointing an
+        # asset path (the whole content of a package move) leaves a file whose
+        # only changed lines are const declarations, which reads as
+        # "contributed no instrumented lines" and fails closed.
+        if in_const:
+            uninstrumentable.add(line_number)
+            if ";" in stripped:
+                in_const = False
+            continue
+        if re.match(
+            r"^(?:pub(?:\([^)]*\))?\s+)?(?:const|static)\s+(?:mut\s+)?[A-Z_][A-Z0-9_]*\s*:",
+            stripped,
+        ):
+            uninstrumentable.add(line_number)
+            in_const = ";" not in stripped
             continue
         if re.fullmatch(
             r"(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?mod\s+[A-Za-z_]\w*\s*;",
