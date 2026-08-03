@@ -353,6 +353,23 @@ async fn cleanup_removes_the_database_and_its_sqlite_sidecars() {
     tokio::fs::create_dir_all(&dir)
         .await
         .expect("create temp dir");
+    // A non-UTF-8 byte in the name is what pins the `OsString` derivation: an
+    // ASCII name survives a `to_string_lossy` round trip unchanged, so on the
+    // ASCII path this case still only covers the extension half of the defect.
+    //
+    // Linux only. macOS rejects a non-UTF-8 filename at creation with EILSEQ
+    // ("Illegal byte sequence"), so seeding the file is impossible there —
+    // gating keeps the byte-preservation pin on the CI runners while leaving
+    // the case runnable for developers on macOS.
+    #[cfg(target_os = "linux")]
+    let database = {
+        use std::os::unix::ffi::OsStringExt;
+        let mut name = b"bench-tool-heavy-".to_vec();
+        name.push(0xff);
+        name.extend_from_slice(b".sqlite");
+        dir.join(std::ffi::OsString::from_vec(name))
+    };
+    #[cfg(not(target_os = "linux"))]
     let database = dir.join("bench-tool-heavy.sqlite");
     let mut created = vec![database.clone()];
     for suffix in ["-wal", "-shm"] {
@@ -374,7 +391,9 @@ async fn cleanup_removes_the_database_and_its_sqlite_sidecars() {
             path.display()
         );
     }
-    let _ = tokio::fs::remove_dir_all(&dir).await;
+    tokio::fs::remove_dir_all(&dir)
+        .await
+        .expect("remove temp dir");
 }
 
 #[test]
