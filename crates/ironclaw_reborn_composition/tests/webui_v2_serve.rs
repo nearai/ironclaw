@@ -18,16 +18,13 @@ use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
+use ironclaw_extension_contracts::state::LifecyclePublicState;
 use ironclaw_host_api::{
     action::NetworkMethod,
     ids::{ActivityId, AgentId, ProjectId, ResultRef, TenantId, ThreadId, UserId},
-    product_surface::{
-        ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    },
     resolution::{Outcome, OutcomeRefs, Resolution, ResultPreviewMeta, ToolVerdict},
     result_meta::{ResultProgress, TerminateHint},
     safe_summary::SafeSummary,
-    state::LifecyclePublicState,
 };
 use ironclaw_host_ingress::{ProtectedRouteMount, PublicRouteMount};
 use ironclaw_product::{
@@ -36,9 +33,13 @@ use ironclaw_product::{
     ProductResolveGateRequest, ProductSubmitTurnRequest, RebornCancelRunResponse,
     RebornCreateThreadResponse, RebornDeleteThreadRequest, RebornListThreadsResponse,
     RebornSetupExtensionResponse, RebornSubmitTurnResponse, RebornTimelineResponse,
-    RebornTraceCreditsResponse, RebornViewQuery, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW,
-    TIMELINE_VIEW, TRACE_CREDITS_VIEW,
+    RebornTraceCreditsResponse, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW,
+    TRACE_CREDITS_VIEW,
 };
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+};
+use ironclaw_product_contracts::views::RebornViewQuery;
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_turns::{EventCursor, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus};
 use ironclaw_webui::{
@@ -431,13 +432,13 @@ mod openai_compat_mount_tests {
     }
 
     #[async_trait]
-    impl ironclaw_host_api::product_surface::ProductSurface for GatewayOpenAiSurface {
+    impl ironclaw_product_contracts::surface::ProductSurface for GatewayOpenAiSurface {
         async fn invoke(
             &self,
             caller: ProductSurfaceCaller,
-            request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
+            request: ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest,
         ) -> Result<
-            ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse,
+            ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
             ProductSurfaceError,
         > {
             let output = match request.operation_id.as_str() {
@@ -484,14 +485,14 @@ mod openai_compat_mount_tests {
                 }
                 _ => return Err(ProductSurfaceError::service_unavailable(false)),
             };
-            Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
+            Ok(ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output })
         }
 
         async fn query(
             &self,
             _caller: ProductSurfaceCaller,
-            _request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
-        ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+            _request: ironclaw_product_contracts::surface::ProductSurfaceQueryRequest,
+        ) -> Result<ironclaw_product_contracts::surface::ProductSurfaceQueryPage, ProductSurfaceError>
         {
             Err(ProductSurfaceError::service_unavailable(false))
         }
@@ -499,9 +500,9 @@ mod openai_compat_mount_tests {
         async fn stream_events(
             &self,
             _caller: ProductSurfaceCaller,
-            _request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
+            _request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
         ) -> Result<
-            ironclaw_host_api::product_surface::ProductSurfaceStreamResponse,
+            ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
             ProductSurfaceError,
         > {
             Err(ProductSurfaceError::service_unavailable(false))
@@ -519,13 +520,13 @@ mod openai_compat_mount_tests {
     }
 
     #[async_trait]
-    impl ironclaw_host_api::product_surface::ProductSurface for AdmissionProductSurface {
+    impl ironclaw_product_contracts::surface::ProductSurface for AdmissionProductSurface {
         async fn invoke(
             &self,
             caller: ProductSurfaceCaller,
-            request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
+            request: ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest,
         ) -> Result<
-            ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse,
+            ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
             ProductSurfaceError,
         > {
             let output = match request.operation_id.as_str() {
@@ -626,14 +627,14 @@ mod openai_compat_mount_tests {
                 }
                 _ => return Err(ProductSurfaceError::service_unavailable(false)),
             };
-            Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
+            Ok(ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output })
         }
 
         async fn query(
             &self,
             _caller: ProductSurfaceCaller,
-            _request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
-        ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+            _request: ironclaw_product_contracts::surface::ProductSurfaceQueryRequest,
+        ) -> Result<ironclaw_product_contracts::surface::ProductSurfaceQueryPage, ProductSurfaceError>
         {
             Err(ProductSurfaceError::service_unavailable(false))
         }
@@ -641,9 +642,9 @@ mod openai_compat_mount_tests {
         async fn stream_events(
             &self,
             _caller: ProductSurfaceCaller,
-            _request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
+            _request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
         ) -> Result<
-            ironclaw_host_api::product_surface::ProductSurfaceStreamResponse,
+            ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
             ProductSurfaceError,
         > {
             Err(ProductSurfaceError::service_unavailable(false))
@@ -843,13 +844,15 @@ struct StubServices {
 }
 
 #[async_trait]
-impl ironclaw_host_api::product_surface::ProductSurface for StubServices {
+impl ironclaw_product_contracts::surface::ProductSurface for StubServices {
     async fn invoke(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse, ProductSurfaceError>
-    {
+        request: ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
+        ProductSurfaceError,
+    > {
         let output = match request.operation_id.as_str() {
             "thread.create" => {
                 self.create_thread_calls.lock().expect("lock").push(caller);
@@ -944,14 +947,14 @@ impl ironclaw_host_api::product_surface::ProductSurface for StubServices {
                 });
             }
         };
-        Ok(ironclaw_host_api::product_surface::ProductSurfaceInvokeResponse { output })
+        Ok(ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output })
     }
 
     async fn query(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+        request: ironclaw_product_contracts::surface::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_product_contracts::surface::ProductSurfaceQueryPage, ProductSurfaceError>
     {
         let query = RebornViewQuery {
             view_id: request.view_id,
@@ -1025,7 +1028,7 @@ impl ironclaw_host_api::product_surface::ProductSurface for StubServices {
             }
         };
         Ok(
-            ironclaw_host_api::product_surface::ProductSurfaceQueryPage {
+            ironclaw_product_contracts::surface::ProductSurfaceQueryPage {
                 items: vec![payload],
                 next_cursor: None,
             },
@@ -1035,13 +1038,15 @@ impl ironclaw_host_api::product_surface::ProductSurface for StubServices {
     async fn stream_events(
         &self,
         caller: ProductSurfaceCaller,
-        request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceStreamResponse, ProductSurfaceError>
-    {
+        request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
+        ProductSurfaceError,
+    > {
         let _ = request;
         self.stream_events_calls.lock().expect("lock").push(caller);
         Ok(
-            ironclaw_host_api::product_surface::ProductSurfaceStreamResponse {
+            ironclaw_product_contracts::surface::ProductSurfaceStreamResponse {
                 events: Vec::new(),
                 next_cursor: None,
                 subscription: None,
@@ -1782,6 +1787,43 @@ async fn mutation_body_within_descriptor_cap_reaches_service() {
         1,
         "service should be reached for in-budget payload",
     );
+}
+
+#[tokio::test]
+async fn send_message_body_above_axum_default_but_within_descriptor_cap_reaches_service() {
+    // Inline attachment bodies legitimately exceed Axum's 2 MiB extractor
+    // default: 10 MiB decoded files need roughly 13.4 MiB after base64. The
+    // descriptor-driven 14 MiB middleware is the authority, so an otherwise
+    // valid body above 2 MiB must not be rejected by Json<T>'s implicit cap.
+    let (app, services) = build_app();
+    let payload = json!({
+        "client_action_id": "large-inline-attachment",
+        "content": "read this",
+        "attachments": [{
+            "mime_type": "text/plain",
+            "filename": "large.txt",
+            "data_base64": "A".repeat(3 * 1024 * 1024),
+        }],
+    })
+    .to_string();
+    assert!(payload.len() > 2 * 1024 * 1024);
+    assert!(payload.len() < 14 * 1024 * 1024);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads/thread-large/messages")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    drop(services);
 }
 
 #[tokio::test]
@@ -2682,28 +2724,50 @@ async fn static_i18n_module_guards_locale_race_and_clears_failed_pack_cache() {
 }
 
 #[tokio::test]
-async fn static_typing_dot_animation_respects_reduced_motion() {
+async fn static_near_process_animation_respects_reduced_motion() {
     // Content-shape regression guard for the typing-indicator animation
-    // contract (PR #4493 review): `.v2-typing-dot` is the single
-    // intentional animation exception, so it must animate by default and
-    // be suppressed under `prefers-reduced-motion: reduce`. A behavioral
-    // check that the dot computes to `animation: none` via the emulated
-    // media query needs a browser (`getComputedStyle`), which this
-    // workspace's Rust/oneshot harness cannot drive; that belongs in the
-    // deferred e2e scaffold.
+    // contract: the NEAR glyph and its comet animate while the assistant is
+    // working, and both animations are suppressed under
+    // `prefers-reduced-motion: reduce`.
     let body = served_app_stylesheet().await;
 
     assert!(
-        body.contains("animation:1.4s ease-in-out infinite v2-typing-bounce"),
-        "typing dots must animate by default",
+        body.contains("animation:2s ease-in-out infinite near-pulse"),
+        "the working NEAR glyph must pulse by default",
+    );
+    assert!(
+        body.contains(".near-process.is-busy .near-base{opacity:.24}"),
+        "the working NEAR glyph must be dimmed beneath the comet",
+    );
+    assert!(
+        body.contains(".near-process-label{color:var(--v2-text-muted);font-weight:400}"),
+        "the completed-state label must use muted presentation",
+    );
+    assert!(
+        body.contains(
+            ".near-process.is-busy .near-process-label{color:var(--v2-text-strong);\
+             font-weight:560}"
+        ),
+        "the working-state label must use strong presentation",
+    );
+    assert!(
+        body.contains("animation:1.1s linear infinite near-chase"),
+        "the working NEAR comet must chase by default",
     );
     assert!(
         body.contains("@media (prefers-reduced-motion:reduce)"),
         "stylesheet must carry a reduced-motion opt-out block",
     );
     assert!(
-        body.contains(".v2-typing-dot,.v2-spin{animation:none"),
-        "the typing dot must be suppressed under prefers-reduced-motion: reduce",
+        body.contains(
+            ".near-process.is-busy .near-process-icon,.near-process.is-busy \
+             .near-process-icon .near-comet{animation:none"
+        ),
+        "the NEAR glyph and comet must stop under prefers-reduced-motion: reduce",
+    );
+    assert!(
+        body.contains(".near-process .near-comet{display:none"),
+        "the comet must be hidden under prefers-reduced-motion: reduce",
     );
 }
 

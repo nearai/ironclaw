@@ -5,24 +5,27 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::Utc;
 
 use async_trait::async_trait;
+use ironclaw_attachments::ProjectScopedAttachmentLander;
 #[cfg(test)]
 use ironclaw_extensions::SharedExtensionRegistry;
-use ironclaw_host_api::{
-    ids::InvocationId,
-    product_surface::{
-        ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-        ProductSurfaceErrorKind,
-    },
-    resource::ResourceScope,
-};
+use ironclaw_host_api::{ids::InvocationId, resource::ResourceScope};
 use ironclaw_operator::OperatorServiceLifecycle;
-use ironclaw_product::ProjectionStream;
 use ironclaw_product::{
-    ChannelConnectionService, OperatorStatusService, RebornAutomationProductService,
+    ChannelConnectionService, ProjectScopedAttachmentReader, ProjectScopedFilesystemReader,
+    RebornAutomationProductService, RebornServices as ProductRebornServices,
+    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel, SkillsProductService,
+};
+use ironclaw_product_contracts::operator_llm::LlmConfigService;
+use ironclaw_product_contracts::operator_service::OperatorStatusService;
+use ironclaw_product_contracts::product_wire::{
     RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
-    RebornOperatorStatusState, RebornServices as ProductRebornServices, RebornSkillContentResponse,
-    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, SkillsProductService,
+    RebornOperatorStatusState,
+};
+use ironclaw_product_contracts::projection::ProjectionStream;
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind,
 };
 
 use ironclaw_triggers::TriggerRepository;
@@ -37,14 +40,11 @@ use crate::{
         RebornOutboundPreferencesService, outbound_delivery_synthetic_provider,
         outbound_delivery_target_set_operator_tool_info,
     },
-    support::fs::{
-        MountScopedFilesystemReader, ProjectScopedAttachmentLander, ProjectScopedAttachmentReader,
-        ProjectScopedFilesystemReader,
-    },
+    support::fs::MountScopedFilesystemReader,
 };
-use ironclaw_extension_host::ExtensionHostLifecycleProductService;
-use ironclaw_extension_host::admin_configuration::AdminConfigurationViewProvider;
-use ironclaw_extension_host::webui_extension_credentials::ProductAuthExtensionCredentialSetup;
+use ironclaw_extension_manager::ExtensionHostLifecycleProductService;
+use ironclaw_extension_manager::admin_configuration::AdminConfigurationViewProvider;
+use ironclaw_extension_manager::webui_extension_credentials::ProductAuthExtensionCredentialSetup;
 use ironclaw_skills::{ScopedSkillManagementError, ScopedSkillManagementPort};
 
 /// A trigger repository paired with the turn-run snapshot source from the
@@ -200,10 +200,6 @@ pub(crate) fn build_product_surface_with_channel_connection(
             lifecycle_service.with_extension_management(runtime.extension_management.clone());
         lifecycle_service =
             lifecycle_service.with_channel_config(runtime.channel_config_service.clone());
-        if let Some(runtime_http_egress) = &runtime.runtime_http_egress {
-            lifecycle_service =
-                lifecycle_service.with_runtime_http_egress(runtime_http_egress.clone());
-        }
         lifecycle_service = lifecycle_service.with_runtime_credential_accounts(
             runtime
                 .product_auth
@@ -215,7 +211,7 @@ pub(crate) fn build_product_surface_with_channel_connection(
     // manifest-declared channel-config fields and routes submitted values
     // through it (extension-runtime §6.4).
     api = api.with_channel_config_product_service(Arc::new(
-        ironclaw_extension_host::RebornChannelConfigProductService::new(
+        ironclaw_extension_manager::RebornChannelConfigProductService::new(
             runtime.channel_config_service.clone(),
         ),
     ));
@@ -293,7 +289,7 @@ pub(crate) fn build_product_surface_with_channel_connection(
 /// `/v1/models` catalog so both read the same configured-model source.
 pub(crate) fn build_llm_config_service(
     runtime: &RebornRuntime,
-) -> Option<Arc<dyn ironclaw_product::LlmConfigService>> {
+) -> Option<Arc<dyn LlmConfigService>> {
     let boot = runtime.webui_boot_config()?;
     let keys = ironclaw_operator::LlmKeyStore::new(runtime.secret_store());
     let mut llm_config = ironclaw_operator::RebornLlmConfigService::new(boot.clone(), keys);

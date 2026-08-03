@@ -15,7 +15,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
-use ironclaw_turns::run_profile::InstructionSafetyContext;
+use ironclaw_loop_contracts::InstructionSafetyContext;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::reply::RebornScriptedReply;
 

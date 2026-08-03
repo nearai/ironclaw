@@ -4,14 +4,14 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_loop_contracts::{AgentLoopHostError, LoopCapabilityPort, LoopRunContext};
 use ironclaw_loop_host::LoopCapabilityPortFactory;
-use ironclaw_turns::run_profile::{AgentLoopHostError, LoopCapabilityPort, LoopRunContext};
 
 use super::super::harness::HostRuntimeCapabilityHarness;
 
 pub(crate) struct HostRuntimeHarnessCapabilityPortFactory {
     pub(crate) harness: Arc<HostRuntimeCapabilityHarness>,
-    pub(crate) milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
+    pub(crate) milestone_sink: Arc<ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink>,
     pub(crate) trajectory_observer:
         Option<Arc<dyn ironclaw_reborn_composition::RebornTrajectoryObserver>>,
 }

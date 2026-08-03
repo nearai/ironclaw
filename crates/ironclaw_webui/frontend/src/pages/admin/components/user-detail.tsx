@@ -3,6 +3,7 @@ import React from "react";
 import { useT } from "../../../lib/i18n";
 import { Panel, StatusPill } from "../../../design-system/primitives";
 import { Button } from "../../../design-system/button";
+import { ConfirmDialog } from "../../../design-system/confirm-dialog";
 import { SelectMenu } from "../../../design-system/select-menu";
 import { useAdminUserDetail, useAdminUsers } from "../hooks/useAdminUsers";
 import { useUsage } from "../hooks/useAdminUsage";
@@ -66,6 +67,8 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
 
   const [role, setRole] = React.useState(null);
   const [confirmDelete, setConfirmDelete] = React.useState(false);
+  const deleteTriggerRef = React.useRef(null);
+  const deleteInFlightRef = React.useRef(false);
   const roleOptions = React.useMemo(() => buildRoleOptions(t), [t]);
 
   const user = userQuery.data;
@@ -123,8 +126,9 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
     }
   };
 
-  const beginDelete = () => {
+  const beginDelete = (event) => {
     if (isActionPending) return;
+    deleteTriggerRef.current = event?.currentTarget || null;
     resetDelete?.();
     setConfirmDelete(true);
   };
@@ -136,7 +140,8 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
   };
 
   const handleDelete = async () => {
-    if (isActionPending) return;
+    if (isActionPending || deleteInFlightRef.current) return;
+    deleteInFlightRef.current = true;
     resetActionErrors?.();
     try {
       await deleteUser(user.id);
@@ -144,6 +149,8 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
       onBack();
     } catch (_) {
       // Keep the confirmation open so the administrator can retry.
+    } finally {
+      deleteInFlightRef.current = false;
     }
   };
 
@@ -282,33 +289,28 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
             )}
       </Panel>
 
-      {confirmDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={closeDelete}>
-          <div data-testid="admin-user-delete-dialog" className="w-full max-w-md rounded-xl border border-white/10 bg-iron-900 p-6" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold text-white">{t("admin.users.deleteUserTitle")}</h3>
-            <p className="mt-2 text-sm text-iron-300">
-              {t("admin.users.deleteUserDesc", { name: user.display_name })}
-            </p>
+      <ConfirmDialog
+        open={confirmDelete}
+        title={t("admin.users.deleteUserTitle")}
+        description={(
+          <>
+            <span>
+              {t("admin.users.deleteUserDesc", { name: user.display_name || user.id })}
+            </span>
             {deleteError && (
-              <p className="mt-4 text-sm text-red-200" role="alert" data-testid="admin-user-delete-error">
+              <span className="mt-4 block text-red-200" role="alert" data-testid="admin-user-delete-error">
                 {adminUserActionErrorMessage(deleteError, t)}
-              </p>
+              </span>
             )}
-            <div className="mt-5 flex justify-end gap-2">
-              <Button data-testid="admin-user-delete-cancel" variant="ghost" disabled={isDeleting} onClick={closeDelete}>{t("admin.users.cancel")}</Button>
-              <Button
-                variant="danger"
-                loading={isDeleting}
-                disabled={isDeleting}
-                data-testid="admin-user-delete-confirm"
-                onClick={handleDelete}
-              >
-                {isDeleting ? t("common.loading") : t("admin.users.delete")}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+        confirmLabel={t("admin.users.delete")}
+        cancelLabel={t("admin.users.cancel")}
+        isConfirming={isDeleting}
+        returnFocusTo={deleteTriggerRef.current}
+        onConfirm={handleDelete}
+        onCancel={closeDelete}
+      />
     </div>
   );
 }

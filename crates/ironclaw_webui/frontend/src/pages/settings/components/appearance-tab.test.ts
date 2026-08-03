@@ -53,7 +53,7 @@ function componentProps(node, component) {
   const props = {};
   const start = node.values.indexOf(component);
   for (let index = start + 1; index < node.values.length; index += 1) {
-    const name = node.strings[index]?.match(/([A-Za-z][A-Za-z0-9]*)=\s*$/)?.[1];
+    const name = node.strings[index]?.match(/([A-Za-z][A-Za-z0-9-]*)=\s*$/)?.[1];
     if (name) props[name] = node.values[index];
   }
   return props;
@@ -79,9 +79,11 @@ function renderAppearanceModule({
     "settings.field.showChatTerminalShortcutDesc":
       "Displays the floating terminal/logs icon inside chat threads.",
   };
+  const Switch = component("Switch");
   const context = {
     Card: component("Card"),
     Icon: component("Icon"),
+    Switch,
     matchesSearch: (query, values) =>
       !query ||
       values.some((value) =>
@@ -96,7 +98,7 @@ function renderAppearanceModule({
   };
   const exports = runVmModuleForTest(
     "./appearance-tab.tsx",
-    ["AppearanceTab", "Switch", "ThemeOption"],
+    ["AppearanceTab", "ThemeOption"],
     context,
     import.meta.url
   );
@@ -105,7 +107,7 @@ function renderAppearanceModule({
     onThemeChange: (nextTheme) => themeChanges.push(nextTheme),
     ...props,
   });
-  return { exports, render, themeChanges, toggles };
+  return { exports, render, Switch, themeChanges, toggles };
 }
 
 test("Appearance tab selects the shared interface theme", () => {
@@ -127,18 +129,19 @@ test("Appearance tab selects the shared interface theme", () => {
   assert.deepEqual(themeChanges, ["dark"]);
 });
 
-test("Appearance tab toggles the chat terminal shortcut preference", () => {
-  const { exports, render, toggles } = renderAppearanceModule({
+test("Appearance tab uses the shared Switch for the chat terminal shortcut preference", () => {
+  const { render, Switch, toggles } = renderAppearanceModule({
     showChatLogsShortcut: true,
   });
   const rendered = render();
-  const switchNode = findComponentNode(rendered, exports.Switch);
+  const switchNode = findComponentNode(rendered, Switch);
 
   assert.ok(switchNode, "expected appearance tab to render a switch");
   assert.ok(collectScalars(rendered).includes("Show chat terminal shortcut"));
 
-  const props = componentProps(switchNode, exports.Switch);
+  const props = componentProps(switchNode, Switch);
   assert.equal(props.checked, true);
+  assert.equal(props["aria-label"], "Show chat terminal shortcut");
   props.onChange(false);
   assert.deepEqual(toggles, [false]);
 });

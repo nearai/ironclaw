@@ -1,21 +1,18 @@
 use std::collections::{HashMap, HashSet};
 
+use ironclaw_host_api::turn::LoopResultRef;
 use ironclaw_host_api::{
     dispatch::DispatchInputIssueCode,
     ids::CapabilityId,
     result_meta::{CapabilityRecoveryHint, FailureKind, ModelDiagnostic, SameCallRetryConstraint},
 };
-use ironclaw_turns::{
-    LoopResultRef,
-    run_profile::{
-        AgentLoopDriverHost, AppendCapabilityResultRef, CapabilityApprovalResume,
-        CapabilityAuthResume, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityFailure,
-        CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRepair,
-        CapabilityResultMessage, CapabilitySurfaceVersion, LoopRequest,
-        ModelVisibleToolObservation, ObservationTrust, ProviderToolCall, ProviderToolCallReference,
-        RegisterProviderToolCallRequest, ToolObservationDetail, ToolObservationStatus,
-        ToolRecoveryObservation, VisibleCapabilitySurface,
-    },
+use ironclaw_loop_contracts::{
+    AgentLoopDriverHost, AppendCapabilityResultRef, CapabilityApprovalResume, CapabilityAuthResume,
+    CapabilityCallCandidate, CapabilityDescriptorView, CapabilityFailure, CapabilityFailureDetail,
+    CapabilityInputIssue, CapabilityInputRepair, CapabilityResultMessage, CapabilitySurfaceVersion,
+    LoopRequest, ModelVisibleToolObservation, ObservationTrust, ProviderToolCall,
+    ProviderToolCallReference, RegisterProviderToolCallRequest, ToolObservationDetail,
+    ToolObservationStatus, ToolRecoveryObservation, VisibleCapabilitySurface,
 };
 
 use crate::{
@@ -71,7 +68,7 @@ pub(super) fn capability_invocation_from_auth_resume_candidate(
 ) -> LoopRequest {
     let auth_resume = if matches!(
         pending_auth.disposition,
-        Some(ironclaw_turns::GateResumeDisposition::Denied)
+        Some(ironclaw_host_api::turn::GateResumeDisposition::Denied)
     ) {
         Some(CapabilityAuthResume::denied())
     } else {
@@ -79,7 +76,7 @@ pub(super) fn capability_invocation_from_auth_resume_candidate(
             CapabilityAuthResume::resolved(
                 token.clone(),
                 pending_auth.prior_approval.as_ref().map(|pa| {
-                    ironclaw_turns::run_profile::AuthResumeApprovalIdentity {
+                    ironclaw_loop_contracts::AuthResumeApprovalIdentity {
                         approval_request_id: pa.approval_request_id,
                         correlation_id: pa.correlation_id,
                     }
@@ -202,7 +199,7 @@ pub(super) fn capability_summary(
         .descriptors
         .get(&call.capability_id)
         .map(|descriptor| descriptor.concurrency_hint)
-        .unwrap_or(ironclaw_turns::run_profile::ConcurrencyHint::Exclusive);
+        .unwrap_or(ironclaw_loop_contracts::ConcurrencyHint::Exclusive);
     CapabilityCallSummary {
         name: call.capability_id.clone(),
         concurrency_hint,
@@ -293,7 +290,7 @@ fn model_visible_capability_success_observation(
 ) -> Option<ModelVisibleToolObservation> {
     call.provider_replay.as_ref()?;
     Some(ModelVisibleToolObservation {
-        schema_version: ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+        schema_version: ironclaw_loop_contracts::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
         status: ToolObservationStatus::Success,
         summary: result.safe_summary.clone(),
         detail: ToolObservationDetail::ResultReference {
@@ -402,7 +399,7 @@ pub(super) fn model_visible_capability_failure_observation(
             };
             ModelVisibleToolObservation {
                 schema_version:
-                    ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+                    ironclaw_loop_contracts::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
                 status: ToolObservationStatus::Error,
                 summary: model_visible_failure_summary(failure.error_kind),
                 detail: ToolObservationDetail::GenericFailure {
@@ -420,7 +417,7 @@ pub(super) fn model_visible_capability_failure_observation(
 /// Bound a free-text diagnostic to the model-visible detail cap, truncating on
 /// a UTF-8 boundary. The diagnostic is already secret-scrubbed by the producer.
 fn bounded_diagnostic_detail(value: &str) -> String {
-    const MAX: usize = ironclaw_turns::run_profile::MODEL_OBSERVATION_DETAIL_MAX_BYTES;
+    const MAX: usize = ironclaw_loop_contracts::MODEL_OBSERVATION_DETAIL_MAX_BYTES;
     truncate_marked(value, MAX)
 }
 
@@ -488,7 +485,7 @@ fn truncate_model_observation_text(value: &str) -> String {
 fn invalid_input_observation(issues: Vec<CapabilityInputIssue>) -> ModelVisibleToolObservation {
     let repairs = issues.iter().map(input_issue_repair).collect();
     ModelVisibleToolObservation {
-        schema_version: ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+        schema_version: ironclaw_loop_contracts::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
         status: ToolObservationStatus::Error,
         summary: "Tool input failed schema validation.".to_string(),
         detail: ToolObservationDetail::InvalidInput { issues },
@@ -745,7 +742,7 @@ mod tests {
         let bounded = bounded_diagnostic_detail(&long);
 
         assert!(
-            bounded.len() <= ironclaw_turns::run_profile::MODEL_OBSERVATION_DETAIL_MAX_BYTES,
+            bounded.len() <= ironclaw_loop_contracts::MODEL_OBSERVATION_DETAIL_MAX_BYTES,
             "the marker must fit inside the cap, not push past it"
         );
         assert!(
@@ -782,7 +779,7 @@ mod tests {
     /// A multi-byte character must not be split by making room for the marker.
     #[test]
     fn marking_a_truncation_respects_utf8_boundaries() {
-        let long = "\u{e9}".repeat(ironclaw_turns::run_profile::MODEL_OBSERVATION_DETAIL_MAX_BYTES);
+        let long = "\u{e9}".repeat(ironclaw_loop_contracts::MODEL_OBSERVATION_DETAIL_MAX_BYTES);
         let bounded = bounded_diagnostic_detail(&long);
         assert!(bounded.ends_with(TRUNCATION_MARKER));
         // Round-trips as valid UTF-8 by construction; assert no replacement
@@ -791,7 +788,7 @@ mod tests {
     }
 
     use crate::test_support::test_run_context;
-    use ironclaw_turns::run_profile::{CapabilityProgress, CapabilitySurfaceVersion};
+    use ironclaw_loop_contracts::{CapabilityProgress, CapabilitySurfaceVersion};
 
     #[test]
     fn push_completed_result_accumulates_bytes_per_capability() {
@@ -800,7 +797,8 @@ mod tests {
         let cap_a = CapabilityId::new("test.cap_a").unwrap();
         let cap_b = CapabilityId::new("test.cap_b").unwrap();
         let result_a1 = CapabilityResultMessage {
-            result_ref: ironclaw_turns::LoopResultRef::new("result:a1".to_string()).unwrap(),
+            result_ref: ironclaw_host_api::turn::LoopResultRef::new("result:a1".to_string())
+                .unwrap(),
             safe_summary: "a1".into(),
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
@@ -809,7 +807,8 @@ mod tests {
             model_observation: None,
         };
         let result_a2 = CapabilityResultMessage {
-            result_ref: ironclaw_turns::LoopResultRef::new("result:a2".to_string()).unwrap(),
+            result_ref: ironclaw_host_api::turn::LoopResultRef::new("result:a2".to_string())
+                .unwrap(),
             safe_summary: "a2".into(),
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
@@ -818,7 +817,8 @@ mod tests {
             model_observation: None,
         };
         let result_b = CapabilityResultMessage {
-            result_ref: ironclaw_turns::LoopResultRef::new("result:b".to_string()).unwrap(),
+            result_ref: ironclaw_host_api::turn::LoopResultRef::new("result:b".to_string())
+                .unwrap(),
             safe_summary: "b".into(),
             progress: CapabilityProgress::MadeProgress,
             terminate_hint: false,
@@ -849,7 +849,7 @@ mod tests {
     #[test]
     fn capability_is_visible_authorizes_disclosed_but_unadvertised_callable_tool() {
         use ironclaw_host_api::runtime::RuntimeKind;
-        use ironclaw_turns::run_profile::{
+        use ironclaw_loop_contracts::{
             CapabilityDescriptorView, CapabilityInputRef, ConcurrencyHint, VisibleCapabilitySurface,
         };
 
@@ -868,7 +868,7 @@ mod tests {
             parameters_schema: serde_json::json!({"type": "object"}),
         };
         let candidate = |cap: &CapabilityId| CapabilityCallCandidate {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
             surface_version: version.clone(),
             capability_id: cap.clone(),
             input_ref: CapabilityInputRef::new("input:x").unwrap(),
@@ -939,19 +939,19 @@ mod tests {
     #[test]
     fn pending_auth_resume_candidate_carries_non_empty_effective_capability_ids() {
         use crate::state::PendingAuthResume;
-        use ironclaw_turns::run_profile::{CapabilityInputRef, CapabilitySurfaceVersion};
+        use ironclaw_loop_contracts::{CapabilityInputRef, CapabilitySurfaceVersion};
 
         let cap_a = CapabilityId::new("test.cap_a").unwrap();
         let cap_b = CapabilityId::new("test.cap_b").unwrap();
         let resume = PendingAuthResume {
-            gate_ref: ironclaw_turns::LoopGateRef::new("gate:auth-test").unwrap(),
+            gate_ref: ironclaw_host_api::turn::LoopGateRef::new("gate:auth-test").unwrap(),
             capability_id: cap_a.clone(),
             surface_version: CapabilitySurfaceVersion::new("surface:v1").unwrap(),
             input_ref: CapabilityInputRef::new("input:test").unwrap(),
             effective_capability_ids: vec![cap_a.clone(), cap_b.clone()],
             provider_replay: None,
             resume_token: None,
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
             prior_approval: None,
             disposition: None,
         };
@@ -976,7 +976,7 @@ mod tests {
     #[test]
     fn capability_invocation_from_auth_resume_candidate_with_both_token_and_prior_approval() {
         use ironclaw_host_api::ids::{ApprovalRequestId, CorrelationId};
-        use ironclaw_turns::run_profile::{
+        use ironclaw_loop_contracts::{
             AuthResumeApprovalIdentity, CapabilityInputRef, CapabilityResumeToken,
         };
 
@@ -987,14 +987,14 @@ mod tests {
         let correlation_id = CorrelationId::new();
 
         let resume = PendingAuthResume {
-            gate_ref: ironclaw_turns::LoopGateRef::new("gate:auth-both-fields").unwrap(),
+            gate_ref: ironclaw_host_api::turn::LoopGateRef::new("gate:auth-both-fields").unwrap(),
             capability_id: cap.clone(),
             surface_version: CapabilitySurfaceVersion::new("surface:v1").unwrap(),
             input_ref: CapabilityInputRef::new("input:both-fields").unwrap(),
             effective_capability_ids: vec![cap.clone()],
             provider_replay: None,
             resume_token: Some(resume_token.clone()),
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
             prior_approval: Some(AuthResumeApprovalIdentity {
                 approval_request_id,
                 correlation_id,
@@ -1003,7 +1003,7 @@ mod tests {
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
         let call = CapabilityCallCandidate {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
             surface_version,
             capability_id: cap.clone(),
             input_ref: CapabilityInputRef::new("input:both-fields").unwrap(),
@@ -1053,23 +1053,23 @@ mod tests {
         // passed an approval gate), the returned `LoopRequest` must
         // carry `auth_resume: None` so the host routes through `invoke_json`,
         // while preserving the call activity id as the invocation identity.
-        use ironclaw_turns::run_profile::CapabilityInputRef;
+        use ironclaw_loop_contracts::CapabilityInputRef;
 
         let cap = CapabilityId::new("test.cap").unwrap();
         let resume = PendingAuthResume {
-            gate_ref: ironclaw_turns::LoopGateRef::new("gate:auth-none-token").unwrap(),
+            gate_ref: ironclaw_host_api::turn::LoopGateRef::new("gate:auth-none-token").unwrap(),
             capability_id: cap.clone(),
             surface_version: CapabilitySurfaceVersion::new("surface:v1").unwrap(),
             input_ref: CapabilityInputRef::new("input:none-token").unwrap(),
             effective_capability_ids: vec![cap.clone()],
             provider_replay: None,
             resume_token: None, // no prior approval — the key precondition
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
             prior_approval: None,
             disposition: None,
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
-        let activity_id = ironclaw_turns::CapabilityActivityId::new();
+        let activity_id = ironclaw_host_api::turn::CapabilityActivityId::new();
         let call = CapabilityCallCandidate {
             activity_id,
             surface_version,

@@ -1,7 +1,7 @@
 schema_version = "reborn.extension_manifest.v3"
 id = "github"
 name = "GitHub"
-version = "0.2.7"
+version = "0.2.8"
 description = "GitHub repository, issue, pull request, search, branch, file, release, workflow, fork, and webhook capabilities."
 trust = "first_party_requested"
 
@@ -10,8 +10,9 @@ kind = "wasm"
 module = "wasm/github_tool.wasm"
 
 # GitHub REST endpoints return heterogeneous provider-owned response shapes.
-# The WASM intentionally preserves those raw JSON contracts for v1 parity while
-# keeping inputs typed and host-mediated.
+# Detail tools preserve those raw JSON contracts. High-cardinality pull request
+# list/search tools keep their established top-level shapes but project compact
+# model-facing summaries; their prompt docs name the dedicated detail tools.
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -224,7 +225,7 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "github.list_pull_requests"
-description = "List pull requests in one repository."
+description = "List compact pull request summaries in one repository."
 effects = ["network", "use_secret"]
 default_permission = "allow"
 visibility = "model"
@@ -512,7 +513,7 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "github.search_issues"
-description = "Compatibility alias for github.search_issues_pull_requests."
+description = "Compatibility alias for compact github.search_issues_pull_requests results."
 effects = ["network", "use_secret"]
 default_permission = "allow"
 visibility = "model"
@@ -528,7 +529,7 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "github.search_issues_pull_requests"
-description = "Search GitHub issues and pull requests."
+description = "Search compact GitHub issue and pull request summaries."
 effects = ["network", "use_secret"]
 default_permission = "allow"
 visibility = "model"

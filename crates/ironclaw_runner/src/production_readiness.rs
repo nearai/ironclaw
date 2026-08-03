@@ -12,9 +12,8 @@
 //! operator diagnostics. The runtime gate is tracked separately from this pure
 //! reporting slice so readiness semantics can stabilize before startup wiring.
 
-use ironclaw_turns::{
-    RunProfileId, RunProfileVersion, TurnStatus, run_profile::CheckpointSchemaId,
-};
+use ironclaw_loop_contracts::CheckpointSchemaId;
+use ironclaw_turns::{RunProfileId, RunProfileVersion, TurnStatus};
 
 use crate::driver_registry::{
     ConfiguredRunProfile, DriverReadinessDiagnosticCode, DriverReadinessMode, DriverRegistry,

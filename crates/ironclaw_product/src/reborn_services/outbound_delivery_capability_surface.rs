@@ -1,10 +1,10 @@
+use ironclaw_product_contracts::operator_tools::RebornOperatorToolInfo;
 use std::sync::Arc;
 
 use super::{
     OutboundPreferencesProductService, ProductSurfaceCaller, ProductSurfaceError,
-    RebornOperatorToolInfo, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornSetOutboundPreferencesRequest,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundPreferencesResponse, RebornSetOutboundPreferencesRequest,
 };
 use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},

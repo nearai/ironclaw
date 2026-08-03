@@ -11,8 +11,9 @@
 
 ## Agent-loop touch points
 
-- Production wiring validates the trusted turn-run transition port consumed by
-  `ironclaw_runner`; it does not construct or own the scheduler/executor.
+- Production wiring validates the `TurnRunWakeNotifier` handle consumed by
+  `ironclaw_runner` (`ProductionWiringComponent::TurnRunWakeNotifier`); it does
+  not construct or own the scheduler/executor.
 - `surface.rs` owns host-runtime capability-surface shaping and versions.
 - `production.rs` and `services.rs` compose runtime services and readiness
   evidence used by Reborn loop wiring.

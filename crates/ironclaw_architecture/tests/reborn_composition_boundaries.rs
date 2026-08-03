@@ -1,3 +1,6 @@
+#[allow(dead_code)]
+mod ratchet_support;
+
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -7,6 +10,8 @@ use std::{
 use serde_json::Value;
 
 const COMPOSITION_CRATE: &str = "ironclaw_reborn_composition";
+
+use ratchet_support::workspace_root;
 
 const SUBSTRATE_CRATES: &[&str] = &[
     "ironclaw_auth",
@@ -23,7 +28,6 @@ const SUBSTRATE_CRATES: &[&str] = &[
     "ironclaw_resources",
     "ironclaw_trust",
     "ironclaw_capabilities",
-    "ironclaw_dispatcher",
     "ironclaw_processes",
     "ironclaw_secrets",
     "ironclaw_network",
@@ -424,14 +428,6 @@ fn cargo_metadata() -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("metadata json")
-}
-
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("architecture crate under crates")
-        .to_path_buf()
 }
 
 fn package_dependencies(package: &Value) -> Option<(String, Vec<String>)> {

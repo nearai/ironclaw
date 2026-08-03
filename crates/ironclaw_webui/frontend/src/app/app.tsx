@@ -193,6 +193,9 @@ function AuthenticatedLayout({ auth }) {
           isChecking={auth.isChecking}
           isAdmin={auth.isAdmin}
           rebornProjectsEnabled={auth.rebornProjectsEnabled}
+          regressionArtifactExportEnabled={
+            auth.regressionArtifactExportEnabled
+          }
           globalAutoApproveEnabled={auth.globalAutoApproveEnabled}
           onSignOut={auth.signOut}
         />

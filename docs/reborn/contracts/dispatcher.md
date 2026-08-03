@@ -2,13 +2,21 @@
 
 Date: 2026-04-24
 Status: V1 contract slice
-Crate: `crates/ironclaw_dispatcher`
+Crate: `crates/ironclaw_capabilities` (module `dispatch`)
+
+> **2026-07-30 (WS8).** This contract was originally written against a
+> separate `ironclaw_dispatcher` crate. That crate had already been reduced to a
+> 14-line `pub use` re-export over `ironclaw_capabilities` and has now been
+> deleted; the dispatch layer it named was always this code. The contract itself
+> is unchanged in substance and binds `ironclaw_capabilities::dispatch`, whose
+> implementation is `crates/ironclaw_capabilities/src/dispatch.rs`.
 
 ---
 
 ## 1. Purpose
 
-`ironclaw_dispatcher` is the composition-only runtime dispatch layer for Reborn.
+`ironclaw_capabilities::dispatch` is the composition-only runtime dispatch layer
+for Reborn.
 
 It connects already-validated extension capabilities to prebound runtime
 bindings:
@@ -38,7 +46,10 @@ DispatchError
 RuntimeDispatchErrorKind
 ```
 
-`ironclaw_dispatcher` implements that neutral port. Higher-level workflow crates such as `ironclaw_capabilities` depend on `ironclaw_host_api`, not on the concrete dispatcher crate in production code.
+The `dispatch` module implements that neutral port; it does not own the port
+vocabulary. Callers reach dispatch through `ironclaw_host_api`'s
+`CapabilityDispatcher` trait rather than naming the concrete `RuntimeDispatcher`,
+so the runtime lanes stay swappable.
 
 ---
 
@@ -86,17 +97,17 @@ a spawned task.
 
 `ToolResolver` remains the authority for what can run. Runtime adapter owners
 remain the authority for how a lane runs. The concrete WASM, Script, MCP, and
-first-party adapters live outside `ironclaw_dispatcher`, so this crate has no
-normal dependencies on concrete runtime crates.
+first-party adapters live outside the dispatch module, so it has no normal
+dependencies on concrete runtime crates.
 
 Implementation evidence:
 
-- `crates/ironclaw_dispatcher/src/lib.rs` defines `RuntimeDispatcher`,
+- `crates/ironclaw_capabilities/src/dispatch.rs` defines `RuntimeDispatcher`,
   `ToolResolver`, and `BoundCapabilityAdapter`.
 - `crates/ironclaw_host_api/src/dispatch.rs` defines the sealed
   `CapabilityDispatcher::dispatch_json(Authorized)` port and internal
   `CapabilityDispatchRequest`.
-- `crates/ironclaw_dispatcher/tests/dispatch_contract.rs` covers sealed-lane
+- `crates/ironclaw_capabilities/tests/runtime_dispatch_contract.rs` covers sealed-lane
   mismatch rejection, `None` mount preservation, resolver misses, and prepared
   reservation validation.
 
@@ -235,6 +246,6 @@ These tests are intentionally caller-level: they drive `RuntimeDispatcher::dispa
 
 WASM, Script, and MCP are all first-class V1 runtime lanes.
 
-`ironclaw_dispatcher` still remains an already-authorized router only. It must not take dependencies on authorization, approvals, run-state, memory, secrets, network workflow, process lifecycle, or concrete host-runtime composition. Runtime lanes are registered through `RuntimeAdapter`.
+The dispatch layer still remains an already-authorized router only. It must not take dependencies on authorization, approvals, run-state, memory, secrets, network workflow, process lifecycle, or concrete host-runtime composition. Runtime lanes are registered through `RuntimeAdapter`.
 
 Because Script and MCP are first-class, their adapters must satisfy the same redaction, resource, process, event, and network-enforcement contracts as WASM. If a required obligation cannot be enforced for a lane, that invocation fails closed before dispatch.

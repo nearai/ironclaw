@@ -1,6 +1,9 @@
 // arch-exempt: large_file, canonical executor regression remains with shared loop fixtures, plan #4088
 use std::{collections::VecDeque, sync::Arc};
 
+use ironclaw_host_api::turn::{
+    CapabilityActivityId, GateResumeDisposition, LoopGateRef, LoopResultRef, TurnRunId,
+};
 use ironclaw_host_api::{
     decision::DenyReason,
     dispatch::DispatchInputIssueCode,
@@ -8,22 +11,19 @@ use ironclaw_host_api::{
     resolution::Denial,
     result_meta::{CapabilityRecoveryHint, FailureKind, SameCallRetryConstraint},
 };
-use ironclaw_turns::{
-    CapabilityActivityId, GateResumeDisposition, LoopCancelledReasonKind, LoopCompletionKind,
-    LoopExit, LoopFailureKind, LoopGateRef, LoopResultRef, TurnRunId,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
-        CapabilityCallCandidate, CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRef,
-        CapabilityInputRepair, CapabilityResumeToken, LoopCancelReasonKind, LoopCancellationSignal,
-        LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome, LoopCompactionResponse,
-        LoopContextCompactionKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
-        LoopInterruptKind, LoopModelCapabilityView, LoopProcessRef, LoopProgressEvent,
-        LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage, LoopRunInfoPort,
-        LoopSafeSummary, LoopSummaryArtifactId, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
-        ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput, PromptMode,
-        ProviderToolCallReplay, ToolObservationDetail, ToolObservationStatus,
-        VisibleCapabilityRequest, resolution,
-    },
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
+    CapabilityCallCandidate, CapabilityFailureDetail, CapabilityInputIssue, CapabilityInputRef,
+    CapabilityInputRepair, CapabilityResumeToken, LoopCancelReasonKind, LoopCancellationSignal,
+    LoopCancelledReasonKind, LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome,
+    LoopCompactionResponse, LoopCompletionKind, LoopContextCompactionKind, LoopExit,
+    LoopFailureKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
+    LoopInterruptKind, LoopModelCapabilityView, LoopProcessRef, LoopProgressEvent,
+    LoopRecoveryClass, LoopRecoveryDisposition, LoopRecoveryStage, LoopRunInfoPort,
+    LoopSafeSummary, LoopSummaryArtifactId, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+    ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput, PromptMode,
+    ProviderToolCallReplay, ToolObservationDetail, ToolObservationStatus, VisibleCapabilityRequest,
+    resolution,
 };
 
 use crate::state::{
@@ -446,7 +446,7 @@ async fn explanation_prompt_bundle_error_degrades_to_original_failed_exit() {
 }
 
 #[tokio::test]
-async fn prompt_stage_compacts_candidate_prompt_then_rebuilds_final_bundle() {
+async fn prompt_stage_compacts_candidate_emits_redaction_once_then_rebuilds_final_bundle() {
     let host = MockHost::new(Vec::new())
         .with_prompt_compaction_indexes(vec![
             vec![
@@ -462,6 +462,7 @@ async fn prompt_stage_compacts_candidate_prompt_then_rebuilds_final_bundle() {
         .with_compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
             compression_ratio_ppm: 250_000,
+            redacted_leak_count: 2,
         }));
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {
         deadline_ms: 1,
@@ -524,16 +525,32 @@ async fn prompt_stage_compacts_candidate_prompt_then_rebuilds_final_bundle() {
         vec![
             "prompt_bundle_built",
             "compaction_started",
+            "compaction_leak_detected",
             "compaction_completed",
             "checkpoint_written",
             "prompt_bundle_built",
         ]
     );
+    assert!(matches!(
+        host.progress_events().as_slice(),
+        [
+            _,
+            _,
+            LoopProgressEvent::CompactionLeakDetected {
+                reason_kind,
+                redacted_leak_count: 2,
+                ..
+            },
+            _,
+            _,
+            _
+        ] if reason_kind.as_str() == "redacted"
+    ));
 }
 
 #[tokio::test]
 async fn prompt_stage_circuit_breaker_disables_compaction_after_repeated_ineffective_runs() {
-    use ironclaw_turns::run_profile::PromptContextTokenBudget;
+    use ironclaw_loop_contracts::PromptContextTokenBudget;
 
     use crate::state::CompactionStrategyState;
 
@@ -592,6 +609,7 @@ async fn prompt_stage_circuit_breaker_disables_compaction_after_repeated_ineffec
         .with_compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
             compression_ratio_ppm: 250_000,
+            redacted_leak_count: 0,
         }));
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {
         prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
@@ -668,7 +686,7 @@ async fn prompt_stage_circuit_breaker_disables_compaction_after_repeated_ineffec
 
 #[tokio::test]
 async fn prompt_stage_forced_compaction_bypasses_open_circuit_breaker() {
-    use ironclaw_turns::run_profile::PromptContextTokenBudget;
+    use ironclaw_loop_contracts::PromptContextTokenBudget;
 
     // BUG B1 regression: force_compact_on_next_iteration (context-overflow
     // recovery via RetryAlteration::ShrinkContext, byte-cap overflow) must
@@ -696,6 +714,7 @@ async fn prompt_stage_forced_compaction_bypasses_open_circuit_breaker() {
         .with_compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
             compression_ratio_ppm: 250_000,
+            redacted_leak_count: 0,
         }));
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {
         prompt_context_budget: PromptContextTokenBudget::new(100, 10, 0),
@@ -854,6 +873,7 @@ async fn prompt_stage_successful_compaction_clears_deferred_watermark() {
         .with_compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
             compression_ratio_ppm: 250_000,
+            redacted_leak_count: 0,
         }));
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {
         deadline_ms: 1,
@@ -896,6 +916,12 @@ async fn prompt_stage_successful_compaction_clears_deferred_watermark() {
         Some(1)
     );
     assert_eq!(output.state.compaction_state.last_deferred, None);
+    assert!(
+        !host
+            .progress_event_names()
+            .contains(&"compaction_leak_detected"),
+        "zero redactions must not emit leak telemetry"
+    );
 }
 
 #[tokio::test]
@@ -1312,6 +1338,7 @@ async fn prompt_stage_cancellation_during_compaction_aborts_prompt_planning() {
         .with_compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
             compression_ratio_ppm: 250_000,
+            redacted_leak_count: 0,
         }))
         .with_compaction_delay(std::time::Duration::from_millis(50));
     let host_for_cancel = host.clone();
@@ -1356,6 +1383,7 @@ async fn prompt_stage_compaction_aborts_immediately_when_cancellation_already_se
         .with_compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
             compression_ratio_ppm: 250_000,
+            redacted_leak_count: 0,
         }))
         .with_compaction_delay(std::time::Duration::from_secs(1))
         .cancel_on_compaction_start();
@@ -1398,6 +1426,7 @@ async fn prompt_stage_cancellation_after_compaction_success_skips_final_bundle_r
         .with_compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
             compression_ratio_ppm: 250_000,
+            redacted_leak_count: 1,
         }))
         .cancel_after_compaction_success();
     let family = family_with_compaction_strategy(DefaultCompactionStrategy {
@@ -1430,6 +1459,7 @@ async fn prompt_stage_cancellation_after_compaction_success_skips_final_bundle_r
         vec![
             "prompt_bundle_built",
             "compaction_started",
+            "compaction_leak_detected",
             "checkpoint_written",
         ]
     );
@@ -1451,6 +1481,7 @@ async fn model_context_overflow_retries_through_canonical_compaction_stage() {
             summary_artifact_id: LoopSummaryArtifactId::new("summary:overflow-retry")
                 .expect("valid summary id"),
             compression_ratio_ppm: 100_000,
+            redacted_leak_count: 0,
         }));
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
@@ -1545,7 +1576,10 @@ async fn model_budget_approval_required_with_gate_ref_blocks_resource_gate() {
 
     match exit {
         LoopExit::Blocked(blocked) => {
-            assert_eq!(blocked.kind, ironclaw_turns::LoopBlockedKind::Resource);
+            assert_eq!(
+                blocked.kind,
+                ironclaw_loop_contracts::LoopBlockedKind::Resource
+            );
             assert_eq!(blocked.gate_ref, gate_ref);
             assert_eq!(blocked.blocked_activity_id, None);
         }
@@ -1869,7 +1903,7 @@ async fn reply_admission_rejects_candidate_before_finalizing_and_continues() {
             resolutions: vec![resolution::completed(
                 result_ref.clone(),
                 "done".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 false,
                 0,
                 None,
@@ -1939,7 +1973,7 @@ async fn reply_admission_rejects_candidate_before_finalizing_and_continues() {
 /// now accumulates before branching on the model output.
 #[tokio::test]
 async fn cumulative_usage_counts_capability_call_and_reply_turns() {
-    use ironclaw_turns::run_profile::{LoopModelResponse, LoopModelUsage};
+    use ironclaw_loop_contracts::{LoopModelResponse, LoopModelUsage};
 
     let result_ref = LoopResultRef::new("result:done").expect("valid");
     // Turn 1 is a capability call carrying its own usage; turn 2 is the reply.
@@ -1968,7 +2002,7 @@ async fn cumulative_usage_counts_capability_call_and_reply_turns() {
             resolutions: vec![resolution::completed(
                 result_ref,
                 "done".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 false,
                 0,
                 None,
@@ -2011,7 +2045,7 @@ async fn reply_admission_rendered_flag_stays_false_when_context_suppresses_contr
             resolutions: vec![resolution::completed(
                 result_ref.clone(),
                 "done".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 false,
                 0,
                 None,
@@ -2281,7 +2315,7 @@ async fn prompt_stage_redacts_rejected_prompt_error_summary() {
         } => {
             assert_eq!(
                 safe_summary,
-                ironclaw_turns::run_profile::LoopSafeSummary::tool_failure_details_redacted()
+                ironclaw_loop_contracts::LoopSafeSummary::tool_failure_details_redacted()
             );
             assert!(detail.contains("prompt construction rejected token"));
             assert!(detail.contains("[redacted]"));
@@ -2299,7 +2333,7 @@ async fn capability_stage_returns_after_batch_summary() {
             resolutions: vec![resolution::completed(
                 result_ref.clone(),
                 "done".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 false,
                 0,
                 None,
@@ -2324,7 +2358,7 @@ async fn capability_stage_returns_after_batch_summary() {
             ctx,
             CapabilityInput {
                 state,
-                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                surface: ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
                     &host,
                     VisibleCapabilityRequest,
                 )
@@ -2413,7 +2447,7 @@ fn sanitize_result_ref_suffix_handles_empty_special_chars_and_truncation() {
     assert_eq!(sanitized.len(), 300);
 
     let result_ref = synthetic_provider_error_result_ref(&CapabilityCallCandidate {
-        activity_id: ironclaw_turns::CapabilityActivityId::new(),
+        activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
         surface_version: surface_version(),
         capability_id: capability_id(),
         input_ref: CapabilityInputRef::new("input:demo").expect("valid"),
@@ -2619,7 +2653,7 @@ async fn completion_nudge_lets_model_use_tools_to_finish_after_trailing_off() {
         resolutions: vec![resolution::completed(
             result_ref.clone(),
             "wrote file".to_string(),
-            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
             false,
             0,
             None,
@@ -2826,7 +2860,7 @@ async fn stopped_on_suspension_completed_outcome_still_appends_result() {
             resolutions: vec![resolution::completed(
                 result_ref.clone(),
                 "stopped batch completed".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,
@@ -2918,7 +2952,7 @@ async fn terminate_hint_after_batch_completes_without_extra_model_call() {
             resolutions: vec![resolution::completed(
                 LoopResultRef::new("result:done").expect("valid"),
                 "done".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,
@@ -2960,7 +2994,7 @@ async fn terminate_hint_after_batch_completes_without_extra_model_call() {
         .progress_events()
         .into_iter()
         .find_map(|event| match event {
-            ironclaw_turns::run_profile::LoopProgressEvent::CapabilityBatchCompleted {
+            ironclaw_loop_contracts::LoopProgressEvent::CapabilityBatchCompleted {
                 result_count,
                 denied_count,
                 gated_count,
@@ -3022,7 +3056,7 @@ async fn gate_blocks_with_before_block_checkpoint() {
         .progress_events()
         .into_iter()
         .find_map(|event| match event {
-            ironclaw_turns::run_profile::LoopProgressEvent::CapabilityBatchCompleted {
+            ironclaw_loop_contracts::LoopProgressEvent::CapabilityBatchCompleted {
                 result_count,
                 denied_count,
                 gated_count,
@@ -3065,7 +3099,7 @@ async fn approval_resume_metadata_is_replayed_after_before_block_checkpoint() {
             resolutions: vec![resolution::completed(
                 completed_ref.clone(),
                 "approval resumed".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,
@@ -3312,7 +3346,7 @@ async fn parallel_batch_records_completed_results_before_blocking_on_suspension(
                 resolution::completed(
                     completed_ref.clone(),
                     "parallel call completed".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     false,
                     0,
                     None,
@@ -3373,7 +3407,7 @@ async fn capability_batch_rejects_outcome_count_exceeding_invocation_count() {
                 resolution::completed(
                     LoopResultRef::new("result:first").expect("valid"),
                     "first".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     false,
                     0,
                     None,
@@ -3382,7 +3416,7 @@ async fn capability_batch_rejects_outcome_count_exceeding_invocation_count() {
                 resolution::completed(
                     LoopResultRef::new("result:second").expect("valid"),
                     "second".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     false,
                     0,
                     None,
@@ -4866,7 +4900,7 @@ async fn terminate_hint_counts_only_visible_invoked_calls() {
             resolutions: vec![resolution::completed(
                 LoopResultRef::new("result:visible").expect("valid"),
                 "visible call completed".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,
@@ -4952,7 +4986,7 @@ async fn retry_uses_single_call_invocation() {
             .with_single_outcomes(vec![resolution::completed(
                 LoopResultRef::new("result:retry").expect("valid"),
                 "retry completed".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,
@@ -4993,14 +5027,14 @@ async fn a_denial_tells_the_model_what_would_unlock_it() {
                 resolution::completed(
                     result_ref.clone(),
                     "provider call completed".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     true,
                     0,
                     None,
                     None,
                 ),
                 resolution::denied(
-                    ironclaw_turns::run_profile::CapabilityDeniedReasonKind::unknown("auth_denied")
+                    ironclaw_loop_contracts::CapabilityDeniedReasonKind::unknown("auth_denied")
                         .expect("valid reason tag"),
                     // Deliberately avoids the word "credential": the summary
                     // channel's credential-marker guard would scrub it to a
@@ -5089,7 +5123,7 @@ async fn policy_denied_capability_error_honors_retry_recovery() {
         .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![
                 resolution::denied(
-                    ironclaw_turns::run_profile::CapabilityDeniedReasonKind::EmptySurface,
+                    ironclaw_loop_contracts::CapabilityDeniedReasonKind::EmptySurface,
                     "provider call denied".to_string(),
                 )
                 .resolution,
@@ -5099,7 +5133,7 @@ async fn policy_denied_capability_error_honors_retry_recovery() {
         .with_single_outcomes(vec![resolution::completed(
             LoopResultRef::new("result:policy-retry").expect("valid"),
             "policy retry completed".to_string(),
-            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
             true,
             0,
             None,
@@ -5260,7 +5294,7 @@ async fn completed_provider_call_appends_provider_replay_metadata() {
             resolutions: vec![resolution::completed(
                 result_ref.clone(),
                 safe_summary.clone(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,
@@ -5341,14 +5375,14 @@ async fn denied_provider_call_appends_failure_tool_result_for_replay() {
                 resolution::completed(
                     result_ref.clone(),
                     "provider call completed".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     true,
                     0,
                     None,
                     None,
                 ),
                 resolution::denied(
-                    ironclaw_turns::run_profile::CapabilityDeniedReasonKind::EmptySurface,
+                    ironclaw_loop_contracts::CapabilityDeniedReasonKind::EmptySurface,
                     "provider call denied".to_string(),
                 )
                 .resolution,
@@ -5624,14 +5658,14 @@ async fn completed_output_digest_is_recorded_into_seen_capability_output_digests
     // `append_completed_capability_result` cannot silently regress while it is still
     // inert — nothing reads the ring until output-aware detection lands in a later
     // change, so a behavior-only test would stay green even if the push were removed.
-    let digest = ironclaw_turns::run_profile::ContentDigest(4242);
+    let digest = ironclaw_loop_contracts::ContentDigest(4242);
     let result_ref = LoopResultRef::new("result:digest-recorded").expect("valid");
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
         ironclaw_host_api::resolution::ResolutionBatch {
             resolutions: vec![resolution::completed(
                 result_ref.clone(),
                 "completed with digest".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 Some(digest),
@@ -5945,7 +5979,7 @@ async fn executor_post_capability_trips_policy_and_sets_flags_in_final_state() {
             resolutions: vec![resolution::completed(
                 LoopResultRef::new("result:big").expect("valid"),
                 "big result".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 33_001,
                 None,
@@ -5996,7 +6030,7 @@ async fn executor_post_capability_trips_policy_and_sets_flags_in_final_state() {
     // D-A: the initiator must be threaded through state.
     assert_eq!(
         final_state.compaction_state.force_compact_initiator,
-        Some(ironclaw_turns::run_profile::CompactionInitiator::CapabilityResultOverflow),
+        Some(ironclaw_loop_contracts::CompactionInitiator::CapabilityResultOverflow),
         "force_compact_initiator must be CapabilityResultOverflow after a byte-cap trip"
     );
 }
@@ -6009,7 +6043,7 @@ async fn executor_post_capability_does_not_trip_under_threshold() {
             resolutions: vec![resolution::completed(
                 LoopResultRef::new("result:small").expect("valid"),
                 "small result".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 100,
                 None,
@@ -6057,7 +6091,7 @@ async fn executor_skip_model_turn_bypasses_model_stage() {
             resolutions: vec![resolution::completed(
                 LoopResultRef::new("result:big-no-term").expect("valid"),
                 "big result no terminate".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 false,
                 33_001,
                 None,
@@ -6170,7 +6204,7 @@ async fn executor_batch_accumulates_per_capability_bytes_and_trips() {
                 resolution::completed(
                     LoopResultRef::new("result:first").expect("valid"),
                     "first".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     true,
                     20_000,
                     None,
@@ -6179,7 +6213,7 @@ async fn executor_batch_accumulates_per_capability_bytes_and_trips() {
                 resolution::completed(
                     LoopResultRef::new("result:second").expect("valid"),
                     "second".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     true,
                     20_000,
                     None,
@@ -6229,7 +6263,7 @@ async fn executor_batch_accumulates_per_capability_bytes_and_trips() {
     // D-A: the initiator must be threaded through state.
     assert_eq!(
         final_state.compaction_state.force_compact_initiator,
-        Some(ironclaw_turns::run_profile::CompactionInitiator::CapabilityResultOverflow),
+        Some(ironclaw_loop_contracts::CompactionInitiator::CapabilityResultOverflow),
         "force_compact_initiator must be CapabilityResultOverflow after accumulated overflow"
     );
 }
@@ -6479,7 +6513,7 @@ async fn executor_emits_compaction_started_with_capability_result_overflow_initi
             resolutions: vec![resolution::completed(
                 LoopResultRef::new("result:big-f12").expect("valid"),
                 "big result for F12".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 false,
                 33_001,
                 None,
@@ -6500,6 +6534,7 @@ async fn executor_emits_compaction_started_with_capability_result_overflow_initi
         .with_compaction_result(Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new("summary-f12").unwrap(),
             compression_ratio_ppm: 250_000,
+            redacted_leak_count: 0,
         }));
 
     let executor = CanonicalAgentLoopExecutor;
@@ -6533,7 +6568,7 @@ async fn executor_emits_compaction_started_with_capability_result_overflow_initi
         .filter(|event| {
             matches!(
                 event,
-                ironclaw_turns::run_profile::LoopProgressEvent::CompactionStarted { .. }
+                ironclaw_loop_contracts::LoopProgressEvent::CompactionStarted { .. }
             )
         })
         .collect();
@@ -6544,10 +6579,10 @@ async fn executor_emits_compaction_started_with_capability_result_overflow_initi
          got: {compaction_started_events:?}"
     );
     match compaction_started_events[0] {
-        ironclaw_turns::run_profile::LoopProgressEvent::CompactionStarted { initiator, .. } => {
+        ironclaw_loop_contracts::LoopProgressEvent::CompactionStarted { initiator, .. } => {
             assert_eq!(
                 initiator,
-                &ironclaw_turns::run_profile::CompactionInitiator::CapabilityResultOverflow,
+                &ironclaw_loop_contracts::CompactionInitiator::CapabilityResultOverflow,
                 "CompactionStarted initiator must be CapabilityResultOverflow; \
                  if it is Auto the D-A state-threaded initiator was dropped before \
                  PromptCompactionStep could consume it"
@@ -6588,7 +6623,7 @@ async fn executor_continues_after_forced_compaction_rejection_from_tool_result_o
         resolutions: vec![resolution::completed(
             LoopResultRef::new("result:big-compaction-rejected").expect("valid"),
             "large search result".to_string(),
-            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
             false,
             33_001,
             None,
@@ -6912,7 +6947,7 @@ async fn parallel_batch_records_completed_results_before_external_tool_block() {
                 resolution::completed(
                     completed_ref.clone(),
                     "parallel call completed".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     false,
                     0,
                     None,
@@ -6973,7 +7008,7 @@ async fn resume_after_external_tool_gate_redispatches_without_model_turn() {
             resolutions: vec![resolution::completed(
                 completed_ref.clone(),
                 "external tool output".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,
@@ -7051,7 +7086,7 @@ async fn resume_after_auth_gate_redispatches_original_call_without_model_turn() 
             resolutions: vec![resolution::completed(
                 completed_ref.clone(),
                 "auth resumed and completed".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,
@@ -7224,7 +7259,7 @@ async fn auth_resume_provider_registration_failure_fails_before_invocation() {
                 resolutions: vec![resolution::completed(
                     completed_ref,
                     "should not invoke".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     true,
                     0,
                     None,
@@ -7296,7 +7331,7 @@ async fn auth_resume_provider_activity_remap_fails_before_invocation() {
             resolutions: vec![resolution::completed(
                 completed_ref,
                 "should not invoke".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,
@@ -7855,7 +7890,7 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
             resolutions: vec![resolution::completed(
                 completed_ref.clone(),
                 "completed after auth resume".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,
@@ -8112,7 +8147,7 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
             resolutions: vec![resolution::completed(
                 completed_ref.clone(),
                 "done".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 true,
                 0,
                 None,
@@ -8236,7 +8271,7 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
                 resolution::completed(
                     LoopResultRef::new("result:first").expect("valid"),
                     "first done".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     false,
                     0,
                     None,
@@ -8245,7 +8280,7 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
                 resolution::completed(
                     LoopResultRef::new("result:second").expect("valid"),
                     "second done".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     false,
                     0,
                     None,
@@ -8286,7 +8321,7 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
         ParentLoopOutput::AssistantReply(_) => panic!("expected calls fixture"),
     };
 
-    let surface = ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+    let surface = ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
         &host,
         VisibleCapabilityRequest,
     )
@@ -8405,18 +8440,18 @@ async fn resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
     };
 
     // Phase 1 model response: issues cap1 with original-run input_ref.
-    let cap1_model_response = ironclaw_turns::run_profile::LoopModelResponse {
+    let cap1_model_response = ironclaw_loop_contracts::LoopModelResponse {
         chunks: Vec::new(),
         safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: capability_id(),
             input_ref: cap1_input_ref,
             effective_capability_ids: vec![capability_id()],
             provider_replay: None,
         }]),
-        effective_model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("model")
+        effective_model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("model")
             .expect("valid"),
         usage: None,
     };
@@ -8590,18 +8625,18 @@ async fn auth_resume_origin_backend_failure_does_not_die_as_scope_mismatch() {
     // (No provider_replay — this is a non-provider-backed auth resume, so
     // Phase 2 reuses the stored input_ref directly via
     // pending_auth_resume_staged_input_candidate.)
-    let cap1_model_response = ironclaw_turns::run_profile::LoopModelResponse {
+    let cap1_model_response = ironclaw_loop_contracts::LoopModelResponse {
         chunks: Vec::new(),
         safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: capability_id(),
             input_ref: cap1_input_ref,
             effective_capability_ids: vec![capability_id()],
             provider_replay: None,
         }]),
-        effective_model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("model")
+        effective_model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("model")
             .expect("valid"),
         usage: None,
     };
@@ -8772,7 +8807,7 @@ async fn capability_stage_denied_approval_resume_surfaces_gate_declined_failure_
             ctx,
             CapabilityInput {
                 state,
-                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                surface: ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
                     &host,
                     VisibleCapabilityRequest,
                 )
@@ -8871,7 +8906,7 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
         gate_ref: LoopGateRef::new("gate:auth-deny-test").expect("valid"),
         capability_id: capability_id(),
         surface_version: surface_version(),
-        input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:deny-test")
+        input_ref: ironclaw_loop_contracts::CapabilityInputRef::new("input:deny-test")
             .expect("valid"),
         effective_capability_ids: vec![capability_id()],
         provider_replay: None,
@@ -8880,7 +8915,7 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
         ),
         activity_id: denied_activity_id,
         prior_approval: None,
-        disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
+        disposition: Some(ironclaw_host_api::turn::GateResumeDisposition::Denied),
     });
 
     // Use provider_calls_response so provider_replay is set, enabling the
@@ -8891,13 +8926,12 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
     };
     calls[0].activity_id = denied_activity_id;
 
-    let mut current_surface =
-        ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
-            &host,
-            VisibleCapabilityRequest,
-        )
-        .await
-        .expect("visible surface");
+    let mut current_surface = ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
+        &host,
+        VisibleCapabilityRequest,
+    )
+    .await
+    .expect("visible surface");
     current_surface.descriptors.clear();
     current_surface.callable_capability_ids = Some(Vec::new());
 
@@ -8941,7 +8975,7 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
         .expect("denied auth resume reaches the capability lifecycle");
     assert_eq!(
         auth_resume.disposition,
-        Some(ironclaw_turns::GateResumeDisposition::Denied)
+        Some(ironclaw_host_api::turn::GateResumeDisposition::Denied)
     );
     assert!(auth_resume.resume_token.is_none());
     // 4. One model-visible observation appended with GateDeclined error + Forbidden retry.
@@ -9018,7 +9052,7 @@ async fn auth_gate_without_resume_token_records_activity_id_for_denial_failure()
             ctx,
             CapabilityInput {
                 state: LoopExecutionState::initial_for_run(host.run_context()),
-                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                surface: ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
                     &host,
                     VisibleCapabilityRequest,
                 )
@@ -9052,14 +9086,14 @@ async fn auth_gate_without_resume_token_records_activity_id_for_denial_failure()
         .pending_auth_resume
         .as_mut()
         .expect("pending auth resume")
-        .disposition = Some(ironclaw_turns::GateResumeDisposition::Denied);
+        .disposition = Some(ironclaw_host_api::turn::GateResumeDisposition::Denied);
 
     let phase2 = CapabilityStage
         .process(
             ctx,
             CapabilityInput {
                 state: blocked_state,
-                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                surface: ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
                     &host,
                     VisibleCapabilityRequest,
                 )
@@ -9094,7 +9128,7 @@ async fn auth_gate_without_resume_token_records_activity_id_for_denial_failure()
         .expect("denied tokenless resume reaches the capability lifecycle");
     assert_eq!(
         denied_resume.disposition,
-        Some(ironclaw_turns::GateResumeDisposition::Denied)
+        Some(ironclaw_host_api::turn::GateResumeDisposition::Denied)
     );
     assert!(
         denied_resume.resume_token.is_none(),
@@ -9126,14 +9160,14 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
     // visible rather than denied-by-surface.
     let host = MockHost::new(Vec::new())
         .with_extra_capability_descriptors(vec![
-            ironclaw_turns::run_profile::CapabilityDescriptorView {
+            ironclaw_loop_contracts::CapabilityDescriptorView {
                 capability_id: other_capability_id(),
                 provider: None,
                 runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
                 safe_name: "demo_list".to_string(),
                 safe_description: "demo list capability".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
+                concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
         ])
@@ -9149,7 +9183,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
                 resolution::completed(
                     y_result_ref.clone(),
                     "list done".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     false,
                     0,
                     None,
@@ -9172,14 +9206,13 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
         gate_ref: LoopGateRef::new("gate:auth-deny-multi-test").expect("valid"),
         capability_id: capability_id(),
         surface_version: surface_version(),
-        input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:deny-x")
-            .expect("valid"),
+        input_ref: ironclaw_loop_contracts::CapabilityInputRef::new("input:deny-x").expect("valid"),
         effective_capability_ids: vec![capability_id()],
         provider_replay: None,
         resume_token: None,
         activity_id: denied_activity_id,
         prior_approval: None,
-        disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
+        disposition: Some(ironclaw_host_api::turn::GateResumeDisposition::Denied),
     });
 
     // Build a batch with two calls:
@@ -9190,14 +9223,14 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
     // written to appended_result_refs (same pattern as the single-call test).
     let calls = vec![
         // call X — denied
-        ironclaw_turns::run_profile::CapabilityCallCandidate {
+        ironclaw_loop_contracts::CapabilityCallCandidate {
             activity_id: denied_activity_id,
             surface_version: surface_version(),
             capability_id: capability_id(),
-            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:x-denied")
+            input_ref: ironclaw_loop_contracts::CapabilityInputRef::new("input:x-denied")
                 .expect("valid"),
             effective_capability_ids: vec![capability_id()],
-            provider_replay: Some(ironclaw_turns::run_profile::ProviderToolCallReplay {
+            provider_replay: Some(ironclaw_loop_contracts::ProviderToolCallReplay {
                 provider_id: "test-provider".to_string(),
                 provider_model_id: "test-model".to_string(),
                 provider_turn_id: "turn_1".to_string(),
@@ -9211,11 +9244,11 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
             }),
         },
         // call Y — unrelated, must dispatch normally
-        ironclaw_turns::run_profile::CapabilityCallCandidate {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+        ironclaw_loop_contracts::CapabilityCallCandidate {
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: other_capability_id(),
-            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:y-unrelated")
+            input_ref: ironclaw_loop_contracts::CapabilityInputRef::new("input:y-unrelated")
                 .expect("valid"),
             effective_capability_ids: vec![other_capability_id()],
             provider_replay: None,
@@ -9227,7 +9260,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
             ctx,
             CapabilityInput {
                 state,
-                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                surface: ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
                     &host,
                     VisibleCapabilityRequest,
                 )
@@ -9278,7 +9311,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_call_remaining_
         .expect("X must carry the typed denied auth resume");
     assert_eq!(
         x_resume.disposition,
-        Some(ironclaw_turns::GateResumeDisposition::Denied)
+        Some(ironclaw_host_api::turn::GateResumeDisposition::Denied)
     );
     assert!(x_resume.resume_token.is_none());
     let y_invocation = batches[0]
@@ -9372,7 +9405,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
                 resolution::completed(
                     y_result_ref.clone(),
                     "same capability second call done".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     false,
                     0,
                     None,
@@ -9401,11 +9434,11 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
         resume_token: None,
         activity_id: denied_activity_id,
         prior_approval: None,
-        disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
+        disposition: Some(ironclaw_host_api::turn::GateResumeDisposition::Denied),
     });
 
     let calls = vec![
-        ironclaw_turns::run_profile::CapabilityCallCandidate {
+        ironclaw_loop_contracts::CapabilityCallCandidate {
             activity_id: denied_activity_id,
             surface_version: surface_version(),
             capability_id: capability_id(),
@@ -9424,7 +9457,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
                 signature: None,
             }),
         },
-        ironclaw_turns::run_profile::CapabilityCallCandidate {
+        ironclaw_loop_contracts::CapabilityCallCandidate {
             activity_id: surviving_activity_id,
             surface_version: surface_version(),
             capability_id: capability_id(),
@@ -9439,7 +9472,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
             ctx,
             CapabilityInput {
                 state,
-                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                surface: ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
                     &host,
                     VisibleCapabilityRequest,
                 )
@@ -9476,7 +9509,7 @@ async fn capability_stage_denied_auth_resume_only_fails_matching_activity_when_c
             .as_ref()
             .expect("denied activity carries the typed denied auth resume")
             .disposition,
-        Some(ironclaw_turns::GateResumeDisposition::Denied)
+        Some(ironclaw_host_api::turn::GateResumeDisposition::Denied)
     );
     let surviving_invocation = batches[0]
         .invocations
@@ -9530,25 +9563,25 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
     let host = MockHost::new(Vec::new())
         .with_extra_capability_descriptors(vec![
             // Y: demo.list
-            ironclaw_turns::run_profile::CapabilityDescriptorView {
+            ironclaw_loop_contracts::CapabilityDescriptorView {
                 capability_id: other_capability_id(),
                 provider: None,
                 runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
                 safe_name: "demo_list".to_string(),
                 safe_description: "demo list capability".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
+                concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
             // Z: demo.write
-            ironclaw_turns::run_profile::CapabilityDescriptorView {
+            ironclaw_loop_contracts::CapabilityDescriptorView {
                 capability_id: z_capability_id.clone(),
                 provider: None,
                 runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
                 safe_name: "demo_write".to_string(),
                 safe_description: "demo write capability".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
+                concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
         ])
@@ -9564,7 +9597,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
                 resolution::completed(
                     y_result_ref.clone(),
                     "list done".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     false,
                     0,
                     None,
@@ -9573,7 +9606,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
                 resolution::completed(
                     z_result_ref.clone(),
                     "write done".to_string(),
-                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                     false,
                     0,
                     None,
@@ -9596,30 +9629,28 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
         gate_ref: LoopGateRef::new("gate:auth-deny-1plus2").expect("valid"),
         capability_id: capability_id(),
         surface_version: surface_version(),
-        input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:deny-x-1plus2")
+        input_ref: ironclaw_loop_contracts::CapabilityInputRef::new("input:deny-x-1plus2")
             .expect("valid"),
         effective_capability_ids: vec![capability_id()],
         provider_replay: None,
         resume_token: None,
         activity_id: denied_activity_id,
         prior_approval: None,
-        disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
+        disposition: Some(ironclaw_host_api::turn::GateResumeDisposition::Denied),
     });
 
     // Three calls: X (denied), Y (unrelated), Z (unrelated).
     let calls = vec![
         // X — matches denied pending_auth_resume; provider_replay set so the
         // gate-declined failure observation is written to appended_result_refs.
-        ironclaw_turns::run_profile::CapabilityCallCandidate {
+        ironclaw_loop_contracts::CapabilityCallCandidate {
             activity_id: denied_activity_id,
             surface_version: surface_version(),
             capability_id: capability_id(),
-            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new(
-                "input:x-denied-1plus2",
-            )
-            .expect("valid"),
+            input_ref: ironclaw_loop_contracts::CapabilityInputRef::new("input:x-denied-1plus2")
+                .expect("valid"),
             effective_capability_ids: vec![capability_id()],
-            provider_replay: Some(ironclaw_turns::run_profile::ProviderToolCallReplay {
+            provider_replay: Some(ironclaw_loop_contracts::ProviderToolCallReplay {
                 provider_id: "test-provider".to_string(),
                 provider_model_id: "test-model".to_string(),
                 provider_turn_id: "turn_1".to_string(),
@@ -9633,26 +9664,22 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
             }),
         },
         // Y — unrelated, must dispatch normally.
-        ironclaw_turns::run_profile::CapabilityCallCandidate {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+        ironclaw_loop_contracts::CapabilityCallCandidate {
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: other_capability_id(),
-            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new(
-                "input:y-unrelated-1plus2",
-            )
-            .expect("valid"),
+            input_ref: ironclaw_loop_contracts::CapabilityInputRef::new("input:y-unrelated-1plus2")
+                .expect("valid"),
             effective_capability_ids: vec![other_capability_id()],
             provider_replay: None,
         },
         // Z — unrelated, must dispatch normally.
-        ironclaw_turns::run_profile::CapabilityCallCandidate {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+        ironclaw_loop_contracts::CapabilityCallCandidate {
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: z_capability_id.clone(),
-            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new(
-                "input:z-unrelated-1plus2",
-            )
-            .expect("valid"),
+            input_ref: ironclaw_loop_contracts::CapabilityInputRef::new("input:z-unrelated-1plus2")
+                .expect("valid"),
             effective_capability_ids: vec![z_capability_id.clone()],
             provider_replay: None,
         },
@@ -9663,7 +9690,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
             ctx,
             CapabilityInput {
                 state,
-                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                surface: ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
                     &host,
                     VisibleCapabilityRequest,
                 )
@@ -9714,7 +9741,7 @@ async fn capability_stage_denied_auth_resume_one_denied_two_remaining_all_dispat
             .as_ref()
             .expect("X carries the typed denied auth resume")
             .disposition,
-        Some(ironclaw_turns::GateResumeDisposition::Denied)
+        Some(ironclaw_host_api::turn::GateResumeDisposition::Denied)
     );
     let dispatched_ids: std::collections::HashSet<_> = batches[0]
         .invocations
@@ -9807,14 +9834,14 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
 
     let host = MockHost::new(Vec::new())
         .with_extra_capability_descriptors(vec![
-            ironclaw_turns::run_profile::CapabilityDescriptorView {
+            ironclaw_loop_contracts::CapabilityDescriptorView {
                 capability_id: other_capability_id(),
                 provider: None,
                 runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
                 safe_name: "demo_list".to_string(),
                 safe_description: "demo list capability".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
+                concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
         ])
@@ -9822,7 +9849,7 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
             resolutions: vec![resolution::completed(
                 y_result_ref.clone(),
                 "list done".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 false,
                 0,
                 None,
@@ -9852,7 +9879,7 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
         input_ref: CapabilityInputRef::new("input:approval-deny-x").expect("valid"),
         effective_capability_ids: vec![capability_id()],
         provider_replay: None,
-        disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
+        disposition: Some(ironclaw_host_api::turn::GateResumeDisposition::Denied),
     });
 
     // Build a batch with two calls:
@@ -9860,13 +9887,13 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
     //   call Y: other_capability_id() ("demo.list") — unrelated, must proceed normally
     let calls = vec![
         // call X — denied
-        ironclaw_turns::run_profile::CapabilityCallCandidate {
+        ironclaw_loop_contracts::CapabilityCallCandidate {
             activity_id: denied_activity_id,
             surface_version: surface_version(),
             capability_id: capability_id(),
             input_ref: CapabilityInputRef::new("input:x-approval-denied").expect("valid"),
             effective_capability_ids: vec![capability_id()],
-            provider_replay: Some(ironclaw_turns::run_profile::ProviderToolCallReplay {
+            provider_replay: Some(ironclaw_loop_contracts::ProviderToolCallReplay {
                 provider_id: "test-provider".to_string(),
                 provider_model_id: "test-model".to_string(),
                 provider_turn_id: "turn_1".to_string(),
@@ -9880,8 +9907,8 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
             }),
         },
         // call Y — unrelated, must dispatch normally
-        ironclaw_turns::run_profile::CapabilityCallCandidate {
-            activity_id: ironclaw_turns::CapabilityActivityId::new(),
+        ironclaw_loop_contracts::CapabilityCallCandidate {
+            activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
             surface_version: surface_version(),
             capability_id: other_capability_id(),
             input_ref: CapabilityInputRef::new("input:y-approval-unrelated").expect("valid"),
@@ -9895,7 +9922,7 @@ async fn capability_stage_denied_approval_resume_only_fails_matching_call_remain
             ctx,
             CapabilityInput {
                 state,
-                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                surface: ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
                     &host,
                     VisibleCapabilityRequest,
                 )
@@ -10023,14 +10050,14 @@ async fn capability_stage_denied_approval_resume_no_matching_call_dispatches_unr
     // Only capability Y is needed in the batch outcome; X is never submitted.
     let host = MockHost::new(Vec::new())
         .with_extra_capability_descriptors(vec![
-            ironclaw_turns::run_profile::CapabilityDescriptorView {
+            ironclaw_loop_contracts::CapabilityDescriptorView {
                 capability_id: other_capability_id(),
                 provider: None,
                 runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
                 safe_name: "demo_list".to_string(),
                 safe_description: "demo list capability".to_string(),
                 description_trust: Default::default(),
-                concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
+                concurrency_hint: ironclaw_loop_contracts::ConcurrencyHint::SafeForParallel,
                 parameters_schema: serde_json::json!({"type":"object","properties":{}}),
             },
         ])
@@ -10038,7 +10065,7 @@ async fn capability_stage_denied_approval_resume_no_matching_call_dispatches_unr
             resolutions: vec![resolution::completed(
                 y_result_ref.clone(),
                 "list done no-match".to_string(),
-                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
                 false,
                 0,
                 None,
@@ -10068,12 +10095,12 @@ async fn capability_stage_denied_approval_resume_no_matching_call_dispatches_unr
         input_ref: CapabilityInputRef::new("input:approval-deny-no-match-x").expect("valid"),
         effective_capability_ids: vec![capability_id()],
         provider_replay: None,
-        disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
+        disposition: Some(ironclaw_host_api::turn::GateResumeDisposition::Denied),
     });
 
     // The model emits ONLY call Y (other_capability_id); no X in this batch.
-    let calls = vec![ironclaw_turns::run_profile::CapabilityCallCandidate {
-        activity_id: ironclaw_turns::CapabilityActivityId::new(),
+    let calls = vec![ironclaw_loop_contracts::CapabilityCallCandidate {
+        activity_id: ironclaw_host_api::turn::CapabilityActivityId::new(),
         surface_version: surface_version(),
         capability_id: other_capability_id(),
         input_ref: CapabilityInputRef::new("input:y-no-match-approval").expect("valid"),
@@ -10086,7 +10113,7 @@ async fn capability_stage_denied_approval_resume_no_matching_call_dispatches_unr
             ctx,
             CapabilityInput {
                 state,
-                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+                surface: ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
                     &host,
                     VisibleCapabilityRequest,
                 )

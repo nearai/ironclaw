@@ -25,7 +25,6 @@ import { matchCommand } from "./lib/chat-commands";
 import { channelConnectionDisplayName } from "../../lib/channel-connection-events";
 import { channelConnectionFromGate } from "./lib/gates";
 import { NEW_DRAFT_KEY } from "./lib/draft-store";
-import { messageBelongsToActiveRun } from "./lib/message-types";
 import { buildRuntimeContext } from "./lib/runtime-context";
 import { buildScopedLogsPath } from "../logs/lib/logs-data";
 import { useInterfacePreferences } from "../../lib/interface-preferences";
@@ -47,16 +46,6 @@ function pendingOnboardingLabel(onboarding) {
   // Single source of channel display names (lib/channel-connection-events.ts) so
   // the composer notice and the pairing-card title can't drift in casing.
   return channelConnectionDisplayName(onboarding?.extensionName);
-}
-
-function hasVisibleStreamingAssistantText(messages, activeRunId) {
-  return (messages || []).some((message) =>
-    message?.role === "assistant" &&
-    message.isFinalReply === false &&
-    typeof message.content === "string" &&
-    message.content.length > 0 &&
-    messageBelongsToActiveRun(message, activeRunId)
-  );
 }
 
 function cancellationFailureDiagnostic(error) {
@@ -81,6 +70,7 @@ export function Chat({
   composerDraft = "",
   composerResetKey = "",
   gatewayStatus,
+  regressionArtifactExportEnabled = false,
   globalAutoApproveEnabled = false,
   onConnectionStatusChange,
 }) {
@@ -154,14 +144,9 @@ export function Chat({
     Boolean(activeThreadId) && Boolean(pendingOnboarding);
   const activeThreadIsProcessing = Boolean(activeThreadId) && isProcessing;
   const activeRunId = activeRun?.runId || null;
-  const streamingAssistantTextVisible = hasVisibleStreamingAssistantText(
-    messages,
-    activeRunId
-  );
   const showTypingIndicator =
     activeThreadIsProcessing &&
-    !activeThreadHasGate &&
-    !streamingAssistantTextVisible;
+    !activeThreadHasGate;
   const hasMessages =
     messages.length > 0 ||
     activeThreadIsProcessing ||
@@ -395,6 +380,9 @@ export function Chat({
             onRetryMessage={retryMessage}
             threadId={activeThreadId}
             activeRunId={activeRunId}
+            regressionArtifactExportEnabled={
+              regressionArtifactExportEnabled
+            }
             logsPath={logsPath}
             pending={activeThreadIsProcessing}
             commands={chatCommands}

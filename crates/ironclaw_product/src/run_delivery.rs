@@ -27,22 +27,20 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::{
-    ApprovalPromptContextView, AuthPromptView, ExternalConversationRef, ExternalEventId,
-    OutboundPart, ProductAdapterError,
-};
-use async_trait::async_trait;
-use ironclaw_host_api::ids::UserId;
+use crate::{ExternalConversationRef, ExternalEventId, OutboundPart, ProductAdapterError};
+use ironclaw_host_api::turn::{TurnRunId, TurnScope, TurnStatus};
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundError,
     OutboundStateStorePort,
 };
-use ironclaw_turns::{
-    GateRef, GetRunStateRequest, TurnCoordinator, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+use ironclaw_turns::{GetRunStateRequest, TurnCoordinator, TurnRunState};
+
+use crate::auth_prompt::BlockedAuthFlowCanceller;
+use ironclaw_product_contracts::prompt_source::{
+    ApprovalPromptContextSource, BlockedAuthPromptSource,
 };
 
-use crate::auth_prompt::{BlockedAuthFlowCanceller, BlockedAuthPromptRequest};
-
+use crate::ProjectFilesystemReader;
 use crate::delivery_coordinator::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, DeliveryCoordinator, DeliveryIntent,
     NoticeDeliveryRequest,
@@ -105,31 +103,6 @@ pub fn triggered_run_delivery_settings() -> RunDeliverySettings {
     RunDeliverySettings::default()
 }
 
-/// Approval-gate context enrichment: resolves WHAT is being approved
-/// (tool/action/reason) for a gate ref — the same source the WebUI gate
-/// projection reads. Implemented by the composition over its approval
-/// request store; `None` results degrade prompts to generic wording.
-#[async_trait]
-pub trait ApprovalPromptContextSource: Send + Sync {
-    async fn approval_prompt_context(
-        &self,
-        gate_ref: &GateRef,
-        owner_user_id: &UserId,
-        scope: &TurnScope,
-    ) -> Option<ApprovalPromptContextView>;
-}
-
-/// Auth-prompt enrichment: resolves the challenge (OAuth authorization URL
-/// vs manual credential entry) for a run blocked on auth. Implemented by the
-/// composition over the auth engine.
-#[async_trait]
-pub trait BlockedAuthPromptSource: Send + Sync {
-    async fn auth_prompt_for_blocked_run(
-        &self,
-        request: BlockedAuthPromptRequest<'_>,
-    ) -> Result<AuthPromptView, ProductAdapterError>;
-}
-
 /// Everything the generic run-delivery components need. All handles are
 /// `Arc`s; cloning shares them.
 #[derive(Clone)]
@@ -140,6 +113,10 @@ pub struct RunDeliveryServices {
     pub outbound_store: Arc<dyn OutboundStateStorePort>,
     pub route_store: Arc<dyn DeliveredGateRouteStore>,
     pub communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
+    /// Canonical project-scoped reader used to materialize assistant-authored
+    /// `/workspace/...` references only after outbound policy approves the
+    /// delivery.
+    pub project_filesystem: Arc<dyn ProjectFilesystemReader>,
     /// The coordinator every send goes through (OUT-1: none bypasses).
     pub coordinator: Arc<DeliveryCoordinator>,
     /// The channel extension whose surface these components serve (the

@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::ids::TenantId;
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     AgentLoopHostError, LoopModelPort, LoopModelRequest, LoopModelResponse,
 };
 
@@ -78,7 +78,7 @@ mod tests {
     use crate::sink::{ObserverHook, ObserverSink};
     use crate::trust::HookTrustClass;
     use async_trait::async_trait;
-    use ironclaw_turns::run_profile::{
+    use ironclaw_loop_contracts::{
         AssistantReply, LoopModelRequest, LoopModelResponse, ModelProfileId, ParentLoopOutput,
     };
     use std::sync::Mutex;
@@ -121,7 +121,7 @@ mod tests {
             *self.calls.lock().expect("not poisoned") += 1;
             if self.fail {
                 return Err(AgentLoopHostError::new(
-                    ironclaw_turns::run_profile::AgentLoopHostErrorKind::Unavailable,
+                    ironclaw_loop_contracts::AgentLoopHostErrorKind::Unavailable,
                     "stub failure",
                 ));
             }
@@ -252,7 +252,7 @@ mod tests {
         let err = wrapped.stream_model(request()).await.expect_err("must err");
         assert_eq!(
             err.kind,
-            ironclaw_turns::run_profile::AgentLoopHostErrorKind::Unavailable
+            ironclaw_loop_contracts::AgentLoopHostErrorKind::Unavailable
         );
         assert_eq!(*seen.lock().expect("not poisoned"), 0);
     }

@@ -420,6 +420,7 @@ fn persisted_reconstruction_preserves_timestamp_and_bindings() {
             installation_id: installation_id("acme-tools"),
             extension_id: extension_id.clone(),
             manifest_ref: ExtensionManifestRef::new(extension_id, None),
+            incarnation_id: None,
             credential_bindings: vec![binding.clone()],
             updated_at,
             owner: owner.clone(),

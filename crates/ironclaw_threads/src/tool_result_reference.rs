@@ -895,12 +895,8 @@ fn validate_model_observation_detail(value: &serde_json::Value) -> Result<(), St
                 // untrusted, regardless of the enclosing observation's trust.
                 validate_model_observation_text(preview, ObservationProvenance::Untrusted)?;
             }
-            if object.contains_key("item_count")
-                && (!object.contains_key("preview") || !object.contains_key("next_offset"))
-            {
-                return Err(
-                    "model observation item_count requires preview and next_offset".to_string(),
-                );
+            if object.contains_key("item_count") && !object.contains_key("next_offset") {
+                return Err("model observation item_count requires next_offset".to_string());
             }
             Ok(())
         }
@@ -1995,10 +1991,9 @@ mod tests {
         );
     }
 
-    /// `item_count` is only meaningful alongside a truncated preview -- an
-    /// observation carrying `item_count` without `preview`/`next_offset`
-    /// must drop through the best-effort constructor and fall back to the
-    /// safe summary, mirroring the malformed-type case above.
+    /// `item_count` requires a continuation offset even when an unsafe preview
+    /// was suppressed. Without an offset it must drop through the best-effort
+    /// constructor and fall back to the safe summary.
     #[test]
     fn best_effort_observation_drops_item_count_without_preview() {
         let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
@@ -2021,12 +2016,41 @@ mod tests {
 
         assert!(
             envelope.model_observation.is_none(),
-            "item_count without preview/next_offset must drop the observation, not persist it"
+            "item_count without next_offset must drop the observation, not persist it"
         );
         assert_eq!(
             envelope.model_visible_content_or_safe_summary(),
             "tool completed"
         );
+    }
+
+    #[test]
+    fn best_effort_observation_keeps_item_count_without_preview() {
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:item-count-with-suppressed-preview",
+            ToolResultSafeSummary::new("tool completed").expect("summary"),
+            Some(serde_json::json!({
+                "schema_version": 1,
+                "status": "success",
+                "summary": "Tool completed; preview suppressed.",
+                "detail": {
+                    "kind": "result_reference",
+                    "result_ref": "result:item-count-with-suppressed-preview",
+                    "byte_len": 4096,
+                    "total_bytes": 4096,
+                    "next_offset": 2048,
+                    "item_count": 600
+                },
+                "trust": "untrusted_tool_output"
+            })),
+        )
+        .expect("envelope construction succeeds");
+
+        let observation = envelope
+            .model_observation
+            .expect("metadata-only observation is retained");
+        assert_eq!(observation["detail"]["item_count"], 600);
+        assert!(observation["detail"].get("preview").is_none());
     }
 
     fn invalid_input_observation_with_issue(issue: serde_json::Value) -> serde_json::Value {

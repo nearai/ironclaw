@@ -33,6 +33,7 @@
 //! request and performs one exact read.
 
 mod message_lookup_index;
+mod message_read;
 mod thread_index;
 
 use std::{
@@ -60,6 +61,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
+use crate::stored_message::serialize_stored_thread_message;
 use crate::summary_artifacts::find_overlapping_summary;
 use crate::title::derive_title_from_message;
 use crate::tool_result_records::{
@@ -70,19 +72,20 @@ use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
     AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
+    BoundedThreadMessageSnapshot, BoundedThreadMessages, BoundedThreadMessagesRequest,
     CapabilityDisplayPreviewEnvelope, ContextMessage, ContextMessages, ContextWindow,
     CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
     LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, ProviderToolCallReferenceEnvelope, PutToolResultRecordRequest,
-    ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact,
-    SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
-    ToolResultRecordChunk, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
-    UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
+    MessageStatus, PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+    SessionThreadService, SummaryArtifact, SummaryModelContextPolicy, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
+    ThreadMessageRecord, ThreadScope, ToolResultRecordChunk, ToolResultReferenceEnvelope,
+    UpdateAssistantDraftRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 use message_lookup_index::MessageLookupIndexStore;
+use message_read::{MessageReadBudget, MessageReadResult};
 
 /// Bound on the CAS retry loop. Mirrors the run-state / authorization
 /// store budgets — enough to absorb routine cross-process contention,
@@ -124,29 +127,6 @@ struct StoredThreadRecord {
     #[serde(flatten)]
     record: SessionThreadRecord,
     next_sequence: u64,
-}
-
-/// On-disk transcript message record.
-///
-/// `ThreadMessageRecord` deliberately skips provider replay metadata when it is
-/// serialized for product-facing transcript surfaces. The filesystem service is
-/// the private backend for model context, so it stores that metadata explicitly
-/// while history reads continue to scrub it before returning records.
-#[derive(Serialize)]
-struct StoredThreadMessageRecord<'a> {
-    #[serde(flatten)]
-    record: &'a ThreadMessageRecord,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_result_provider_call: &'a Option<ProviderToolCallReferenceEnvelope>,
-}
-
-impl<'a> From<&'a ThreadMessageRecord> for StoredThreadMessageRecord<'a> {
-    fn from(record: &'a ThreadMessageRecord) -> Self {
-        Self {
-            record,
-            tool_result_provider_call: &record.tool_result_provider_call,
-        }
-    }
 }
 
 /// On-disk inbound idempotency record. Includes the originating scope so a
@@ -254,7 +234,7 @@ where
     }
 
     fn message_entry(record: &ThreadMessageRecord) -> Result<Entry, SessionThreadError> {
-        let body = serialize_pretty(&StoredThreadMessageRecord::from(record))?;
+        let body = serialize_stored_thread_message(record)?;
         let kind = RecordKind::new(THREAD_MESSAGE_KIND).map_err(|error| {
             SessionThreadError::Backend(format!("invalid thread_message record kind: {error}"))
         })?;
@@ -1672,6 +1652,8 @@ where
         &self,
         request: AppendFinalizedAssistantMessageRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let (content, attachments) = request.content.into_parts();
+        crate::contract::validate_attachment_refs(&attachments)?;
         if let Some(existing) = self
             .find_assistant_message_by_run(
                 &request.scope,
@@ -1684,7 +1666,8 @@ where
             if existing.status != MessageStatus::Draft {
                 return Ok(existing);
             }
-            let content = request.content.clone();
+            let content = content.clone();
+            let attachments = attachments.clone();
             let now = Utc::now();
             let finalized = self
                 .apply_message_update(
@@ -1694,8 +1677,8 @@ where
                     |message| {
                         ensure_draft(message)?;
                         message.status = MessageStatus::Finalized;
-                        message.content = Some(content.clone().into_text());
-                        message.attachments = Vec::new();
+                        message.content = Some(content.clone());
+                        message.attachments = attachments.clone();
                         message.updated_at = Some(now);
                         Ok(())
                     },
@@ -1726,8 +1709,8 @@ where
             turn_run_id: Some(request.turn_run_id),
             tool_result_ref: None,
             tool_result_provider_call: None,
-            content: Some(request.content.into_text()),
-            attachments: Vec::new(),
+            content: Some(content),
+            attachments,
             redaction_ref: None,
         };
         self.write_new_message(
@@ -2183,6 +2166,8 @@ where
         message_id: ThreadMessageId,
         content: MessageContent,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let (content, attachments) = content.into_parts();
+        crate::contract::validate_attachment_refs(&attachments)?;
         self.read_thread_versioned(scope, thread_id)
             .await?
             .ok_or_else(|| SessionThreadError::UnknownThread {
@@ -2193,8 +2178,8 @@ where
             .apply_message_update(scope, thread_id, message_id, |message| {
                 ensure_draft(message)?;
                 message.status = MessageStatus::Finalized;
-                message.content = Some(content.clone().into_text());
-                message.attachments = Vec::new();
+                message.content = Some(content.clone());
+                message.attachments = attachments.clone();
                 message.updated_at = Some(now);
                 Ok(())
             })
@@ -2322,6 +2307,51 @@ where
             summary_artifacts: history_summary_artifacts(&messages, summaries),
             messages: history_messages(&messages),
         })
+    }
+
+    async fn list_thread_messages_bounded(
+        &self,
+        request: BoundedThreadMessagesRequest,
+    ) -> Result<BoundedThreadMessages, SessionThreadError> {
+        let thread = self
+            .read_thread_versioned(&request.scope, &request.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            })?
+            .0;
+        let messages = match self
+            .read_thread_messages(
+                &request.scope,
+                &request.thread_id,
+                Some(MessageReadBudget::new(
+                    request.max_messages,
+                    request.max_bytes,
+                )),
+            )
+            .await?
+        {
+            MessageReadResult::Complete(messages) => messages,
+            MessageReadResult::LimitExceeded => {
+                return Ok(BoundedThreadMessages::LimitExceeded);
+            }
+        };
+        let message_ids = messages
+            .iter()
+            .map(|message| message.message_id)
+            .collect::<Vec<_>>();
+        Ok(BoundedThreadMessages::Complete(Box::new(
+            BoundedThreadMessageSnapshot {
+                history: ThreadMessageRange {
+                    thread: self.thread_record_with_index_overlay(thread).await?,
+                    messages: messages.iter().map(history_message).collect(),
+                },
+                context: ContextMessages {
+                    thread_id: request.thread_id,
+                    messages: context_messages_by_id(&messages, &message_ids),
+                },
+            },
+        )))
     }
 
     async fn list_thread_messages_range(

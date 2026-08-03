@@ -149,50 +149,69 @@ test("renderMarkdown returns an empty string for falsy content", async () => {
   assert.equal(renderMarkdown(undefined), "");
 });
 
-test("renderMarkdown only preserves workspace links for preview-enabled renderers", async () => {
+test("workspace sanitizer hooks canonicalize links and reject forged metadata", async () => {
   vi.resetModules();
-  vi.doUnmock("marked");
-  vi.doUnmock("dompurify");
+  const created = [];
+  vi.doMock("marked", () => ({
+    marked: { parse: (content) => content },
+  }));
+  vi.doMock("dompurify", () => ({
+    default: () => {
+      const hooks = new Map();
+      created.push(hooks);
+      return {
+        addHook: (name, hook) => hooks.set(name, hook),
+        sanitize: (raw) => raw,
+      };
+    },
+  }));
 
   const { renderMarkdown } = await import("./markdown");
-  const content =
-    "[plain](/workspace/plain.txt) " +
-    "[sandbox](sandbox:/workspace/sandbox.txt) " +
-    "[encoded](sandbox:/workspace/%E6%8A%A5%E5%91%8A%20final.md)";
-  const defaultOut = renderMarkdown(content);
-  const previewOut = renderMarkdown(
-    content,
-    { workspaceFileLinks: true },
-  );
-  const afterPreviewOut = renderMarkdown(
-    "[sandbox](sandbox:/workspace/after.txt)",
-  );
+  renderMarkdown("preview", { workspaceFileLinks: true });
+  renderMarkdown("default");
 
-  assert.doesNotMatch(defaultOut, /data-workspace-path=/);
-  assert.doesNotMatch(defaultOut, /href="\/workspace\/sandbox\.txt"/);
-  assert.doesNotMatch(afterPreviewOut, /data-workspace-path=/);
-  assert.doesNotMatch(afterPreviewOut, /href="\/workspace\/after\.txt"/);
-  assert.match(
-    previewOut,
-    /<a href="\/workspace\/plain\.txt" data-workspace-path="\/workspace\/plain\.txt" target="_blank" rel="noopener noreferrer">plain<\/a>/,
-  );
-  assert.match(
-    previewOut,
-    /<a href="\/workspace\/sandbox\.txt" data-workspace-path="\/workspace\/sandbox\.txt" target="_blank" rel="noopener noreferrer">sandbox<\/a>/,
-  );
-  assert.match(
-    previewOut,
-    /href="\/workspace\/%E6%8A%A5%E5%91%8A%20final\.md" data-workspace-path="\/workspace\/报告 final\.md"/,
-  );
+  const previewHooks = created[0];
+  const defaultHooks = created[1];
+  const sanitizeAnchor = (hooks, href, forgedPath = undefined) => {
+    const attrs = new Map([["href", href]]);
+    if (forgedPath) attrs.set("data-workspace-path", forgedPath);
+    const node = {
+      tagName: "A",
+      getAttribute: (name) => attrs.get(name) || null,
+      setAttribute: (name, value) => attrs.set(name, value),
+      removeAttribute: (name) => attrs.delete(name),
+    };
+    const hrefData = { attrName: "href", attrValue: href };
+    hooks.get("uponSanitizeAttribute")?.(node, hrefData);
+    attrs.set("href", hrefData.attrValue);
+    hooks.get("afterSanitizeAttributes")?.(node);
+    return attrs;
+  };
 
-  const forgedOut = renderMarkdown(
-    '<a href="/workspace/approved.txt" data-workspace-path="/workspace/secret.txt">file</a> ' +
-      '<a href="https://example.com" data-workspace-path="/workspace/secret.txt">external</a>',
-    { workspaceFileLinks: true },
+  const workspace = sanitizeAnchor(
+    previewHooks,
+    "sandbox:/workspace/%E6%8A%A5%E5%91%8A%20final.md",
+    "/workspace/forged.md",
   );
-  assert.match(
-    forgedOut,
-    /href="\/workspace\/approved\.txt" data-workspace-path="\/workspace\/approved\.txt"/,
+  assert.equal(
+    workspace.get("href"),
+    "/workspace/%E6%8A%A5%E5%91%8A%20final.md",
   );
-  assert.doesNotMatch(forgedOut, /data-workspace-path="\/workspace\/secret\.txt"/);
+  assert.equal(workspace.get("data-workspace-path"), "/workspace/报告 final.md");
+  assert.equal(workspace.get("target"), "_blank");
+  assert.equal(workspace.get("rel"), "noopener noreferrer");
+
+  const external = sanitizeAnchor(
+    previewHooks,
+    "https://example.com",
+    "/workspace/forged.md",
+  );
+  assert.equal(external.has("data-workspace-path"), false);
+
+  const defaultWorkspace = sanitizeAnchor(
+    defaultHooks,
+    "/workspace/plain.txt",
+    "/workspace/forged.md",
+  );
+  assert.equal(defaultWorkspace.has("data-workspace-path"), false);
 });

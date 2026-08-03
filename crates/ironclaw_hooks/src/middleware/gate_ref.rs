@@ -41,8 +41,8 @@
 //! split.
 
 use async_trait::async_trait;
-use ironclaw_turns::LoopGateRef;
-use ironclaw_turns::run_profile::{AgentLoopHostError, AgentLoopHostErrorKind};
+use ironclaw_host_api::turn::LoopGateRef;
+use ironclaw_loop_contracts::{AgentLoopHostError, AgentLoopHostErrorKind};
 
 /// Mints gate refs for hook-emitted suspension decisions.
 ///

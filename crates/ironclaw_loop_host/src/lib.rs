@@ -93,7 +93,7 @@ pub use identity_context::{
 };
 pub use input_port::HostQueueLoopInputPort;
 pub use input_queue::{HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError};
-pub use ironclaw_turns::run_profile::PromptContextTokenBudget;
+pub use ironclaw_loop_contracts::PromptContextTokenBudget;
 pub use model_visible_scrub::scrub_model_visible_detail;
 pub use result_read::{RESULT_READ_CAPABILITY_ID, result_read_capability};
 #[cfg(feature = "test-support")]
@@ -137,8 +137,6 @@ pub const ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT: &str = concat!(
     "\n\n",
     include_str!("../prompts/active_task_compaction_append.md"),
 );
-pub const FAILURE_EXPLANATION_SYSTEM_PROMPT: &str =
-    include_str!("../prompts/failure_explanation.md");
 pub use token_estimator::{
     CHARS_PER_TOKEN_DEFAULT, EstimatedTokenCount, estimate_tokens_from_chars,
 };
@@ -146,32 +144,34 @@ pub use token_estimator::{
 use tokio::sync::{Mutex, OnceCell};
 
 use async_trait::async_trait;
+use ironclaw_host_api::ids::RunId;
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
+    AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
+    CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
+    LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind,
+    LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
+    LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink,
+    LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
+    LoopModelUsage, LoopPromptBundleAuthority, LoopRequest, LoopRequestBatch, LoopRunContext,
+    LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, MemoryPromptContextService,
+    ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution, sanitize_model_visible_text,
+    sort_instruction_snippets_for_prompt,
+};
+use ironclaw_outbound::{
+    OutboundError, ReplyAttachmentHandle, ReplyAttachmentIntent, ReplyAttachmentIntentPort,
+};
 use ironclaw_threads::{
     AppendAssistantDraftRequest, AppendFinalizedAssistantMessageRequest,
-    AppendToolResultReferenceRequest, ContextMessage, FinalizedAssistantMessageByRunRequest,
-    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, ProviderToolCallReferenceEnvelope, SessionThreadError, SessionThreadService,
-    SummaryArtifact, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    AppendToolResultReferenceRequest, AttachmentKind, AttachmentRef, ContextMessage,
+    FinalizedAssistantMessageByRunRequest, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, MessageKind, MessageStatus, ProviderToolCallReferenceEnvelope,
+    SessionThreadError, SessionThreadService, SummaryArtifact, ThreadHistoryRequest,
+    ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
+    ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
-use ironclaw_turns::{
-    LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnScope,
-    run_profile::ModelProfileId,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
-        AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
-        CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
-        LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind,
-        LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
-        LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink,
-        LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
-        LoopModelUsage, LoopPromptBundleAuthority, LoopRequest, LoopRequestBatch, LoopRunContext,
-        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, MemoryPromptContextService,
-        ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
-        sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
-    },
-};
+use ironclaw_turns::{LoopGateRef, LoopMessageRef, TurnId, TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
 
 const EMPTY_SURFACE_VERSION: &str = "empty:v1";
@@ -654,6 +654,7 @@ where
     thread_scope: ThreadScope,
     run_context: LoopRunContext,
     milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
+    reply_attachment_intent_port: Option<Arc<dyn ReplyAttachmentIntentPort>>,
     // Only successful milestone publications are recorded here: if best-effort
     // publishing fails after the transcript write, an idempotent retry can try again.
     emitted_assistant_reply_finalized_refs: Arc<Mutex<HashSet<String>>>,
@@ -676,6 +677,7 @@ where
             thread_scope,
             run_context,
             milestone_sink: None,
+            reply_attachment_intent_port: None,
             emitted_assistant_reply_finalized_refs: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -691,8 +693,17 @@ where
             thread_scope,
             run_context,
             milestone_sink: Some(milestone_sink),
+            reply_attachment_intent_port: None,
             emitted_assistant_reply_finalized_refs: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    pub fn with_reply_attachment_intent_port(
+        mut self,
+        port: Arc<dyn ReplyAttachmentIntentPort>,
+    ) -> Self {
+        self.reply_attachment_intent_port = Some(port);
+        self
     }
 }
 
@@ -752,13 +763,13 @@ where
         request: FinalizeAssistantMessage,
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
-        let reply_content = request.reply.content;
+        let reply_content = self.finalized_reply_content(request.reply.content).await?;
         let turn_run_id = self.run_context.run_id.to_string();
         let append_request = AppendFinalizedAssistantMessageRequest {
             scope: self.thread_scope.clone(),
             thread_id: self.run_context.thread_id.clone(),
             turn_run_id: turn_run_id.clone(),
-            content: MessageContent::text(reply_content.clone()),
+            content: reply_content.clone(),
         };
         let finalized = match retry_transcript_backend_write(
             &turn_run_id,
@@ -783,7 +794,7 @@ where
             }
         };
         if finalized.status != MessageStatus::Finalized
-            || finalized.content.as_deref() != Some(reply_content.as_str())
+            || persisted_message_content(&finalized).as_ref() != Some(&reply_content)
         {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::TranscriptWriteFailed,
@@ -965,7 +976,7 @@ where
 
     async fn already_finalized_matching_reply_for_current_run(
         &self,
-        reply_content: &str,
+        reply_content: &MessageContent,
     ) -> Result<Option<ThreadMessageRecord>, AgentLoopHostError> {
         let Some(message) = self
             .thread_service
@@ -979,12 +990,64 @@ where
         else {
             return Ok(None);
         };
-        if message.content.as_deref() == Some(reply_content) {
+        if persisted_message_content(&message).as_ref() == Some(reply_content) {
             Ok(Some(message))
         } else {
             Ok(None)
         }
     }
+
+    async fn finalized_reply_content(
+        &self,
+        reply_text: String,
+    ) -> Result<MessageContent, AgentLoopHostError> {
+        let Some(port) = self.reply_attachment_intent_port.as_ref() else {
+            return Ok(MessageContent::text(reply_text));
+        };
+        let mut scope = self.thread_scope.to_resource_scope();
+        scope.thread_id = Some(self.run_context.thread_id.clone());
+        let run_id = RunId::from_uuid(self.run_context.run_id.as_uuid());
+        let intents = port
+            .seal(&scope, &run_id)
+            .await
+            .map_err(reply_attachment_seal_error)?;
+        let attachments = reply_attachment_refs(&run_id, intents);
+        let reply_text =
+            ironclaw_threads::deproject_model_attachment_context(reply_text, &attachments);
+        Ok(MessageContent::with_attachments(reply_text, attachments))
+    }
+}
+
+fn reply_attachment_refs(
+    run_id: &RunId,
+    intents: Vec<ReplyAttachmentIntent>,
+) -> Vec<AttachmentRef> {
+    intents
+        .into_iter()
+        .map(|intent| AttachmentRef {
+            id: ReplyAttachmentHandle::for_run_path(run_id, &intent.path).to_string(),
+            kind: AttachmentKind::from_mime_type(&intent.mime_type),
+            mime_type: intent.mime_type,
+            filename: Some(intent.filename),
+            size_bytes: Some(intent.size_bytes),
+            storage_key: Some(intent.path.to_string()),
+            extracted_text: None,
+        })
+        .collect()
+}
+
+fn persisted_message_content(message: &ThreadMessageRecord) -> Option<MessageContent> {
+    message.content.as_ref().map(|content| {
+        MessageContent::with_attachments(content.clone(), message.attachments.clone())
+    })
+}
+
+fn reply_attachment_seal_error(error: OutboundError) -> AgentLoopHostError {
+    tracing::debug!(error = %error, "reply attachment finalization failed");
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::TranscriptWriteFailed,
+        "reply attachment finalization failed",
+    )
 }
 
 /// Empty capability surface for the text-only loop-host MVP.
@@ -992,7 +1055,7 @@ where
 pub struct EmptyLoopCapabilityPort;
 
 #[async_trait]
-impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort {
+impl ironclaw_loop_contracts::LoopCapabilityPort for EmptyLoopCapabilityPort {
     async fn visible_capabilities(
         &self,
         _request: VisibleCapabilityRequest,
@@ -1768,7 +1831,7 @@ pub struct HostManagedModelRequest {
 /// host-managed model requests. This intentionally preserves the turn-owned
 /// wire shape across the loop-host boundary instead of defining a duplicate
 /// snapshot DTO here.
-pub type HostManagedModelRouteSnapshot = ironclaw_turns::run_profile::LoopModelRouteSnapshot;
+pub type HostManagedModelRouteSnapshot = ironclaw_loop_contracts::LoopModelRouteSnapshot;
 
 /// An image attachment read back as raw bytes, ready to become a multimodal
 /// content part for a vision-capable model. The bytes are carried undecorated;
@@ -1909,7 +1972,7 @@ impl HostManagedModelResponse {
     }
 
     pub fn capability_calls(
-        calls: Vec<ironclaw_turns::run_profile::CapabilityCallCandidate>,
+        calls: Vec<ironclaw_loop_contracts::CapabilityCallCandidate>,
         safe_text_delta: impl Into<String>,
     ) -> Self {
         let safe_text_delta = sanitize_model_visible_text(safe_text_delta);
@@ -1927,7 +1990,7 @@ impl HostManagedModelResponse {
     }
 
     pub fn capability_calls_with_reasoning(
-        calls: Vec<ironclaw_turns::run_profile::CapabilityCallCandidate>,
+        calls: Vec<ironclaw_loop_contracts::CapabilityCallCandidate>,
         safe_text_delta: impl Into<String>,
         reasoning: Option<String>,
     ) -> Self {
@@ -2016,7 +2079,7 @@ pub struct HostManagedModelError {
     /// snippet). Unlike `safe_summary`, this carries the original message so the
     /// failure explainer can describe the real fault. Secret VALUES must be
     /// redacted by the producer via
-    /// [`ironclaw_turns::run_profile::sanitize_model_visible_text`]; the
+    /// [`ironclaw_loop_contracts::sanitize_model_visible_text`]; the
     /// summary word/delimiter ban is NOT applied here.
     pub detail: Option<String>,
 }
@@ -2279,7 +2342,7 @@ fn invalid_transcript_ref_error() -> AgentLoopHostError {
 }
 
 fn provider_call_reference_to_envelope(
-    provider_call: ironclaw_turns::run_profile::ProviderToolCallReference,
+    provider_call: ironclaw_loop_contracts::ProviderToolCallReference,
 ) -> ProviderToolCallReferenceEnvelope {
     let capability_id = provider_call.capability_id;
     let replay = provider_call.replay;
@@ -2910,12 +2973,12 @@ mod tests {
     #[test]
     fn every_recovery_hint_the_loop_can_emit_survives_persistence() {
         use ironclaw_host_api::result_meta::{CapabilityRecoveryHint, SameCallRetryConstraint};
-        use ironclaw_threads::{ToolResultReferenceEnvelope, ToolResultSafeSummary};
-        use ironclaw_turns::run_profile::{
+        use ironclaw_loop_contracts::{
             MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
             ObservationTrust, ToolObservationDetail, ToolObservationStatus,
             ToolRecoveryObservation,
         };
+        use ironclaw_threads::{ToolResultReferenceEnvelope, ToolResultSafeSummary};
 
         for hint in CapabilityRecoveryHint::ALL {
             let observation = ModelVisibleToolObservation {

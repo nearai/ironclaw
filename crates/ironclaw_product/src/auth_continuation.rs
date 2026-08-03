@@ -5,15 +5,19 @@
 //! boundary as the WebUI gate-resolution path. It intentionally does not define
 //! another auth-flow model or handle non-turn continuation variants.
 
+use ironclaw_product_contracts::lifecycle_service::{
+    LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
+};
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
 pub use ironclaw_auth::RebornAuthContinuationDispatcher as ProductAuthContinuationDispatcher;
 use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthProductError};
+use ironclaw_host_api::turn::{IdempotencyKey, TurnGateRef, TurnRunId, TurnScope, TurnStatus};
 use ironclaw_turns::{
-    GateRef, GateResumeDisposition, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
-    ResumeTurnRequest, TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnScope,
-    TurnStatus,
+    GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
+    TurnCoordinator, TurnError, TurnErrorCategory,
 };
 use uuid::Uuid;
 
@@ -22,8 +26,7 @@ use crate::binding_ref::{
 };
 use crate::{
     AuthContinuationRejectionKind, LifecyclePackageKind, LifecyclePackageRef,
-    LifecycleProductAction, LifecycleProductContext, LifecycleProductService,
-    LifecycleProductSurfaceContext, ProductSurfaceFailure,
+    LifecycleProductAction, ProductSurfaceFailure,
 };
 
 struct LifecycleAuthContinuationDispatcher {
@@ -406,9 +409,11 @@ fn parse_turn_run_id(value: &str) -> Result<TurnRunId, ProductSurfaceFailure> {
         })
 }
 
-fn parse_gate_ref(value: &str) -> Result<GateRef, ProductSurfaceFailure> {
-    GateRef::new(value.to_string()).map_err(|_| ProductSurfaceFailure::AuthContinuationRejected {
-        kind: AuthContinuationRejectionKind::InvalidGateRef,
+fn parse_gate_ref(value: &str) -> Result<TurnGateRef, ProductSurfaceFailure> {
+    TurnGateRef::new(value.to_string()).map_err(|_| {
+        ProductSurfaceFailure::AuthContinuationRejected {
+            kind: AuthContinuationRejectionKind::InvalidGateRef,
+        }
     })
 }
 
@@ -639,7 +644,7 @@ mod tests {
             model_usage: None,
             received_at: Utc::now(),
             checkpoint_id: None,
-            gate_ref: gate_ref.map(|value| GateRef::new(value).unwrap()),
+            gate_ref: gate_ref.map(|value| TurnGateRef::new(value).unwrap()),
             blocked_activity_id: None,
             credential_requirements: Vec::new(),
             failure: None,

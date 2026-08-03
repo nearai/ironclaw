@@ -1,5 +1,18 @@
 # ironclaw_reborn_openai_compat
 
+> **Product boundary (WS5 transport inversion, 2026-08-01).** This adapter
+> speaks `ironclaw_product_contracts` — `surface` for the membrane,
+> `inbound_requests` for the bodies it constructs, `inbound`/`outbound`/
+> `projection`/`product_wire` for what crosses back — plus
+> `ironclaw_extension_contracts` for the one channel-facing enum it stamps
+> (`ProductTriggerReason`). Its whole remaining `ironclaw_product` surface is
+> three command descriptor constants (`SUBMIT_TURN_COMMAND`,
+> `CREATE_THREAD_COMMAND`, `CANCEL_RUN_COMMAND`) — product's frozen inventory
+> per PROPOSAL §6.1.3. That list is pinned exactly and shrink-only by
+> `ironclaw_architecture/tests/reborn_transport_product_boundary.rs`; a new
+> `ironclaw_product` import fails it.
+
+
 Reborn-native OpenAI-compatible API contract surface for #3283 / #4442 /
 #4443 / #4444 / #4445 / #4446 / #4447.
 ## Boundary
@@ -33,9 +46,10 @@ The `refs` module owns the OpenAI-compatible identity contract:
 - Mappings start as pending and are later bound to internal product-action /
   turn-run / projection refs by ProductSurface wiring slices.
 - The side-effect-free `OpenAiCompatRefStore` port and ref vocabulary are the
-  default surface. The durable `OpenAiCompatRefStore` adapter lives
-  behind the `storage`/`libsql`/`postgres` features, so contract-only consumers
-  pull no `ironclaw_filesystem` dependency.
+  default surface. The durable `OpenAiCompatRefStore` adapter compiles
+  unconditionally — this crate declares no cargo features at all, and
+  `ironclaw_filesystem` is a plain `[dependencies]` entry that every consumer
+  pulls.
 
 ## Chat Completions Workflow
 

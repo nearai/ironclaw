@@ -7,14 +7,12 @@ use ironclaw_agent_loop::{
     family::{LoopFamilyId, LoopFamilyRegistry},
     state::{CHECKPOINT_SCHEMA_ID, CHECKPOINT_SCHEMA_VERSION},
 };
-use ironclaw_turns::{
-    AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, RunProfileId,
-    RunProfileVersion,
-    run_profile::{
-        CapabilitySurfaceProfileId, CheckpointSchemaId, InMemoryRunProfileRegistry,
-        InMemoryRunProfileResolver, RunProfileDefinition, RunProfileRegistryError,
-    },
+use ironclaw_loop_contracts::{
+    AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, CapabilitySurfaceProfileId,
+    CheckpointSchemaId, InMemoryRunProfileRegistry, InMemoryRunProfileResolver,
+    RunProfileDefinition, RunProfileRegistryError,
 };
+use ironclaw_turns::{RunProfileId, RunProfileVersion};
 
 use crate::{
     driver_registry::{
@@ -80,8 +78,8 @@ impl From<DriverRegistryError> for DefaultPlannedDriverRegistrationError {
     }
 }
 
-pub fn planned_driver_default_id() -> Result<ironclaw_turns::run_profile::LoopDriverId, String> {
-    ironclaw_turns::run_profile::LoopDriverId::new(PLANNED_DRIVER_DEFAULT_ID)
+pub fn planned_driver_default_id() -> Result<ironclaw_loop_contracts::LoopDriverId, String> {
+    ironclaw_loop_contracts::LoopDriverId::new(PLANNED_DRIVER_DEFAULT_ID)
 }
 
 pub fn planned_driver_checkpoint_schema_id() -> Result<CheckpointSchemaId, String> {
@@ -97,7 +95,7 @@ pub fn subagent_planned_profile_id() -> Result<RunProfileId, String> {
 }
 
 pub(crate) fn is_subagent_planned_profile(
-    profile: &ironclaw_turns::run_profile::ResolvedRunProfile,
+    profile: &ironclaw_loop_contracts::ResolvedRunProfile,
 ) -> bool {
     profile.profile_id.as_str() == SUBAGENT_PLANNED_PROFILE_ID
         && profile.loop_driver.id.as_str() == SUBAGENT_PLANNED_DRIVER_ID
@@ -105,7 +103,7 @@ pub(crate) fn is_subagent_planned_profile(
 }
 
 pub(crate) fn is_subagent_planned_run_profile(
-    run_context: &ironclaw_turns::run_profile::LoopRunContext,
+    run_context: &ironclaw_loop_contracts::LoopRunContext,
 ) -> bool {
     is_subagent_planned_profile(&run_context.resolved_run_profile)
 }
@@ -321,10 +319,11 @@ pub fn default_planned_run_profile_resolver()
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_turns::{
-        RunProfileRequest, RunProfileResolutionRequest, RunProfileResolver,
-        run_profile::{LoopDriverId, PersonalContextAuthority, PersonalContextPolicy},
+    use ironclaw_loop_contracts::{
+        LoopDriverId, PersonalContextAuthority, PersonalContextPolicy, RunProfileResolutionRequest,
+        RunProfileResolver,
     };
+    use ironclaw_turns::RunProfileRequest;
 
     use super::*;
     use crate::app_loop_family::build_loop_family_registry;

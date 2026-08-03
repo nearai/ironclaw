@@ -10,7 +10,7 @@ pub mod provider_repo;
 pub mod resolved_llm;
 
 pub use active_model::ProviderActiveModelReader;
-pub use ironclaw_host_api::operator_llm::{
+pub use ironclaw_product_contracts::operator_llm::{
     DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, ProviderMenuEntry, ProviderProbeOutcome,
     RebornModelRoutesState, RebornProviderInfo, RebornProviderList, RebornProviderMetadata,
     RebornProviderSelection, RebornProviderStatus, RebornProviderWriteOutcome, RebornV1State,
@@ -19,6 +19,7 @@ pub use llm_catalog::{apply_stored_api_key, resolve_reborn_runtime_llm};
 pub use llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
 pub use llm_key_store::{LlmKeyStore, LlmKeyStoreError};
 pub use llm_reload::RebornLlmReloadAdapter;
+pub use nearai_login_serve::nearai_login_callback_mount;
 pub use provider_admin::{RebornProviderAdmin, RebornProviderAdminError};
 pub use provider_repo::{ProviderRepo, ProviderRepoError};
 pub use resolved_llm::{RebornProviderFactory, ResolvedRebornLlm};

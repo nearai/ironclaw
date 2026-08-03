@@ -8,9 +8,9 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_dispatcher::{
-    BoundCapabilityAdapter, CapabilityDispatchRequest, ResolvedCapability, RuntimeAdapterResult,
-    RuntimeDispatcher, ToolResolver,
+use ironclaw_capabilities::{
+    BoundCapabilityAdapter, ResolvedCapability, RuntimeAdapterResult, RuntimeDispatcher,
+    ToolResolver,
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::{
@@ -22,7 +22,7 @@ use ironclaw_host_api::{
     Timestamp,
     action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     authorized::Authorized,
-    dispatch::{DispatchError, RuntimeDispatchErrorKind},
+    dispatch::{CapabilityDispatchRequest, DispatchError, RuntimeDispatchErrorKind},
     host_port::HostPortCatalog,
     http::{
         RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
@@ -653,7 +653,12 @@ impl WasmRuntimeAdapter {
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let module_path = match &request.package.manifest.runtime {
             ExtensionRuntime::Wasm { module } => module
-                .resolve_under(&request.package.root)
+                .resolve_under(request.package.materialized_root().map_err(|_| {
+                    DispatchError::Wasm {
+                        kind: RuntimeDispatchErrorKind::Manifest,
+                        model_visible_cause: None,
+                    }
+                })?)
                 .map_err(|_| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Manifest,
                     model_visible_cause: None,

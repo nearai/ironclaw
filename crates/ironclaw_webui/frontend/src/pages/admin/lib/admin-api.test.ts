@@ -157,8 +157,14 @@ test("fetchAdminUsers returns an empty list when the response has no users array
 
 test("fetchAdminUsers forwards status/limit/cursor and surfaces next_cursor", async () => {
   stubFetch(() => ({ users: [{ user_id: "u-9" }], next_cursor: "u-9" }));
+  const controller = new AbortController();
 
-  const result = await fetchAdminUsers({ status: "suspended", limit: 2, cursor: "u-1" });
+  const result = await fetchAdminUsers({
+    status: "suspended",
+    limit: 2,
+    cursor: "u-1",
+    signal: controller.signal,
+  });
 
   assert.equal(calls.length, 1);
   // Query params are appended when provided; order follows insertion.
@@ -166,6 +172,7 @@ test("fetchAdminUsers forwards status/limit/cursor and surfaces next_cursor", as
     calls[0].path,
     "/api/webchat/v2/admin/users?status=suspended&limit=2&cursor=u-1",
   );
+  assert.equal(calls[0].init.signal, controller.signal);
   assert.equal(result.nextCursor, "u-9");
   assert.equal(result.users[0].id, "u-9");
 });

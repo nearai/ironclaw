@@ -1,0 +1,30 @@
+{
+  "provenance": {
+    "captured_at": "2026-07-29",
+    "endpoint": "https://www.microsoft.com/releasecommunications/mcp",
+    "source": "official public Microsoft Release Communications MCP server",
+    "transport": "Streamable HTTP; response content-type text/event-stream",
+    "redaction": "No credentials were used. JSON-RPC ids and catalog/result content are minimized to stable protocol fields."
+  },
+  "initialize": "event: message\ndata: {\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{\"logging\":{},\"tools\":{}},\"serverInfo\":{\"name\":\"ReleaseCommunicationsApi\",\"version\":\"1.0.0.0\"}},\"id\":\"<redacted-id>\",\"jsonrpc\":\"2.0\"}\n\n",
+  "tools_list": {
+    "names": [
+      "get_m365_roadmap_by_id",
+      "get_azure_update_by_id",
+      "get_recent_m365_roadmaps",
+      "get_recent_azure_updates"
+    ],
+    "read_only_call": {
+      "name": "get_recent_azure_updates",
+      "arguments": { "skip": 0 },
+      "response_shape": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"items\":[{\"id\":\"<redacted-stable-example>\",\"title\":\"<redacted-volatile-title>\"}],\"totalCount\":\"<redacted-volatile-count>\",\"limit\":50,\"offset\":0,\"hasMore\":true}"
+          }
+        ]
+      }
+    }
+  }
+}

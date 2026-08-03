@@ -693,7 +693,7 @@ impl CodexChatGptProvider {
                     }
                 }
                 Ok(Some(Err(e))) => {
-                    return Err(LlmError::RequestFailed {
+                    return Err(LlmError::StreamInterrupted {
                         provider: "codex_chatgpt".to_string(),
                         reason: format!("Failed to read SSE stream: {e}"),
                     });
@@ -702,7 +702,7 @@ impl CodexChatGptProvider {
                 // (mid-stream disconnect). Treat as truncated, not success.
                 Ok(None) => return Self::finalize_stream_result(result),
                 Err(_) => {
-                    return Err(LlmError::RequestFailed {
+                    return Err(LlmError::StreamInterrupted {
                         provider: "codex_chatgpt".to_string(),
                         reason: format!(
                             "Timed out waiting for SSE event after {}s",
@@ -715,22 +715,21 @@ impl CodexChatGptProvider {
     }
 
     /// Convert a stream that ended without a terminal `response.completed`
-    /// event into a RETRYABLE error. A dropped connection must not masquerade
-    /// as a successful completion: `EmptyResponse` when nothing was produced,
-    /// `InvalidResponse` when partial content/tool calls were captured.
+    /// event into a typed retryable interruption. A dropped connection must
+    /// not masquerade as a successful completion.
     ///
     /// `response.completed` is the only path that returns `Ok(result)`
     /// directly, so reaching this finalizer always means the terminal event
     /// was missing.
     fn finalize_stream_result(result: ResponsesResult) -> Result<ResponsesResult, LlmError> {
-        if result.text.is_empty() && result.pending_tool_calls.is_empty() {
-            return Err(LlmError::EmptyResponse {
-                provider: "codex_chatgpt".to_string(),
-            });
-        }
-        Err(LlmError::InvalidResponse {
+        let produced = if result.text.is_empty() && result.pending_tool_calls.is_empty() {
+            "before any output"
+        } else {
+            "after partial output"
+        };
+        Err(LlmError::StreamInterrupted {
             provider: "codex_chatgpt".to_string(),
-            reason: "stream ended before response.completed".to_string(),
+            reason: format!("stream ended {produced} before response.completed"),
         })
     }
 
@@ -1759,8 +1758,8 @@ data: [DONE]
 "#;
         let result = CodexChatGptProvider::parse_sse_response(sse);
         assert!(
-            matches!(result, Err(LlmError::InvalidResponse { .. })),
-            "[DONE] without response.completed must be InvalidResponse, got {result:?}"
+            matches!(result, Err(LlmError::StreamInterrupted { .. })),
+            "[DONE] without response.completed must be StreamInterrupted, got {result:?}"
         );
 
         let stream = stream::iter(vec![
@@ -1770,23 +1769,23 @@ data: [DONE]
             Ok(Bytes::from_static(b"data: [DONE]\n\n")),
         ]);
         let result = CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1)).await;
-        assert!(matches!(result, Err(LlmError::InvalidResponse { .. })));
+        assert!(matches!(result, Err(LlmError::StreamInterrupted { .. })));
     }
 
     /// A stream that ends (EOF) without any terminal event and without content
-    /// must surface as `EmptyResponse`.
+    /// must surface as a typed stream interruption.
     #[tokio::test]
     async fn test_parse_sse_stream_eof_empty_is_error() {
         let stream = stream::iter(Vec::<Result<Bytes, String>>::new());
         let result = CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1)).await;
         assert!(
-            matches!(result, Err(LlmError::EmptyResponse { .. })),
-            "empty stream must be EmptyResponse, got {result:?}"
+            matches!(result, Err(LlmError::StreamInterrupted { .. })),
+            "empty stream must be StreamInterrupted, got {result:?}"
         );
     }
 
     /// A stream that produced partial text then hit EOF (no `response.completed`)
-    /// must surface as a retryable `InvalidResponse`.
+    /// must surface as a typed retryable stream interruption.
     #[tokio::test]
     async fn test_parse_sse_stream_eof_with_partial_text_is_error() {
         let stream = stream::iter(vec![Ok(Bytes::from_static(
@@ -1794,10 +1793,10 @@ data: [DONE]
         ))]);
         let result = CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1)).await;
         match result {
-            Err(LlmError::InvalidResponse { reason, .. }) => {
+            Err(LlmError::StreamInterrupted { reason, .. }) => {
                 assert!(reason.contains("response.completed"), "reason: {reason}");
             }
-            other => panic!("expected InvalidResponse, got {other:?}"),
+            other => panic!("expected StreamInterrupted, got {other:?}"),
         }
     }
 

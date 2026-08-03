@@ -225,6 +225,8 @@ pub(super) async fn pair_trigger_creator(
     let external_actor_ref = ExternalActorRef::new(
         TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
         record.creator_user_id.as_str(),
+        // A trigger's creator actor has no channel display name.
+        None::<String>,
     )
     .map_err(|error| trigger_pairing_error(TriggerPairingFailureSource::TypedIdentity, error))?;
     pairing

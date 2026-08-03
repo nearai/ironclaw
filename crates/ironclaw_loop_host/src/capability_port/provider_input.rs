@@ -1,5 +1,5 @@
 use ironclaw_host_api::dispatch::DispatchInputIssueCode;
-use ironclaw_turns::run_profile::{
+use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputIssue,
 };
 

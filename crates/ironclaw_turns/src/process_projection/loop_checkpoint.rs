@@ -11,10 +11,11 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
-    CheckpointSchemaId, GetLoopCheckpointRequest, LoopCheckpointKind, LoopCheckpointRecord,
-    LoopCheckpointStateRef, LoopCheckpointStore, LoopGateRef, PutLoopCheckpointRequest,
-    RunProfileVersion, TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnScope,
+    GetLoopCheckpointRequest, LoopCheckpointRecord, LoopCheckpointStore, LoopGateRef,
+    PutLoopCheckpointRequest, RunProfileVersion, TurnCheckpointId, TurnError, TurnId, TurnRunId,
+    TurnScope,
 };
+use ironclaw_loop_contracts::{CheckpointSchemaId, LoopCheckpointKind, LoopCheckpointStateRef};
 
 pub struct ProcessLoopCheckpointStore {
     checkpoints: Arc<dyn ProcessCheckpointPort<Error = TurnError>>,
@@ -127,11 +128,10 @@ fn loop_checkpoint_record_from_process(
         }
     })?;
     let payload =
-        crate::RedactedCheckpointPayload::new(record.payload.into_bytes()).map_err(|reason| {
-            TurnError::Unavailable {
+        ironclaw_loop_contracts::RedactedCheckpointPayload::new(record.payload.into_bytes())
+            .map_err(|reason| TurnError::Unavailable {
                 reason: format!("process checkpoint payload is invalid: {reason}"),
-            }
-        })?;
+            })?;
     Ok(LoopCheckpointRecord {
         checkpoint_id,
         scope,

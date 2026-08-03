@@ -4,10 +4,10 @@ use ironclaw_auth::{
 };
 use ironclaw_host_api::{
     ids::{ExtensionId, InvocationId},
-    product_surface::{
-        ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
-    },
     resource::ResourceScope,
+};
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
 use uuid::Uuid;
 

@@ -23,20 +23,18 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
     VisibleCapabilitySurface as HostVisibleCapabilitySurface,
 };
+use ironclaw_loop_contracts::{
+    AgentLoopHostError, AgentLoopHostErrorKind, InMemoryLoopHostMilestoneSink,
+    InMemoryRunProfileResolver, LoopCapabilityPort, LoopRequest, LoopRunContext, ProviderToolCall,
+    RegisterProviderToolCallRequest, RunProfileResolutionRequest, RunProfileResolver,
+    VisibleCapabilityRequest,
+};
 use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityWriteResult, HostRuntimeLoopCapabilityPortFactory,
     LoopCapabilityInputResolver, LoopCapabilityResultWriter,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
-use ironclaw_turns::{
-    InMemoryRunProfileResolver, LoopResultRef, RunProfileResolutionRequest, RunProfileResolver,
-    TurnId, TurnRunId, TurnScope,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, InMemoryLoopHostMilestoneSink,
-        LoopCapabilityPort, LoopRequest, LoopRunContext, ProviderToolCall,
-        RegisterProviderToolCallRequest, VisibleCapabilityRequest,
-    },
-};
+use ironclaw_turns::{LoopResultRef, TurnId, TurnRunId, TurnScope};
 
 #[test]
 fn host_capability_port_composition_rejects_external_raw_construction() {
@@ -416,7 +414,7 @@ impl LoopCapabilityInputResolver for UnusedInputResolver {
     async fn resolve_capability_input(
         &self,
         _run_context: &LoopRunContext,
-        _input_ref: &ironclaw_turns::run_profile::CapabilityInputRef,
+        _input_ref: &ironclaw_loop_contracts::CapabilityInputRef,
     ) -> Result<serde_json::Value, AgentLoopHostError> {
         Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,

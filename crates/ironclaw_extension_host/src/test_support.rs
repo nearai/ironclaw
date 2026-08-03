@@ -10,19 +10,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_extensions::{ExtensionManifestRecord, ManifestSource, ResolvedExtensionManifest};
-use ironclaw_host_api::{
-    host_port::{
-        HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortId,
-    },
-    tool_adapter::{
-        RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
-        ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
-    },
+use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelContext, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, VerifiedInbound,
 };
-use ironclaw_product::{
-    ChannelAdapter, ChannelContext, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope,
-    VerifiedInbound,
+use ironclaw_extension_contracts::tool_adapter::{
+    RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
+    ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
+};
+use ironclaw_extensions::{ExtensionManifestRecord, ManifestSource, ResolvedExtensionManifest};
+use ironclaw_host_api::host_port::{
+    HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortId,
 };
 
 use crate::entrypoint::{BindContext, BindError, ExtensionBindings, ExtensionEntrypoint};
@@ -442,7 +440,7 @@ impl EgressFactory for FakeEgressFactory {
         &self,
         _extension_id: &str,
         _installation_id: &str,
-        _declared: &[ironclaw_host_api::channel::ChannelEgressDescriptor],
+        _declared: &[ironclaw_extension_contracts::channel::ChannelEgressDescriptor],
     ) -> Arc<dyn RestrictedEgress> {
         Arc::new(DenyAllEgress)
     }
@@ -457,5 +455,27 @@ impl RestrictedEgress for DenyAllEgress {
         _request: RestrictedEgressRequest,
     ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
         Err(RestrictedEgressError::PolicyDenied)
+    }
+}
+
+/// Records pairing outcomes the generic sink observes. An ordinary double now
+/// that the observer is a trait; shared so the sink contract tests and the
+/// composition-side pairing-service tests assert against one implementation.
+pub struct RecordingPairingOutcomeObserver {
+    pub outcomes: Arc<std::sync::Mutex<Vec<crate::channel_pairing::ChannelPairingConsumeOutcome>>>,
+}
+
+#[async_trait]
+impl crate::extension_ingress::ChannelPairingOutcomeObserver for RecordingPairingOutcomeObserver {
+    async fn observe_pairing_outcome(
+        &self,
+        _conversation: ironclaw_extension_contracts::external::ExternalConversationRef,
+        _event_id: ironclaw_extension_contracts::external::ExternalEventId,
+        outcome: crate::channel_pairing::ChannelPairingConsumeOutcome,
+    ) {
+        match self.outcomes.lock() {
+            Ok(mut outcomes) => outcomes.push(outcome),
+            Err(poisoned) => poisoned.into_inner().push(outcome),
+        }
     }
 }

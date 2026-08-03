@@ -17,7 +17,7 @@
 use ironclaw_loop_host::HostManagedModelGateway;
 use ironclaw_runner::runtime::DefaultPlannedRuntimeParts;
 
-/// Some/None shape of `DefaultPlannedRuntimeParts`'s 16 `Option`-typed
+/// Some/None shape of `DefaultPlannedRuntimeParts`'s 17 `Option`-typed
 /// fields. Field VALUES are out of scope by design (see
 /// `tests/integration/wiring_parity.rs`'s module doc) — only whether each
 /// optional wiring seam is populated.
@@ -27,6 +27,7 @@ pub struct DefaultPlannedRuntimePartsShape {
     pub cancellation_factory: bool,
     pub skill_context_source: bool,
     pub attachment_read_port: bool,
+    pub reply_attachment_intent_port: bool,
     pub gate_record_store: bool,
     pub input_queue: bool,
     pub memory_context_service: bool,
@@ -43,7 +44,7 @@ pub struct DefaultPlannedRuntimePartsShape {
 
 /// Exhaustive, no-`..` destructure of `parts` into its Option-field shape.
 ///
-/// Every one of the 32 fields is named explicitly here (the 19 required
+/// Every one of the 33 fields is named explicitly here (the 19 required
 /// fields bound to `_`), so this function FAILS TO COMPILE the moment a
 /// field is added to or removed from `DefaultPlannedRuntimeParts` — the
 /// tripwire `wiring_parity.rs` relies on. Match ergonomics on `&parts` bind
@@ -76,6 +77,7 @@ where
         cancellation_factory,
         skill_context_source,
         attachment_read_port,
+        reply_attachment_intent_port,
         gate_record_store,
         input_queue,
         identity_context_source: _,
@@ -96,6 +98,7 @@ where
         cancellation_factory: cancellation_factory.is_some(),
         skill_context_source: skill_context_source.is_some(),
         attachment_read_port: attachment_read_port.is_some(),
+        reply_attachment_intent_port: reply_attachment_intent_port.is_some(),
         gate_record_store: gate_record_store.is_some(),
         input_queue: input_queue.is_some(),
         memory_context_service: memory_context_service.is_some(),

@@ -4,15 +4,17 @@ use std::sync::{Mutex, MutexGuard};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::ids::{ExtensionId, SecretHandle};
+use secrecy::ExposeSecret;
 
 use crate::{
-    AuthChallenge, AuthContinuationEvent, AuthFlowId, AuthFlowManager, AuthFlowRecord,
-    AuthFlowRecordSource, AuthFlowStatus, AuthInteractionId, AuthInteractionService,
-    AuthProductError, AuthProviderClient, CredentialAccount, CredentialAccountChoiceRequest,
-    CredentialAccountId, CredentialAccountListPage, CredentialAccountListRequest,
-    CredentialAccountLookupRequest, CredentialAccountMutation, CredentialAccountOwnerScope,
-    CredentialAccountProjection, CredentialAccountRecordSource, CredentialAccountSelectionRequest,
-    CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
+    AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowId, AuthFlowManager,
+    AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus, AuthInteractionId,
+    AuthInteractionService, AuthProductError, AuthProductScope, AuthProviderClient, AuthProviderId,
+    CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountId, CredentialAccountLabel,
+    CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountLookupRequest,
+    CredentialAccountMutation, CredentialAccountOwnerScope, CredentialAccountProjection,
+    CredentialAccountRecordSource, CredentialAccountSelectionRequest, CredentialAccountService,
+    CredentialAccountStatus, CredentialAccountUpdateBinding, CredentialOwnership,
     CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRecoveryRequest,
     CredentialRefreshReport, CredentialRefreshRequest, CredentialSelectionInput,
     CredentialSetupService, ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow,
@@ -35,10 +37,39 @@ use crate::{
     },
     flow::credential_status_for_completed_flow,
     flow_matches_turn_gate_query,
-    interaction::PendingSecretInteraction,
     provider::validate_provider_callback_request,
     scope_matches,
 };
+
+/// Pending-interaction record held by this fake. The durable interaction
+/// service persists its own record shape and never reads this one.
+#[derive(Debug, Clone)]
+struct PendingSecretInteraction {
+    scope: AuthProductScope,
+    provider: AuthProviderId,
+    label: CredentialAccountLabel,
+    continuation: AuthContinuationRef,
+    update_binding: Option<CredentialAccountUpdateBinding>,
+    expires_at: Timestamp,
+}
+
+/// Secret hygiene for the fake's manual-token path. The durable service runs
+/// its own `validate_secret` at the storage boundary
+/// (`product_auth::durable::interactions`).
+fn validate_submitted_secret(request: &SecretSubmitRequest) -> Result<(), AuthProductError> {
+    let exposed = request.secret.expose_secret();
+    if exposed.trim().is_empty() {
+        return Err(AuthProductError::invalid_request(
+            "secret value must not be empty",
+        ));
+    }
+    if exposed.chars().any(|c| c == '\0' || c.is_control()) {
+        return Err(AuthProductError::invalid_request(
+            "secret value must not contain NUL/control characters",
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Default)]
 struct AuthState {
@@ -233,6 +264,7 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             kind: request.kind,
             status: AuthFlowStatus::AwaitingUser,
             provider: request.provider,
+            requester_extension: request.requester_extension,
             challenge: Some(request.challenge),
             continuation: request.continuation,
             credential_account_id: None,
@@ -1030,7 +1062,7 @@ impl AuthInteractionService for InMemoryAuthProductServices {
         scope: &crate::AuthProductScope,
         request: SecretSubmitRequest,
     ) -> Result<SecretSubmitResult, AuthProductError> {
-        request.validate_secret()?;
+        validate_submitted_secret(&request)?;
         let now = Utc::now();
         let mut state = self.lock_state();
         let pending = state

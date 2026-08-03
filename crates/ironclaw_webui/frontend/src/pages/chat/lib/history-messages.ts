@@ -89,7 +89,7 @@ export function messagesFromTimeline(records, pendingMessages = [], threadId = n
       role === "user" &&
       (record.status === "rejected_busy" || record.status === "deferred_busy");
     const attachments = attachmentsFromRecord(record, threadId);
-    const content =
+    const storedContent =
       role === "user" &&
       attachments?.length > 0 &&
       record.content === ATTACHMENTS_ONLY_CONTENT
@@ -98,7 +98,7 @@ export function messagesFromTimeline(records, pendingMessages = [], threadId = n
     messages.push({
       id,
       role,
-      content,
+      content: storedContent,
       attachments,
       timestamp: timestampForRecord(record),
       kind: record.kind,

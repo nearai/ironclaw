@@ -5,12 +5,11 @@ Drives the real `ironclaw-reborn serve` binary (v2 SPA) under the
 auto-proceeds instead of parking on a destructive-write gate. The mock LLM
 turns the prompt into two Reborn `builtin.write_file` capability calls via the
 provider-facing `builtin__write_file` name (a CSV and a PDF), then a reply that
-references their `/workspace` paths. The SPA renders those paths as download
-chips; clicking one performs the bearer-authenticated blob fetch and saves the
-file.
+references their `/workspace` paths. The SPA turns those Markdown links into
+authenticated previews whose Download actions save the files.
 
 Complements `webui_v2_e2e.rs` (in-process, asserts the same endpoints against a
-real agent-produced file) by covering the browser chip-render + click-download
+real agent-produced file) by covering the browser link-preview + download
 integration. Requires the full E2E harness (cargo build + reborn serve + mock
 LLM + Chromium); it is CI-run, not exercised by `cargo test`.
 """
@@ -38,20 +37,15 @@ async def _read_download_bytes(download) -> bytes:
     return Path(await download.path()).read_bytes()
 
 
-async def test_reborn_v2_agent_files_render_download_chips(reborn_v2_yolo_page):
-    """Agent writes files; reply links open previews and chips download the bytes."""
+async def test_reborn_v2_agent_file_links_preview_download_and_preserve_scope(
+    reborn_v2_yolo_page,
+):
+    """Agent file links preview/download bytes and retain their thread scope."""
     page = reborn_v2_yolo_page
 
     composer = page.locator(SEL_V2["chat_composer"])
     await composer.fill("Please produce a downloadable CSV and PDF report.")
     await composer.press("Enter")
-
-    # The assistant reply references both /workspace paths, which the SPA turns
-    # into chips that open the shared attachment preview modal.
-    csv_chip = page.locator(SEL_V2["project_file_chip_for"].format(path=CSV_PATH))
-    pdf_chip = page.locator(SEL_V2["project_file_chip_for"].format(path=PDF_PATH))
-    await expect(csv_chip).to_be_visible(timeout=45000)
-    await expect(pdf_chip).to_be_visible(timeout=45000)
 
     # Both the ordinary Markdown href and the sandbox-style href are normalized
     # into thread-scoped in-app preview links. Clicking must open the existing
@@ -63,7 +57,7 @@ async def test_reborn_v2_agent_files_render_download_chips(reborn_v2_yolo_page):
     pdf_link = assistant_msg.locator(
         SEL_V2["workspace_file_link_for"].format(path=PDF_PATH)
     )
-    await expect(csv_link).to_have_attribute("href", CSV_PATH)
+    await expect(csv_link).to_have_attribute("href", CSV_PATH, timeout=45000)
     await expect(pdf_link).to_have_attribute("href", PDF_PATH)
 
     open_pages = len(page.context.pages)
@@ -119,20 +113,19 @@ async def test_reborn_v2_agent_files_render_download_chips(reborn_v2_yolo_page):
     await expect(pdf_link).to_be_visible(timeout=15000)
     await expect(modal_download).to_be_hidden()
 
-    # The chip's inline download icon performs the bearer-authenticated blob
-    # fetch and saves the exact bytes the agent wrote — no modal needed.
-    csv_download_icon = page.locator(
-        SEL_V2["project_file_download_for"].format(path=CSV_PATH)
-    )
+    # Each Markdown link reuses the authenticated preview modal. Its Download
+    # action saves the exact bytes the agent wrote.
+    await csv_link.click()
+    await expect(modal_download).to_be_visible(timeout=15000)
     async with page.expect_download() as csv_dl:
-        await csv_download_icon.click()
+        await modal_download.click()
     csv_download = await csv_dl.value
     assert csv_download.suggested_filename == "report.csv"
     assert await _read_download_bytes(csv_download) == CSV_BYTES
+    await page.get_by_role("button", name="Close", exact=True).last.click()
+    await expect(modal_download).to_be_hidden()
 
-    # Clicking the chip body instead opens the preview modal, whose footer
-    # Download action saves the bytes too (covers the preview path for the PDF).
-    await pdf_chip.click()
+    await pdf_link.click()
     await expect(modal_download).to_be_visible(timeout=15000)
     async with page.expect_download() as pdf_dl:
         await modal_download.click()

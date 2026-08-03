@@ -99,7 +99,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -113,13 +113,16 @@ jobs:
           MUT_JOBS: "3"
           MUT_OUT: target/nightly-mutation
           MUT_TIMEOUT: "300"
+        # Targets the dispatch routing logic itself. Keep this pointed at a file
+        # with real mutable statements — a pure `pub use` re-export file yields
+        # zero mutants and makes this step silently vacuous.
         run: >-
           scripts/mutation-audit.sh
-          -p ironclaw_dispatcher
-          crates/ironclaw_dispatcher/src/lib.rs
+          -p ironclaw_capabilities
+          crates/ironclaw_capabilities/src/dispatch.rs
       - name: Upload mutation triage queue
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nightly-mutation-frontier
           path: target/nightly-mutation/mutants.out/

@@ -1,18 +1,23 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use ironclaw_attachments::InboundAttachmentLander;
+use ironclaw_extension_contracts::extension::ExtensionHostAssemblyConfig;
 use ironclaw_extensions::ExtensionInstallationStorePort;
-use ironclaw_filesystem::{CompositeRootFilesystem, RootFilesystem};
+use ironclaw_filesystem::{CompositeRootFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    extension::ExtensionHostAssemblyConfig,
     ids::{CapabilityId, UserId},
     resource::ResourceScope,
 };
 use ironclaw_host_runtime::{ExtensionLaneToolBinder, HostRuntimeHttpEgressPort};
 use ironclaw_product::{
-    ApprovalInteractionService, ApprovalPromptContextSource, AuthChallengeProvider,
-    AuthInteractionService, BlockedAuthFlowCanceller, BlockedAuthPromptSource,
-    ExtensionAccountSetupDescriptor, ExtensionAccountSetupRegistry, RunDeliverySettings,
+    ApprovalInteractionService, AuthChallengeProvider, AuthInteractionService,
+    BlockedAuthFlowCanceller, ExtensionAccountSetupRegistry, ProjectFilesystemReader,
+    RunDeliverySettings,
+};
+use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
+use ironclaw_product_contracts::prompt_source::{
+    ApprovalPromptContextSource, BlockedAuthPromptSource,
 };
 use ironclaw_resources::ResourceGovernor;
 use ironclaw_threads::{SessionThreadService, ThreadScope};
@@ -22,6 +27,9 @@ use crate::RebornBuildError;
 use crate::factory::RebornRuntimeStores;
 use crate::input::ChannelExtensionBinding;
 use crate::outbound::MutableOutboundDeliveryTargetRegistry;
+use ironclaw_product_contracts::account_setup::AccountConnectionStatusSource;
+use ironclaw_product_contracts::admin_users::AdminUserService;
+use ironclaw_product_contracts::delivery::ChannelDeliveryResolver;
 
 pub(crate) struct BackendExtensionHostAssemblyInput {
     pub(crate) binder: ExtensionLaneToolBinder,
@@ -44,8 +52,7 @@ pub(crate) struct BackendExtensionHostAssembly {
     pub(crate) ingress: ironclaw_extension_host::extension_ingress::ExtensionIngressParts,
     pub(crate) installation_store: Arc<dyn ExtensionInstallationStorePort>,
     pub(crate) delivery_coordinator: Option<Arc<ironclaw_product::DeliveryCoordinator>>,
-    pub(crate) channel_delivery_resolver:
-        Option<Arc<dyn ironclaw_product::ChannelDeliveryResolver>>,
+    pub(crate) channel_delivery_resolver: Option<Arc<dyn ChannelDeliveryResolver>>,
     #[cfg(feature = "test-support")]
     pub(crate) channel_egress_credential_bridges:
         Arc<ironclaw_extension_host::channel_egress::BridgedChannelEgressCredentials>,
@@ -120,18 +127,30 @@ pub(crate) async fn build_backend_extension_host(
         },
     )
     .await;
+    let ingress_filesystem: Arc<dyn RootFilesystem> = filesystem;
     let ingress = ironclaw_extension_host::extension_ingress::build_extension_ingress(
         generic.host.snapshot_watch(),
         Arc::clone(&deployment_channels),
         Arc::new(ironclaw_extension_host::FilesystemReplyContextStore::new(
-            filesystem,
+            Arc::clone(&ingress_filesystem),
             channel_egress_scope.tenant_id.clone(),
             channel_egress_scope.user_id.clone(),
         )),
+        Arc::new(
+            ironclaw_extension_host::FilesystemInboundBatchStore::new(
+                ingress_filesystem,
+                channel_egress_scope.tenant_id.clone(),
+                channel_egress_scope.user_id.clone(),
+            )
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("inbound batch store could not be configured: {error}"),
+            })?,
+        ),
+        channel_egress_transport.clone(),
     );
     let (delivery_coordinator, channel_delivery_resolver) = match channel_egress_transport {
         Some(transport) => {
-            let resolver: Arc<dyn ironclaw_product::ChannelDeliveryResolver> = Arc::new(
+            let resolver: Arc<dyn ChannelDeliveryResolver> = Arc::new(
                 ironclaw_extension_host::SnapshotChannelDeliveryResolver::new(
                     generic.host.snapshot_watch(),
                     transport,
@@ -289,7 +308,7 @@ pub(crate) async fn build_backend_channel_pairing(
         }));
         if !account_setups.connect(
             &descriptor.extension_id,
-            Arc::clone(&service) as Arc<dyn ironclaw_product::AccountConnectionStatusSource>,
+            Arc::clone(&service) as Arc<dyn AccountConnectionStatusSource>,
         ) {
             return Err(RebornBuildError::InvalidConfig {
                 reason: format!(
@@ -330,7 +349,7 @@ pub(crate) struct ChannelHostAssemblyWiring {
     pub(crate) blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
     pub(crate) auth_flow_cancel: Option<Arc<dyn BlockedAuthFlowCanceller>>,
     pub(crate) run_delivery_settings: RunDeliverySettings,
-    pub(crate) admin_users: Arc<dyn ironclaw_product::AdminUserService>,
+    pub(crate) admin_users: Arc<dyn AdminUserService>,
 }
 
 pub(crate) struct RuntimeExtensionHostAssemblyWiring<'a> {
@@ -350,6 +369,8 @@ pub(crate) struct ChannelHostAssemblySource {
     pub(crate) ingress_registry:
         Arc<ironclaw_extension_host::extension_ingress::ExtensionIngressRegistry>,
     pub(crate) workflow_filesystem: Arc<dyn RootFilesystem>,
+    pub(crate) inbound_attachments: Arc<dyn InboundAttachmentLander>,
+    pub(crate) project_filesystem: Arc<dyn ProjectFilesystemReader>,
     pub(crate) delivery_coordinator: Option<Arc<ironclaw_product::DeliveryCoordinator>>,
     pub(crate) outbound_state: Arc<dyn ironclaw_outbound::OutboundStateStorePort>,
     pub(crate) delivered_gate_routes: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
@@ -362,10 +383,30 @@ pub(crate) struct ChannelHostAssemblySource {
 }
 
 fn channel_host_source(services: &RebornRuntimeStores) -> Option<ChannelHostAssemblySource> {
+    let inbound_mounts = crate::runtime_mounts::workspace_mount_view(
+        ironclaw_host_api::mount::MountPermissions::read_write_list_delete(),
+        &[],
+    )
+    .ok()?;
+    let inbound_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&services.extension_filesystem),
+        inbound_mounts,
+    ));
+    let inbound_attachments: Arc<dyn InboundAttachmentLander> = Arc::new(
+        ironclaw_attachments::ProjectScopedAttachmentLander::new(inbound_filesystem),
+    );
+    let project_filesystem: Arc<dyn ProjectFilesystemReader> = Arc::new(
+        ironclaw_product::ProjectScopedFilesystemReader::with_max_read_bytes(
+            Arc::clone(&services.workspace_filesystem),
+            ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64,
+        ),
+    );
     Some(ChannelHostAssemblySource {
         generic_host: services.extension_management.generic_host()?,
         ingress_registry: Arc::clone(&services.extension_ingress.as_ref()?.registry),
         workflow_filesystem: services.extension_filesystem.clone(),
+        inbound_attachments,
+        project_filesystem,
         delivery_coordinator: services.delivery_coordinator.clone(),
         outbound_state: Arc::clone(&services.outbound_state),
         delivered_gate_routes: Arc::clone(&services.delivered_gate_routes),
@@ -381,7 +422,7 @@ fn channel_host_source(services: &RebornRuntimeStores) -> Option<ChannelHostAsse
 pub(crate) fn channel_admin_users(
     services: &RebornRuntimeStores,
     identity: &ironclaw_extension_host::channel_host::ChannelHostIdentity,
-) -> Arc<dyn ironclaw_product::AdminUserService> {
+) -> Arc<dyn AdminUserService> {
     let directory: Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> =
         crate::factory::filesystem_reborn_identity_store(
             Arc::clone(&services.scoped_filesystem),
@@ -422,6 +463,8 @@ pub(crate) fn start_channel_host(
         generic_host,
         ingress_registry: registry,
         workflow_filesystem,
+        inbound_attachments,
+        project_filesystem,
         delivery_coordinator,
         outbound_state,
         delivered_gate_routes,
@@ -441,6 +484,7 @@ pub(crate) fn start_channel_host(
             outbound_store: Arc::clone(outbound_state),
             route_store: Arc::clone(delivered_gate_routes),
             communication_preferences: Arc::clone(outbound_preferences),
+            project_filesystem: Arc::clone(project_filesystem),
             approval_context,
             blocked_auth_prompts,
             auth_flow_cancel,
@@ -456,6 +500,7 @@ pub(crate) fn start_channel_host(
         workflow_state,
         thread_service,
         turn_coordinator,
+        inbound_attachments: Arc::clone(inbound_attachments),
         approval_interaction,
         auth_interaction,
         identity,

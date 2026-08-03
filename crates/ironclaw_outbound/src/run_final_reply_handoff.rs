@@ -7,7 +7,7 @@
 //! canonical run and immutable `RunFinalReplyTargetRecord`, then revalidates
 //! current authority immediately before egress.
 
-use ironclaw_turns::{EventCursor, TurnRunId, TurnScope};
+use ironclaw_host_api::turn::{EventCursor, TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_RUN_FINAL_REPLY_HANDOFF_PAGE: usize = 1_000;

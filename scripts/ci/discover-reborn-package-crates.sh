@@ -40,7 +40,7 @@ allowlist="$(
 # Every workspace crate linked by the shipped binary through a normal or build
 # dependency. The union below keeps non-closure allowlist crates covered too.
 closure="$(
-  comm -12 \
+  LC_ALL=C comm -12 \
     <(cargo tree -p ironclaw -e normal,build --prefix none \
       | grep -oE 'ironclaw_[a-z0-9_]+' \
       | LC_ALL=C sort -u) \

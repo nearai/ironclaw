@@ -5,7 +5,7 @@
 //! The channel-level regression net (the vendor e2e scenarios through the
 //! real ingress mount) re-points onto these components at the cutover.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,7 +13,19 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
+use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
+use ironclaw_extension_contracts::preference_target::{
+    PreferenceTargetCodec, PreferenceTargetEncodeRequest,
+};
+use ironclaw_host_api::turn::{
+    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
+    SourceBindingRef, TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
+};
+use ironclaw_host_api::{
+    attachment::WorkspaceFile,
+    ids::{AgentId, TenantId, ThreadId, UserId},
+    path::ScopedPath,
+};
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
     DeliveredGateRouteStore, DeliveryDefaultScope, OutboundStateStore, OutboundStateStorePort,
@@ -21,30 +33,36 @@ use ironclaw_outbound::{
     TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryStore,
 };
 use ironclaw_product::{
-    AdapterInstallationId, AuthPromptView, AuthRequirement, ChannelAdapter, ChannelError,
-    DeliveryReport, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-    InboundCommandPayload, InboundOutcome, OutboundEnvelope, OutboundPart, ParsedProductInbound,
-    PartDeliveryOutcome, ProductAdapterError, ProductAdapterId, ProductCommandResultPayload,
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
-    ProductRejectionKind, ProductTriggerReason, ProtocolAuthEvidence, TrustedInboundContext,
-    UserMessagePayload, VerifiedInbound,
+    AdapterInstallationId, AuthPromptView, AuthRequirement, ChannelError, DeliveryReport,
+    ExternalActorRef, ExternalConversationRef, ExternalEventId, InboundCommandPayload,
+    InboundOutcome, OutboundEnvelope, OutboundPart, ParsedProductInbound, PartDeliveryOutcome,
+    ProductAdapterError, ProductAdapterId, ProductCommandResultPayload, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductRejectionKind,
+    ProductTriggerReason, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
+    VerifiedInbound,
 };
 use ironclaw_product::{
-    BlockedAuthPromptRequest, BlockedAuthPromptSource, ChannelConnectionNoticePolicy,
-    ChannelDeliveryResolver, DeliveryCoordinator, DeliveryReplyContextSource, DeliveryRetryPolicy,
-    PreferenceTargetCodec, ResolvedChannelDelivery, RunDeliveryObserver, RunDeliveryServices,
+    DeliveryCoordinator, DeliveryRetryPolicy, RunDeliveryObserver, RunDeliveryServices,
     RunDeliverySettings, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
 };
+use ironclaw_product::{
+    ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsStat,
+};
+use ironclaw_product_contracts::account_setup::ChannelConnectionNoticePolicy;
+use ironclaw_product_contracts::delivery::{
+    ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
+};
+use ironclaw_product_contracts::prompt_source::{
+    BlockedAuthPromptRequest, BlockedAuthPromptSource,
+};
 use ironclaw_threads::{
-    AppendFinalizedAssistantMessageRequest, EnsureThreadRequest, InMemorySessionThreadService,
-    MessageContent, SessionThreadService, ThreadScope,
+    AppendFinalizedAssistantMessageRequest, AttachmentKind, AttachmentRef, EnsureThreadRequest,
+    InMemorySessionThreadService, MessageContent, SessionThreadService, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
-    GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
-    RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError, TurnId, TurnRunId,
-    TurnRunState, TurnScope, TurnStatus,
+    CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
+    RetryTurnRequest, RetryTurnResponse, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator,
+    TurnError, TurnRunState,
 };
 
 // ── Scripted fakes ─────────────────────────────────────────────────────────
@@ -52,13 +70,13 @@ use ironclaw_turns::{
 #[derive(Clone)]
 struct ScriptedRunState {
     status: TurnStatus,
-    gate_ref: Option<GateRef>,
+    gate_ref: Option<TurnGateRef>,
 }
 
 fn scripted_state(status: TurnStatus, gate_ref: Option<&str>) -> ScriptedRunState {
     ScriptedRunState {
         status,
-        gate_ref: gate_ref.map(|s| GateRef::new(s).expect("gate ref")),
+        gate_ref: gate_ref.map(|s| TurnGateRef::new(s).expect("gate ref")),
     }
 }
 
@@ -242,7 +260,7 @@ impl ChannelAdapter for RecordingChannelAdapter {
     async fn deliver(
         &self,
         envelope: OutboundEnvelope,
-        _egress: &dyn ironclaw_host_api::tool_adapter::RestrictedEgress,
+        _egress: &dyn ironclaw_extension_contracts::tool_adapter::RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError> {
         self.envelopes
             .lock()
@@ -277,15 +295,15 @@ impl ChannelAdapter for RecordingChannelAdapter {
 struct DenyAllEgress;
 
 #[async_trait]
-impl ironclaw_host_api::tool_adapter::RestrictedEgress for DenyAllEgress {
+impl ironclaw_extension_contracts::tool_adapter::RestrictedEgress for DenyAllEgress {
     async fn send(
         &self,
-        _request: ironclaw_host_api::tool_adapter::RestrictedEgressRequest,
+        _request: ironclaw_extension_contracts::tool_adapter::RestrictedEgressRequest,
     ) -> Result<
-        ironclaw_host_api::tool_adapter::RestrictedEgressResponse,
-        ironclaw_host_api::tool_adapter::RestrictedEgressError,
+        ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse,
+        ironclaw_extension_contracts::tool_adapter::RestrictedEgressError,
     > {
-        Err(ironclaw_host_api::tool_adapter::RestrictedEgressError::PolicyDenied)
+        Err(ironclaw_extension_contracts::tool_adapter::RestrictedEgressError::PolicyDenied)
     }
 }
 
@@ -310,6 +328,74 @@ struct NoStoredReplyContext;
 impl DeliveryReplyContextSource for NoStoredReplyContext {
     async fn reply_context(&self, _: &str, _: &str, _: &str) -> Option<Vec<u8>> {
         None
+    }
+}
+
+#[derive(Default)]
+struct ScriptedProjectFilesystemReader {
+    files: Mutex<HashMap<String, Result<WorkspaceFile, ProjectFsError>>>,
+    reads: Mutex<Vec<String>>,
+}
+
+impl ScriptedProjectFilesystemReader {
+    fn insert_file(&self, path: &str, mime_type: &str, bytes: &[u8]) {
+        self.files.lock().expect("files").insert(
+            path.to_string(),
+            Ok(WorkspaceFile {
+                path: ScopedPath::new(path).expect("scoped workspace path"),
+                filename: path.rsplit('/').next().map(str::to_string),
+                mime_type: mime_type.to_string(),
+                bytes: bytes.to_vec(),
+            }),
+        );
+    }
+}
+
+#[async_trait]
+impl ProjectFilesystemReader for ScriptedProjectFilesystemReader {
+    async fn list_dir(
+        &self,
+        _thread_scope: &ThreadScope,
+        _path: &str,
+    ) -> Result<Vec<ProjectFsEntry>, ProjectFsError> {
+        Err(ProjectFsError::NotADirectory)
+    }
+
+    async fn read_file(
+        &self,
+        _thread_scope: &ThreadScope,
+        path: &str,
+    ) -> Result<WorkspaceFile, ProjectFsError> {
+        self.reads.lock().expect("reads").push(path.to_string());
+        self.files
+            .lock()
+            .expect("files")
+            .get(path)
+            .cloned()
+            .unwrap_or(Err(ProjectFsError::NotFound))
+    }
+
+    async fn stat(
+        &self,
+        _thread_scope: &ThreadScope,
+        path: &str,
+    ) -> Result<ProjectFsStat, ProjectFsError> {
+        match self
+            .files
+            .lock()
+            .expect("files")
+            .get(path)
+            .cloned()
+            .unwrap_or(Err(ProjectFsError::NotFound))
+        {
+            Ok(file) => Ok(ProjectFsStat {
+                path: file.path.as_str().to_string(),
+                kind: ProjectFsEntryKind::File,
+                size_bytes: file.bytes.len() as u64,
+                mime_type: file.mime_type,
+            }),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -399,14 +485,14 @@ impl PreferenceTargetCodec for StaticCodec {
 
     fn encode_shared_conversation_target(
         &self,
-        _request: ironclaw_product::PreferenceTargetEncodeRequest<'_>,
+        _request: PreferenceTargetEncodeRequest<'_>,
     ) -> Option<ReplyTargetBindingRef> {
         None
     }
 
     fn encode_personal_direct_message_target(
         &self,
-        _request: ironclaw_product::PreferenceTargetEncodeRequest<'_>,
+        _request: PreferenceTargetEncodeRequest<'_>,
         _external_actor_id: &str,
     ) -> Option<ReplyTargetBindingRef> {
         None
@@ -465,6 +551,16 @@ fn envelope_for_conversation(
     event_id: &str,
     conversation_id: &str,
 ) -> ProductInboundEnvelope {
+    envelope_for_conversation_replying_to(payload, event_id, conversation_id, None, None)
+}
+
+fn envelope_for_conversation_replying_to(
+    payload: ProductInboundPayload,
+    event_id: &str,
+    conversation_id: &str,
+    topic_id: Option<&str>,
+    reply_target_message_id: Option<&str>,
+) -> ProductInboundEnvelope {
     let adapter_id = ProductAdapterId::new("acme_v1").expect("adapter");
     let installation_id = AdapterInstallationId::new("install_alpha").expect("installation");
     let evidence = ProtocolAuthEvidence::test_verified(
@@ -483,8 +579,13 @@ fn envelope_for_conversation(
     let parsed = ParsedProductInbound::new(
         ExternalEventId::new(event_id).expect("event"),
         ExternalActorRef::new("acme_user", "U-1", None::<String>).expect("actor"),
-        ExternalConversationRef::new(Some("space-1"), conversation_id, None, None)
-            .expect("conversation"),
+        ExternalConversationRef::new(
+            Some("space-1"),
+            conversation_id,
+            topic_id,
+            reply_target_message_id,
+        )
+        .expect("conversation"),
         payload,
     )
     .expect("parsed");
@@ -533,6 +634,7 @@ struct Harness {
     route_store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     turns: Arc<ScriptedTurnCoordinator>,
     threads: Arc<InMemorySessionThreadService>,
+    project_files: Arc<ScriptedProjectFilesystemReader>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -586,6 +688,7 @@ fn build_harness_with_settings(
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     let threads = Arc::new(InMemorySessionThreadService::default());
+    let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
     let coordinator = Arc::new(DeliveryCoordinator::new(
         Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         Arc::new(StaticResolver {
@@ -607,6 +710,7 @@ fn build_harness_with_settings(
         outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
+        project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
         coordinator,
         extension_id: EXTENSION_ID.to_string(),
         fallback_notice_scope: fallback_scope(),
@@ -635,10 +739,20 @@ fn build_harness_with_settings(
         route_store,
         turns,
         threads,
+        project_files,
     }
 }
 
 async fn seed_final_message(threads: &InMemorySessionThreadService, run_id: TurnRunId, text: &str) {
+    seed_final_message_with_attachments(threads, run_id, text, Vec::new()).await;
+}
+
+async fn seed_final_message_with_attachments(
+    threads: &InMemorySessionThreadService,
+    run_id: TurnRunId,
+    text: &str,
+    attachments: Vec<AttachmentRef>,
+) {
     let thread_scope = ThreadScope {
         tenant_id: tenant(),
         agent_id: agent(),
@@ -661,7 +775,7 @@ async fn seed_final_message(threads: &InMemorySessionThreadService, run_id: Turn
             scope: thread_scope,
             thread_id: ThreadId::new("thread-a").expect("thread"),
             turn_run_id: run_id.to_string(),
-            content: MessageContent::text(text),
+            content: MessageContent::with_attachments(text, attachments),
         })
         .await
         .expect("finalized");
@@ -703,6 +817,55 @@ async fn observer_delivers_final_reply_through_the_coordinator() {
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::Delivered
     );
+}
+
+#[tokio::test]
+async fn observer_materializes_finalized_attachment_refs_for_delivery() {
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    let run_id = TurnRunId::new();
+    harness
+        .project_files
+        .insert_file("/workspace/report.txt", "text/plain", b"hello");
+    seed_final_message_with_attachments(
+        &harness.threads,
+        run_id,
+        "report attached",
+        vec![AttachmentRef {
+            id: "reply-attachment-0".to_string(),
+            kind: AttachmentKind::Document,
+            mime_type: "text/plain".to_string(),
+            filename: Some("renamed-report.txt".to_string()),
+            size_bytes: Some(5),
+            storage_key: Some("/workspace/report.txt".to_string()),
+            extracted_text: None,
+        }],
+    )
+    .await;
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-file-final"),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let envelopes = harness.adapter.envelopes();
+    assert_eq!(envelopes.len(), 1);
+    assert!(matches!(
+        envelopes[0].parts.as_slice(),
+        [OutboundPart::Text(text), OutboundPart::File(file)]
+            if text == "report attached"
+                && file.path.as_str() == "/workspace/report.txt"
+                && file.filename.as_deref() == Some("renamed-report.txt")
+                && file.mime_type == "text/plain"
+                && file.bytes == b"hello"
+    ));
 }
 
 #[tokio::test]
@@ -1104,10 +1267,30 @@ async fn observer_records_gate_route_after_approval_prompt() {
     );
     let run_id = TurnRunId::new();
 
+    // A *threaded* prompting event that is itself a reply. Both halves are
+    // load-bearing:
+    //
+    // - the topic (`1700.1`) makes the source branch's key distinguishable from
+    //   the delivered-message loop's, which only ever keys the topic off a
+    //   vendor message ref (`ts-N` here) or leaves it empty. Without a topic the
+    //   two branches produce the same conversation-root key and an assertion on
+    //   it passes no matter what the source branch does.
+    // - the reply target (`1800.2`) is the per-event id the recorded route must
+    //   NOT inherit: a later bare `approve` in the same topic carries a
+    //   different one (or none), and a key that varied with it would never match.
     harness
         .observer
         .observe_ack(
-            user_message_envelope(ProductTriggerReason::DirectChat, "evt-gate"),
+            envelope_for_conversation_replying_to(
+                ProductInboundPayload::UserMessage(
+                    UserMessagePayload::new("hello", Vec::new(), ProductTriggerReason::DirectChat)
+                        .expect("payload"),
+                ),
+                "evt-gate",
+                "conv-1",
+                Some("1700.1"),
+                Some("1800.2"),
+            ),
             accepted_ack(run_id),
         )
         .await;
@@ -1135,16 +1318,126 @@ async fn observer_records_gate_route_after_approval_prompt() {
         !route.delivered_conversation_fingerprints.is_empty(),
         "fingerprints recorded"
     );
-    // The source conversation (bare replies next to the prompt) routes too.
+    // The source topic (bare replies next to the prompt) routes too, keyed by
+    // the topic and WITHOUT the prompting event's reply target. Only the source
+    // branch can produce this key — the delivered loop's topics are vendor
+    // message refs.
     let source_fingerprint =
-        ironclaw_conversations::ExternalConversationRef::new(Some("space-1"), "conv-1", None, None)
+        ExternalConversationRef::new(Some("space-1"), "conv-1", Some("1700.1"), None)
             .expect("conversation")
             .conversation_fingerprint();
+    // Non-vacuity for the membership check below: if the topic did NOT
+    // participate in the fingerprint, `source_fingerprint` would just be the
+    // untargeted conversation's key, which the route records anyway — so the
+    // assertion would pass while proving nothing about topic routing.
+    assert_ne!(
+        source_fingerprint,
+        ExternalConversationRef::new(Some("space-1"), "conv-1", None, None)
+            .expect("conversation")
+            .conversation_fingerprint(),
+        "the conversation topic must participate in the fingerprint"
+    );
     assert!(
         route
             .delivered_conversation_fingerprints
             .contains(&source_fingerprint),
-        "source conversation fingerprint recorded"
+        "a gate route recorded from a threaded reply must still be resolvable by a \
+         bare reply in the same topic that carries no reply target: {:?}",
+        route.delivered_conversation_fingerprints
+    );
+    // The invariant the assertion above leans on, pinned here rather than left
+    // to be re-derived from `conversation_fingerprint`'s body: the fingerprint
+    // is the ROUTE, so it does not vary with the per-event reply target. If that
+    // ever stopped holding, the recording branch would start baking a message id
+    // into a stable key and the failure above would look unrelated to the cause.
+    assert_eq!(
+        ExternalConversationRef::new(Some("space-1"), "conv-1", Some("1700.1"), Some("1800.2"))
+            .expect("conversation")
+            .conversation_fingerprint(),
+        source_fingerprint,
+        "conversation_fingerprint must exclude the reply-target hint"
+    );
+}
+
+#[tokio::test]
+async fn observer_records_gate_route_without_a_vendor_ref_that_cannot_key_a_route() {
+    // `vendor_message_ref` is an unvalidated vendor string, so a channel can
+    // hand back a ref that is not a legal route segment (here: a control
+    // character). The two topic-keyed route variants must then be DROPPED
+    // rather than recorded malformed -- and, crucially, the conversation-root
+    // variants must still be recorded, or one bad ref would silently cost the
+    // gate every route and a bare `approve` would resolve nothing.
+    let harness = build_harness(
+        vec![scripted_state(
+            TurnStatus::BlockedApproval,
+            Some("gate:approval-00000000000000000000000000000001"),
+        )],
+        false,
+        None,
+        Duration::from_millis(40),
+    );
+    harness
+        .adapter
+        .reports
+        .lock()
+        .expect("reports lock")
+        .push_back(DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Sent {
+                vendor_message_ref: Some("ts-\u{7}1".to_string()),
+            }],
+        });
+    let run_id = TurnRunId::new();
+
+    harness
+        .observer
+        .observe_ack(
+            envelope_for_conversation_replying_to(
+                ProductInboundPayload::UserMessage(
+                    UserMessagePayload::new("hello", Vec::new(), ProductTriggerReason::DirectChat)
+                        .expect("payload"),
+                ),
+                "evt-gate-bad-ref",
+                "conv-1",
+                Some("1700.1"),
+                None,
+            ),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let route = harness
+        .route_store
+        .load_delivered_gate_route(
+            &tenant(),
+            &user(),
+            "gate:approval-00000000000000000000000000000001",
+        )
+        .await
+        .expect("route lookup")
+        .expect("gate route recorded");
+    let fingerprint = |space: Option<&str>, topic: Option<&str>| {
+        ExternalConversationRef::new(space, "conv-1", topic, None)
+            .expect("conversation")
+            .conversation_fingerprint()
+    };
+    let mut recorded = route.delivered_conversation_fingerprints.clone();
+    recorded.sort();
+    let mut expected = vec![
+        // Delivered loop, space-qualified conversation root.
+        fingerprint(Some("space-1"), None),
+        // Delivered loop, no-space fallback.
+        fingerprint(None, None),
+        // The prompting (source) conversation, keyed by its own topic.
+        fingerprint(Some("space-1"), Some("1700.1")),
+    ];
+    expected.sort();
+    assert_eq!(
+        recorded, expected,
+        "an unusable vendor message ref drops only the two ref-keyed variants"
+    );
+    assert!(
+        !recorded.iter().any(|entry| entry.contains('\u{7}')),
+        "a vendor ref that is not a legal external id must never reach a route key: {recorded:?}"
     );
 }
 
@@ -1535,6 +1828,7 @@ struct TriggeredHarness {
     delivery_store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     turns: Arc<ScriptedTurnCoordinator>,
     threads: Arc<InMemorySessionThreadService>,
+    project_files: Arc<ScriptedProjectFilesystemReader>,
 }
 
 fn build_triggered_harness(
@@ -1550,6 +1844,7 @@ fn build_triggered_harness(
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     let threads = Arc::new(InMemorySessionThreadService::default());
+    let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
     let coordinator = Arc::new(DeliveryCoordinator::new(
         Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         Arc::new(StaticResolver {
@@ -1571,6 +1866,7 @@ fn build_triggered_harness(
         outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
+        project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
         coordinator,
         extension_id: EXTENSION_ID.to_string(),
         fallback_notice_scope: fallback_scope(),
@@ -1605,6 +1901,7 @@ fn build_triggered_harness(
         delivery_store,
         turns,
         threads,
+        project_files,
     }
 }
 
@@ -1699,6 +1996,51 @@ async fn triggered_final_reply_reaches_the_preference_target_with_footer() {
         "dm-creator",
         "delivered to the decoded preference target"
     );
+}
+
+#[tokio::test]
+async fn triggered_final_reply_materializes_workspace_files_before_adapter_delivery() {
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        None,
+        true,
+    );
+    seed_preference(&harness.store).await;
+    harness.project_files.insert_file(
+        "/workspace/trigger.json",
+        "application/json",
+        br#"{"ok":true}"#,
+    );
+    let run_id = TurnRunId::new();
+    seed_final_message_with_attachments(
+        &harness.threads,
+        run_id,
+        "trigger complete: /workspace/trigger.json",
+        vec![AttachmentRef {
+            id: "reply-attachment-0".to_string(),
+            kind: AttachmentKind::Document,
+            mime_type: "application/json".to_string(),
+            filename: Some("trigger.json".to_string()),
+            size_bytes: Some(11),
+            storage_key: Some("/workspace/trigger.json".to_string()),
+            extracted_text: None,
+        }],
+    )
+    .await;
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    let envelopes = harness.adapter.envelopes();
+    assert!(matches!(
+        &envelopes[0].parts[1],
+        OutboundPart::File(file)
+            if file.path.as_str() == "/workspace/trigger.json"
+                && file.bytes == br#"{"ok":true}"#
+    ));
 }
 
 #[tokio::test]

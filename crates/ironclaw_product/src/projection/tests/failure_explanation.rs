@@ -1,5 +1,5 @@
 use super::*;
-use ironclaw_runner::failure_categories::{
+use ironclaw_host_api::failure::categories::{
     BUDGET_ACCOUNTING_FAILED_CATEGORY, CHECKPOINT_REJECTED_CATEGORY,
     HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY, HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY,
     HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY, HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY,
@@ -9,7 +9,7 @@ use ironclaw_runner::failure_categories::{
     MODEL_STAGE_POLICY_DENIED_CATEGORY, MODEL_STAGE_REQUEST_INVALID_CATEGORY,
     MODEL_STAGE_SCOPE_MISMATCH_CATEGORY, TRANSCRIPT_WRITE_FAILED_CATEGORY,
 };
-use ironclaw_turns::LoopFailureKind;
+use ironclaw_loop_contracts::LoopFailureKind;
 
 const GENERIC_FAILURE_SUMMARY: &str = "The run failed before producing a reply. Retry the run, and contact support if it keeps happening.";
 
@@ -185,8 +185,9 @@ fn failure_summary_covers_every_loop_failure_kind_category() {
     );
 
     for (category, expected_summary) in expected {
-        let summary =
-            ironclaw_runner::failure_summary::reborn_failure_summary_for_category(Some(category));
+        let summary = ironclaw_host_api::failure::summary::reborn_failure_summary_for_category(
+            Some(category),
+        );
         assert_eq!(summary, expected_summary, "category {category}");
         assert_ne!(summary, GENERIC_FAILURE_SUMMARY, "category {category}");
         assert!(
@@ -275,12 +276,14 @@ fn failure_summary_covers_reborn_failure_category_constants() {
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         source_values, expected_values,
-        "failure_categories.rs gained or lost a public category constant; update the Tier-2 summary table"
+        "host_api::failure::categories gained or lost a public category constant; update the Tier-2 summary table"
     );
 
     for (category, expected_summary) in expected {
         assert_eq!(
-            ironclaw_runner::failure_summary::reborn_failure_summary_for_category(Some(category)),
+            ironclaw_host_api::failure::summary::reborn_failure_summary_for_category(Some(
+                category
+            )),
             expected_summary,
             "category {category}"
         );
@@ -322,7 +325,9 @@ fn failure_summary_covers_host_stage_unavailable_categories() {
 
     for (category, expected_summary) in expected {
         assert_eq!(
-            ironclaw_runner::failure_summary::reborn_failure_summary_for_category(Some(category)),
+            ironclaw_host_api::failure::summary::reborn_failure_summary_for_category(Some(
+                category
+            )),
             expected_summary,
             "category {category}"
         );
@@ -407,7 +412,7 @@ fn failure_summary_covers_agent_loop_safe_summary_categories() {
         // The granular `compaction_*` categories are deliberately absent: the
         // agent loop no longer mints them since non-cancellation compaction
         // failures became a deferred-continue path instead of a terminal exit
-        // (#5838). `ironclaw_runner::failure_summary` keeps display support so
+        // (#5838). `host_api::failure::summary` keeps display support so
         // historical records still render.
     ];
 
@@ -426,8 +431,9 @@ fn failure_summary_covers_agent_loop_safe_summary_categories() {
     );
 
     for (category, expected_summary) in expected {
-        let summary =
-            ironclaw_runner::failure_summary::reborn_failure_summary_for_category(Some(category));
+        let summary = ironclaw_host_api::failure::summary::reborn_failure_summary_for_category(
+            Some(category),
+        );
         assert_eq!(summary, expected_summary, "category {category}");
         assert_ne!(summary, GENERIC_FAILURE_SUMMARY, "category {category}");
     }
@@ -435,7 +441,7 @@ fn failure_summary_covers_agent_loop_safe_summary_categories() {
 
 #[test]
 fn failure_summary_uses_safe_generic_fallback_for_unknown_categories() {
-    let summary = ironclaw_runner::failure_summary::reborn_failure_summary_for_category(Some(
+    let summary = ironclaw_host_api::failure::summary::reborn_failure_summary_for_category(Some(
         "new_snake_case_code",
     ));
 
@@ -1206,13 +1212,24 @@ async fn model_failure_explainer_returns_none_when_gateway_fails() {
 }
 
 fn loop_failure_kind_as_str_values_from_source() -> std::collections::BTreeSet<&'static str> {
-    const SOURCE: &str = include_str!("../../../../ironclaw_turns/src/loop_exit.rs");
+    // WS1.2 moved the `LoopExit` claim vocabulary (and this `impl`) out of the
+    // turn kernel into `ironclaw_loop_contracts`. The scan is a cross-crate
+    // source reach-in — pre-existing §11.2.7 debt that WS2 deletes — so it has
+    // to follow the code; left pointing at the old path it still resolves and
+    // silently matches nothing.
+    const SOURCE: &str = include_str!("../../../../ironclaw_loop_contracts/src/loop_exit.rs");
     source_match_string_values(SOURCE, "impl LoopFailureKind")
 }
 
 fn reborn_failure_category_constant_values_from_source() -> std::collections::BTreeSet<&'static str>
 {
-    const SOURCE: &str = include_str!("../../../../ironclaw_runner/src/failure_categories.rs");
+    // WS1.7 moved the category constants out of the turn runner into
+    // `ironclaw_host_api::failure::categories`, beside the summary table this
+    // test pins them against. The scan is a cross-crate source reach-in —
+    // pre-existing §11.2.7 debt that WS2 deletes — so it has to follow the
+    // code; left pointing at the old path it still resolves and silently
+    // matches nothing.
+    const SOURCE: &str = include_str!("../../../../ironclaw_host_api/src/failure/categories.rs");
     SOURCE
         .lines()
         .filter_map(|line| {

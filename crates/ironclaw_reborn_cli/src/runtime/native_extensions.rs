@@ -70,19 +70,17 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
+    use ironclaw_extension_contracts::channel_adapter::{
+        InboundOutcome, ProductTriggerReason, VerifiedInbound,
+    };
     use ironclaw_extension_host::extension_ingress::{
         ChannelInboundSinkConfig, GenericChannelInboundSink, VerifiedEvidenceMint,
     };
     use ironclaw_extension_host::ingress::{InboundAdmission, InboundSink};
-    use ironclaw_host_api::{
-        product_adapter::{
-            ChannelInboundClassification, InboundOutcome, ProductAdapterId, ProductTriggerReason,
-            VerifiedInbound,
-        },
-        product_surface::{
-            ChannelInboundProductSurface, ChannelInboundSurfaceOutcome,
-            ChannelInboundSurfaceRequest,
-        },
+    use ironclaw_host_api::product_adapter::ProductAdapterId;
+    use ironclaw_product_contracts::inbound::ChannelInboundClassification;
+    use ironclaw_product_contracts::surface::{
+        ChannelInboundProductSurface, ChannelInboundSurfaceOutcome, ChannelInboundSurfaceRequest,
     };
     use ironclaw_telegram_extension::TELEGRAM_BOT_USERNAME_CONFIG;
     use serde_json::json;
@@ -204,6 +202,8 @@ mod tests {
                     extension_id: telegram.extension_id.clone(),
                     installation_id: "install_test".to_string(),
                     message,
+                    channel_adapter: Arc::clone(&telegram.adapter),
+                    channel_egress: None,
                 })
                 .await
                 .is_err(),
