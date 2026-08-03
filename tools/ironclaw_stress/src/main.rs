@@ -2327,11 +2327,21 @@ pub(crate) fn default_libsql_path() -> PathBuf {
 }
 
 pub(crate) async fn cleanup_generated_libsql_path(path: &Path) {
-    for candidate in [
-        path.to_path_buf(),
-        path.with_extension("db-wal"),
-        path.with_extension("db-shm"),
-    ] {
+    // SQLite appends `-wal`/`-shm` to the whole file name; it does not replace
+    // the extension. `with_extension("db-wal")` only lined up when the path
+    // ended in `.db`, so an explicit `--libsql-path bench.sqlite` left
+    // `bench-<case>.sqlite-wal` and `-shm` behind on every run.
+    let sidecars = path
+        .file_name()
+        .map(|name| {
+            let name = name.to_string_lossy().into_owned();
+            [
+                path.with_file_name(format!("{name}-wal")),
+                path.with_file_name(format!("{name}-shm")),
+            ]
+        })
+        .unwrap_or_else(|| [path.to_path_buf(), path.to_path_buf()]);
+    for candidate in [path.to_path_buf(), sidecars[0].clone(), sidecars[1].clone()] {
         match tokio::fs::remove_file(&candidate).await {
             Ok(()) => {}
             Err(error) if error.kind() == ErrorKind::NotFound => {}

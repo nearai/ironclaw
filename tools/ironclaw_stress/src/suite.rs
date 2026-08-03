@@ -309,8 +309,13 @@ pub(crate) fn apply_case(base_args: &Args, case: &SuiteCase, case_args: &mut Arg
                     .extension()
                     .map(|extension| format!(".{}", extension.to_string_lossy()))
                     .unwrap_or_default();
-                per_case
-                    .set_file_name(format!("{stem}-{}{extension}", case_args.scenario.as_str()));
+                // Keyed on the case label, not the scenario: several cases
+                // share a scenario (`tool-heavy`, `tool-wait`, and
+                // `tool-failure` are all `ToolSession`), so a scenario suffix
+                // hands them one file and reintroduces the cross-case lock
+                // contention this split exists to remove. Labels are internal
+                // constants, never user input.
+                per_case.set_file_name(format!("{stem}-{}{extension}", case.label));
                 per_case
             }
             None => crate::default_libsql_path(),

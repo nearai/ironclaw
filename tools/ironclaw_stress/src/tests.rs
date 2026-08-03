@@ -283,6 +283,63 @@ fn libsql_cases_use_distinct_generated_database_paths() {
     );
 }
 
+/// An explicit `--libsql-path` is honoured and still isolates every case.
+///
+/// Two properties at once, because they trade off against each other: the
+/// operator's directory and extension survive (the path is not silently
+/// replaced with a temporary file), and no two cases land on the same file.
+/// Keying the suffix on the scenario satisfies only the first — `tool-heavy`,
+/// `tool-wait`, and `tool-failure` are all `ToolSession` and would share one
+/// database, which is the cross-runtime lock contention the split exists to
+/// prevent.
+#[test]
+fn explicit_libsql_path_is_preserved_and_still_isolates_each_case() {
+    let mut base = test_args();
+    base.backend = crate::Backend::Libsql;
+    base.libsql_path = Some(std::path::PathBuf::from(
+        "/tmp/operator-choice/bench.sqlite",
+    ));
+    let cases = suite::build_cases(StressSuite::BottleneckFinder);
+    let mut seen = std::collections::BTreeSet::new();
+    let mut checked = 0;
+    for case in &cases {
+        let mut case_args = base.clone();
+        suite::apply_case(&base, case, &mut case_args, "run-id");
+        if case_args.scenario.is_api_capacity() {
+            continue;
+        }
+        let path = case_args
+            .libsql_path
+            .clone()
+            .expect("every non-API libSQL case gets a database path");
+        assert_eq!(
+            path.parent(),
+            Some(std::path::Path::new("/tmp/operator-choice")),
+            "case {} moved off the operator's directory to {}",
+            case.label,
+            path.display()
+        );
+        assert_eq!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some("sqlite"),
+            "case {} dropped the operator's extension: {}",
+            case.label,
+            path.display()
+        );
+        assert!(
+            seen.insert(path.clone()),
+            "case {} reused database path {}",
+            case.label,
+            path.display()
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 1,
+        "the suite must exercise more than one explicit-path libSQL case"
+    );
+}
+
 #[test]
 fn postgres_pool_pressure_suite_includes_remote_pool_cases() {
     let cases = suite::build_cases(StressSuite::PostgresPoolPressure);
