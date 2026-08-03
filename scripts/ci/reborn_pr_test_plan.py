@@ -503,6 +503,14 @@ def build_plan(
         if path == CHANGED_COVERAGE_MANIFEST:
             reasons.append("changed-coverage policy is statically validated")
             continue
+        # The WIT directory moved inside `ironclaw_wasm` (CHECKLIST WS4), so a
+        # bare `wit/` path no longer occurs on disk; both prefixes are kept so
+        # neither the historical root location nor the current crate-owned
+        # one falls through to the crate's own production-package lane, which
+        # would duplicate `has_direct_wasm_abi_risk`'s coverage.
+        if path.startswith("wit/") or path.startswith("crates/ironclaw_wasm/wit/"):
+            reasons.append(f"Platform & Compat owns WIT compatibility: {path}")
+            continue
         if (
             path in IGNORED_GUIDANCE_PATHS
             or path.startswith(IGNORED_PREFIXES)

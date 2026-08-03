@@ -618,6 +618,85 @@ class RebornPrTestPlanTests(unittest.TestCase):
                     )
                 )
 
+    def test_wit_only_change_is_owned_by_platform_and_compat(self) -> None:
+        # Both the historical root location and the current crate-owned one
+        # (CHECKLIST WS4 moved `wit/` inside `ironclaw_wasm`) must delegate,
+        # so a real `crates/ironclaw_wasm/wit/*.wit` change never falls
+        # through to `ironclaw_wasm`'s own production-package lane.
+        for path in (
+            "wit/tool.wit",
+            "wit/channel.wit",
+            "crates/ironclaw_wasm/wit/tool.wit",
+            "crates/ironclaw_wasm/wit/channel.wit",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "none")
+                self.assertEqual(plan["changed_packages"], [])
+                self.assertEqual(plan["affected_packages"], [])
+                self.assertEqual(plan["crate_buckets"], [])
+                self.assertEqual(plan["root_partitions"], [])
+                self.assertEqual(plan["integration_lanes"], [])
+                self.assertTrue(plan["run_qa_replay"])
+                self.assertEqual(plan["coverage_mode"], "none")
+                self.assertEqual(
+                    plan["reasons"],
+                    [f"Platform & Compat owns WIT compatibility: {path}"],
+                )
+
+    def test_wit_and_crate_change_keeps_package_dependency_closure(self) -> None:
+        plan = self.plan(
+            "pull_request",
+            ["wit/tool.wit", "crates/alpha/src/lib.rs"],
+        )
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["alpha"])
+        self.assertEqual(plan["affected_packages"], ["alpha", "beta", "gamma"])
+        self.assertEqual(
+            plan["crate_buckets"],
+            [{"name": "selected", "packages": ["alpha", "beta", "gamma"]}],
+        )
+        self.assertTrue(plan["run_qa_replay"])
+
+    # An unmapped extension-package manifest or `wasm-src/**` path used to be
+    # carved out here for silent "Platform & Compat, no lane" delegation.
+    # Upstream's `EMBEDDED_ASSET_OWNERS` table (CHECKLIST WS10) supersedes
+    # that: the whole `crates/extensions/packages/` tree now schedules the
+    # crate that actually compiles it instead of selecting no lane, which is
+    # the safer default the fail-closed doctrine below and
+    # `test_embedded_package_assets_schedule_the_crate_that_compiles_them` /
+    # `test_package_prompt_markdown_routes_to_its_compiler_not_to_prose`
+    # already pin.
+
+    def test_mapped_nested_extension_package_retains_package_coverage(self) -> None:
+        nested = metadata()
+        nested["workspace_members"].append("slack")
+        nested["packages"].append(
+            {
+                "id": "slack",
+                "name": "ironclaw_slack_extension",
+                "manifest_path": str(
+                    ROOT / "crates/extensions/packages/slack/Cargo.toml"
+                ),
+            }
+        )
+        nested["resolve"]["nodes"].append({"id": "slack", "deps": []})
+
+        plan = planner.build_plan(
+            event="pull_request",
+            changed_paths=["crates/extensions/packages/slack/manifest.toml"],
+            metadata=nested,
+            canonical_packages=self.canonical + ["ironclaw_slack_extension"],
+        )
+
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["ironclaw_slack_extension"])
+        self.assertEqual(plan["affected_packages"], ["ironclaw_slack_extension"])
+        self.assertEqual(
+            plan["reasons"],
+            ["production package changed: ironclaw_slack_extension"],
+        )
+
     def test_changed_coverage_manifest_does_not_launch_integration_lanes(self) -> None:
         plan = self.plan(
             "pull_request",
