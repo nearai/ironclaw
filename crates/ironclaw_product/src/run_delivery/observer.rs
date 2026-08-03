@@ -1338,13 +1338,22 @@ fn classify_observed_delivery_outcome(
 }
 
 fn delivery_failure_feedback(error: &RunDeliveryError) -> Option<&'static str> {
+    // Keep this match exhaustive so every new delivery failure chooses its
+    // user-feedback behavior explicitly.
     match error {
         RunDeliveryError::RunWaitTimedOut { .. } => Some(prompts::DELIVERY_TIMEOUT_MESSAGE),
         RunDeliveryError::RunWaitTimedOutAfterNotification { .. }
         | RunDeliveryError::NoDelivery
         | RunDeliveryError::DeliveryRejected { .. }
         | RunDeliveryError::DeliveryUnconfirmed { .. } => None,
-        _ => Some(prompts::DELIVERY_ERROR_MESSAGE),
+        RunDeliveryError::Workflow(_)
+        | RunDeliveryError::Turn(_)
+        | RunDeliveryError::Thread(_)
+        | RunDeliveryError::Adapter(_)
+        | RunDeliveryError::Outbound(_)
+        | RunDeliveryError::Delivery(_)
+        | RunDeliveryError::DeliveryFailed { .. }
+        | RunDeliveryError::InvalidProjectionRef { .. } => Some(prompts::DELIVERY_ERROR_MESSAGE),
     }
 }
 
@@ -1666,6 +1675,9 @@ mod outcome_classification_tests {
                 failure_kind: DeliveryFailureKind::TransportUnavailable
             }
         ));
-        assert!(delivery_failure_feedback(&failed).is_some());
+        assert_eq!(
+            delivery_failure_feedback(&failed),
+            Some(prompts::DELIVERY_ERROR_MESSAGE)
+        );
     }
 }
