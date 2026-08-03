@@ -76,7 +76,8 @@ pub use triggered_run_delivery::{
     TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore,
 };
 pub use types::{
-    AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendRequest, DeliveryFailureKind,
+    AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendOutcome,
+    ClaimDeliveryAttemptForSendRequest, DeliveryFailureKind, FailPreparedDeliveryAttemptOutcome,
     FailPreparedDeliveryAttemptRequest, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
     OutboundDeliveryDecision, OutboundDeliveryStatus, OutboundPushCandidate, OutboundPushKind,
     OutboundPushPlan, OutboundPushTargetRequest, PrepareCommunicationDeliveryRequest,

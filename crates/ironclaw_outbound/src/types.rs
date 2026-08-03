@@ -342,9 +342,28 @@ pub struct UpdateDeliveryStatusRequest {
     pub failure_kind: Option<DeliveryFailureKind>,
 }
 
+/// Result of atomically claiming the sole vendor-egress drive for a prepared
+/// delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimDeliveryAttemptForSendOutcome {
+    /// This caller persisted `Prepared -> Sending` and owns vendor egress.
+    Claimed,
+    /// The authoritative attempt no longer permits the transition.
+    Existing(OutboundDeliveryAttempt),
+}
+
+/// Result of atomically settling a permanent failure while an attempt is
+/// still prepared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FailPreparedDeliveryAttemptOutcome {
+    /// This caller persisted `Prepared -> Failed`.
+    Settled,
+    /// The authoritative attempt no longer permits the transition.
+    Existing(OutboundDeliveryAttempt),
+}
+
 /// Atomic ownership claim for the sole vendor-egress writer of a prepared
-/// delivery. Stores transition `Prepared -> Sending` exactly once and return
-/// `false` for replays or already-terminal attempts.
+/// delivery. Stores transition `Prepared -> Sending` exactly once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimDeliveryAttemptForSendRequest {
     pub delivery_id: OutboundDeliveryId,

@@ -5,7 +5,8 @@ use ironclaw_event_projections::ProjectionCursor;
 use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnScope};
 
 use crate::{
-    AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendRequest,
+    AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendOutcome,
+    ClaimDeliveryAttemptForSendRequest, FailPreparedDeliveryAttemptOutcome,
     FailPreparedDeliveryAttemptRequest, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
     OutboundError, OutboundPushCandidate, OutboundPushKind, OutboundPushPlan,
     OutboundPushTargetRequest, ProjectionSubscriptionRecord, RecoverInterruptedDeliveryRequest,
@@ -142,19 +143,23 @@ pub trait OutboundStateStorePort: Send + Sync {
     ) -> Result<(), OutboundError>;
 
     /// Atomically reserve the one allowed vendor-egress drive for a prepared
-    /// attempt. Returns `true` only to the caller that persisted the
-    /// `Prepared -> Sending` transition.
+    /// attempt. Returns [`ClaimDeliveryAttemptForSendOutcome::Claimed`] only
+    /// to the caller that persisted the `Prepared -> Sending` transition;
+    /// every other caller receives the complete authoritative attempt from
+    /// the store read that rejected the transition.
     async fn claim_delivery_attempt_for_send(
         &self,
         request: ClaimDeliveryAttemptForSendRequest,
-    ) -> Result<bool, OutboundError>;
+    ) -> Result<ClaimDeliveryAttemptForSendOutcome, OutboundError>;
 
     /// Atomically settle a permanent preflight failure without consuming or
-    /// rewriting an attempt that has already reached `Sending`.
+    /// rewriting an attempt that has already reached `Sending`. A caller that
+    /// cannot settle receives the complete authoritative attempt from the
+    /// store read that rejected the transition.
     async fn fail_prepared_delivery_attempt(
         &self,
         request: FailPreparedDeliveryAttemptRequest,
-    ) -> Result<bool, OutboundError>;
+    ) -> Result<FailPreparedDeliveryAttemptOutcome, OutboundError>;
 
     /// Crash recovery for an interrupted send. Re-reads the attempt inside the
     /// store's CAS and transitions `Sending -> Unknown` only when it is still

@@ -75,9 +75,10 @@ use crate::validation::{
     validate_subscription_record, validate_subscription_request,
 };
 use crate::{
-    AdvanceSubscriptionCursorRequest, CommunicationPreferenceKey, CommunicationPreferenceRecord,
-    CommunicationPreferenceRepository, CommunicationPreferenceVersion, DeliveredGateRouteRecord,
-    DeliveredGateRouteStore, DeliveryDefaultScope, LoadSubscriptionCursorRequest,
+    AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendOutcome,
+    CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
+    CommunicationPreferenceVersion, DeliveredGateRouteRecord, DeliveredGateRouteStore,
+    DeliveryDefaultScope, FailPreparedDeliveryAttemptOutcome, LoadSubscriptionCursorRequest,
     MAX_RUN_DELIVERY_CLEANUP_RECORDS, MAX_RUN_FINAL_REPLY_HANDOFF_PAGE, OutboundDeliveryAttempt,
     OutboundDeliveryId, OutboundDeliveryStatus, OutboundError, OutboundStateStorePort,
     ProjectionSubscriptionId, ProjectionSubscriptionRecord, ReplyAttachmentIntent,
@@ -1050,7 +1051,7 @@ where
     async fn claim_delivery_attempt_for_send(
         &self,
         request: crate::ClaimDeliveryAttemptForSendRequest,
-    ) -> Result<bool, OutboundError> {
+    ) -> Result<ClaimDeliveryAttemptForSendOutcome, OutboundError> {
         let path = delivery_path(&request.delivery_id)?;
         let resource_scope = request.scope.to_resource_scope();
         for _ in 0..MAX_CAS_RETRIES {
@@ -1064,7 +1065,7 @@ where
                 return Err(OutboundError::SubscriptionScopeMismatch);
             }
             if attempt.status != OutboundDeliveryStatus::Prepared {
-                return Ok(false);
+                return Ok(ClaimDeliveryAttemptForSendOutcome::Existing(attempt));
             }
             attempt.status = OutboundDeliveryStatus::Sending;
             attempt.failure_kind = None;
@@ -1084,7 +1085,7 @@ where
                 .await
                 .map_err(map_fs_error)
             {
-                Ok(_) => return Ok(true),
+                Ok(_) => return Ok(ClaimDeliveryAttemptForSendOutcome::Claimed),
                 Err(OutboundError::CasConflict) => continue,
                 Err(error) => return Err(error),
             }
@@ -1095,7 +1096,7 @@ where
     async fn fail_prepared_delivery_attempt(
         &self,
         request: crate::FailPreparedDeliveryAttemptRequest,
-    ) -> Result<bool, OutboundError> {
+    ) -> Result<FailPreparedDeliveryAttemptOutcome, OutboundError> {
         validate_prepared_failure_request(&request)?;
         let path = delivery_path(&request.delivery_id)?;
         let resource_scope = request.scope.to_resource_scope();
@@ -1110,7 +1111,7 @@ where
                 return Err(OutboundError::SubscriptionScopeMismatch);
             }
             if attempt.status != OutboundDeliveryStatus::Prepared {
-                return Ok(false);
+                return Ok(FailPreparedDeliveryAttemptOutcome::Existing(attempt));
             }
             attempt.status = OutboundDeliveryStatus::Failed;
             attempt.failure_kind = Some(request.failure_kind);
@@ -1129,7 +1130,7 @@ where
                 .await
                 .map_err(map_fs_error)
             {
-                Ok(_) => return Ok(true),
+                Ok(_) => return Ok(FailPreparedDeliveryAttemptOutcome::Settled),
                 Err(OutboundError::CasConflict) => continue,
                 Err(error) => return Err(error),
             }
