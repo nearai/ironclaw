@@ -87,7 +87,6 @@ jobs:
       run_integration_tests: ${{ steps.plan.outputs.run_integration_tests }}
       integration_lanes: ${{ steps.plan.outputs.integration_lanes }}
       run_coverage: ${{ steps.plan.outputs.run_coverage }}
-      run_frontend: ${{ steps.plan.outputs.run_frontend }}
       run_qa_replay: ${{ steps.plan.outputs.run_qa_replay }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -130,7 +129,6 @@ jobs:
               and .root_partitions == [0, 1, 2, 3]
               and .integration_lanes == [0, 1, 2, 3, "groups"]
               and .run_group_tests == true
-              and .run_frontend == true
               and .run_qa_replay == true
               and .coverage_mode == "full"
             )
@@ -157,7 +155,6 @@ jobs:
           echo "run_integration_tests=$(jq -r '.integration_lanes | length > 0' <<< "${plan}")" >> "$GITHUB_OUTPUT"
           echo "integration_lanes=$(jq -c '.integration_lanes' <<< "${plan}")" >> "$GITHUB_OUTPUT"
           echo "run_coverage=$(jq -r '.coverage_mode == "full"' <<< "${plan}")" >> "$GITHUB_OUTPUT"
-          echo "run_frontend=$(jq -r '.run_frontend' <<< "${plan}")" >> "$GITHUB_OUTPUT"
           echo "run_qa_replay=$(jq -r '.run_qa_replay' <<< "${plan}")" >> "$GITHUB_OUTPUT"
 
           scripts/ci/check-test-suite-boundaries.sh
@@ -879,29 +876,6 @@ jobs:
             --manifest tests/integration/critical-mutation-functions.toml \
             --changed-files changed-files.txt
 
-  webui-v2-js-tests:
-    name: Reborn WebUI v2 JS tests
-    needs: changes
-    if: needs.changes.outputs.run_frontend == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-          persist-credentials: false
-
-      - name: Install Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
-        with:
-          node-version: "22"
-
-      - name: Enable pnpm
-        run: corepack enable pnpm
-
-      - name: Run Reborn WebUI frontend tests
-        run: scripts/ci/run-hermetic-deterministic-suite.sh frontend
-
   qa-recorded-fixtures:
     name: Reborn QA recorded fixtures
     needs: changes
@@ -1001,7 +975,6 @@ jobs:
       - reborn-integration-coverage
       - coverage-report
       - critical-mutation
-      - webui-v2-js-tests
       - qa-recorded-fixtures
     steps:
       - name: Checkout repository
@@ -1036,7 +1009,6 @@ jobs:
             "${{ needs.changes.outputs.run_group_tests }}" \
             "${{ needs.changes.outputs.run_integration_tests }}" \
             "${{ needs.changes.outputs.run_coverage }}" \
-            "${{ needs.changes.outputs.run_frontend }}" \
             "${{ needs.changes.outputs.run_qa_replay }}"; do
             if [[ "${flag}" != "true" && "${flag}" != "false" ]]; then
               echo "Missing or invalid Reborn test plan flag: '${flag}'"
@@ -1051,7 +1023,6 @@ jobs:
               "${{ needs.changes.outputs.run_group_tests }}" \
               "${{ needs.changes.outputs.run_integration_tests }}" \
               "${{ needs.changes.outputs.run_coverage }}" \
-              "${{ needs.changes.outputs.run_frontend }}" \
               "${{ needs.changes.outputs.run_qa_replay }}"; do
               if [[ "${flag}" != "true" ]]; then
                 echo "Full Reborn plan omitted a required lane"
@@ -1092,9 +1063,6 @@ jobs:
           check_planned_job "coverage-report" \
             "${{ needs.coverage-report.result }}" \
             "${{ needs.changes.outputs.run_coverage }}"
-          check_planned_job "webui-v2-js-tests" \
-            "${{ needs.webui-v2-js-tests.result }}" \
-            "${{ needs.changes.outputs.run_frontend }}"
           check_planned_job "qa-recorded-fixtures" \
             "${{ needs.qa-recorded-fixtures.result }}" \
             "${{ needs.changes.outputs.run_qa_replay }}"

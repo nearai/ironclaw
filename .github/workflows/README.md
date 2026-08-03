@@ -32,8 +32,8 @@ they run the lane in the merge queue, before landing, without adding the full
 WASM build to ordinary PR feedback. Push and deep-CI runs remain exhaustive.
 
 `reborn-tests.yml` follows the same PR-versus-queue contract. Pull requests use
-`reborn_pr_test_plan.py` to run affected crate buckets and exact changed root,
-integration, and frontend suites without LLVM instrumentation. Recorded QA
+`reborn_pr_test_plan.py` to run affected crate buckets and exact changed root
+and integration suites without LLVM instrumentation. Recorded QA
 replay remains a baseline on every pull request because it detects ordering
 and cross-surface regressions that cannot be inferred from changed paths. The
 full transitive reverse workspace dependency closure is included in PR crate
@@ -41,7 +41,7 @@ selection. Foundational-crate changes that span more than three canonical
 buckets coalesce every changed and dependent package into at most three PR
 jobs instead of omitting consumer tests. The merge queue and pushes to `main`
 still run every crate bucket, root
-partition, group suite, integration lane, frontend test, recorded replay, and
+partition, group suite, integration lane, recorded replay, and
 coverage gate. Unknown paths, empty diffs, and recognized test-topology or
 workspace-topology changes fail closed to that same full plan on the pull
 request. A planner execution or schema failure also fails the required check
@@ -59,8 +59,9 @@ Full-coverage crate buckets run one multi-package `cargo llvm-cov` invocation
 per bucket, preserving every package test and the bucket LCOV artifact while
 sharing dependency compilation across packages in the same job.
 
-On pull requests, `Tests (Reborn)` owns the Rust crate, root, architecture, and
-runtime contracts. Code Style's CLI Rust smoke and Reborn E2E's four Rust
+`Tests (Reborn)` owns Rust crate, root, architecture, runtime, and coverage
+contracts. Code Style owns WebUI lint, Vitest, and the production build on all
+code events. Code Style's CLI Rust smoke and Reborn E2E's four Rust
 groups run on merge queue and main, where they validate the exhaustive merged
 state, but do not repeat those contracts on PR runners. The release-binary
 smoke harness self-test remains in Code Style's fast deterministic job on every

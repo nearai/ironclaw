@@ -137,12 +137,12 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 any(package_set <= set(candidate["packages"]) for candidate in bounded)
             )
 
-    def test_frontend_change_runs_frontend_and_baseline_qa_replay(self) -> None:
+    def test_frontend_change_is_owned_by_code_style_with_baseline_qa_replay(self) -> None:
         plan = self.plan(
             "pull_request", ["crates/ironclaw_webui/frontend/src/app.tsx"]
         )
-        self.assertEqual(plan["mode"], "selected")
-        self.assertTrue(plan["run_frontend"])
+        self.assertEqual(plan["mode"], "none")
+        self.assertNotIn("run_frontend", plan)
         self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["crate_buckets"], [])
         self.assertEqual(plan["integration_lanes"], [])
@@ -171,7 +171,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["mode"], "full")
         self.assertEqual(plan["root_partitions"], [0, 1, 2, 3])
         self.assertEqual(plan["integration_lanes"], [0, 1, 2, 3, "groups"])
-        self.assertTrue(plan["run_frontend"])
+        self.assertNotIn("run_frontend", plan)
         self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["coverage_mode"], "full")
 
@@ -301,6 +301,9 @@ class RebornPrTestPlanTests(unittest.TestCase):
         e2e = (ROOT / ".github/workflows/reborn-e2e.yml").read_text(
             encoding="utf-8"
         )
+        reborn_tests = (ROOT / ".github/workflows/reborn-tests.yml").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn(
             "needs.changes.outputs.has_reborn_cli == 'true' && "
@@ -314,6 +317,9 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )
         self.assertIn("rust_reborn_optional=true", e2e)
         self.assertIn("--validate-manifest-only", code_style)
+        self.assertIn("pnpm test", code_style)
+        self.assertIn("pnpm build", code_style)
+        self.assertNotIn("webui-v2-js-tests:", reborn_tests)
 
     def test_reborn_e2e_shards_preserve_all_runtime_and_webui_suites(self) -> None:
         workflow = (ROOT / ".github/workflows/reborn-e2e.yml").read_text(

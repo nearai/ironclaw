@@ -209,7 +209,6 @@ def _full_plan(
         "root_partitions": [0, 1, 2, 3],
         "integration_lanes": [0, 1, 2, 3, "groups"],
         "run_group_tests": True,
-        "run_frontend": True,
         "run_qa_replay": True,
         "coverage_mode": "full",
     }
@@ -251,7 +250,6 @@ def build_plan(
     changed_packages: set[str] = set()
     root_partitions: set[int] = set()
     integration_lanes: set[str | int] = set()
-    run_frontend = False
     # Recorded replay is a repository-wide ordering and integration sentinel,
     # not affected-area coverage. Keep it on for every pull request even when
     # no changed path maps to another Reborn lane.
@@ -278,8 +276,7 @@ def build_plan(
         if path.startswith(".github/workflows/"):
             continue
         if path.startswith("crates/ironclaw_webui/frontend/"):
-            run_frontend = True
-            reasons.append("WebUI frontend changed")
+            reasons.append("Code Style owns WebUI lint, tests, and production build")
             continue
         if path in root_inventory:
             root_partitions.add(root_inventory[path])
@@ -361,7 +358,6 @@ def build_plan(
         buckets
         or root_partitions
         or integration_lanes
-        or run_frontend
         or qa_evidence_changed
     )
     return {
@@ -375,7 +371,6 @@ def build_plan(
             integration_lanes, key=lambda value: (isinstance(value, str), str(value))
         ),
         "run_group_tests": False,
-        "run_frontend": run_frontend,
         "run_qa_replay": run_qa_replay,
         "coverage_mode": "none",
     }
