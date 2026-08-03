@@ -190,6 +190,35 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["mode"], "full")
         self.assertEqual(plan["coverage_mode"], "full")
 
+    def test_lockfile_with_changed_crate_manifest_uses_affected_packages(self) -> None:
+        plan = self.plan(
+            "pull_request", ["Cargo.lock", "crates/alpha/Cargo.toml"]
+        )
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["alpha"])
+        self.assertEqual(plan["affected_packages"], ["alpha", "beta", "gamma"])
+
+    def test_lockfile_without_changed_crate_manifest_fails_closed(self) -> None:
+        plan = self.plan("pull_request", ["Cargo.lock"])
+        self.assertEqual(plan["mode"], "full")
+
+    def test_stress_tool_is_owned_by_dedicated_workflow(self) -> None:
+        plan = self.plan(
+            "pull_request", ["tools/ironclaw_stress/src/main.rs"]
+        )
+        self.assertEqual(plan["mode"], "none")
+        self.assertTrue(plan["run_qa_replay"])
+        self.assertEqual(plan["integration_lanes"], [])
+
+    def test_changed_coverage_manifest_does_not_launch_integration_lanes(self) -> None:
+        plan = self.plan(
+            "pull_request",
+            ["tests/integration/changed-coverage-exemptions.toml"],
+        )
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["integration_lanes"], [])
+        self.assertEqual(plan["coverage_mode"], "none")
+
     def test_noncanonical_package_fails_closed_to_full_pr_plan(self) -> None:
         plan = planner.build_plan(
             event="pull_request",
@@ -264,6 +293,27 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )
         self.assertIn("Full Reborn plan is not exhaustive", workflow)
         self.assertIn("Full Reborn plan omitted a required lane", workflow)
+
+    def test_pr_workflows_do_not_repeat_reborn_rust_contracts(self) -> None:
+        code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
+            encoding="utf-8"
+        )
+        e2e = (ROOT / ".github/workflows/reborn-e2e.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "needs.changes.outputs.has_reborn_cli == 'true' && "
+            "github.event_name != 'pull_request'",
+            code_style,
+        )
+        self.assertIn(
+            "needs.changes.outputs.has_e2e_scope == 'true' && "
+            "github.event_name != 'pull_request'",
+            e2e,
+        )
+        self.assertIn("rust_reborn_optional=true", e2e)
+        self.assertIn("--validate-manifest-only", code_style)
 
     def test_reborn_e2e_shards_preserve_all_runtime_and_webui_suites(self) -> None:
         workflow = (ROOT / ".github/workflows/reborn-e2e.yml").read_text(

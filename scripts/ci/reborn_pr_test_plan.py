@@ -20,9 +20,10 @@ ROOT = Path(__file__).resolve().parents[2]
 MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
 IGNORED_PREFIXES = ("docs/", ".github/ISSUE_TEMPLATE/")
+DEDICATED_WORKFLOW_PREFIXES = ("tools/ironclaw_stress/",)
+CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
 FULL_PR_PATHS = {
     "Cargo.toml",
-    "Cargo.lock",
     "rust-toolchain",
     "rust-toolchain.toml",
     ".cargo/config",
@@ -240,6 +241,13 @@ def build_plan(
         )
 
     package_directories, reverse = _workspace_packages(metadata)
+    crate_manifests = {f"{directory}/Cargo.toml" for directory in package_directories}
+    if "Cargo.lock" in paths and not (paths & crate_manifests):
+        return _full_plan(
+            "Cargo.lock changed without a crate-local manifest; workspace "
+            "dependency impact requires fail-closed coverage",
+            canonical_packages,
+        )
     changed_packages: set[str] = set()
     root_partitions: set[int] = set()
     integration_lanes: set[str | int] = set()
@@ -254,6 +262,15 @@ def build_plan(
     integration_inventory = _integration_test_lanes()
 
     for path in sorted(paths):
+        if path == "Cargo.lock":
+            reasons.append("Cargo.lock change is owned by a changed crate manifest")
+            continue
+        if path.startswith(DEDICATED_WORKFLOW_PREFIXES):
+            reasons.append(f"dedicated stress workflow owns: {path}")
+            continue
+        if path == CHANGED_COVERAGE_MANIFEST:
+            reasons.append("changed-coverage policy is statically validated")
+            continue
         if path.startswith(IGNORED_PREFIXES) or (
             path.endswith(".md") and "/" not in path
         ):

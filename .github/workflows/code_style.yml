@@ -159,6 +159,13 @@ jobs:
         run: bash scripts/ci/test-check-composition-budget.sh
       - name: Unit-test the dev-metrics tool
         run: python3 scripts/test_dev_metrics.py
+      - name: Validate changed-coverage policy
+        run: >-
+          python3 scripts/ci/reborn_changed_coverage.py
+          --manifest tests/integration/changed-coverage-exemptions.toml
+          --validate-manifest-only
+      - name: Self-test exact release-binary smoke gate
+        run: python3 -m unittest tests/test_smoke_release_binary.py
 
   webui-v2-js-lint:
     name: WebUI v2 JS lint (no-undef)
@@ -308,7 +315,7 @@ jobs:
   reborn-cli-smoke:
     name: Reborn CLI smoke tests
     needs: changes
-    if: needs.changes.outputs.has_reborn_cli == 'true'
+    if: needs.changes.outputs.has_reborn_cli == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -340,8 +347,6 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Test Reborn boot config crate
         run: cargo test -p ironclaw_reborn_config
-      - name: Self-test exact release-binary smoke gate
-        run: python3 -m unittest tests/test_smoke_release_binary.py
       - name: Test Reborn CLI binary crate
         run: cargo test -p ironclaw
       - name: Test Reborn libSQL restart integration

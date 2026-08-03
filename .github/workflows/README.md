@@ -46,6 +46,10 @@ coverage gate. Unknown paths, empty diffs, and recognized test-topology or
 workspace-topology changes fail closed to that same full plan on the pull
 request. A planner execution or schema failure also fails the required check
 loudly.
+`Cargo.lock` is scoped only when the same diff contains a crate-local manifest;
+a lockfile change without that ownership signal remains exhaustive. The stress
+tool is owned by `ironclaw-stress.yml`, and changed-line coverage exemptions are
+schema-checked in Code Style instead of launching unrelated integration lanes.
 The queue therefore preserves exhaustive deterministic evidence while
 ordinary PRs avoid consuming 20-plus runners for unrelated lanes. Pull-request
 parallelism is capped at three crate buckets, one root partition, and one
@@ -54,6 +58,14 @@ feedback optimization does not serialize the production gate.
 Full-coverage crate buckets run one multi-package `cargo llvm-cov` invocation
 per bucket, preserving every package test and the bucket LCOV artifact while
 sharing dependency compilation across packages in the same job.
+
+On pull requests, `Tests (Reborn)` owns the Rust crate, root, architecture, and
+runtime contracts. Code Style's CLI Rust smoke and Reborn E2E's four Rust
+groups run on merge queue and main, where they validate the exhaustive merged
+state, but do not repeat those contracts on PR runners. The release-binary
+smoke harness self-test remains in Code Style's fast deterministic job on every
+code PR. Reborn E2E continues to build the real product binary and run all
+browser/provider lanes on pull requests.
 
 History: the slim-vs-full clippy matrix violated this — the queue linted only
 `--all-features` while push linted a broader matrix, so feature-gated dead code
@@ -101,10 +113,10 @@ Rules for a roll-up job that is (or may become) required:
 Code Style deliberately consolidates formatting, dependency policy, static
 guards, panic checks, and composition-budget checks into one
 `fast-checks` job. These checks complete in seconds to a few minutes and do not
-benefit from separate runners; keeping them together bounds a code-changing
-pull request to at most six active Code Style jobs while preserving every
-command. Clippy, WebUI checks, and CLI smoke remain separate because they are
-expensive or independently scope-gated.
+benefit from separate runners. Clippy and WebUI checks remain separate because
+they are expensive independent gates. The CLI Rust smoke remains a separate
+merged-state lane; its unique Python harness contract runs in `fast-checks` on
+pull requests.
 
 ## Reborn release and manual compile preflight
 

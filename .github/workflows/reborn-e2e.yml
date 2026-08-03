@@ -118,7 +118,10 @@ jobs:
   rust-reborn:
     name: Rust Reborn (${{ matrix.group }})
     needs: changes
-    if: needs.changes.outputs.has_e2e_scope == 'true'
+    # Tests (Reborn) already runs these crate/root/integration contracts for
+    # pull requests. Keep this exhaustive grouping for merged-state and main
+    # validation without spending four additional PR runners on duplicates.
+    if: needs.changes.outputs.has_e2e_scope == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
@@ -313,10 +316,11 @@ jobs:
           # Temporary compatibility member for downstream QA consumers; remove
           # after every consumer invokes the canonical ironclaw binary.
           cp target/debug/ironclaw target/debug/ironclaw-reborn
-          tar -C target/debug -czf "${live_dir}/ironclaw-reborn.tar.gz" ironclaw ironclaw-reborn &
+          tar -C target/debug -cf - ironclaw ironclaw-reborn \
+            | gzip -1 > "${live_dir}/ironclaw-reborn.tar.gz" &
           live_package_pid=$!
-          tar -C "${CARGO_TARGET_DIR:-target}/e2e-sso/debug" \
-            -czf "${sso_dir}/ironclaw-sso.tar.gz" ironclaw &
+          tar -C "${CARGO_TARGET_DIR:-target}/e2e-sso/debug" -cf - ironclaw \
+            | gzip -1 > "${sso_dir}/ironclaw-sso.tar.gz" &
           sso_package_pid=$!
           status=0
           wait "${live_package_pid}" || status=1
@@ -351,6 +355,7 @@ jobs:
           name: reborn-webui-v2-binary-${{ steps.live_canary_binary.outputs.product_ref }}
           path: artifacts/reborn-webui-v2-binary/
           if-no-files-found: error
+          compression-level: 0
           retention-days: 7
 
   webui-v2-test-lanes:
@@ -613,7 +618,11 @@ jobs:
             echo "No Reborn E2E scope in this merge group — roll-up passes"
             exit 0
           fi
-          if ! job_result_ok "rust-reborn" "${{ needs.rust-reborn.result }}" false "allow"; then
+          rust_reborn_optional=false
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            rust_reborn_optional=true
+          fi
+          if ! job_result_ok "rust-reborn" "${{ needs.rust-reborn.result }}" "${rust_reborn_optional}" "allow"; then
             echo "Rust Reborn E2E failed"
             exit 1
           fi
