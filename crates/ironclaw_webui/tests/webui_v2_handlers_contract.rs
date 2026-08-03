@@ -7962,6 +7962,157 @@ async fn stat_fs_path_returns_metadata() {
 }
 
 #[tokio::test]
+async fn browse_fs_dir_prefixes_workspace_path_with_scoped_projection() {
+    // Scoped projection ON + non-operator caller: the browser must confine
+    // Workspace reads to the caller's own subtree. The server prepends
+    // `tenants/{tenant}/users/{user}` before forwarding to the product layer,
+    // so one user can never list another user's workspace artifacts.
+    let services = Arc::new(StubServices::default());
+    let caller = caller_for_user("user-alpha");
+    let router = webui_v2_router(
+        WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_workspace_requires_scoped_projection(true),
+    )
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: false,
+    }));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/list?mount=workspace")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    // The response echoes the *requested* mount-relative root, not the prefixed
+    // served path, so the browser never sees the caller storage prefix.
+    assert_eq!(body["path"], "");
+    let calls = services.browse_fs_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].path,
+        "tenants/tenant-alpha/users/user-alpha",
+        "workspace list must be confined to the caller subtree under scoped projection"
+    );
+}
+
+#[tokio::test]
+async fn browse_fs_dir_keeps_raw_workspace_root_for_operator_fallback() {
+    // Operator bypass with scoped projection OFF: raw shared workspace root is
+    // served unchanged so local/single-user workspaces stay visible. The
+    // deployment flag gates scoping; operator capability alone does not override
+    // a deployment that requires scoped projection.
+    let services = Arc::new(StubServices::default());
+    let caller = caller_for_user("user-alpha");
+    let router = webui_v2_router(
+        WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_workspace_requires_scoped_projection(false),
+    )
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: true,
+    }));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/list?mount=workspace&path=shared.txt")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.browse_fs_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].path, "shared.txt",
+        "operator fallback must not prefix the workspace path"
+    );
+}
+
+#[tokio::test]
+async fn browse_fs_dir_scopes_workspace_for_non_operator_even_when_state_flag_off() {
+    // Non-operator caller is always scoped (state flag OR not-operator), so a
+    // hosted user without operator capability is confined to their own subtree
+    // even on a deployment that has not set the scoped-projection flag.
+    let services = Arc::new(StubServices::default());
+    let caller = caller_for_user("user-alpha");
+    let router = webui_v2_router(
+        WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_workspace_requires_scoped_projection(false),
+    )
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: false,
+    }));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/list?mount=workspace&path=notes/idea.md")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.browse_fs_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].path,
+        "tenants/tenant-alpha/users/user-alpha/notes/idea.md",
+        "non-operator callers must be scoped to their own workspace subtree"
+    );
+}
+
+#[tokio::test]
+async fn stat_fs_path_prefixes_workspace_path_with_scoped_projection() {
+    // The stat route must apply the same caller-subtree prefixing so a user
+    // cannot stat another user's file. The echoed stat path is stripped back
+    // to the mount-relative request.
+    let services = Arc::new(StubServices::default());
+    let caller = caller_for_user("user-alpha");
+    let router = webui_v2_router(
+        WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_workspace_requires_scoped_projection(true),
+    )
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: false,
+    }));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/stat?mount=workspace&path=report.md")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(
+        body["stat"]["path"], "report.md",
+        "stat response must echo the mount-relative path, not the prefixed served path"
+    );
+}
+
+#[tokio::test]
 async fn stat_fs_path_rejects_blank_path() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services);

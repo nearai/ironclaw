@@ -82,22 +82,19 @@ function stripRelativePrefix(path, prefix) {
 // identity is unavailable, listings render empty and file reads short-circuit
 // to a directory placeholder, so an unauthenticated or identity-still-loading
 // session can never request a raw mount path.
+// `currentUser` is a fail-closed identity gate, not a path component: the
+// `/fs/*` handlers resolve the caller's scoped mount server-side. This predicate
+// only checks identity presence; it never formats a tenant/user path, so no
+// caller can re-introduce the double-prefix regression.
+function hasCallerIdentity(currentUser: WorkspaceCurrentUser) {
+  return Boolean(currentUser?.tenant_id && currentUser?.user_id);
+}
+
 function scopedUserUnavailable(
   currentUser: WorkspaceCurrentUser,
   requireScopedWorkspace: boolean,
 ) {
-  return requireScopedWorkspace && !userScopedPrefix(currentUser);
-}
-
-// `currentUser` is a fail-closed identity gate, not a path component: the
-// `/fs/*` handlers resolve the caller's scoped mount server-side. When a
-// scoped projection is required and the caller identity is unavailable, the
-// listing renders empty instead of requesting the raw mount root.
-function userScopedPrefix(currentUser: WorkspaceCurrentUser) {
-  const tenantId = String(currentUser?.tenant_id || "").replace(/^\/+|\/+$/g, "");
-  const userId = String(currentUser?.user_id || "").replace(/^\/+|\/+$/g, "");
-  if (!tenantId || !userId) return "";
-  return `tenants/${tenantId}/users/${userId}`;
+  return requireScopedWorkspace && !hasCallerIdentity(currentUser);
 }
 
 function emptyDirectoryResponse() {
@@ -215,7 +212,10 @@ async function resolveMemoryDirectory(
     return { actualPath: "", response: emptyDirectoryResponse() };
   }
 
-  let actualPath = relativePath;
+  // Seed the walk at the mount root and let the segment loop descend through
+  // `relativePath` exactly once. Seeding with `relativePath` would list it once
+  // up front and then append every segment again, doubling any non-root path.
+  let actualPath = "";
   let response;
   try {
     response = await fetchFsList(MEMORY_MOUNT, actualPath);

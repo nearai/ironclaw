@@ -393,6 +393,54 @@ test("memory file preview does not honor raw storage paths for scoped users", as
   }
 });
 
+test("memory subdirectory descends through the collapse walk without doubling the path", async () => {
+  // Regression: seeding the walk with relativePath caused `notes` to be
+  // requested once up front and then appended again as a segment, producing
+  // `notes/notes`. The walk must start at the mount root and descend once.
+  const requested = [];
+  const notesDir = `${MEMORY_PROJECT_PATH}/notes`;
+  const notesQuery = encodeURIComponent(notesDir);
+  const harness = installFetch((path) => {
+    if (path.startsWith("/api/webchat/v2/fs/list?mount=memory")) {
+      requested.push(path);
+    }
+    const response = memoryScopeListResponse(path, [
+      { name: "notes", path: notesDir, kind: "directory" },
+      MEMORY_HELLO_ENTRY,
+    ]);
+    if (response) return response;
+    if (path === `/api/webchat/v2/fs/list?mount=memory&path=${notesQuery}`) {
+      return jsonResponse({
+        entries: [{ name: "idea.md", path: `${notesDir}/idea.md`, kind: "file" }],
+      });
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  });
+
+  try {
+    const response = await listWorkspace("memory/notes", {
+      currentUser: CURRENT_USER,
+      requireScopedWorkspace: true,
+    });
+
+    assert.deepEqual(response, {
+      entries: [{ name: "idea.md", path: "memory/notes/idea.md", is_dir: false }],
+    });
+    // The walk lists root, then agents, reborn-cli-agent, projects, _none, then
+    // descends into `notes` exactly once — never `notes/notes`.
+    assert.ok(
+      !requested.some((p) => p.includes("%2Fnotes%2Fnotes")),
+      `walker doubled the memory subdirectory: ${requested.join(", ")}`,
+    );
+    assert.ok(
+      requested.includes(`/api/webchat/v2/fs/list?mount=memory&path=${notesQuery}`),
+      `walker never requested the notes directory: ${requested.join(", ")}`,
+    );
+  } finally {
+    harness.restore();
+  }
+});
+
 test("thread-scoped workspace roots expose only the authorized project mount", async () => {
   const harness = installFetch((path) => {
     throw new Error(`unexpected fetch ${path}`);
