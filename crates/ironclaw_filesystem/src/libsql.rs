@@ -2251,28 +2251,32 @@ impl LibSqlRootFilesystem {
         // Scan the spec catalog for FTS specs whose prefix is path or any
         // ancestor (so callers may declare the index on a higher prefix
         // and query a child path).
-        // Same candidate set and same precedence as `query_ordered` over this
-        // table: every ancestor prefix plus `/shared`, with `/shared` ranking
-        // ahead of every path-derived candidate. Omitting it left a shared FTS
-        // declaration undiscoverable from any query outside `/shared`.
+        // Ancestors only, deliberately unlike `query_ordered`, which also
+        // considers `/shared`. The two resolve different things: an ordered
+        // index is a projection row keyed by `(index_name, path)` and readable
+        // from anywhere, whereas an FTS declaration owns a table whose triggers
+        // and backfill populate rows for the declaring prefix's subtree alone.
+        // Selecting `/shared` for a path outside it therefore points the
+        // `path IN (SELECT path FROM <fts> MATCH …)` clause at a table with no
+        // rows for that path — a silent empty result rather than a miss the
+        // caller can see.
         //
         // Ordered in SQL rather than by hoping the driver returns insertion
         // order: the caller keeps the first row it sees per key, so "most
         // specific wins" only holds if the most specific prefix arrives first.
         // Without ORDER BY, two declarations at different ancestor prefixes
         // resolve by rowid.
-        let mut params: Vec<libsql::Value> = crate::index::ancestor_prefixes(path.as_str())
+        let params: Vec<libsql::Value> = crate::index::ancestor_prefixes(path.as_str())
             .iter()
             .map(|prefix| libsql::Value::Text((*prefix).to_string()))
             .collect();
-        params.push(libsql::Value::Text("/shared".to_string()));
         let placeholders: Vec<String> = (1..=params.len())
             .map(|position| format!("?{position}"))
             .collect();
         let sql = format!(
             "SELECT prefix, name, keys FROM root_filesystem_index_specs \
              WHERE kind = 'fts' AND prefix IN ({}) \
-             ORDER BY CASE WHEN prefix = '/shared' THEN 0 ELSE 1 END, LENGTH(prefix) DESC",
+             ORDER BY LENGTH(prefix) DESC",
             placeholders.join(", ")
         );
         let mut rows = conn
