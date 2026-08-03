@@ -27,6 +27,7 @@ Wiring confirmed manually before this test existed:
 import asyncio
 import json
 import re
+import sys
 import uuid
 from urllib.parse import parse_qs, urlparse
 
@@ -190,6 +191,11 @@ async def _wait_for_automation_named(
             while True:
                 response = await client.get(
                     f"{base_url}/api/webchat/v2/automations",
+                    params={
+                        "include_completed": "true",
+                        "limit": 100,
+                        "run_limit": 0,
+                    },
                     timeout=5,
                 )
                 response.raise_for_status()
@@ -201,6 +207,63 @@ async def _wait_for_automation_named(
     except TimeoutError:
         raise AssertionError(
             f"Timed out waiting for automation {name!r}. Last body: {last_body}"
+        ) from None
+
+
+async def _wait_for_automation_id(
+    client: httpx.AsyncClient,
+    base_url: str,
+    automation_id: str,
+    *,
+    expected_state: str | None = None,
+    absent: bool = False,
+    timeout: float = 30.0,
+) -> dict | None:
+    last_body: dict = {}
+    try:
+        async with asyncio.timeout(timeout):
+            while True:
+                response = await client.get(
+                    f"{base_url}/api/webchat/v2/automations",
+                    params={
+                        "include_completed": "true",
+                        "limit": 100,
+                        "run_limit": 0,
+                    },
+                    timeout=5,
+                )
+                response.raise_for_status()
+                last_body = response.json()
+                automation = next(
+                    (
+                        item
+                        for item in last_body.get("automations", [])
+                        if item.get("automation_id") == automation_id
+                    ),
+                    None,
+                )
+                if absent and automation is None:
+                    return None
+                if (
+                    not absent
+                    and automation is not None
+                    and (
+                        expected_state is None
+                        or automation.get("state") == expected_state
+                    )
+                ):
+                    return automation
+                await asyncio.sleep(0.5)
+    except TimeoutError:
+        if absent:
+            expectation = "to be absent"
+        elif expected_state is not None:
+            expectation = f"to have state {expected_state!r}"
+        else:
+            expectation = "to be present"
+        raise AssertionError(
+            f"Timed out waiting for automation {automation_id!r} {expectation}. "
+            f"Last body: {last_body}"
         ) from None
 
 
@@ -1079,68 +1142,173 @@ async def test_reborn_v2_ui_enter_submits_initial_and_follow_up_messages(
     await expect(assistant_messages.last).to_contain_text("I understand your request.")
 
 
-async def test_reborn_v2_automation_rename_persists_from_ui(
+async def test_reborn_v2_automation_lifecycle_persists_from_ui(
     reborn_v2_server, reborn_v2_browser
 ):
-    """Creating an automation through chat can be renamed from /automations."""
+    """Automation UI mutations persist through the real served API."""
     label = f"ui-{uuid.uuid4().hex[:8]}"
     original_name = f"E2E rename original {label}"
     renamed_name = f"E2E rename updated {label}"
     headers = {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+    automation_id = None
+    automation_deleted = False
+    context = None
 
     async with httpx.AsyncClient(headers=headers) as client:
-        thread_id = await _create_thread(client, reborn_v2_server)
-        await _send_message(
-            client,
-            reborn_v2_server,
-            thread_id,
-            f"reborn create automation rename target {label}",
-        )
-        await _wait_for_assistant_message(client, reborn_v2_server, thread_id)
-        automation = await _wait_for_automation_named(
-            client, reborn_v2_server, original_name
-        )
-        automation_id = automation["automation_id"]
+        try:
+            thread_id = await _create_thread(client, reborn_v2_server)
+            await _send_message(
+                client,
+                reborn_v2_server,
+                thread_id,
+                f"reborn create automation rename target {label}",
+            )
+            await _wait_for_assistant_message(client, reborn_v2_server, thread_id)
+            automation = await _wait_for_automation_named(
+                client, reborn_v2_server, original_name
+            )
+            automation_id = automation["automation_id"]
+            assert automation["state"] == "scheduled"
 
-    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
-    page = await context.new_page()
-    try:
-        await page.goto(f"{reborn_v2_server}/automations?token={REBORN_V2_AUTH_TOKEN}")
-        row_selector = SEL_V2["automation_row_for"].format(id=automation_id)
-        row = page.locator(row_selector)
-        await expect(row).to_be_visible(timeout=15000)
-        await row.locator(
-            SEL_V2["automation_name_button_for"].format(id=automation_id)
-        ).click()
+            context = await reborn_v2_browser.new_context(
+                viewport={"width": 1280, "height": 720}
+            )
+            page = await context.new_page()
+            await page.goto(
+                f"{reborn_v2_server}/automations?token={REBORN_V2_AUTH_TOKEN}"
+            )
+            row_selector = SEL_V2["automation_row_for"].format(id=automation_id)
+            name_button_selector = SEL_V2["automation_name_button_for"].format(
+                id=automation_id
+            )
+            row = page.locator(row_selector)
+            await expect(row).to_be_visible(timeout=15000)
+            await row.locator(name_button_selector).click()
 
-        await expect(page.locator(SEL_V2["automation_detail"])).to_be_visible(
-            timeout=15000
-        )
-        await expect(page.locator(SEL_V2["automation_detail_title"])).to_contain_text(
-            original_name
-        )
+            await expect(page.locator(SEL_V2["automation_detail"])).to_be_visible(
+                timeout=15000
+            )
+            await expect(
+                page.locator(SEL_V2["automation_detail_title"])
+            ).to_contain_text(original_name)
 
-        await page.locator(SEL_V2["automation_rename_button"]).click()
-        rename_input = page.locator(SEL_V2["automation_rename_input"])
-        await expect(rename_input).to_have_value(original_name)
-        await rename_input.fill(f"  {renamed_name}  ")
-        await page.locator(SEL_V2["automation_rename_save"]).click()
+            await page.locator(SEL_V2["automation_rename_button"]).click()
+            rename_input = page.locator(SEL_V2["automation_rename_input"])
+            await expect(rename_input).to_have_value(original_name)
+            await rename_input.fill(f"  {renamed_name}  ")
+            await page.locator(SEL_V2["automation_rename_save"]).click()
 
-        await expect(page.locator(SEL_V2["automation_detail_title"])).to_contain_text(
-            renamed_name,
-            timeout=15000,
-        )
-        await expect(row).to_contain_text(renamed_name)
+            await expect(
+                page.locator(SEL_V2["automation_detail_title"])
+            ).to_contain_text(renamed_name, timeout=15000)
+            renamed = await _wait_for_automation_named(
+                client, reborn_v2_server, renamed_name
+            )
+            assert renamed["automation_id"] == automation_id
 
-        await page.reload()
-        row = page.locator(row_selector)
-        await expect(row).to_contain_text(renamed_name, timeout=15000)
-    finally:
-        await context.close()
+            await page.reload()
+            row = page.locator(row_selector)
+            await expect(row).to_contain_text(renamed_name, timeout=15000)
+            await row.locator(name_button_selector).click()
 
-    async with httpx.AsyncClient(headers=headers) as client:
-        renamed = await _wait_for_automation_named(client, reborn_v2_server, renamed_name)
-        assert renamed["automation_id"] == automation_id
+            await page.get_by_role(
+                "button", name=f"Pause: {renamed_name}", exact=True
+            ).click()
+            paused = await _wait_for_automation_id(
+                client,
+                reborn_v2_server,
+                automation_id,
+                expected_state="paused",
+            )
+            assert paused is not None
+            assert paused["name"] == renamed_name
+
+            await page.reload()
+            row = page.locator(row_selector)
+            await expect(row).to_contain_text("Paused", timeout=15000)
+            await row.locator(name_button_selector).click()
+            await expect(
+                page.get_by_role(
+                    "button", name=f"Resume: {renamed_name}", exact=True
+                )
+            ).to_be_visible(timeout=15000)
+            paused_after_reload = await _wait_for_automation_id(
+                client,
+                reborn_v2_server,
+                automation_id,
+                expected_state="paused",
+            )
+            assert paused_after_reload is not None
+
+            await page.get_by_role(
+                "button", name=f"Resume: {renamed_name}", exact=True
+            ).click()
+            resumed = await _wait_for_automation_id(
+                client,
+                reborn_v2_server,
+                automation_id,
+                expected_state="scheduled",
+            )
+            assert resumed is not None
+            assert resumed["name"] == renamed_name
+
+            await page.reload()
+            row = page.locator(row_selector)
+            await expect(row).to_contain_text("Scheduled", timeout=15000)
+            await row.locator(name_button_selector).click()
+            await expect(
+                page.get_by_role(
+                    "button", name=f"Pause: {renamed_name}", exact=True
+                )
+            ).to_be_visible(timeout=15000)
+            resumed_after_reload = await _wait_for_automation_id(
+                client,
+                reborn_v2_server,
+                automation_id,
+                expected_state="scheduled",
+            )
+            assert resumed_after_reload is not None
+
+            await page.get_by_role(
+                "button", name=f"Delete: {renamed_name}", exact=True
+            ).click()
+            confirmation = page.get_by_role(
+                "dialog", name=f"Delete: {renamed_name}", exact=True
+            )
+            await expect(confirmation).to_be_visible()
+            await confirmation.locator(SEL_V2["confirm_dialog_confirm"]).click()
+
+            await expect(page.locator(row_selector)).to_have_count(0, timeout=15000)
+            await _wait_for_automation_id(
+                client,
+                reborn_v2_server,
+                automation_id,
+                absent=True,
+            )
+            automation_deleted = True
+        finally:
+            # Keep the module-scoped server isolated if an earlier assertion fails.
+            test_failed = sys.exc_info()[0] is not None
+            cleanup_error = None
+            if automation_id is not None and not automation_deleted:
+                try:
+                    cleanup_response = await client.delete(
+                        f"{reborn_v2_server}/api/webchat/v2/automations/{automation_id}",
+                        timeout=5,
+                    )
+                    cleanup_response.raise_for_status()
+                    await _wait_for_automation_id(
+                        client,
+                        reborn_v2_server,
+                        automation_id,
+                        absent=True,
+                    )
+                except (AssertionError, httpx.HTTPError) as error:
+                    cleanup_error = error
+            if context is not None:
+                await context.close()
+            if cleanup_error is not None and not test_failed:
+                raise cleanup_error
 
 
 async def test_reborn_v2_automation_filter_keeps_list_visible_while_loading(
