@@ -97,6 +97,28 @@ pub struct RebornListProjectsRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornListProjectsResponse {
     pub projects: Vec<RebornProjectInfo>,
+    #[serde(default)]
+    pub total_projects: usize,
+    #[serde(default)]
+    pub active_projects: usize,
+    #[serde(default)]
+    pub archived_projects: usize,
+}
+
+impl RebornListProjectsResponse {
+    pub fn new(
+        projects: Vec<RebornProjectInfo>,
+        total_projects: usize,
+        active_projects: usize,
+        archived_projects: usize,
+    ) -> Self {
+        Self {
+            projects,
+            total_projects,
+            active_projects,
+            archived_projects,
+        }
+    }
 }
 
 /// Single-project response (create / get / update).

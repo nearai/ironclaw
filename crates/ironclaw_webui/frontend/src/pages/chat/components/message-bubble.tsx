@@ -4,9 +4,12 @@ import { ToolActivity } from "./tool-activity";
 import { Icon } from "../../../design-system/icons";
 import { toast } from "../../../lib/toast";
 import { AttachmentChip } from "./attachment-chip";
-import { AttachmentPreviewModal } from "./attachment-preview";
 import { useT } from "../../../lib/i18n";
-import { fetchRunArtifact, fetchThreadArtifact } from "../../../lib/api";
+import {
+  fetchRunArtifact,
+  fetchThreadArtifact,
+  projectFileContentUrl,
+} from "../../../lib/api";
 import { saveBlob } from "../../../lib/download";
 import { COMMAND_RESULT_KIND, classifyCommandResponse } from "../lib/chat-commands";
 import {
@@ -23,6 +26,12 @@ import {
 const CommandResult = React.lazy(() =>
   import("./command-result").then(({ CommandResult }) => ({
     default: CommandResult,
+  }))
+);
+
+const AttachmentPreviewModal = React.lazy(() =>
+  import("./attachment-preview").then(({ AttachmentPreviewModal }) => ({
+    default: AttachmentPreviewModal,
   }))
 );
 
@@ -153,6 +162,18 @@ function MessageBubbleImpl({
   // The attachment currently open in the preview modal (null when closed).
   const [previewAttachment, setPreviewAttachment] =
     React.useState<ChatAttachment | null>(null);
+  const openWorkspaceFile = React.useCallback(
+    (path: string) => {
+      if (!threadId) return;
+      setPreviewAttachment({
+        filename: path.split("/").filter(Boolean).pop() || path,
+        mime_type: "",
+        fetch_url: projectFileContentUrl({ threadId, path }),
+        workspace_path: path,
+      });
+    },
+    [threadId],
+  );
   // All hooks must run before the role-based early returns below.
   // A message can change role in place across renders (e.g. an
   // optimistic bubble upgrading, or a streaming role shift), so
@@ -341,7 +362,15 @@ function MessageBubbleImpl({
           {role === CHAT_MESSAGE_ROLES.ASSISTANT ||
           role === CHAT_MESSAGE_ROLES.SYSTEM ||
           role === CHAT_MESSAGE_ROLES.ERROR
-            ? (<div className={contentOpacityClass}><MarkdownRenderer content={content} streaming={isStreamingAssistantReply} /></div>)
+            ? (<div className={contentOpacityClass}><MarkdownRenderer
+                content={content}
+                streaming={isStreamingAssistantReply}
+                onWorkspaceFileOpen={
+                  role === CHAT_MESSAGE_ROLES.ASSISTANT && threadId
+                    ? openWorkspaceFile
+                    : undefined
+                }
+              /></div>)
             : (<div className="v2-wrap-anywhere whitespace-pre-wrap break-words"><span className={contentOpacityClass}>{content}</span></div>)}
 
           {status === "error" && (
@@ -357,7 +386,6 @@ function MessageBubbleImpl({
           )}
 
           {attachments && attachments.length > 0 && (
-            <>
             <div className="mt-2 flex flex-col gap-1.5">
               {attachments.map((att, i) => (<AttachmentChip
                 key={att.id || i}
@@ -365,13 +393,17 @@ function MessageBubbleImpl({
                 onPreview={setPreviewAttachment}
               />))}
             </div>
-            <AttachmentPreviewModal
-              attachment={previewAttachment}
-              onClose={() => setPreviewAttachment(null)}
-            />
-            </>
           )}
 
+          {previewAttachment && (
+            <React.Suspense fallback={null}>
+              <AttachmentPreviewModal
+                attachment={previewAttachment}
+                onClose={() => setPreviewAttachment(null)}
+                threadId={threadId}
+              />
+            </React.Suspense>
+          )}
         </div>
       </div>
 

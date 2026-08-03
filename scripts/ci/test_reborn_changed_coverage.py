@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 import re
 import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -17,6 +18,24 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class ChangedCoverageWorkflowTests(unittest.TestCase):
+    def test_committed_manifest_passes_standalone_validation(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "scripts/ci/reborn_changed_coverage.py",
+                "--manifest",
+                "tests/integration/changed-coverage-exemptions.toml",
+                "--validate-manifest-only",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("changed coverage manifest valid", result.stdout)
+
     def test_gate_sabotage_harness_passes(self):
         result = subprocess.run(
             ["bash", "scripts/ci/test-reborn-changed-coverage.sh"],

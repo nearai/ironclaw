@@ -160,11 +160,11 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
 name = "ironclaw_llm"
-floor_percent = 79.22
-floor_covered_lines = 20885
+floor_percent = 79.02
+floor_covered_lines = 20833
 captured_total_lines = 26364
-captured_date = "2026-07-31"
-rationale = "Provider retry classification and the complete decorator chain are production-critical; recalibrated for #6964's verified-dead `reasoning` deletion (-1871 instrumented lines) — the dead half carried denser test coverage than the crate average, so deleting it with its tests lowered the percentage."
+captured_date = "2026-08-03"
+rationale = "Provider retry classification and the complete decorator chain are production-critical. Recaptured after coverage buckets began compiling and executing all packages together: the exact same 884 ironclaw_llm tests ran, while LLVM stopped attributing 52 tracing-macro expansion lines that repeated per-package invocations had counted. The denominator remained exactly 26364."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]

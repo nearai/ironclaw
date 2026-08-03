@@ -979,8 +979,13 @@ def write_json_report(path: pathlib.Path | None, report: dict[str, object]) -> N
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--lcov", required=True, type=pathlib.Path)
+    parser.add_argument("--lcov", type=pathlib.Path)
     parser.add_argument("--manifest", required=True, type=pathlib.Path)
+    parser.add_argument(
+        "--validate-manifest-only",
+        action="store_true",
+        help="validate policy and exemptions without requiring coverage inputs",
+    )
     parser.add_argument("--base")
     parser.add_argument("--head")
     parser.add_argument("--diff-file", type=pathlib.Path)
@@ -1001,15 +1006,24 @@ def main() -> int:
     parser.add_argument("--github-repo", default=None)
     args = parser.parse_args()
     try:
+        repo_root = args.repo_root.resolve()
+        production = ProductionPaths(repo_root)
+        policy, exemptions = load_manifest(args.manifest, repo_root, production)
+        if args.validate_manifest_only:
+            print(
+                "changed coverage manifest valid: "
+                f"{len(exemptions)} exemptions, "
+                f"line floor {policy['line_percent']}%"
+            )
+            return 0
         if args.diff_file and (args.base or args.head):
             raise GateError("--diff-file cannot be combined with --base/--head")
         if not args.diff_file and (not args.base or not args.head):
             raise GateError("provide --diff-file or both --base and --head")
         if args.base_lcov is not None and args.fetch_base_coverage:
             raise GateError("--base-lcov cannot be combined with --fetch-base-coverage")
-        repo_root = args.repo_root.resolve()
-        production = ProductionPaths(repo_root)
-        policy, exemptions = load_manifest(args.manifest, repo_root, production)
+        if args.lcov is None:
+            raise GateError("--lcov is required unless --validate-manifest-only is used")
         coverage = parse_lcov(args.lcov, repo_root)
         diff_text = (
             args.diff_file.read_text(encoding="utf-8")
