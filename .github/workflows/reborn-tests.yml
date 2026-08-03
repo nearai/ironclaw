@@ -368,7 +368,8 @@ jobs:
                 fi
                 scripts/ci/run-hermetic-deterministic-suite.sh command \
                   timeout --signal=INT --kill-after=30s 28m \
-                  cargo test -p "${package}" "--${kind}" "${name}" \
+                  "${incremental_env[@]}" cargo test \
+                    -p "${package}" "--${kind}" "${name}" \
                     "${target_feature_args[@]}" --ignore-rust-version -- --nocapture
               done < <(
                 jq -r '.[] | [.package, .kind, .name] | @tsv' \

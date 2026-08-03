@@ -283,6 +283,40 @@ class RebornPrTestPlanTests(unittest.TestCase):
             )
         )
 
+    def test_lockfile_ownership_rejects_package_additions_and_removals(self) -> None:
+        base = {
+            "version": 4,
+            "package": [
+                {"name": "alpha", "version": "0.1.0", "dependencies": []},
+            ],
+        }
+        added = {
+            "version": 4,
+            "package": [
+                {
+                    "name": "alpha",
+                    "version": "0.1.0",
+                    "dependencies": ["tempfile"],
+                },
+                {
+                    "name": "tempfile",
+                    "version": "3.0.0",
+                    "source": "registry",
+                    "checksum": "x",
+                },
+            ],
+        }
+        for current, previous in ((added, base), (base, added)):
+            with self.subTest(current=current):
+                self.assertFalse(
+                    planner._lockfile_change_is_manifest_owned(
+                        current=current,
+                        base=previous,
+                        changed_paths={"crates/alpha/Cargo.toml"},
+                        metadata=metadata(),
+                    )
+                )
+
     def test_stress_tool_is_owned_by_dedicated_workflow(self) -> None:
         plan = self.plan(
             "pull_request", ["tools/ironclaw_stress/src/main.rs"]
@@ -420,7 +454,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "${{ toJSON(matrix.bucket.exact_targets || fromJSON('[]')) }}",
             workflow,
         )
-        self.assertIn('cargo test -p "${package}" "--${kind}" "${name}"', workflow)
+        self.assertIn('"${incremental_env[@]}" cargo test', workflow)
+        self.assertIn('-p "${package}" "--${kind}" "${name}"', workflow)
 
     def test_pr_workflows_do_not_repeat_reborn_rust_contracts(self) -> None:
         code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
