@@ -37,6 +37,18 @@ PR_STATIC_CONTROL_PATHS = {
     ".cargo/config.toml",
     "tests/integration/coverage-exemptions.toml",
     "tests/integration/coverage-floor.toml",
+    # Repo-root `scripts/` is deliberately NOT prefix-classified — the
+    # `unmapped test or CI path` arm below exists to force a per-file decision.
+    # These two are decided:
+    #   * the panic baseline is enforced by Code Style
+    #     (`check_no_panics.py --reborn-baseline`), which runs on every PR and
+    #     owns the whole check; no Reborn lane reads it.
+    #   * `reborn-e2e-rust.sh` is driven by the `Reborn E2E` workflow, which has
+    #     its own scope detector (`Detect Reborn E2E scope`). This planner
+    #     selects lanes for `Tests (Reborn)` only, and that workflow does not
+    #     invoke the script.
+    "scripts/no_panics_reborn_baseline.txt",
+    "scripts/reborn-e2e-rust.sh",
 }
 PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/")
 BUCKET_WEIGHTS = {
