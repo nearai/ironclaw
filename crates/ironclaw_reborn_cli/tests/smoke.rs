@@ -7,6 +7,8 @@ use std::{
 };
 
 const INVALID_PROFILE_MESSAGE: &str = "IRONCLAW_REBORN_PROFILE must be one of";
+const HOST_MEDIATED_PROXY_CHECK: &str = "host_mediated_ambient_proxy";
+const HOST_MEDIATED_PROXY_DETAIL: &str = "ambient proxy variables are configured but ignored by host-mediated ReqwestNetworkTransport so approved pinned destinations remain authoritative; LLM clients and sandbox egress use separate proxy policies";
 
 fn reborn_bin() -> &'static str {
     env!("CARGO_BIN_EXE_ironclaw")
@@ -3976,6 +3978,205 @@ fn doctor_json_reports_checks_and_summary() {
         !reborn_home.exists(),
         "doctor --json should not create state directories"
     );
+}
+
+fn run_doctor_with_child_env(
+    home: &Path,
+    reborn_home: &Path,
+    json: bool,
+    env: &[(&str, &str)],
+) -> std::process::Output {
+    let mut command = reborn_command();
+    command
+        .arg("doctor")
+        .env("HOME", home)
+        .env("IRONCLAW_REBORN_HOME", reborn_home);
+    if json {
+        command.arg("--json");
+    }
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    command.output().expect("ironclaw doctor should run")
+}
+
+fn assert_host_mediated_proxy_diagnostic(
+    output: &std::process::Output,
+    json: bool,
+    forbidden: &[&str],
+) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}\n{stderr}");
+    assert!(output.status.success(), "doctor failed: {combined}");
+    assert_eq!(
+        combined.matches(HOST_MEDIATED_PROXY_CHECK).count(),
+        1,
+        "doctor must emit exactly one ambient-proxy diagnostic: {combined}"
+    );
+    assert!(
+        combined.contains(HOST_MEDIATED_PROXY_DETAIL),
+        "doctor must emit the fixed boundary wording: {combined}"
+    );
+    for fragment in forbidden {
+        assert!(
+            !combined.contains(fragment),
+            "doctor leaked ambient-proxy configuration fragment {fragment:?}: {combined}"
+        );
+    }
+
+    if json {
+        let value: serde_json::Value =
+            serde_json::from_str(stdout.trim()).expect("doctor --json must emit valid JSON");
+        let matching: Vec<_> = value["checks"]
+            .as_array()
+            .expect("checks must be an array")
+            .iter()
+            .filter(|check| check["name"] == HOST_MEDIATED_PROXY_CHECK)
+            .collect();
+        assert_eq!(matching.len(), 1, "JSON diagnostic must be unique: {value}");
+        assert_eq!(matching[0]["category"], "core");
+        assert_eq!(matching[0]["outcome"], "skip");
+        assert_eq!(matching[0]["detail"], HOST_MEDIATED_PROXY_DETAIL);
+    }
+}
+
+fn assert_no_host_mediated_proxy_diagnostic(output: &std::process::Output, json: bool) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}\n{stderr}");
+    assert!(output.status.success(), "doctor failed: {combined}");
+    assert!(
+        !combined.contains(HOST_MEDIATED_PROXY_CHECK),
+        "doctor emitted a misleading ambient-proxy diagnostic: {combined}"
+    );
+    assert!(
+        !combined.contains(HOST_MEDIATED_PROXY_DETAIL),
+        "doctor emitted misleading ambient-proxy wording: {combined}"
+    );
+
+    if json {
+        let value: serde_json::Value =
+            serde_json::from_str(stdout.trim()).expect("doctor --json must emit valid JSON");
+        assert!(
+            value["checks"]
+                .as_array()
+                .expect("checks must be an array")
+                .iter()
+                .all(|check| check["name"] != HOST_MEDIATED_PROXY_CHECK),
+            "JSON must omit the ambient-proxy diagnostic: {value}"
+        );
+    }
+}
+
+#[test]
+fn doctor_binary_reports_only_recognized_ambient_proxy_presence_without_values() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = temp.path().join("home");
+    let reborn_home = temp.path().join("reborn-home");
+    let recognized = [
+        (
+            "HTTP_PROXY",
+            "http://credential-http:password-http@host-http.invalid:18001/path-http",
+            [
+                "credential-http",
+                "password-http",
+                "host-http.invalid",
+                "18001",
+                "path-http",
+            ],
+        ),
+        (
+            "HTTPS_PROXY",
+            "https://credential-https:password-https@host-https.invalid:18002/path-https",
+            [
+                "credential-https",
+                "password-https",
+                "host-https.invalid",
+                "18002",
+                "path-https",
+            ],
+        ),
+        (
+            "ALL_PROXY",
+            "socks5://credential-all:password-all@host-all.invalid:18003/path-all",
+            [
+                "credential-all",
+                "password-all",
+                "host-all.invalid",
+                "18003",
+                "path-all",
+            ],
+        ),
+        (
+            "http_proxy",
+            "http://credential-http-lower:password-http-lower@host-http-lower.invalid:18004/path-http-lower",
+            [
+                "credential-http-lower",
+                "password-http-lower",
+                "host-http-lower.invalid",
+                "18004",
+                "path-http-lower",
+            ],
+        ),
+        (
+            "https_proxy",
+            "https://credential-https-lower:password-https-lower@host-https-lower.invalid:18005/path-https-lower",
+            [
+                "credential-https-lower",
+                "password-https-lower",
+                "host-https-lower.invalid",
+                "18005",
+                "path-https-lower",
+            ],
+        ),
+        (
+            "all_proxy",
+            "socks5://credential-all-lower:password-all-lower@host-all-lower.invalid:18006/path-all-lower",
+            [
+                "credential-all-lower",
+                "password-all-lower",
+                "host-all-lower.invalid",
+                "18006",
+                "path-all-lower",
+            ],
+        ),
+    ];
+
+    for (name, value, fragments) in recognized {
+        for json in [false, true] {
+            let output = run_doctor_with_child_env(&home, &reborn_home, json, &[(name, value)]);
+            let mut forbidden = Vec::from(fragments);
+            forbidden.push(value);
+            assert_host_mediated_proxy_diagnostic(&output, json, &forbidden);
+        }
+    }
+
+    for json in [false, true] {
+        let output = run_doctor_with_child_env(&home, &reborn_home, json, &[]);
+        assert_no_host_mediated_proxy_diagnostic(&output, json);
+
+        let no_proxy_output = run_doctor_with_child_env(
+            &home,
+            &reborn_home,
+            json,
+            &[
+                (
+                    "NO_PROXY",
+                    "credential-no-proxy@host-no-proxy.invalid:19001/path-no-proxy",
+                ),
+                (
+                    "no_proxy",
+                    "credential-no-proxy-lower@host-no-proxy-lower.invalid:19002/path-no-proxy-lower",
+                ),
+            ],
+        );
+        assert_no_host_mediated_proxy_diagnostic(&no_proxy_output, json);
+    }
+
+    let empty_but_set =
+        run_doctor_with_child_env(&home, &reborn_home, false, &[("HTTP_PROXY", "")]);
+    assert_host_mediated_proxy_diagnostic(&empty_but_set, false, &[]);
 }
 
 // ─── Boot-config TOML + provider catalog (epic #3036 prep) ───────────────────
