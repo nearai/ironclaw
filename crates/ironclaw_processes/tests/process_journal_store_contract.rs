@@ -2274,6 +2274,68 @@ async fn group_committed_submissions_deliver_every_entry_once_before_returning()
     );
 }
 
+/// Concurrent claims in one group commit each get work.
+///
+/// A group commit materializes one shared state for the whole batch, so the
+/// candidate window has to cover the batch's total demand. Sized for a single
+/// request it does not: the first claim consumes the window and the rest come
+/// back empty while eligible work is still queued. Before batching each claim
+/// ran its own transaction and re-queried after the previous one advanced
+/// state, so the window was always fresh.
+///
+/// Deliberately more queued work than any one claim asks for, and enough
+/// concurrent claimants that they batch.
+#[tokio::test]
+async fn concurrent_claims_in_one_batch_each_receive_queued_work() {
+    // Demand must exceed one request's window, which is `max_processes` plus
+    // the 64-row quota-skip allowance; below that the allowance already covers
+    // the batch and the defect is invisible.
+    const CLAIMANTS: usize = 40;
+    const PER_CLAIM: usize = 4;
+
+    let store = Arc::new(ProcessJournalStore::new(
+        in_memory_backed_processes_filesystem(),
+    ));
+    let scope = scope();
+    for _ in 0..(CLAIMANTS * PER_CLAIM) {
+        submit_internal_process(store.as_ref(), &scope, ProcessId::new()).await;
+    }
+
+    let claims = (0..CLAIMANTS).map(|worker| {
+        let store = Arc::clone(&store);
+        async move {
+            store
+                .claim_next_processes(ClaimProcessesRequest {
+                    worker_id: ProcessWorkerId::from_trusted(format!("worker-{worker}")),
+                    scope_filter: None,
+                    process_id_filter: None,
+                    process_kind_filter: None,
+                    max_processes: PER_CLAIM,
+                })
+                .await
+                .expect("claim")
+        }
+    });
+    let claimed = futures::future::join_all(claims).await;
+
+    let empty = claimed.iter().filter(|batch| batch.is_empty()).count();
+    let total = claimed.iter().map(Vec::len).sum::<usize>();
+    assert_eq!(
+        empty,
+        0,
+        "every claimant must receive work when the queue holds \
+         {} processes and the batch asks for {}; got per-claimant counts {:?}",
+        CLAIMANTS * PER_CLAIM,
+        CLAIMANTS * PER_CLAIM,
+        claimed.iter().map(Vec::len).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        total,
+        CLAIMANTS * PER_CLAIM,
+        "claims must not overlap or drop work"
+    );
+}
+
 #[tokio::test]
 async fn group_commit_isolates_a_rejected_command_from_its_batch() {
     let store = Arc::new(ProcessJournalStore::new(

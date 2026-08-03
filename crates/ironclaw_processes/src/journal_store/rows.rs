@@ -348,11 +348,38 @@ where
     for (scope, process_kind) in &references.active_conflicts {
         records.extend(query_active_conflict(filesystem, scope, process_kind, 1).await?);
     }
+    // Sum the demand of equivalent unfiltered claims before querying any of
+    // them. Two claims are equivalent when they drive the same query, which is
+    // the scope and kind filters; `process_id_filter` claims are skipped
+    // entirely and named rows are loaded elsewhere. Linear scan because a group
+    // commit holds at most `MAX_BATCH_COMMANDS` claims, so this is a handful of
+    // comparisons, not a data structure.
+    let mut batched_demand: Vec<(&ClaimProcessesRequest, usize)> = Vec::new();
+    for (request, _) in &references.claims {
+        if request.process_id_filter.is_some() {
+            continue;
+        }
+        match batched_demand.iter_mut().find(|(equivalent, _)| {
+            equivalent.scope_filter == request.scope_filter
+                && equivalent.process_kind_filter == request.process_kind_filter
+        }) {
+            Some((_, total)) => *total = total.saturating_add(request.max_processes),
+            None => batched_demand.push((request, request.max_processes)),
+        }
+    }
+
     for (request, limits) in &references.claims {
         if request.process_id_filter.is_some() {
             continue;
         }
-        let candidates = query_claim_candidates(filesystem, request).await?;
+        let demand = batched_demand
+            .iter()
+            .find(|(equivalent, _)| {
+                equivalent.scope_filter == request.scope_filter
+                    && equivalent.process_kind_filter == request.process_kind_filter
+            })
+            .map_or(request.max_processes, |(_, total)| *total);
+        let candidates = query_claim_candidates(filesystem, request, demand).await?;
         records.extend(candidates.clone());
         let snapshots = candidates
             .iter()
@@ -891,9 +918,19 @@ where
 const RECOVERY_BATCH_LIMIT: u32 = Page::MAX_LIMIT;
 const CLAIM_QUOTA_SKIP_ALLOWANCE: usize = 64;
 
+/// Load queued candidates for one claim shape.
+///
+/// `batched_demand` is the summed `max_processes` of every equivalent claim in
+/// the group commit, not just this request's. A batch materializes one shared
+/// state, so a window sized for a single request leaves later claims in the
+/// same batch reading an already-exhausted candidate set and returning empty
+/// while eligible work is still queued. Before group commit each claim ran its
+/// own transaction and re-queried after the previous one advanced state, so the
+/// window was always fresh; batching removed that and this replaces it.
 async fn query_claim_candidates<F>(
     filesystem: &ScopedFilesystem<F>,
     request: &ClaimProcessesRequest,
+    batched_demand: usize,
 ) -> Result<Vec<VersionedEntry>, ProcessJournalStoreError>
 where
     F: RootFilesystem,
@@ -924,8 +961,8 @@ where
         }
         (None, None) => index_name("process_queue_v4")?,
     };
-    let candidate_limit = request
-        .max_processes
+    let candidate_limit = batched_demand
+        .max(request.max_processes)
         .saturating_add(CLAIM_QUOTA_SKIP_ALLOWANCE)
         .min(Page::MAX_LIMIT as usize);
     let candidate_limit = u32::try_from(candidate_limit).unwrap_or(Page::MAX_LIMIT);
