@@ -94,7 +94,11 @@ import tomllib
 import zipfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
-from crate_tree import CrateTreeError, crate_directories  # noqa: E402
+from crate_tree import (  # noqa: E402
+    CrateTreeError,
+    crate_directories,
+    workspace_root_directories,
+)
 
 CRATES_ROOT = "crates"
 # A crate-relative Reborn production source: `src/` of the crate itself, at any
@@ -159,6 +163,13 @@ class ProductionPaths:
             # something" assertion: every path verdict below flows from this
             # inventory, so a broken tree cannot read as "nothing changed".
             self._crate_directories = crate_directories(repo_root)
+            # Separate workspace roots under `crates/` (the `wasm-src/` guest
+            # components, `ironclaw_silk_decoder`). Nothing here compiles them,
+            # so no line inside one can ever be covered — but they are also not
+            # "the inventory and the tree disagree", which is what
+            # `reject_unattributable` is for. Enumerated once, beside the
+            # inventory, so both answers come from the same walk.
+            self._workspace_roots = workspace_root_directories(repo_root)
         except CrateTreeError as error:
             raise GateError(
                 f"crate discovery failed, so no changed line can be attributed: {error}"
@@ -190,6 +201,11 @@ class ProductionPaths:
         if not path.startswith(f"{CRATES_ROOT}/") or not path.endswith(".rs"):
             return
         if self.owner(path) is not None:
+            return
+        # Excluded by construction, not unattributable: a separate cargo
+        # workspace under `crates/` is never built or covered here, so "no
+        # crate owns it" is the correct and complete answer.
+        if any(path.startswith(f"{root}/") for root in self._workspace_roots):
             return
         raise GateError(
             f"changed Rust file under {CRATES_ROOT}/ belongs to no discovered crate: "

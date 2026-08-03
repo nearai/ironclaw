@@ -322,13 +322,13 @@ assert_contains "M6: merge names the missing crate tree" "${CAP_ERR}" \
 # separate records. This is the shape consumed by the crate-bucket workflow;
 # raw concatenation would corrupt the boundary as `end_of_recordSF:...`.
 printf '%s' \
-  'SF:/work/ironclaw/crates/ironclaw_slack_extension/src/attachment_transfer.rs
+  'SF:/work/ironclaw/crates/extensions/packages/slack/src/attachment_transfer.rs
 DA:100,7
 LF:1
 LH:1
 end_of_record' > "${fixtures_dir}/m4_slack.lcov"
 printf '%s' \
-  'SF:/work/ironclaw/crates/ironclaw_telegram_extension/src/attachment_transfer.rs
+  'SF:/work/ironclaw/crates/extensions/packages/telegram/src/attachment_transfer.rs
 DA:100,5
 LF:1
 LH:1

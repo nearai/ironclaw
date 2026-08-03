@@ -46,7 +46,7 @@ fn v2_fixture(dir: &str) -> String {
 
 fn live_asset(dir: &str) -> String {
     let path = format!(
-        "{}/../ironclaw_first_party_extensions/assets/{dir}/manifest.toml",
+        "{}/../extensions/packages/{dir}/manifest.toml",
         env!("CARGO_MANIFEST_DIR")
     );
     std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {path}: {error}"))

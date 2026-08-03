@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import dataclasses
+import glob
+import os
+import pathlib
 import re
 import sys
 from pathlib import Path
@@ -265,10 +268,12 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
             ("ironclaw_wasm", "src/lib.rs"),
         ),
         # Probe derived from reality rather than from a guessed layout: the
-        # first-party extension manifests are found on disk and every one of
-        # them must be in scope. When WS2 moves extension packages, this stops
-        # discovering files or stops matching them — either way, loudly.
-        crate_globs=(("ironclaw_first_party_extensions", "assets/*/manifest.toml"),),
+        # shipped package manifests are found on disk and every one of them
+        # must be in scope. Anchored on the support crate and hopping to its
+        # sibling `packages/` directory, which is where WS2 put them — if that
+        # moves again this stops discovering files or stops matching them,
+        # either way loudly.
+        crate_globs=(("ironclaw_extension_support", "../packages/*/manifest.toml"),),
         in_scope=("wit/host.wit", "registry/tools/x.json", "scripts/build-wasm-extensions.sh"),
         out_of_scope=(
             "crates/ironclaw_llm/src/lib.rs",
@@ -453,21 +458,31 @@ def validate_crate_scope_filters(
             except CrateTreeError as error:
                 errors.append(f"{label}: names crate {name!r}: {error}")
                 continue
+            # `glob.glob` rather than `Path.glob` because a pattern may climb
+            # out of the anchor crate with `../`: WS2 moved the extension
+            # packages to `extensions/packages/`, a SIBLING of the support
+            # crate rather than a subdirectory of it, because a package
+            # directory is self-contained and owned by no crate (PROPOSAL §5).
+            # Anchoring on the crate name is still what keeps this probe alive
+            # across a family move; only the hop changed.
+            anchored = os.path.normpath(str(root / directory / pattern))
             discovered = sorted(
-                candidate.relative_to(root).as_posix()
-                for candidate in (root / directory).glob(pattern)
+                pathlib.Path(candidate).relative_to(root).as_posix()
+                for candidate in glob.glob(anchored)
             )
+            relative_probe = os.path.normpath(f"{directory}/{pattern}")
             if not discovered:
                 errors.append(
-                    f"{label}: probe {directory}/{pattern} discovered no files, so "
+                    f"{label}: probe {relative_probe} discovered no files, so "
                     "the filter is pinned against nothing — repoint the probe to "
                     "wherever those files moved"
                 )
                 continue
             probes.extend((path, True) for path in discovered)
-            probes.append(
-                (f"crates/{NESTED_FAMILY}/{name}/{pattern.replace('*', 'probe')}", True)
-            )
+            nested_probe = os.path.normpath(
+                f"crates/{NESTED_FAMILY}/{name}/{pattern}"
+            ).replace("*", "probe")
+            probes.append((nested_probe, True))
 
         if not probes:  # pragma: no cover - every entry declares probes
             errors.append(f"{label}: no probes declared, the pin asserts nothing")

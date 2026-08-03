@@ -41,7 +41,7 @@ pub use crate::available_extension_import::{
 };
 
 const NEARAI_MCP_MANIFEST: &str =
-    include_str!("../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
+    include_str!("../../extensions/packages/nearai-mcp/manifest.toml");
 const NEARAI_EXTENSION_ID: &str = HostManagedCredentialExtension::NearAi.id();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,7 +120,7 @@ pub struct AvailableExtensionPackage {
     pub channel_presentation: Option<ironclaw_extension_contracts::channel::ChannelPresentation>,
     pub assets: Vec<AvailableExtensionAsset>,
     /// Bespoke onboarding copy carried down from a migrated inventory bundle
-    /// (`ironclaw_first_party_extensions::packages`). `None` for packages whose
+    /// (`ironclaw_extension_support::packages`). `None` for packages whose
     /// onboarding copy still lives in composition's per-id `onboarding()` match;
     /// as each package migrates, its copy moves here and its match arm is
     /// deleted. See overview §3 (package self-containment).
@@ -962,20 +962,18 @@ fn nearai_mcp_assets(manifest: &str) -> Vec<AvailableExtensionAsset> {
         bytes_asset(
             "schemas/nearai/web_search.input.v1.json",
             include_bytes!(
-                "../../ironclaw_first_party_extensions/assets/nearai-mcp/schemas/nearai/web_search.input.v1.json"
+                "../../extensions/packages/nearai-mcp/schemas/nearai/web_search.input.v1.json"
             ),
         ),
         bytes_asset(
             "schemas/nearai/web_search.output.v1.json",
             include_bytes!(
-                "../../ironclaw_first_party_extensions/assets/nearai-mcp/schemas/nearai/web_search.output.v1.json"
+                "../../extensions/packages/nearai-mcp/schemas/nearai/web_search.output.v1.json"
             ),
         ),
         bytes_asset(
             "prompts/nearai/web_search.md",
-            include_bytes!(
-                "../../ironclaw_first_party_extensions/assets/nearai-mcp/prompts/nearai/web_search.md"
-            ),
+            include_bytes!("../../extensions/packages/nearai-mcp/prompts/nearai/web_search.md"),
         ),
     ]
 }

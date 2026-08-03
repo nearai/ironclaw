@@ -2228,7 +2228,7 @@ fn filesystem_with_slack_user_package() -> DiskFilesystem {
 fn slack_user_asset_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("crates/ironclaw_first_party_extensions/assets/slack")
+        .join("crates/extensions/packages/slack")
 }
 
 fn slack_policy() -> NetworkPolicy {
@@ -2244,7 +2244,7 @@ fn slack_policy() -> NetworkPolicy {
 }
 
 /// The read-only scopes the Slack read capabilities (e.g. slack.search_messages)
-/// request. Kept in lockstep with `assets/slack/manifest.toml`, where the
+/// request. Kept in lockstep with `crates/extensions/packages/slack/manifest.toml`, where the
 /// read-only tools request only read scopes and only send_message adds chat:write.
 fn slack_user_scopes() -> Vec<String> {
     [
@@ -2369,7 +2369,7 @@ fn filesystem_with_google_package(package_id: &str) -> DiskFilesystem {
 fn github_asset_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("crates/ironclaw_first_party_extensions/assets/github")
+        .join("crates/extensions/packages/github")
 }
 
 fn google_drive_asset_root() -> std::path::PathBuf {
@@ -2379,7 +2379,7 @@ fn google_drive_asset_root() -> std::path::PathBuf {
 fn google_asset_root(package_id: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("crates/ironclaw_first_party_extensions/assets")
+        .join("crates/extensions/packages")
         .join(package_id)
 }
 

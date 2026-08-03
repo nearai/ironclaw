@@ -1205,7 +1205,7 @@ class CheckNoPanicsTests(unittest.TestCase):
         # is not the blessed feature-gated module either.
         self.assertFalse(is_test_only_path("crates/foo/src/auth/test_support.rs"))
         self.assertFalse(
-            is_test_only_path("crates/ironclaw_memory_native/src/contract_tests.rs")
+            is_test_only_path("crates/extensions/packages/memory-native/src/contract_tests.rs")
         )
 
     def test_lifetime_annotations_do_not_desync_braces(self) -> None:

@@ -73,24 +73,50 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
-  "reborn v2 adapter crate" \
-  "crates/ironclaw_telegram_extension/src/lib.rs" \
-  "docs_only=false
-has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
-
-assert_scope \
   "reborn telegram extension crate" \
-  "crates/ironclaw_telegram_extension/src/channel.rs" \
+  "crates/extensions/packages/telegram/src/channel.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
-  "reborn telegram v2 protocol adapter crate" \
-  "crates/ironclaw_telegram_v2_adapter/src/render.rs" \
+  "reborn telegram protocol engine (merged from the v2 adapter crate)" \
+  "crates/extensions/packages/telegram/src/render.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn slack package crate" \
+  "crates/extensions/packages/slack/src/channel.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn memory-native package crate" \
+  "crates/extensions/packages/memory-native/src/service.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn mem0 package crate" \
+  "crates/extensions/packages/mem0/src/service.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+# A guest component rooting its own workspace: attributable to no crate, but a
+# refusal would be wrong — it is excluded by construction, not missing.
+assert_scope \
+  "wasm-src guest inside a data-only package" \
+  "crates/extensions/packages/github/wasm-src/src/lib.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false

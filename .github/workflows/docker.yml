@@ -110,7 +110,7 @@ jobs:
 
           # The Reborn Dockerfile has a single `runtime` stage — WASM
           # extensions are compiled into the binary via
-          # `ironclaw_first_party_extensions`, so there is no separate
+          # `ironclaw_extension_support`, so there is no separate
           # pre-bundled staging image target.
           echo "target=runtime" >> "$GITHUB_OUTPUT"
 
