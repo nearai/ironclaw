@@ -136,10 +136,12 @@ async def _wait_for_run_artifact_status(
                 thread_id,
                 run_id,
             )
-            last_not_ready = None
         except _ArtifactNotReady as error:
             # The projection may briefly miss the resumed run's terminal
             # records; keep polling until they land or the deadline elapses.
+            # Retain the latest transient 404 detail so a later non-terminal
+            # 200 followed by a timeout still surfaces the earlier miss in
+            # the failure message instead of reporting transient_404=None.
             last_not_ready = str(error)
             await asyncio.sleep(0.25)
             continue
@@ -594,3 +596,74 @@ async def test_reborn_v2_manual_token_auth_gate_resolves_and_resumes(
     assert isinstance(artifact.get("logs", {}).get("entries"), list), artifact
     _assert_text_redacted(raw_token, json.dumps(timeline), source="timeline")
     _assert_text_redacted(raw_token, json.dumps(artifact), source="run artifact")
+
+
+class _MockArtifactResponse:
+    """Minimal stand-in for `httpx.Response` used by `_try_fetch_run_artifact`."""
+
+    def __init__(self, status_code: int, json_payload: dict | None = None, text: str = ""):
+        self.status_code = status_code
+        self._json = json_payload
+        self.text = text
+
+    def json(self) -> dict:
+        if self._json is None:
+            raise ValueError("no json payload")
+        return self._json
+
+
+class _ScriptedArtifactClient:
+    """Async client that replays a scripted sequence of artifact responses.
+
+    Each entry is either an `int` status code (with empty text) or a
+    `(status_code, json_payload_or_none, text)` tuple. The client records
+    every call so the regression test can assert polling behavior.
+    """
+
+    def __init__(self, script: list):
+        self._script = list(script)
+        self.calls = 0
+
+    async def get(self, _url: str, timeout: float = 15) -> _MockArtifactResponse:
+        if not self._script:
+            raise AssertionError("scripted client exhausted")
+        entry = self._script.pop(0)
+        self.calls += 1
+        if isinstance(entry, int):
+            return _MockArtifactResponse(entry, text=f"status {entry}")
+        status_code, payload, text = entry
+        return _MockArtifactResponse(status_code, payload, text)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_run_artifact_status_preserves_transient_404_through_timeout() -> None:
+    """A 404 followed by a non-terminal 200 must still surface the 404 on timeout.
+
+    Regression for the polling helper: previously a non-terminal 200 cleared
+    `last_not_ready`, so a later timeout reported `transient_404=None` and hid
+    the earlier miss. The sequence here is 404 -> non-terminal 200 -> timeout,
+    which must raise an `AssertionError` whose message still includes the 404
+    detail.
+    """
+    script = [
+        404,
+        (200, {"run": {"status": "Running"}}, ""),
+        (200, {"run": {"status": "Running"}}, ""),
+    ]
+    client = _ScriptedArtifactClient(script)
+    with pytest.raises(AssertionError) as exc_info:
+        await _wait_for_run_artifact_status(
+            client,  # type: ignore[arg-type]
+            "http://server",
+            "thread-1",
+            "run-1",
+            "Completed",
+            timeout=0.6,
+        )
+    message = str(exc_info.value)
+    assert "transient_404=status 404" in message, message
+    assert "Run artifact did not reach Completed" in message, message
+    # The non-terminal 200 response must be reflected as the last artifact,
+    # proving the helper continued polling past the 404 instead of exiting
+    # on the first transient miss.
+    assert "'status': 'Running'" in message, message

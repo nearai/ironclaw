@@ -210,6 +210,25 @@ class RebornPrTestPlanTests(unittest.TestCase):
             plan["reasons"],
         )
 
+    def test_reborn_e2e_and_crate_changes_keep_both_owners(self) -> None:
+        plan = self.plan(
+            "pull_request",
+            [
+                "tests/e2e/scenarios/test_reborn_webui_v2_legacy_extensions.py",
+                "crates/alpha/src/lib.rs",
+            ],
+        )
+        # The E2E scenario path is skipped (owned by reborn-e2e.yml) while
+        # the changed crate is still scheduled in the affected crate buckets.
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["alpha"])
+        self.assertTrue(plan["crate_buckets"])
+        self.assertTrue(plan["run_qa_replay"])
+        self.assertTrue(
+            any("Reborn E2E workflow owns" in reason for reason in plan["reasons"]),
+            plan["reasons"],
+        )
+
     def test_unrelated_workflow_change_runs_only_baseline_qa_replay(self) -> None:
         plan = self.plan("pull_request", [".github/workflows/code_style.yml"])
         self.assertEqual(plan["mode"], "none")
