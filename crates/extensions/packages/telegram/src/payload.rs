@@ -975,5 +975,9 @@ fn _suppress_unused_field_warnings(update: &TelegramUpdate) {
 mod tests;
 
 #[cfg(test)]
+#[path = "tests/payload_errors.rs"]
+mod payload_errors;
+
+#[cfg(test)]
 #[path = "tests/payload_ingress_properties.rs"]
 mod ingress_properties;
