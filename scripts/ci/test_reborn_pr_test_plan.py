@@ -52,12 +52,19 @@ class RebornPrTestPlanTests(unittest.TestCase):
     def tearDown(self) -> None:
         planner._bucket_packages = self.original_bucket_packages
 
-    def plan(self, event: str, paths: list[str]) -> dict:
+    def plan(
+        self,
+        event: str,
+        paths: list[str],
+        *,
+        lockfile_manifest_owned: bool = False,
+    ) -> dict:
         return planner.build_plan(
             event=event,
             changed_paths=paths,
             metadata=metadata(),
             canonical_packages=self.canonical,
+            lockfile_manifest_owned=lockfile_manifest_owned,
         )
 
     def test_merge_queue_is_always_exhaustive(self) -> None:
@@ -192,7 +199,9 @@ class RebornPrTestPlanTests(unittest.TestCase):
 
     def test_lockfile_with_changed_crate_manifest_uses_affected_packages(self) -> None:
         plan = self.plan(
-            "pull_request", ["Cargo.lock", "crates/alpha/Cargo.toml"]
+            "pull_request",
+            ["Cargo.lock", "crates/alpha/Cargo.toml"],
+            lockfile_manifest_owned=True,
         )
         self.assertEqual(plan["mode"], "selected")
         self.assertEqual(plan["changed_packages"], ["alpha"])
@@ -201,6 +210,55 @@ class RebornPrTestPlanTests(unittest.TestCase):
     def test_lockfile_without_changed_crate_manifest_fails_closed(self) -> None:
         plan = self.plan("pull_request", ["Cargo.lock"])
         self.assertEqual(plan["mode"], "full")
+
+    def test_unowned_lockfile_change_with_manifest_still_fails_closed(self) -> None:
+        plan = self.plan(
+            "pull_request", ["Cargo.lock", "crates/alpha/Cargo.toml"]
+        )
+        self.assertEqual(plan["mode"], "full")
+
+    def test_lockfile_ownership_accepts_only_changed_workspace_dependency_edges(self) -> None:
+        base = {
+            "version": 4,
+            "package": [
+                {"name": "alpha", "version": "0.1.0", "dependencies": ["serde"]},
+                {
+                    "name": "serde",
+                    "version": "1.0.0",
+                    "source": "registry",
+                    "checksum": "same",
+                },
+            ],
+        }
+        current = {
+            **base,
+            "package": [
+                {
+                    "name": "alpha",
+                    "version": "0.1.0",
+                    "dependencies": ["serde", "tempfile"],
+                },
+                base["package"][1],
+            ],
+        }
+        self.assertTrue(
+            planner._lockfile_change_is_manifest_owned(
+                current=current,
+                base=base,
+                changed_paths={"crates/alpha/Cargo.toml"},
+                metadata=metadata(),
+            )
+        )
+
+        current["package"][1] = {**base["package"][1], "checksum": "changed"}
+        self.assertFalse(
+            planner._lockfile_change_is_manifest_owned(
+                current=current,
+                base=base,
+                changed_paths={"crates/alpha/Cargo.toml"},
+                metadata=metadata(),
+            )
+        )
 
     def test_stress_tool_is_owned_by_dedicated_workflow(self) -> None:
         plan = self.plan(
@@ -261,6 +319,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertIn("python3 scripts/ci/reborn_pr_test_plan.py", workflow)
         self.assertIn("scripts/ci/discover-reborn-package-crates.sh", workflow)
         self.assertIn("--canonical-packages", workflow)
+        self.assertIn('--base-sha "$BASE_SHA"', workflow)
         self.assertIn("needs.changes.outputs.crate_buckets", workflow)
         self.assertIn("needs.changes.outputs.root_partitions", workflow)
         self.assertIn("needs.changes.outputs.integration_lanes", workflow)

@@ -46,9 +46,11 @@ coverage gate. Unknown paths, empty diffs, and recognized test-topology or
 workspace-topology changes fail closed to that same full plan on the pull
 request. A planner execution or schema failure also fails the required check
 loudly.
-`Cargo.lock` is scoped only when the same diff contains a crate-local manifest;
-a lockfile change without that ownership signal remains exhaustive. The stress
-tool is owned by `ironclaw-stress.yml`, and changed-line coverage exemptions are
+`Cargo.lock` is scoped only when a structured base/head comparison proves that
+the lockfile changed solely in dependency lists for workspace manifests changed
+by the same PR. Package additions/removals, versions, checksums, unrelated
+workspace edges, and unreadable base state remain exhaustive. The stress tool
+is owned by `ironclaw-stress.yml`, and changed-line coverage exemptions are
 schema-checked in Code Style instead of launching unrelated integration lanes.
 The queue therefore preserves exhaustive deterministic evidence while
 ordinary PRs avoid consuming 20-plus runners for unrelated lanes. Pull-request

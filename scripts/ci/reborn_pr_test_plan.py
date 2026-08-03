@@ -79,6 +79,86 @@ def _metadata() -> dict[str, Any]:
     return json.loads(_run("cargo", "metadata", "--format-version", "1"))
 
 
+def _lockfile_change_is_manifest_owned(
+    *,
+    current: dict[str, Any],
+    base: dict[str, Any],
+    changed_paths: set[str],
+    metadata: dict[str, Any],
+) -> bool:
+    """Return true only for lockfile edits confined to changed workspace manifests."""
+    if {key: value for key, value in current.items() if key != "package"} != {
+        key: value for key, value in base.items() if key != "package"
+    }:
+        return False
+
+    workspace_members = set(metadata["workspace_members"])
+    workspace_packages = {
+        package["name"]: str(
+            Path(package["manifest_path"]).resolve().relative_to(ROOT)
+        )
+        for package in metadata["packages"]
+        if package["id"] in workspace_members
+    }
+    changed_workspace_packages = {
+        name for name, manifest in workspace_packages.items() if manifest in changed_paths
+    }
+    if not changed_workspace_packages:
+        return False
+
+    def indexed(lockfile: dict[str, Any]) -> dict[tuple[str, str, str], dict[str, Any]]:
+        packages = lockfile.get("package", [])
+        if not isinstance(packages, list):
+            return {}
+        result = {
+            (
+                str(package.get("name", "")),
+                str(package.get("version", "")),
+                str(package.get("source", "")),
+            ): package
+            for package in packages
+            if isinstance(package, dict)
+        }
+        return result if len(result) == len(packages) else {}
+
+    current_packages = indexed(current)
+    base_packages = indexed(base)
+    if not current_packages or current_packages.keys() != base_packages.keys():
+        return False
+
+    for key, current_package in current_packages.items():
+        base_package = base_packages[key]
+        if current_package == base_package:
+            continue
+        name, _version, source = key
+        if source or name not in changed_workspace_packages:
+            return False
+        current_without_dependencies = {
+            field: value
+            for field, value in current_package.items()
+            if field != "dependencies"
+        }
+        base_without_dependencies = {
+            field: value for field, value in base_package.items() if field != "dependencies"
+        }
+        if current_without_dependencies != base_without_dependencies:
+            return False
+    return True
+
+
+def _manifest_owned_lockfile_change(
+    *, base_sha: str, changed_paths: set[str], metadata: dict[str, Any]
+) -> bool:
+    if not base_sha:
+        return False
+    return _lockfile_change_is_manifest_owned(
+        current=tomllib.loads((ROOT / "Cargo.lock").read_text(encoding="utf-8")),
+        base=tomllib.loads(_run("git", "show", f"{base_sha}:Cargo.lock")),
+        changed_paths=changed_paths,
+        metadata=metadata,
+    )
+
+
 def _canonical_packages() -> list[str]:
     return json.loads(_run("scripts/ci/discover-reborn-package-crates.sh"))
 
@@ -220,6 +300,7 @@ def build_plan(
     changed_paths: list[str],
     metadata: dict[str, Any],
     canonical_packages: list[str],
+    lockfile_manifest_owned: bool = False,
 ) -> dict[str, Any]:
     """Build a deterministic test plan, failing open on unknown Reborn inputs."""
     if event in FULL_EVENTS:
@@ -240,11 +321,10 @@ def build_plan(
         )
 
     package_directories, reverse = _workspace_packages(metadata)
-    crate_manifests = {f"{directory}/Cargo.toml" for directory in package_directories}
-    if "Cargo.lock" in paths and not (paths & crate_manifests):
+    if "Cargo.lock" in paths and not lockfile_manifest_owned:
         return _full_plan(
-            "Cargo.lock changed without a crate-local manifest; workspace "
-            "dependency impact requires fail-closed coverage",
+            "Cargo.lock changed beyond dependency edges owned by changed "
+            "workspace manifests; dependency impact requires fail-closed coverage",
             canonical_packages,
         )
     changed_packages: set[str] = set()
@@ -389,6 +469,10 @@ def main() -> int:
         type=Path,
         help="JSON package array produced by discover-reborn-package-crates.sh",
     )
+    parser.add_argument(
+        "--base-sha",
+        help="pull-request base commit used to verify manifest-owned lockfile edits",
+    )
     args = parser.parse_args()
     try:
         changed_paths = (
@@ -401,11 +485,25 @@ def main() -> int:
             if args.canonical_packages
             else _canonical_packages()
         )
+        normalized_paths = {
+            path.strip().replace("\\", "/") for path in changed_paths if path.strip()
+        }
+        metadata = _metadata()
+        lockfile_manifest_owned = (
+            _manifest_owned_lockfile_change(
+                base_sha=args.base_sha or "",
+                changed_paths=normalized_paths,
+                metadata=metadata,
+            )
+            if "Cargo.lock" in normalized_paths
+            else False
+        )
         plan = build_plan(
             event=args.event,
             changed_paths=changed_paths,
-            metadata=_metadata(),
+            metadata=metadata,
             canonical_packages=canonical_packages,
+            lockfile_manifest_owned=lockfile_manifest_owned,
         )
     except (OSError, KeyError, ValueError, subprocess.CalledProcessError) as error:
         print(f"Reborn PR test planner failed: {error}", file=sys.stderr)

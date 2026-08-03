@@ -106,10 +106,12 @@ jobs:
         run: |
           set -euo pipefail
           changed_args=()
+          base_args=()
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             git diff --name-only "$BASE_SHA"..."$HEAD_SHA" \
               > "${RUNNER_TEMP}/reborn-changed-files.txt"
             changed_args=(--changed-files "${RUNNER_TEMP}/reborn-changed-files.txt")
+            base_args=(--base-sha "$BASE_SHA")
           fi
 
           python3 scripts/ci/test_reborn_pr_test_plan.py
@@ -119,6 +121,7 @@ jobs:
             python3 scripts/ci/reborn_pr_test_plan.py \
               --event "${{ github.event_name }}" \
               --canonical-packages "${RUNNER_TEMP}/reborn-canonical-packages.json" \
+              "${base_args[@]}" \
               "${changed_args[@]}"
           )"
           printf '%s\n' "${plan}" | jq .
