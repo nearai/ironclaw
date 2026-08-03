@@ -267,7 +267,8 @@ mod tests {
             (RunNotificationEventKind::DeliveryStatus, "delivery-status"),
         ] {
             assert_eq!(
-                run_notification_projection_id(run_id, kind),
+                run_notification_projection_id(run_id, kind, None)
+                    .expect("non-gate notification identity remains infallible"),
                 format!("run-notification:{suffix}:{run_id}"),
                 "gate identity hardening must not rewrite legacy non-gate delivery identities"
             );
