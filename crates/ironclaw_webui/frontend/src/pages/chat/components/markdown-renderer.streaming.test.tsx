@@ -1,4 +1,4 @@
-// @vitest-environment happy-dom
+// @vitest-environment jsdom
 // @ts-nocheck
 import assert from "node:assert/strict";
 import React, { act } from "react";

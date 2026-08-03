@@ -1,4 +1,4 @@
-// @vitest-environment happy-dom
+// @vitest-environment jsdom
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import { renderMarkdown } from "./markdown";

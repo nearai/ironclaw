@@ -17,6 +17,9 @@ import {
 // fallback for renderer call sites that do not install that handler.
 function createSanitizer(currentWindow: WindowLike) {
   const sanitizer = DOMPurify(currentWindow);
+  if (!sanitizer.isSupported) {
+    throw new Error("Markdown sanitization is unavailable in this browser");
+  }
   const validatedWorkspacePaths = new WeakMap<Element, string>();
   sanitizer.addHook("uponSanitizeAttribute", (node, data, config) => {
     const workspaceFileLinks = Boolean(
