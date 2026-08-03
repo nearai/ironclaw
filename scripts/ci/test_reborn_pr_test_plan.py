@@ -380,14 +380,14 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertIn('mv "${default_binary}" "${target_dir}/debug/ironclaw"', workflow)
         self.assertNotIn('--target-dir "${CARGO_TARGET_DIR:-target}/e2e-sso"', workflow)
 
-        for shard in range(4):
-            with self.subTest(provider_operation_shard=shard):
-                self.assertIn(f'shard: "{shard}/4"', workflow)
+        self.assertIn('shard: "0/4 1/4"', workflow)
+        self.assertIn('shard: "2/4 3/4"', workflow)
+        self.assertIn('for provider_shard in "${provider_shards[@]}"', workflow)
         self.assertIn("  webui-v2-test-lanes:", workflow)
         self.assertIn("lane: fast-contracts", workflow)
         self.assertIn("lane: provider-contracts", workflow)
         self.assertNotIn("\n  blackbox-smoke:", workflow)
-        self.assertIn("max-parallel: 7", workflow)
+        self.assertIn("max-parallel: 5", workflow)
         self.assertIn("reborn-webui-v2-sso-binary-${{", workflow)
         self.assertIn("reborn-webui-v2-binary-${{", workflow)
         self.assertIn("touch target/debug/ironclaw", workflow)

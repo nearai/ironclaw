@@ -372,7 +372,7 @@ jobs:
       IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE: "1"
     strategy:
       fail-fast: false
-      max-parallel: 7
+      max-parallel: 5
       matrix:
         include:
           - lane: browser
@@ -384,18 +384,12 @@ jobs:
           - lane: provider-contracts
             kind: provider
             shard: ""
-          - lane: provider-0
+          - lane: provider-0-1
             kind: provider
-            shard: "0/4"
-          - lane: provider-1
+            shard: "0/4 1/4"
+          - lane: provider-2-3
             kind: provider
-            shard: "1/4"
-          - lane: provider-2
-            kind: provider
-            shard: "2/4"
-          - lane: provider-3
-            kind: provider
-            shard: "3/4"
+            shard: "2/4 3/4"
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -535,10 +529,16 @@ jobs:
                 -m "not shared_world" -v --timeout=120
               ;;
             provider-*)
-              IRONCLAW_PROVIDER_OPERATION_SHARD="${PROVIDER_SHARD}" \
-                scripts/ci/run-hermetic-deterministic-suite.sh command pytest \
-                  tests/e2e/scenarios/test_reborn_qa_trace_full_path.py::test_provider_operation_case_executes_with_provider_readback \
-                  -m "not shared_world" -v --timeout=120
+              read -ra provider_shards <<< "${PROVIDER_SHARD}"
+              ((${#provider_shards[@]} > 0))
+              for provider_shard in "${provider_shards[@]}"; do
+                echo "::group::provider operation shard ${provider_shard}"
+                IRONCLAW_PROVIDER_OPERATION_SHARD="${provider_shard}" \
+                  scripts/ci/run-hermetic-deterministic-suite.sh command pytest \
+                    tests/e2e/scenarios/test_reborn_qa_trace_full_path.py::test_provider_operation_case_executes_with_provider_readback \
+                    -m "not shared_world" -v --timeout=120
+                echo "::endgroup::"
+              done
               ;;
             *)
               echo "Unknown Reborn E2E lane: ${LANE}" >&2
@@ -547,7 +547,7 @@ jobs:
           esac
 
       - name: Replay provider journeys in reverse order
-        if: matrix.lane == 'provider-0' && inputs.reversed_journey_order
+        if: matrix.lane == 'provider-0-1' && inputs.reversed_journey_order
         env:
           IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
           IRONCLAW_JOURNEY_ORDER: reverse
@@ -560,7 +560,7 @@ jobs:
           --timeout=120
 
       - name: Replay each mutating journey alone
-        if: matrix.lane == 'provider-0' && inputs.alone_journey_replay
+        if: matrix.lane == 'provider-0-1' && inputs.alone_journey_replay
         env:
           IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
         run: |
