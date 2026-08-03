@@ -142,29 +142,20 @@ impl FirstPartyCapabilityHandler for AdminConfigurationReplaceHandler {
             .with_usage(resource_usage(started)));
         }
 
-        let input: ReplaceInput = serde_json::from_value(request.input).map_err(|_| {
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
-                .with_usage(resource_usage(started))
-        })?;
-        let group_id = AdminConfigurationGroupId::new(input.group_id).map_err(|_| {
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
-                .with_usage(resource_usage(started))
-        })?;
+        let input: ReplaceInput = serde_json::from_value(request.input)
+            .map_err(|error| rejected_input(started, "input", error))?;
+        let group_id = AdminConfigurationGroupId::new(input.group_id)
+            .map_err(|error| rejected_input(started, "group_id", error))?;
         let idempotency_key =
             AdminConfigurationIdempotencyKey::new(request.scope.invocation_id.to_string())
-                .map_err(|_| {
-                    FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
-                        .with_usage(resource_usage(started))
-                })?;
+                .map_err(|error| rejected_input(started, "idempotency_key", error))?;
         let submitted = input
             .values
             .into_iter()
             .map(|value| {
                 Ok(AdminConfigurationSubmittedValue {
-                    handle: SecretHandle::new(value.handle).map_err(|_| {
-                        FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
-                            .with_usage(resource_usage(started))
-                    })?,
+                    handle: SecretHandle::new(value.handle)
+                        .map_err(|error| rejected_input(started, "values[].handle", error))?,
                     value: SecretMaterial::from(value.value),
                 })
             })
@@ -190,6 +181,21 @@ impl FirstPartyCapabilityHandler for AdminConfigurationReplaceHandler {
 }
 
 impl AdminConfigurationReplaceHandler {
+    /// Refresh every installed extension that consumes the group.
+    ///
+    /// **This runs after the replacement is already durable.** `dispatch`
+    /// awaits `service.replace(..)` first, so a failure here reports
+    /// `OperationFailed` over a group whose new values *are* committed — the
+    /// caller must re-read rather than assume the write was rolled back.
+    ///
+    /// That asymmetry is deliberate, not an unhandled persist-then-reload gap.
+    /// Neither escape hatch fits: the replacement cannot be pre-validated
+    /// (whether an extension reactivates is only knowable by attempting it),
+    /// and rolling back would mean re-writing the previous secret values — a
+    /// second mutation of the same revision-guarded group, which is a worse
+    /// failure than a stale-but-live extension. What makes the exposure
+    /// bounded is that the group is revision- and idempotency-guarded, so the
+    /// caller's retry re-runs this refresh without re-applying the write.
     async fn reactivate_consumers(
         &self,
         group_id: &AdminConfigurationGroupId,
@@ -215,6 +221,35 @@ impl AdminConfigurationReplaceHandler {
         }
         Ok(())
     }
+}
+
+/// Reject one malformed piece of the replace input without discarding why.
+///
+/// `RuntimeDispatchErrorKind::InputEncode` carries no reason, and the operator
+/// gets nothing but that kind — so the parse/validation cause has nowhere to go
+/// except a log, and dropping the binding (`map_err(|_| …)`) would lose it for
+/// good. `debug!`, not `warn!`/`info!`: those corrupt the REPL/TUI, and a
+/// malformed payload is an internal diagnostic rather than operator-facing
+/// status.
+///
+/// Safe to record: the three validation causes name an identifier
+/// (`group_id`, the invocation-derived idempotency key, a field `handle`) and
+/// `serde_json`'s message names *fields* — `missing field \`group_id\``,
+/// `unknown field \`x\``. It never echoes a well-typed string, so a submitted
+/// secret value (always a JSON string here, and always routed to
+/// `SecretMaterial`) cannot reach this line.
+fn rejected_input(
+    started: Instant,
+    field: &'static str,
+    error: impl std::fmt::Display,
+) -> FirstPartyCapabilityError {
+    tracing::debug!(
+        error = %error,
+        field,
+        "admin-configuration replacement rejected malformed input"
+    );
+    FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
+        .with_usage(resource_usage(started))
 }
 
 fn is_operator_request(request: &FirstPartyCapabilityRequest, operator_user_id: &UserId) -> bool {
@@ -269,11 +304,18 @@ fn resource_usage(started: Instant) -> ResourceUsage {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_extension_host::{AdminConfigurationFieldState, AdminConfigurationGroupState};
+    use ironclaw_extension_host::{
+        AdminConfigurationFieldState, AdminConfigurationGroupState, ChannelConfigReactivationError,
+        FilesystemAdminConfigurationStore,
+    };
+    use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{
         ids::{AgentId, InvocationId, TenantId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
         resource::ResourceScope,
     };
+    use ironclaw_secrets::{SecretStore, SecretStorePort};
 
     use super::*;
 
@@ -302,6 +344,192 @@ mod tests {
         assert!(!is_operator_request(&request, &operator));
         request.authenticated_actor_user_id = Some(operator.clone());
         assert!(is_operator_request(&request, &operator));
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    struct SharedLogWriterGuard(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedLogWriterGuard {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogWriter {
+        type Writer = SharedLogWriterGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriterGuard(std::sync::Arc::clone(&self.0))
+        }
+    }
+
+    impl SharedLogWriter {
+        fn contents(&self) -> String {
+            String::from_utf8(
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone(),
+            )
+            .expect("tracing output is UTF-8")
+        }
+    }
+
+    struct NoopReactivation;
+
+    #[async_trait]
+    impl ChannelConfigReactivation for NoopReactivation {
+        async fn reactivate_if_active(
+            &self,
+            _extension_id: &ExtensionId,
+        ) -> Result<(), ChannelConfigReactivationError> {
+            Ok(())
+        }
+    }
+
+    /// A handler whose service declares no groups. Every case below is
+    /// rejected while parsing the payload, so the service is never reached —
+    /// which is the point: input rejection must not depend on backend state.
+    fn replace_handler(operator_user_id: UserId) -> AdminConfigurationReplaceHandler {
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let secrets: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+        let service = ComposedAdminConfigurationService::new(
+            FilesystemAdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
+                filesystem,
+                |_scope| {
+                    MountView::new(vec![MountGrant::new(
+                        MountAlias::new("/extension-admin-configuration").expect("mount alias"),
+                        VirtualPath::new("/tenants/test/shared/admin-configuration")
+                            .expect("virtual path"),
+                        MountPermissions::read_write_list_delete(),
+                    )])
+                },
+            ))),
+            secrets,
+            Vec::new(),
+        )
+        .expect("admin configuration service");
+        AdminConfigurationReplaceHandler {
+            service: Arc::new(service),
+            operator_user_id,
+            reactivation: Arc::new(NoopReactivation),
+            consumers: Arc::new(BTreeMap::new()),
+        }
+    }
+
+    /// Each malformed shape is refused as `InputEncode`, and the reason it was
+    /// refused survives in the log instead of being dropped on the floor.
+    ///
+    /// The dispatch error carries no reason field, so a `map_err(|_| …)` here
+    /// destroys the only copy of the cause — the operator sees "input encode"
+    /// and nothing, anywhere, says which field or why. That is why the log
+    /// half is asserted, and why a subscriber has to be installed for the
+    /// assertion to mean anything: `tracing` short-circuits on the null
+    /// dispatcher, so without one the macro body never runs and this could not
+    /// tell "recorded it" from "discarded it".
+    ///
+    /// The third case carries a secret sentinel behind an invalid handle, so
+    /// the same test also pins that recording the *cause* never starts
+    /// recording the submitted *value*.
+    #[test]
+    fn every_malformed_input_is_refused_as_input_encode_with_its_cause_recorded() {
+        let secret_sentinel = "submitted-secret-never-logged";
+        let operator = UserId::new("operator").expect("user id");
+        let handler = replace_handler(operator.clone());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        // `idempotency_key` has no case: it is derived from the scope's own
+        // `InvocationId`, which is always well-formed, so that arm is
+        // unreachable from any caller-supplied payload and defensive only.
+        let cases = [
+            (
+                "input",
+                "missing field",
+                serde_json::json!({ "group_id": "extension.fixture" }),
+            ),
+            (
+                "group_id",
+                "not a dotted identifier",
+                serde_json::json!({
+                    "group_id": "Not A Group",
+                    "expected_revision": 1,
+                    "values": [],
+                }),
+            ),
+            (
+                "values[].handle",
+                "not a valid secret handle",
+                serde_json::json!({
+                    "group_id": "extension.fixture",
+                    "expected_revision": 1,
+                    "values": [{ "handle": "Not A Handle!", "value": secret_sentinel }],
+                }),
+            ),
+        ];
+
+        for (field, why, input) in cases {
+            let logs = SharedLogWriter::default();
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_target(false)
+                .with_ansi(false)
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(logs.clone())
+                .finish();
+            let mut request = FirstPartyCapabilityRequest::request_for_test(
+                CapabilityId::new(ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID)
+                    .expect("capability id"),
+                ResourceScope {
+                    tenant_id: TenantId::new("tenant").expect("tenant"),
+                    user_id: operator.clone(),
+                    agent_id: None,
+                    project_id: None,
+                    mission_id: None,
+                    thread_id: None,
+                    invocation_id: InvocationId::new(),
+                },
+                input,
+                None,
+            );
+            request.authenticated_actor_user_id = Some(operator.clone());
+
+            let error = tracing::subscriber::with_default(subscriber, || {
+                runtime.block_on(handler.dispatch(request))
+            })
+            .err()
+            .unwrap_or_else(|| panic!("{field} ({why}) must be refused"));
+            assert_eq!(
+                error.kind(),
+                Some(RuntimeDispatchErrorKind::InputEncode),
+                "{field} ({why}) must stay an input-encode refusal"
+            );
+
+            let logged = logs.contents();
+            assert!(
+                logged.contains(field),
+                "{field} ({why}) must name the field it refused, got {logged:?}"
+            );
+            assert!(
+                logged.contains("rejected malformed input"),
+                "{field} ({why}) must keep the stable diagnostic, got {logged:?}"
+            );
+            assert!(
+                !logged.contains(secret_sentinel),
+                "a submitted value must never reach the diagnostic, got {logged:?}"
+            );
+        }
     }
 
     #[test]

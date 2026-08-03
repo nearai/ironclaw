@@ -29,6 +29,7 @@ memory-mem0 = ["dep:ironclaw_memory_mem0"]
 test-support = [
     "dep:ironclaw_first_party_extensions",
     "ironclaw_extension_host/test-support",
+    "ironclaw_extension_manager/test-support",
     "ironclaw_auth/test-support",
     "ironclaw_host_runtime/test-support",
     "ironclaw_loop_host/test-support",
@@ -59,6 +60,7 @@ ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version =
 ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_host_ingress = { path = "../ironclaw_host_ingress" }
 ironclaw_extension_host = { path = "../ironclaw_extension_host" }
+ironclaw_extension_manager = { path = "../ironclaw_extension_manager" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_llm = { path = "../ironclaw_llm", default-features = false, features = ["registry-provider-factory"] }
 ironclaw_loop_host = { path = "../ironclaw_loop_host" }
@@ -129,6 +131,7 @@ uuid = { version = "1", features = ["v4"] }
 [dev-dependencies]
 ironclaw_auth = { path = "../ironclaw_auth", features = ["test-support"] }
 ironclaw_extension_host = { path = "../ironclaw_extension_host", features = ["test-support"] }
+ironclaw_extension_manager = { path = "../ironclaw_extension_manager", features = ["test-support"] }
 # DEL-7: composition no longer links first-party extensions in production; the
 # binary injects them as neutral data. The dev-dependency stays so the crate's
 # own unit/integration tests (and the test-support inventory helper) can build

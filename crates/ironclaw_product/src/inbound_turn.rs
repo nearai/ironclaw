@@ -46,7 +46,7 @@ use crate::policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
     NoopBeforeInboundPolicy,
 };
-use crate::reborn_services::InboundAttachmentLander;
+use ironclaw_attachments::InboundAttachmentLander;
 
 #[cfg(not(any(test, feature = "test-support")))]
 const BEFORE_INBOUND_POLICY_TIMEOUT: Duration = Duration::from_secs(5);

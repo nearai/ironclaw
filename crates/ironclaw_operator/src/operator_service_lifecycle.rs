@@ -21,9 +21,10 @@ use std::os::unix::process::CommandExt;
 
 use async_trait::async_trait;
 use ironclaw_host_api::ids::{TenantId, UserId};
-use ironclaw_product::{
-    OperatorServiceLifecycleService, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
-    RebornServiceLifecycleResponse, RebornServiceLifecycleState,
+use ironclaw_product_contracts::operator_service::OperatorServiceLifecycleService;
+use ironclaw_product_contracts::product_wire::{
+    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
+    RebornServiceLifecycleState,
 };
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,

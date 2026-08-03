@@ -16,7 +16,7 @@ A type is admitted iff all four hold (the contracts-family test, §6.1):
 3. two or more consumers need it without importing an owner;
 4. it carries no execution, persistence, policy engine, or workflow.
 
-Today that is twenty-three shipped modules (plus the dev-only `test_support`, gated behind `#[cfg(any(test, feature = "test-support"))]`; `src/lib.rs` is the source of truth for the list):
+Today that is twenty-four shipped modules (plus the dev-only `test_support`, gated behind `#[cfg(any(test, feature = "test-support"))]`; `src/lib.rs` is the source of truth for the list):
 
 | Module | Owns |
 | --- | --- |
@@ -25,9 +25,9 @@ Today that is twenty-three shipped modules (plus the dev-only `test_support`, ga
 | `outbound` | The product projection wire: `ProductOutboundEnvelope`, `ProductProjectionState`/`Item`, the approval prompt views, capability activity views, progress views, `ProjectionCursor`. |
 | `projection` | The projection read/subscribe ports and their request DTOs (`ProjectionStream`, `ProjectionStreamSubscription`). |
 | `interaction_commands` | The channel-neutral interaction-reply grammar (`parse_interaction_resolution_text`). |
-| `operator_llm` | The operator LLM menu vocabulary. |
+| `operator_llm` | The operator LLM-administration port (`LlmConfigService`), the active-model read port (`ActiveModelReader`), the provider-menu and login/probe wire vocabulary, `LlmConfigServiceError`, and its projection onto `ProductSurfaceError`. Implemented by `ironclaw_operator`; the `llm_config` view descriptor and the "no service wired" error stay with product. |
 | `package_lifecycle` | Package/extension lifecycle projection vocabulary (`Lifecycle*`, `ChannelConnectStrategy`, `ChannelConfigField`) — see the ruling below. |
-| `lifecycle_service` | The lifecycle product service port (`LifecycleProductService`) and its caller contexts. Implemented by `ironclaw_extension_host` — the only crate that may write lifecycle state. |
+| `lifecycle_service` | The lifecycle product service port (`LifecycleProductService`) and its caller contexts. Implemented by `ironclaw_extension_manager` (WS2.4); the *authority* it calls — the only writer of lifecycle state — stayed in `ironclaw_extension_host`. |
 | `delivery` | The delivery-resolution ports: `ChannelDeliveryResolver`, `ResolvedChannelDelivery`, `DeliveryReplyContextSource`. The coordinator itself is product's. |
 | `account_setup` | `AccountConnectionStatusSource` + the extension account-setup descriptor/notice/error vocabulary. The declaration registry is product's (it holds mutable state). |
 | `channel_config` | `ChannelConfigProductService` — per-extension `[channel.config]` operator config, implemented over the installation store. |
@@ -41,6 +41,7 @@ Today that is twenty-three shipped modules (plus the dev-only `test_support`, ga
 | `inbound_requests` | The browser/API request bodies a transport hands to `ProductSurface` (`ProductSubmitTurnRequest`, `ProductCreateThreadRequest`, the cancel/gate/retry/setup/list bodies, `ProductInboundAttachment`). Field shapes and the `serde` contract only — normalization stays in product. |
 | `product_wire` | The `Reborn*` product wire DTO family every product transport serializes across the boundary. Payload vocabulary only: no service, handler, or projection reducer. |
 | `workspace_views` | Project and filesystem-browse wire vocabulary for the Projects page and the Workspace/Files explorer. The read ports that serve them stayed in product. |
+| `operator_service` | The deployment-operator control plane's three ports — `OperatorStatusService`, `OperatorLogsService`, `OperatorServiceLifecycleService` — their wire DTOs, and the log-context bound (`normalize_operator_log_context_value`). Implemented by `ironclaw_operator` except readiness status, which is composition's. Product keeps the `Unsupported*`/`Static*` doubles, the frozen view descriptors, and the operator *command-plane* envelope that wraps these DTOs. |
 | `error` | `ProductOperationFailure` — the error a product-side port fails with, and its projection onto `ProductSurfaceError`. Product's `ProductSurfaceFailure` is the superset and absorbs it; see the ruling below. |
 | `subject_route` | `ProductConversationSubjectRouteResolver` + `ProductConversationRouteKey` and its request. Shared-route subject resolution, implemented by `ironclaw_extension_host` over `[channel.config]`. |
 
@@ -126,14 +127,24 @@ packages call `render_channel_auth_prompt` from `deliver`. It lives in
 **The twelve ports WS2 relocated, and the five it could not.** The
 `extension_host` port-inversion row moved every product-declared port the
 extension host reaches whose signature this crate may legally name. **Ten of
-them `extension_host` itself implements** — those are the ones
-`reborn_extension_host_port_inversion.rs::INVERTED_PORTS` enumerates and pins:
-`AccountConnectionStatusSource`, `ApprovalPromptContextSource`,
-`BlockedAuthPromptSource`, `ChannelConfigProductService`,
-`ChannelDeliveryResolver`, `CommandActorRoleResolver`,
-`DeliveryReplyContextSource`, `LifecycleProductService`,
-`ProductConversationSubjectRouteResolver` (WS2.2, once the boundary error made
-it declarable), `RebornViewProvider`.
+them the extension side implements** — those are the ones
+`reborn_extension_host_port_inversion.rs::INVERTED_PORT_IMPLEMENTORS`
+enumerates and pins, each *with its implementing crate*, because WS2.4 split
+the extension-management product face out of the host and four of the ten went
+with it:
+
+| Port | Implemented by |
+|---|---|
+| `AccountConnectionStatusSource` | `ironclaw_extension_host` |
+| `ApprovalPromptContextSource` | `ironclaw_extension_host` |
+| `BlockedAuthPromptSource` | `ironclaw_extension_host` |
+| `ChannelDeliveryResolver` | `ironclaw_extension_host` |
+| `CommandActorRoleResolver` | `ironclaw_extension_host` |
+| `DeliveryReplyContextSource` | `ironclaw_extension_host` |
+| `ProductConversationSubjectRouteResolver` (WS2.2, once the boundary error made it declarable) | `ironclaw_extension_host` |
+| `ChannelConfigProductService` | `ironclaw_extension_manager` |
+| `LifecycleProductService` | `ironclaw_extension_manager` |
+| `RebornViewProvider` | `ironclaw_extension_manager` |
 **Two more it only consumes**, implemented in `ironclaw_reborn_composition`, and
 they moved for the same reason — a port whose implementation sits outside
 product does not belong inside it: `AdminUserService`,
@@ -157,6 +168,13 @@ shrink-only by
 `crates/ironclaw_architecture/tests/reborn_extension_host_port_inversion.rs`;
 **do not add a row there** — narrow the signature or move the type instead.
 
+The sibling gate `reborn_operator_port_inversion.rs` does the same job for
+`ironclaw_operator`, and its residue is **empty**: every port that crate
+implements is declared here. It additionally proves, through `cargo metadata`,
+that `ironclaw_operator` names no `ironclaw_product` dependency under any kind.
+Adding a product-declared port for the operator to implement will fail there
+before it fails anywhere else.
+
 **The error a port fails with lives here too** (`error::ProductOperationFailure`,
 WS2.2). It is the boundary vocabulary — six variants whose payloads are a plain
 `String` or nothing — so a crate below product can describe its own failure
@@ -175,6 +193,26 @@ Two rules follow, both pinned by tests:
   repeating the status choices, so the WebUI cannot get one answer through
   product's lifecycle service and a different one through the extension host's.
   Only the logging stays with each caller — this crate may not log.
+
+## Vendor neutrality has one live exception, and it is not a licence
+
+`llm_config` names NEAR AI and OpenAI Codex — three method names
+(`start_nearai_login`, `complete_nearai_wallet_login`, `start_codex_login`) and
+six DTOs (`NearAi*` ×5, `CodexLoginStart`). PROPOSAL §8.2's vendor rule
+sanctions vendor names in `ironclaw_operator` — that crate *is* the LLM-vendor
+admin layer — but **not** in the contracts family, and a port has to be
+declared where its implementor compiles against it.
+
+This is a recorded open decision on the CHECKLIST WS5 operator row, with two
+ways out: narrow the port to a neutral provider-login shape, or amend §8.2 to
+name this module. Until it resolves:
+
+- **Do not add a seventh vendor name here.** A new provider login belongs
+  behind a neutral shape, not beside these six.
+- The two names the specificity scanner can see —
+  `NearAiAuthProvider::{Github, Google}` — carry allowlist entries that were
+  **repointed** from `ironclaw_product`, not added. The baseline did not move
+  and must not move for this module.
 
 ## Deferred by design (not missing)
 

@@ -828,7 +828,7 @@ async fn fail_forced_tool_replacement(
 
 fn configured_service(
     skill_management: Arc<ironclaw_skills::ScopedSkillManagementPort>,
-    extension_management: Arc<crate::ExtensionLifecycleManager>,
+    extension_management: Arc<ironclaw_extension_host::ExtensionLifecycleManager>,
     egress: Arc<RecordingEgress>,
     scope: ResourceScope,
     manifest_url: &str,

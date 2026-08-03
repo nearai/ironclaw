@@ -6,7 +6,8 @@
 //! concrete views is product's frozen surface and stays there; the descriptor,
 //! the page envelope, and the port a view provider implements are boundary
 //! vocabulary, because providers legitimately sit outside product — the
-//! admin-configuration view is implemented by `ironclaw_extension_host`.
+//! admin-configuration view is implemented by `ironclaw_extension_manager`
+//! (WS2.4).
 //!
 //! Never here: any concrete view id, or any provider implementation. The typed
 //! `ProductView` declaration wrapper lives beside the other two operation

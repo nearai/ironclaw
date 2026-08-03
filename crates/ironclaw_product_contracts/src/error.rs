@@ -122,6 +122,8 @@ impl From<ProductOperationFailure> for ProductSurfaceError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use crate::surface::ProductSurfaceErrorKind;
 
@@ -260,17 +262,117 @@ mod tests {
         }
     }
 
+    /// Discriminant name of a `HostApiError`, by an exhaustive `match`.
+    ///
+    /// The exhaustiveness is the point: a new `HostApiError` variant stops
+    /// compiling here, which forces whoever adds it to decide how it reaches a
+    /// caller instead of inheriting the blanket mapping silently.
+    fn host_api_error_tag(error: &HostApiError) -> &'static str {
+        match error {
+            HostApiError::InvalidId { .. } => "InvalidId",
+            HostApiError::InvalidPath { .. } => "InvalidPath",
+            HostApiError::InvalidCapability { .. } => "InvalidCapability",
+            HostApiError::InvalidMount { .. } => "InvalidMount",
+            HostApiError::InvalidNetworkTarget { .. } => "InvalidNetworkTarget",
+            HostApiError::InvalidRuntimeCredentialTarget { .. } => "InvalidRuntimeCredentialTarget",
+            HostApiError::InvalidSafeSummary { .. } => "InvalidSafeSummary",
+            HostApiError::InvalidModelDiagnostic { .. } => "InvalidModelDiagnostic",
+            HostApiError::InvalidHostRemediation { .. } => "InvalidHostRemediation",
+            HostApiError::InvariantViolation { .. } => "InvariantViolation",
+        }
+    }
+
+    /// `HostApiError` is validation feedback, so it lands on the caller's side
+    /// of the boundary rather than reading as a service outage.
+    ///
+    /// **Every variant is enumerated**, `InvariantViolation` included. That one
+    /// is an internal protocol mismatch rather than caller input, so its 400
+    /// arguably overstates client responsibility — but the classification is
+    /// not this slice's: `ironclaw_product`'s `From<HostApiError> for
+    /// ProductSurfaceFailure` has always been the same blanket mapping, and the
+    /// impl under test mirrors it so the two absorption paths cannot disagree.
+    /// It is pinned here rather than changed so that reclassifying it is a
+    /// deliberate edit with a failing test, not silent drift. (It is also
+    /// unreachable on this path today: the only construction outside
+    /// `ironclaw_host_api` itself is in a gsuite handler, which does not reach
+    /// a product-side port.)
     #[test]
     fn host_api_errors_become_invalid_requests_not_transient_failures() {
-        let failure: ProductOperationFailure = HostApiError::InvalidId {
-            kind: "extension",
-            value: String::new(),
-            reason: "blank".to_string(),
+        let cases = [
+            HostApiError::InvalidId {
+                kind: "extension",
+                value: String::new(),
+                reason: "blank".to_string(),
+            },
+            HostApiError::InvalidPath {
+                value: "../escape".to_string(),
+                reason: "dot-dot".to_string(),
+            },
+            HostApiError::InvalidCapability {
+                value: "teleport".to_string(),
+                reason: "unknown".to_string(),
+            },
+            HostApiError::InvalidMount {
+                value: "/nowhere".to_string(),
+                reason: "unmounted".to_string(),
+            },
+            HostApiError::InvalidNetworkTarget {
+                value: "10.0.0.1".to_string(),
+                reason: "private range".to_string(),
+            },
+            HostApiError::InvalidRuntimeCredentialTarget {
+                value: "google".to_string(),
+                reason: "not declared".to_string(),
+            },
+            HostApiError::InvalidSafeSummary {
+                reason: "too long".to_string(),
+            },
+            HostApiError::InvalidModelDiagnostic {
+                reason: "empty".to_string(),
+            },
+            HostApiError::InvalidHostRemediation {
+                reason: "empty".to_string(),
+            },
+            HostApiError::InvariantViolation {
+                reason: "port answered for an unrequested id".to_string(),
+            },
+        ];
+
+        let covered: BTreeSet<&'static str> = cases.iter().map(host_api_error_tag).collect();
+        assert_eq!(
+            covered.len(),
+            cases.len(),
+            "each variant is enumerated exactly once: {covered:?}"
+        );
+        assert_eq!(
+            covered.len(),
+            10,
+            "a HostApiError variant was added without a case here: {covered:?}"
+        );
+
+        for error in cases {
+            let tag = host_api_error_tag(&error);
+            let rendered = error.to_string();
+            let failure: ProductOperationFailure = error.into();
+            let ProductOperationFailure::InvalidBindingRequest { reason } = &failure else {
+                panic!("{tag} projected to {failure:?}, not InvalidBindingRequest");
+            };
+            assert_eq!(
+                reason, &rendered,
+                "{tag} must carry its own rendering, or the cause is lost at the boundary"
+            );
+
+            // The consequence a caller actually sees. Pinned alongside the
+            // discriminant so a status change cannot slip through by editing
+            // only the projection table above.
+            let projected: ProductSurfaceError = failure.into();
+            assert_eq!(
+                projected.code,
+                ProductSurfaceErrorCode::InvalidRequest,
+                "{tag}"
+            );
+            assert_eq!(projected.status_code, 400, "{tag}");
+            assert!(!projected.retryable, "{tag}");
         }
-        .into();
-        assert!(matches!(
-            failure,
-            ProductOperationFailure::InvalidBindingRequest { .. }
-        ));
     }
 }

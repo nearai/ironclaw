@@ -550,7 +550,12 @@ impl HostedMcpPreparationService {
                 reason: "hosted MCP OAuth metadata response was invalid".to_string(),
             });
         }
-        serde_json::from_slice(&response.body).map_err(|_| {
+        serde_json::from_slice(&response.body).map_err(|error| {
+            // Same shape as the fetch arm above: the `reason` crossing the
+            // boundary is fixed text (the document came from a third-party
+            // server and must not be echoed), so the parse error is the only
+            // thing that says *why* it was malformed. Logged, never dropped.
+            tracing::debug!(%error, "hosted MCP OAuth metadata document was malformed");
             ProductOperationFailure::InvalidBindingRequest {
                 reason: "hosted MCP OAuth metadata document was malformed".to_string(),
             }

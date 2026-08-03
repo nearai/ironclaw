@@ -44,15 +44,13 @@ use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
     ADMIN_USER_SET_ROLE_CAPABILITY_ID, ADMIN_USER_SET_STATUS_CAPABILITY_ID,
     ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW, ADMIN_USERS_VIEW, AUTOMATIONS_VIEW,
-    CodexLoginStart, EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
+    EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
     EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW,
     EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
     EXTENSIONS_VIEW, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW,
     LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
     LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
-    LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
-    LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
-    NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
     OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
     OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID,
     OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
@@ -78,10 +76,10 @@ use ironclaw_product::{
     RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
     RebornGetProjectRequest, RebornGetRunStateResponse, RebornGlobalAutoApproveRequest,
     RebornGlobalAutoApproveResponse, RebornListAutomationsResponse, RebornListMembersResponse,
-    RebornListProjectsResponse, RebornListThreadsResponse, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornListProjectsResponse, RebornListThreadsResponse, RebornOperatorArea,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
@@ -115,6 +113,12 @@ use ironclaw_product::{
 use ironclaw_product_contracts::admin_users::{
     AdminUserRecord, AdminUserRole, AdminUserSecretMeta, AdminUserStatus,
 };
+use ironclaw_product_contracts::operator_llm::{
+    CodexLoginStart, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
+    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult,
+};
+use ironclaw_product_contracts::product_wire::{RebornLogQueryRequest, RebornLogQueryResponse};
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
     ProductSurfaceErrorKind, ProductSurfaceEventSubscription, ProductSurfaceStreamResponse,
@@ -3780,7 +3784,7 @@ async fn get_session_returns_caller_identity_and_capabilities() {
     // rather than a static frontend list that can drift. The `accept` tokens
     // must be exactly the shared format registry's output (drift kill), and
     // the budgets must match what `decode_attachments` enforces.
-    let expected = ironclaw_product::product_attachment_capabilities();
+    let expected = ironclaw_attachments::attachment_capabilities();
     let accept: Vec<String> = body["attachments"]["accept"]
         .as_array()
         .expect("attachments.accept is an array")
