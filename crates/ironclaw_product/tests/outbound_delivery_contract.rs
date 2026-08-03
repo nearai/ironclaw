@@ -245,7 +245,7 @@ fn trigger_context() -> ironclaw_outbound::TriggerCommunicationContext {
 
 fn configured_policy<'a>(
     store: &'a OutboundStateStore<InMemoryBackend>,
-    validator: &'a FakeReplyTargetBindingValidator,
+    validator: &'a dyn ReplyTargetBindingValidator,
 ) -> OutboundPolicyService<'a> {
     OutboundPolicyService::new(store, &ACCESS_POLICY, validator)
 }
