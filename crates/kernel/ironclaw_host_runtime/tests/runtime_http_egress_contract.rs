@@ -201,13 +201,14 @@ fn tool_call_http_egress_returns_network_error_when_partial_response_is_missing(
 #[tokio::test]
 async fn host_http_egress_composes_and_redacts_rfc7617_basic_credentials() {
     let encoded = "d2F6dWgtd3VpOnMzY3IzdA==";
+    let authorization = format!("Basic {encoded}");
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
-        body: encoded.as_bytes().to_vec(),
+        body: authorization.as_bytes().to_vec(),
         usage: NetworkUsage {
             request_bytes: 5,
-            response_bytes: encoded.len() as u64,
+            response_bytes: authorization.len() as u64,
             resolved_ip: None,
         },
     });
@@ -252,14 +253,14 @@ async fn host_http_egress_composes_and_redacts_rfc7617_basic_credentials() {
 
     let requests = network_recorder.lock().unwrap();
     assert_eq!(requests.len(), 1);
-    let authorization = requests[0]
+    let injected_authorization = requests[0]
         .headers
         .iter()
         .find(|(name, _)| name == "Authorization")
         .expect("Authorization header is present");
     // base64("wazuh-wui:s3cr3t")
-    assert_eq!(authorization.1, "Basic d2F6dWgtd3VpOnMzY3IzdA==");
-    assert!(!authorization.1.contains("s3cr3t"));
+    assert_eq!(injected_authorization.1, authorization);
+    assert!(!injected_authorization.1.contains("s3cr3t"));
 }
 
 #[tokio::test]

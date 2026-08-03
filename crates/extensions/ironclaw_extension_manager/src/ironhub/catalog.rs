@@ -9,15 +9,15 @@ use ironclaw_skills::{
     MAX_INSTALL_BUNDLE_FILE_BYTES, MAX_INSTALL_BUNDLE_FILES, MAX_INSTALL_BUNDLE_TOTAL_BYTES,
 };
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 
 use crate::ironhub::{
     artifact_hosts::is_allowed_artifact_host,
     model::{
         IronHubArtifact, IronHubCommandError, IronHubEntryKind, IronHubEntrySummary,
         IronHubInstallOptions, IronHubManifest, IronHubProvenance, IronHubSkillEntry,
-        IronHubToolEntry, MANIFEST_VERIFY_KEYS, MAX_METADATA_BYTES, MAX_TOOL_PROMPT_ARTIFACTS,
         IronHubSkillFile, IronHubToolEntry, MANIFEST_VERIFY_KEYS, MAX_METADATA_BYTES,
-        MAX_TOOL_SCHEMA_ARTIFACTS, MAX_WASM_BYTES, SignedManifestEnvelope,
+        MAX_TOOL_PROMPT_ARTIFACTS, MAX_TOOL_SCHEMA_ARTIFACTS, MAX_WASM_BYTES, SignedManifestEnvelope,
     },
 };
 
@@ -352,13 +352,30 @@ fn validate_manifest_artifacts(
             )));
         }
         let mut bundle_bytes: u64 = 0;
+        let mut bundle_destinations = BTreeSet::new();
         for file in &entry.files {
-            ironclaw_skills::validate_install_bundle_relative_path(&file.path).map_err(|_| {
-                catalog(format!(
-                    "skill '{}' publishes an invalid bundled file path",
+            let destination =
+                match ironclaw_skills::normalize_install_bundle_relative_path(&file.path) {
+                    Ok(destination) => destination,
+                    Err(error) => {
+                        tracing::debug!(
+                            ?error,
+                            skill = %entry.name,
+                            path = %file.path,
+                            "IronHub skill publishes an invalid bundled file path"
+                        );
+                        return Err(catalog(format!(
+                            "skill '{}' publishes an invalid bundled file path",
+                            entry.name
+                        )));
+                    }
+                };
+            if !bundle_destinations.insert(destination) {
+                return Err(catalog(format!(
+                    "skill '{}' publishes duplicate bundled file destinations",
                     entry.name
-                ))
-            })?;
+                )));
+            }
             validate_artifact_for_origin(&file.artifact, skill_file_byte_cap(), origin)?;
             bundle_bytes = bundle_bytes.saturating_add(file.artifact.size_bytes);
         }
