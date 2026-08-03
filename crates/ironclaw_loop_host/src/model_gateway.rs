@@ -1,9 +1,17 @@
 // arch-exempt: large_file, targeted model error mapping stays with the gateway adapter, plan #4088
 //! LLM provider-backed Reborn model gateway wiring.
 //!
-//! The loop-host crate owns the host-facing model gateway contract. This
-//! adapter lives in the standalone Reborn composition crate because it bridges
-//! that contract to the shared `ironclaw_llm` provider abstraction.
+//! This crate owns the host-facing `HostManagedModelGateway` contract, and this
+//! module is its only production implementation: the adapter that bridges that
+//! contract to the shared `ironclaw_llm` provider abstraction. It moved here
+//! from `ironclaw_runner` with the WS3 runner sheds (PROPOSAL §6.7.2 — "gains:
+//! runner's model-gateway adapter (a host-port adapter by charter)"); the doc
+//! it replaces claimed the adapter lived "in the standalone Reborn composition
+//! crate", which was never true of any tree.
+//!
+//! This is the one module in `ironclaw_loop_host` permitted to name a provider
+//! client. `families/loop.md` allows "a provider client … beyond what a single
+//! port adapter strictly needs" nowhere else in the crate.
 
 use std::{
     collections::{HashMap, HashSet},
