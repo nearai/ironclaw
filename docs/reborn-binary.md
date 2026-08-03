@@ -387,6 +387,18 @@ Expected fields include:
 - `v1_state: not-used`
 - `driver_registry: initialized`
 
+When one or more ambient proxy environment variables are present, `doctor`
+also reports a `host_mediated_ambient_proxy` check. The check reports only that
+ambient proxy configuration is present; it never emits proxy URLs, credentials,
+or other environment-variable values. When none of those variables are present,
+the check is omitted.
+
+The diagnostic reflects the host-mediated network behavior established by
+#7016: `ReqwestNetworkTransport` ignores ambient proxy discovery so an approved,
+pinned destination remains authoritative. It does not imply support for an
+explicit proxy configuration. LLM-provider clients and sandbox egress have
+separate proxy policies and are outside this check.
+
 ### `hooks list` — disabled
 
 Same treatment as `channels list` above: the Reborn hook registry is not
