@@ -199,6 +199,66 @@ fn tool_call_http_egress_returns_network_error_when_partial_response_is_missing(
 }
 
 #[tokio::test]
+async fn host_http_egress_composes_rfc7617_basic_from_username_and_secret() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(&services, &scope, &capability_id, &handle, "s3cr3t");
+    let service = services.host_http_egress(network);
+
+    service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: scope.clone(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: handle.clone(),
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
+                target: RuntimeCredentialTarget::Basic {
+                    username: "wazuh-wui".to_string(),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .await
+        .expect("basic credential should be injected through host egress");
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let authorization = requests[0]
+        .headers
+        .iter()
+        .find(|(name, _)| name == "Authorization")
+        .expect("Authorization header is present");
+    // base64("wazuh-wui:s3cr3t")
+    assert_eq!(authorization.1, "Basic d2F6dWgtd3VpOnMzY3IzdA==");
+    assert!(!authorization.1.contains("s3cr3t"));
+}
+
+#[tokio::test]
 async fn host_http_egress_consumes_staged_obligation_secret_once() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,

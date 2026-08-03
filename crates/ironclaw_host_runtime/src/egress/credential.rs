@@ -1,3 +1,4 @@
+use base64::Engine;
 use ironclaw_host_api::{
     http::{
         RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
@@ -396,6 +397,21 @@ fn apply_credential_injection(
                 });
             }
             request.headers.push((name.clone(), injected));
+        }
+        RuntimeCredentialTarget::Basic { username } => {
+            if username.contains(':')
+                || username.chars().any(char::is_control)
+                || value.chars().any(char::is_control)
+            {
+                return Err(RuntimeHttpEgressError::Credential {
+                    reason: "credential injection basic username or secret is invalid".to_string(),
+                });
+            }
+            let encoded = base64::engine::general_purpose::STANDARD
+                .encode(format!("{username}:{value}").as_bytes());
+            request
+                .headers
+                .push(("Authorization".to_string(), format!("Basic {encoded}")));
         }
         RuntimeCredentialTarget::QueryParam { name } => {
             let url = parsed_request_url(&request.url, parsed_url)?;

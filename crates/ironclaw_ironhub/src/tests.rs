@@ -36,7 +36,7 @@ use super::link_service::{
 };
 use super::model::{
     IronHubArtifact, IronHubCommand, IronHubCommandError, IronHubEntryKind, IronHubInstallOptions,
-    IronHubManifest, IronHubPhase, IronHubProvenance, IronHubSkillEntry,
+    IronHubManifest, IronHubPhase, IronHubProvenance, IronHubSkillEntry, IronHubSkillFile,
 };
 use super::service::{
     IronHubService, RebornIronHubRuntime, clear_test_manifest_cache, configure_test_catalog,
@@ -449,6 +449,127 @@ fn signed_catalog_verification_rejects_bad_signature() {
     assert_eq!(error, "manifest signature verification failed");
 }
 
+fn skill_manifest_with_files(files: Vec<IronHubSkillFile>) -> IronHubManifest {
+    IronHubManifest {
+        version: "1".to_string(),
+        generated_at: "2026-01-01T00:00:00Z".to_string(),
+        release_tag: "test".to_string(),
+        repo: "nearai/ironhub".to_string(),
+        tools: Vec::new(),
+        skills: vec![IronHubSkillEntry {
+            name: "bundled-skill".to_string(),
+            trunk: String::new(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            provenance: IronHubProvenance::Official,
+            skill_md: IronHubArtifact {
+                url: "https://hub.ironclaw.com/bundled-skill/SKILL.md".to_string(),
+                size_bytes: 10,
+                sha256: "a".repeat(64),
+            },
+            files,
+        }],
+    }
+}
+
+fn skill_file(path: &str, sha256: &str) -> IronHubSkillFile {
+    IronHubSkillFile {
+        path: path.to_string(),
+        artifact: IronHubArtifact {
+            url: format!("https://hub.ironclaw.com/bundled-skill/{path}"),
+            size_bytes: 4,
+            sha256: sha256.to_string(),
+        },
+    }
+}
+
+fn bundled_skill_digest(manifest: &IronHubManifest) -> String {
+    let (_, _, digest) = classify_gate_and_digest(
+        manifest,
+        "bundled-skill",
+        Some(IronHubEntryKind::Skill),
+        &IronHubInstallOptions::default(),
+        IronHubManifestSource::Public,
+    )
+    .expect("official skill classifies");
+    digest
+}
+
+#[test]
+fn a_companion_file_change_moves_the_skill_artifact_digest() {
+    let before = bundled_skill_digest(&skill_manifest_with_files(vec![skill_file(
+        "scripts/run.py",
+        &"1".repeat(64),
+    )]));
+    let changed = bundled_skill_digest(&skill_manifest_with_files(vec![skill_file(
+        "scripts/run.py",
+        &"2".repeat(64),
+    )]));
+    let renamed = bundled_skill_digest(&skill_manifest_with_files(vec![skill_file(
+        "scripts/other.py",
+        &"1".repeat(64),
+    )]));
+    let dropped = bundled_skill_digest(&skill_manifest_with_files(Vec::new()));
+
+    assert_ne!(before, changed);
+    assert_ne!(before, renamed);
+    assert_ne!(before, dropped);
+}
+
+#[test]
+fn companion_file_order_does_not_change_the_skill_artifact_digest() {
+    let forward = bundled_skill_digest(&skill_manifest_with_files(vec![
+        skill_file("scripts/a.py", &"1".repeat(64)),
+        skill_file("scripts/b.py", &"2".repeat(64)),
+    ]));
+    let reversed = bundled_skill_digest(&skill_manifest_with_files(vec![
+        skill_file("scripts/b.py", &"2".repeat(64)),
+        skill_file("scripts/a.py", &"1".repeat(64)),
+    ]));
+
+    assert_eq!(forward, reversed);
+}
+
+#[test]
+fn a_skill_without_companion_files_keeps_its_established_digest() {
+    let manifest = skill_manifest_with_files(Vec::new());
+    assert_eq!(
+        bundled_skill_digest(&manifest),
+        format!(
+            "sha256:{}",
+            sha256_hex(manifest.skills[0].skill_md.sha256.as_bytes())
+        )
+    );
+}
+
+#[test]
+fn a_skill_companion_path_that_escapes_the_package_is_rejected() {
+    let manifest = skill_manifest_with_files(vec![skill_file("../escape.py", &"1".repeat(64))]);
+    assert!(validate_manifest(&manifest).is_err());
+}
+
+#[test]
+fn a_skill_bundle_is_bounded_by_count_and_total_declared_bytes() {
+    let mut too_many = Vec::new();
+    for index in 0..=ironclaw_skills::MAX_INSTALL_BUNDLE_FILES {
+        too_many.push(skill_file(&format!("scripts/f{index}.py"), &"1".repeat(64)));
+    }
+    assert!(validate_manifest(&skill_manifest_with_files(too_many)).is_err());
+
+    let per_file = u64::try_from(ironclaw_skills::MAX_INSTALL_BUNDLE_FILE_BYTES).expect("cap");
+    let mut oversize = skill_file("scripts/big.py", &"1".repeat(64));
+    oversize.artifact.size_bytes = per_file + 1;
+    assert!(validate_manifest(&skill_manifest_with_files(vec![oversize])).is_err());
+
+    let mut total = Vec::new();
+    for index in 0..32 {
+        let mut file = skill_file(&format!("scripts/g{index}.py"), &"1".repeat(64));
+        file.artifact.size_bytes = per_file;
+        total.push(file);
+    }
+    assert!(validate_manifest(&skill_manifest_with_files(total)).is_err());
+}
+
 #[test]
 fn unverified_entry_requires_non_model_operator_acknowledgement() {
     let manifest = IronHubManifest {
@@ -468,6 +589,7 @@ fn unverified_entry_requires_non_model_operator_acknowledgement() {
                 size_bytes: 10,
                 sha256: "a".repeat(64),
             },
+            files: Vec::new(),
         }],
     };
 
@@ -901,6 +1023,8 @@ async fn verified_tool_and_skill_install_through_real_managers() {
     let skill_bytes =
         b"---\nname: installed-skill\ndescription: Installed by IronHub\n---\n# Installed\n"
             .to_vec();
+    let skill_file_url = "https://hub.ironclaw.com/tests/native-install/scripts/run.py";
+    let skill_file_bytes = b"print('installed companion')\n".to_vec();
     let manifest = signed_manifest(
         mixed_manifest_json(MixedManifestFixture {
             tool_url,
@@ -912,6 +1036,9 @@ async fn verified_tool_and_skill_install_through_real_managers() {
             skill_url,
             skill_size: skill_bytes.len(),
             skill_sha: &sha256_hex(&skill_bytes),
+            skill_file_url,
+            skill_file_size: skill_file_bytes.len(),
+            skill_file_sha: &sha256_hex(&skill_file_bytes),
             tool_manifest_url,
             input_schema_url,
             output_schema_url,
@@ -926,6 +1053,7 @@ async fn verified_tool_and_skill_install_through_real_managers() {
         (input_schema_url, published_input_schema()),
         (output_schema_url, published_output_schema()),
         (skill_url, skill_bytes),
+        (skill_file_url, skill_file_bytes.clone()),
     ]));
     let service = configure_test_catalog(
         IronHubService::new_with_runtime_egress(
@@ -1009,17 +1137,31 @@ async fn verified_tool_and_skill_install_through_real_managers() {
         .await
         .expect("verified skill installs");
     assert_eq!(skill.phase, IronHubPhase::Installed);
+    let companion_path = VirtualPath::new(format!(
+        "/projects/tenants/{}/users/{}/skills/installed-skill/scripts/run.py",
+        scope.tenant_id.as_str(),
+        scope.user_id.as_str()
+    ))
+    .expect("companion path");
     let installed_skill = services
         .skill_management
         .read_content_for_scope(scope, "installed-skill")
         .await
         .expect("skill manager reads installed skill");
     assert!(installed_skill.content.contains("# Installed"));
+    assert_eq!(
+        services
+            .filesystem
+            .read_file(&companion_path)
+            .await
+            .expect("published skill file materialized"),
+        skill_file_bytes,
+    );
 
     let requests = egress.requests();
     // Catalog, then the tool's manifest, wasm, capabilities, and two schemas,
-    // then the skill.
-    assert_eq!(requests.len(), 7);
+    // then the skill and its companion file.
+    assert_eq!(requests.len(), 8);
     assert!(requests.iter().all(|request| {
         request.runtime == RuntimeKind::FirstParty
             && request.policy.deny_private_ip_ranges
@@ -1913,6 +2055,7 @@ fn skill_manifest(
                 size_bytes: u64::try_from(artifact.len()).expect("test artifact length"),
                 sha256: sha256_hex(artifact),
             },
+            files: Vec::new(),
         }],
     }
 }
@@ -2031,6 +2174,9 @@ struct MixedManifestFixture<'a> {
     skill_url: &'a str,
     skill_size: usize,
     skill_sha: &'a str,
+    skill_file_url: &'a str,
+    skill_file_size: usize,
+    skill_file_sha: &'a str,
     tool_manifest_url: &'a str,
     input_schema_url: &'a str,
     output_schema_url: &'a str,
@@ -2047,6 +2193,9 @@ fn mixed_manifest_json(fixture: MixedManifestFixture<'_>) -> String {
         skill_url,
         skill_size,
         skill_sha,
+        skill_file_url,
+        skill_file_size,
+        skill_file_sha,
         tool_manifest_url,
         input_schema_url,
         output_schema_url,
@@ -2084,7 +2233,13 @@ fn mixed_manifest_json(fixture: MixedManifestFixture<'_>) -> String {
                 "url": skill_url,
                 "size_bytes": skill_size,
                 "sha256": skill_sha
-            }
+            },
+            "files": [{
+                "path": "scripts/run.py",
+                "url": skill_file_url,
+                "size_bytes": skill_file_size,
+                "sha256": skill_file_sha
+            }]
         }]
     })
     .to_string()

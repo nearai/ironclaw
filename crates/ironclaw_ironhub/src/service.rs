@@ -28,9 +28,10 @@ use ironclaw_extension_host::ExtensionLifecycleManager;
 use super::catalog::{
     CatalogOrigin, IronHubManifestSource, catalog, classify, classify_gate_and_digest,
     compact_skill_summary, compact_tool_summary, entry_matches, invalid,
-    network_policy_for_url_from_origin, sha256_hex, skill_summary, tool_summary,
-    validate_artifact_for_origin, validate_artifact_url, validate_hub_name, validate_manifest,
-    validate_private_manifest, validate_private_manifest_origin, verify_signed_manifest,
+    network_policy_for_url_from_origin, sha256_hex, skill_file_byte_cap, skill_summary,
+    tool_summary, validate_artifact_for_origin, validate_artifact_url, validate_hub_name,
+    validate_manifest, validate_private_manifest, validate_private_manifest_origin,
+    verify_signed_manifest,
 };
 use super::model::{
     DEFAULT_IRONHUB_MANIFEST_URL, IronHubArtifact, IronHubCommand, IronHubCommandError,
@@ -307,8 +308,25 @@ impl IronHubService {
                     .as_ref()
                     .map(CatalogOrigin::redacted_source_url)
                     .unwrap_or_else(|| entry.skill_md.url.clone());
+                let mut files = Vec::with_capacity(entry.files.len());
+                for file in &entry.files {
+                    let contents = self
+                        .download_verified(
+                            &file.artifact,
+                            skill_file_byte_cap(),
+                            private_origin.as_ref(),
+                        )
+                        .await?;
+                    files.push((file.path.clone(), contents));
+                }
                 let installed = self
-                    .install_skill(entry.name.as_str(), &content, &source_url, options.force)
+                    .install_skill(
+                        entry.name.as_str(),
+                        &content,
+                        &files,
+                        &source_url,
+                        options.force,
+                    )
                     .await?;
                 LifecycleProductResponse {
                     package_ref: Some(
@@ -422,12 +440,26 @@ impl IronHubService {
         &self,
         name: &str,
         content: &str,
+        files: &[(String, Vec<u8>)],
         source_url: &str,
         force: bool,
     ) -> Result<ironclaw_skills::SkillInstallResult, IronHubCommandError> {
+        let bundle: Vec<ironclaw_skills::SkillInstallFile<'_>> = files
+            .iter()
+            .map(|(path, contents)| ironclaw_skills::SkillInstallFile {
+                relative_path: path.as_str(),
+                contents: contents.as_slice(),
+            })
+            .collect();
         let first = self
             .skill_management
-            .install_from_url_for_scope(self.scope.clone(), Some(name), content, source_url)
+            .install_from_url_for_scope(
+                self.scope.clone(),
+                Some(name),
+                content,
+                &bundle,
+                source_url,
+            )
             .await;
         let Err(error) = first else {
             return first.map_err(skill_install_error);
@@ -446,7 +478,13 @@ impl IronHubService {
             .map_err(skill_install_error)?;
         match self
             .skill_management
-            .install_from_url_for_scope(self.scope.clone(), Some(name), content, source_url)
+            .install_from_url_for_scope(
+                self.scope.clone(),
+                Some(name),
+                content,
+                &bundle,
+                source_url,
+            )
             .await
         {
             Ok(result) => Ok(result),

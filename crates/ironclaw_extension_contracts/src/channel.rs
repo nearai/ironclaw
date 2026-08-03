@@ -198,6 +198,11 @@ impl ChannelDescriptor {
                                 .chars()
                                 .all(|c| c.is_ascii_alphanumeric() || c == '_')
                     }
+                    ironclaw_host_api::http::RuntimeCredentialTarget::Basic { username } => {
+                        !username.trim().is_empty()
+                            && !username.contains(':')
+                            && !username.chars().any(char::is_control)
+                    }
                     ironclaw_host_api::http::RuntimeCredentialTarget::BodyJsonPointer {
                         pointer,
                         ..
