@@ -1,17 +1,31 @@
+use std::sync::LazyLock;
+
 use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_safety::LeakDetector;
 use ironclaw_wasm::{WasmError, WasmLogLevel, WasmLogRecord};
+
+const WASM_DIAGNOSTIC_MAX_BYTES: usize = 4096;
+const WASM_DIAGNOSTIC_REDACTION_MARKER: &str = "[WASM_DIAGNOSTIC_REDACTED]";
+const LEAK_DETECTOR_REDACTION_MARKER: &str = "[REDACTED]";
+
+/// Shared leak detector for guest-controlled tracing fields. Building a
+/// detector compiles its regex registry and prefix matcher, so keep one at the
+/// sink instead of rebuilding it for every guest log record.
+static WASM_DIAGNOSTIC_LEAK_DETECTOR: LazyLock<LeakDetector> = LazyLock::new(LeakDetector::new);
 
 pub(super) fn log_wasm_runtime_error(capability_id: &CapabilityId, error: &WasmError) {
     if let WasmError::ExecutionFailed { message, logs, .. } = error {
         log_wasm_guest_logs(capability_id, logs);
+        let message = sanitize_wasm_diagnostic(message);
         tracing::debug!(
             capability_id = %capability_id,
             wasm_error = %message,
-            "WASM runtime execution failed with raw guest error"
+            "WASM runtime execution failed with guest diagnostic"
         );
         return;
     }
 
+    let error = sanitize_wasm_diagnostic(&error.to_string());
     tracing::debug!(
         capability_id = %capability_id,
         wasm_error = %error,
@@ -25,43 +39,72 @@ pub(super) fn log_wasm_guest_error(
     error: &str,
 ) {
     log_wasm_guest_logs(capability_id, logs);
+    let error = sanitize_wasm_diagnostic(error);
     tracing::debug!(
         capability_id = %capability_id,
         wasm_error = %error,
-        "WASM guest returned raw capability error"
+        "WASM guest returned capability error diagnostic"
     );
 }
 
 fn log_wasm_guest_logs(capability_id: &CapabilityId, logs: &[WasmLogRecord]) {
     for log in logs {
+        let message = sanitize_wasm_diagnostic(&log.message);
         match log.level {
             WasmLogLevel::Trace => tracing::trace!(
                 capability_id = %capability_id,
-                wasm_log = %log.message,
+                wasm_log = %message,
                 "WASM guest log"
             ),
             WasmLogLevel::Debug => tracing::debug!(
                 capability_id = %capability_id,
-                wasm_log = %log.message,
+                wasm_log = %message,
                 "WASM guest log"
             ),
             WasmLogLevel::Info => tracing::info!(
                 capability_id = %capability_id,
-                wasm_log = %log.message,
+                wasm_log = %message,
                 "WASM guest log"
             ),
             WasmLogLevel::Warn => tracing::warn!(
                 capability_id = %capability_id,
-                wasm_log = %log.message,
+                wasm_log = %message,
                 "WASM guest log"
             ),
             WasmLogLevel::Error => tracing::error!(
                 capability_id = %capability_id,
-                wasm_log = %log.message,
+                wasm_log = %message,
                 "WASM guest log"
             ),
         }
     }
+}
+
+fn sanitize_wasm_diagnostic(raw: &str) -> String {
+    // Do not scan unbounded guest-controlled strings. Oversize diagnostics are
+    // discarded wholesale so no unscanned fragment can reach tracing.
+    if raw.len() > WASM_DIAGNOSTIC_MAX_BYTES {
+        return WASM_DIAGNOSTIC_REDACTION_MARKER.to_string();
+    }
+
+    let (redacted, changed) = WASM_DIAGNOSTIC_LEAK_DETECTOR.redact_all_secrets(raw);
+    let sanitized = if changed {
+        redacted.replace(
+            LEAK_DETECTOR_REDACTION_MARKER,
+            WASM_DIAGNOSTIC_REDACTION_MARKER,
+        )
+    } else {
+        redacted
+    };
+    truncate_to_char_boundary(&sanitized, WASM_DIAGNOSTIC_MAX_BYTES).to_string()
+}
+
+fn truncate_to_char_boundary(value: &str, max_bytes: usize) -> &str {
+    let mut end = value.len().min(max_bytes);
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end] // safety: `end` is moved to a UTF-8 boundary above.
 }
 
 #[cfg(test)]
