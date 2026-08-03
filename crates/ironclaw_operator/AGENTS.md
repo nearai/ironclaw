@@ -24,8 +24,8 @@
     entry above except the two `operator_*.rs` files lives under `src/llm_admin/`,
     so a non-recursive `ls` of `src/` cannot reproduce it.
 - Read the contract this crate implements *against*, never the crate beside it:
-  - `crates/ironclaw_product_contracts/CLAUDE.md` — `llm_config`,
-    `operator_service`, `operator_llm`, `operator_tools`, `surface`.
+  - `crates/ironclaw_product_contracts/CLAUDE.md` — `operator_llm`,
+    `operator_service`, `operator_tools`, `surface`.
 
 ## What This Crate Owns
 
