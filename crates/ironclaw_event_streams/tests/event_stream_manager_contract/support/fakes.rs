@@ -1,6 +1,4 @@
-use ironclaw_outbound::{
-    ClaimDeliveryAttemptForSendOutcome, FailPreparedDeliveryAttemptOutcome,
-};
+use ironclaw_outbound::{ClaimDeliveryAttemptForSendOutcome, FailPreparedDeliveryAttemptOutcome};
 
 struct TestManager {
     inner: EventStreamManager,
@@ -667,8 +665,8 @@ impl ProjectionRedactionValidator for CountingRedactionValidator {
 /// a hand-rolled trait stand-in. `plan_push_targets` loads the thread
 /// notification policy through `ScopedFilesystem::get`, so a `ReadFile` fault
 /// surfaces as `OutboundError::Backend`.
-fn outbound_store_failing_backend_reads()
--> Arc<OutboundStateStore<FaultInjecting<InMemoryBackend>>> {
+fn outbound_store_failing_backend_reads() -> Arc<OutboundStateStore<FaultInjecting<InMemoryBackend>>>
+{
     let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
         Fault::on(FilesystemOperation::ReadFile).backend("injected outbound backend failure"),
     ));
