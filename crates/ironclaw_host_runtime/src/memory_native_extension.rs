@@ -55,7 +55,8 @@ pub const NATIVE_MEMORY_PROVIDER_SERVICE: &str = "native_memory_provider";
 const NATIVE_MEMORY_PACKAGE_ROOT: &str = "/system/extensions/ironclaw.memory";
 
 /// Raw bundled manifest TOML for the native memory extension.
-pub const NATIVE_MEMORY_MANIFEST_TOML: &str = include_str!("../assets/memory_native/manifest.toml");
+pub const NATIVE_MEMORY_MANIFEST_TOML: &str =
+    include_str!("../../extensions/packages/memory-native/manifest.toml");
 
 /// Reserved (host-bundled) extension id for the mem0 memory backend. Mirrors
 /// `ironclaw_memory_mem0::MEM0_MEMORY_EXTENSION_ID`; the `[memory]` binding
@@ -70,7 +71,8 @@ pub const MEM0_MEMORY_PROVIDER_SERVICE: &str = "mem0_memory_provider";
 /// declarations (under the stable `ironclaw.memory.*` ids) plus its honest
 /// lifecycle set. The mem0 `MemoryService` is constructed from `[memory]`
 /// config in composition, gated by the `memory-mem0` feature.
-pub const MEM0_MEMORY_MANIFEST_TOML: &str = include_str!("../assets/memory_mem0/manifest.toml");
+pub const MEM0_MEMORY_MANIFEST_TOML: &str =
+    include_str!("../../extensions/packages/mem0/manifest.toml");
 
 /// Parse the bundled `ironclaw.memory` manifest into the internal manifest
 /// model. Fail-closed: the reserved id, `first_party` runtime, `[memory]`

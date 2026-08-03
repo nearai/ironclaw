@@ -791,7 +791,7 @@ mod tests {
                 services,
                 &seed_scope,
                 "google",
-                ironclaw_first_party_extensions::GSUITE_PROVIDER_SCOPES,
+                ironclaw_extension_support::GSUITE_PROVIDER_SCOPES,
             )
             .await;
         }
@@ -5554,7 +5554,7 @@ mod tests {
             .find(|definition| definition.capability_id.as_str() == EXTENSION_SEARCH_CAPABILITY_ID)
             .expect("extension_search tool definition");
 
-        let extension_ids = ironclaw_first_party_extensions::packages::bundled_packages()
+        let extension_ids = ironclaw_extension_support::packages::bundled_packages()
             .iter()
             .map(|package| package.id)
             .collect::<Vec<_>>();

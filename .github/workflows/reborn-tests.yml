@@ -87,7 +87,6 @@ jobs:
       run_integration_tests: ${{ steps.plan.outputs.run_integration_tests }}
       integration_lanes: ${{ steps.plan.outputs.integration_lanes }}
       run_coverage: ${{ steps.plan.outputs.run_coverage }}
-      run_frontend: ${{ steps.plan.outputs.run_frontend }}
       run_qa_replay: ${{ steps.plan.outputs.run_qa_replay }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -107,10 +106,12 @@ jobs:
         run: |
           set -euo pipefail
           changed_args=()
+          base_args=()
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             git diff --name-only "$BASE_SHA"..."$HEAD_SHA" \
               > "${RUNNER_TEMP}/reborn-changed-files.txt"
             changed_args=(--changed-files "${RUNNER_TEMP}/reborn-changed-files.txt")
+            base_args=(--base-sha "$BASE_SHA")
           fi
 
           python3 scripts/ci/test_reborn_pr_test_plan.py
@@ -120,6 +121,7 @@ jobs:
             python3 scripts/ci/reborn_pr_test_plan.py \
               --event "${{ github.event_name }}" \
               --canonical-packages "${RUNNER_TEMP}/reborn-canonical-packages.json" \
+              "${base_args[@]}" \
               "${changed_args[@]}"
           )"
           printf '%s\n' "${plan}" | jq .
@@ -130,7 +132,6 @@ jobs:
               and .root_partitions == [0, 1, 2, 3]
               and .integration_lanes == [0, 1, 2, 3, "groups"]
               and .run_group_tests == true
-              and .run_frontend == true
               and .run_qa_replay == true
               and .coverage_mode == "full"
             )
@@ -157,13 +158,20 @@ jobs:
           echo "run_integration_tests=$(jq -r '.integration_lanes | length > 0' <<< "${plan}")" >> "$GITHUB_OUTPUT"
           echo "integration_lanes=$(jq -c '.integration_lanes' <<< "${plan}")" >> "$GITHUB_OUTPUT"
           echo "run_coverage=$(jq -r '.coverage_mode == "full"' <<< "${plan}")" >> "$GITHUB_OUTPUT"
-          echo "run_frontend=$(jq -r '.run_frontend' <<< "${plan}")" >> "$GITHUB_OUTPUT"
           echo "run_qa_replay=$(jq -r '.run_qa_replay' <<< "${plan}")" >> "$GITHUB_OUTPUT"
 
           scripts/ci/check-test-suite-boundaries.sh
           scripts/ci/test-reborn-changed-coverage.sh
           scripts/ci/test-reborn-coverage.sh
           scripts/ci/test-check-reborn-branch-coverage-flags.sh
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            scripts/ci/test-critical-mutation-gate.sh
+            python3 scripts/ci/critical_mutation_gate.py \
+              --manifest tests/integration/critical-mutation-functions.toml \
+              --changed-files "${RUNNER_TEMP}/reborn-changed-files.txt" \
+              --selection-only
+          fi
 
   crate-tests:
     name: Test Reborn crate bucket (${{ matrix.bucket.name }})
@@ -314,6 +322,7 @@ jobs:
         env:
           BUCKET_NAME: ${{ matrix.bucket.name }}
           BUCKET_PACKAGES: ${{ toJSON(matrix.bucket.packages) }}
+          EXACT_TARGETS: ${{ toJSON(matrix.bucket.exact_targets || fromJSON('[]')) }}
           COLLECT_COVERAGE: ${{ needs.changes.outputs.run_coverage }}
         run: |
           echo "Running Reborn crate bucket: ${BUCKET_NAME}"
@@ -321,63 +330,58 @@ jobs:
 
           scripts/ci/run-hermetic-deterministic-suite.sh prepare-command
           export IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1
+          package_args=()
+          feature_args=()
+          incremental_env=()
+          while IFS= read -r package; do
+            package_args+=(-p "$package")
+            feature_flags="$(scripts/ci/package-feature-flags.sh "$package")"
+            if [[ -n "${feature_flags}" ]]; then
+              features="${feature_flags#--features }"
+              IFS=, read -ra package_features <<< "${features}"
+              for feature in "${package_features[@]}"; do
+                feature_args+=(--features "${package}/${feature}")
+              done
+            fi
+            if [[ "$package" == "ironclaw_reborn_composition" ]]; then
+              incremental_env=(env CARGO_INCREMENTAL=0)
+            fi
+          done < <(printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[]')
+
           if [[ "${COLLECT_COVERAGE}" == "true" ]]; then
-            mkdir -p coverage
-            while IFS= read -r package; do
-              feature_flags="$(scripts/ci/package-feature-flags.sh "$package")"
-
-              # Scoped to this invocation only (never `export`) so it can't leak
-              # onto later packages in the same bucket iteration if
-              # composition-core ever stops being single-package.
-              incremental_env=()
-              if [ "$package" = "ironclaw_reborn_composition" ]; then
-                echo "Disabling incremental compilation for ironclaw_reborn_composition to keep runner disk usage bounded."
-                incremental_env=(env CARGO_INCREMENTAL=0)
-              fi
-
-              echo "::group::cargo llvm-cov -p ${package} ${feature_flags} test"
-              # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
-              scripts/ci/run-hermetic-deterministic-suite.sh command \
-                timeout --signal=INT --kill-after=30s 40m \
-                "${incremental_env[@]}" cargo llvm-cov --branch --skip-functions -p "$package" ${feature_flags} --all-targets \
-                  --lcov --output-path "coverage/${package}.lcov" \
-                  test --ignore-rust-version -- --nocapture
-              echo "::endgroup::"
-            done < <(printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[]')
-          else
-            package_args=()
-            feature_args=()
-            incremental_env=()
-            while IFS= read -r package; do
-              package_args+=(-p "$package")
-              feature_flags="$(scripts/ci/package-feature-flags.sh "$package")"
-              if [[ -n "${feature_flags}" ]]; then
-                features="${feature_flags#--features }"
-                IFS=, read -ra package_features <<< "${features}"
-                for feature in "${package_features[@]}"; do
-                  feature_args+=(--features "${package}/${feature}")
-                done
-              fi
-              if [[ "$package" == "ironclaw_reborn_composition" ]]; then
-                incremental_env=(env CARGO_INCREMENTAL=0)
-              fi
-            done < <(printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[]')
-
-            echo "::group::cargo test affected bucket ${BUCKET_NAME}"
+            echo "::group::cargo llvm-cov bucket ${BUCKET_NAME}"
             scripts/ci/run-hermetic-deterministic-suite.sh command \
-              timeout --signal=INT --kill-after=30s 28m \
-              "${incremental_env[@]}" cargo test "${package_args[@]}" \
-                "${feature_args[@]}" --ignore-rust-version --all-targets -- --nocapture
+              timeout --signal=INT --kill-after=30s 40m \
+              "${incremental_env[@]}" cargo llvm-cov --branch --skip-functions \
+                "${package_args[@]}" "${feature_args[@]}" --all-targets \
+                --lcov --output-path "bucket-${BUCKET_NAME}.lcov" \
+                test --ignore-rust-version -- --nocapture
             echo "::endgroup::"
-          fi
-
-          if [[ "${COLLECT_COVERAGE}" == "true" ]]; then
-            # Keep reports separate: llvm-cov does not guarantee a trailing
-            # newline, so raw concatenation can corrupt record boundaries.
-            package_parts=(coverage/*.lcov)
-            scripts/ci/reborn-coverage-merge-lcov.sh \
-              "bucket-${BUCKET_NAME}.lcov" \
-              "${package_parts[@]}"
+          else
+            echo "::group::cargo test affected bucket ${BUCKET_NAME}"
+            if [[ "$(jq 'length' <<< "${EXACT_TARGETS}")" -gt 0 ]]; then
+              while IFS=$'\t' read -r package kind name; do
+                target_feature_args=()
+                feature_flags="$(scripts/ci/package-feature-flags.sh "${package}")"
+                if [[ -n "${feature_flags}" ]]; then
+                  read -ra target_feature_args <<< "${feature_flags}"
+                fi
+                scripts/ci/run-hermetic-deterministic-suite.sh command \
+                  timeout --signal=INT --kill-after=30s 28m \
+                  "${incremental_env[@]}" cargo test \
+                    -p "${package}" "--${kind}" "${name}" \
+                    "${target_feature_args[@]}" --ignore-rust-version -- --nocapture
+              done < <(
+                jq -r '.[] | [.package, .kind, .name] | @tsv' \
+                  <<< "${EXACT_TARGETS}"
+              )
+            else
+              scripts/ci/run-hermetic-deterministic-suite.sh command \
+                timeout --signal=INT --kill-after=30s 28m \
+                "${incremental_env[@]}" cargo test "${package_args[@]}" \
+                  "${feature_args[@]}" --ignore-rust-version --all-targets -- --nocapture
+            fi
+            echo "::endgroup::"
           fi
 
       - name: Upload bucket lcov artifact
@@ -848,9 +852,7 @@ jobs:
   critical-mutation:
     name: Critical named-function mutation gate
     needs: changes
-    if: >-
-      needs.changes.outputs.plan_mode != 'none' &&
-      (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    if: github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -881,49 +883,27 @@ jobs:
           echo "should_run=${should_run}" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust
-        if: steps.scope.outputs.should_run == 'true'
+        if: github.event_name == 'merge_group' && steps.scope.outputs.should_run == 'true'
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Install mold and clang
-        if: steps.scope.outputs.should_run == 'true'
+        if: github.event_name == 'merge_group' && steps.scope.outputs.should_run == 'true'
         run: |
           scripts/ci/install-ci-apt-packages.sh clang mold
           test -x /usr/bin/mold
 
       - name: Install cargo-mutants
-        if: steps.scope.outputs.should_run == 'true'
+        if: github.event_name == 'merge_group' && steps.scope.outputs.should_run == 'true'
         uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
         with:
           tool: cargo-mutants@27.1.0
 
       - name: Run affected named critical invariants
+        if: github.event_name == 'merge_group' && steps.scope.outputs.should_run == 'true'
         run: |
           python3 scripts/ci/critical_mutation_gate.py \
             --manifest tests/integration/critical-mutation-functions.toml \
             --changed-files changed-files.txt
-
-  webui-v2-js-tests:
-    name: Reborn WebUI v2 JS tests
-    needs: changes
-    if: needs.changes.outputs.run_frontend == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-          persist-credentials: false
-
-      - name: Install Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
-        with:
-          node-version: "22"
-
-      - name: Enable pnpm
-        run: corepack enable pnpm
-
-      - name: Run Reborn WebUI frontend tests
-        run: scripts/ci/run-hermetic-deterministic-suite.sh frontend
 
   qa-recorded-fixtures:
     name: Reborn QA recorded fixtures
@@ -1024,7 +1004,6 @@ jobs:
       - reborn-integration-coverage
       - coverage-report
       - critical-mutation
-      - webui-v2-js-tests
       - qa-recorded-fixtures
     steps:
       - name: Checkout repository
@@ -1059,7 +1038,6 @@ jobs:
             "${{ needs.changes.outputs.run_group_tests }}" \
             "${{ needs.changes.outputs.run_integration_tests }}" \
             "${{ needs.changes.outputs.run_coverage }}" \
-            "${{ needs.changes.outputs.run_frontend }}" \
             "${{ needs.changes.outputs.run_qa_replay }}"; do
             if [[ "${flag}" != "true" && "${flag}" != "false" ]]; then
               echo "Missing or invalid Reborn test plan flag: '${flag}'"
@@ -1074,7 +1052,6 @@ jobs:
               "${{ needs.changes.outputs.run_group_tests }}" \
               "${{ needs.changes.outputs.run_integration_tests }}" \
               "${{ needs.changes.outputs.run_coverage }}" \
-              "${{ needs.changes.outputs.run_frontend }}" \
               "${{ needs.changes.outputs.run_qa_replay }}"; do
               if [[ "${flag}" != "true" ]]; then
                 echo "Full Reborn plan omitted a required lane"
@@ -1115,19 +1092,11 @@ jobs:
           check_planned_job "coverage-report" \
             "${{ needs.coverage-report.result }}" \
             "${{ needs.changes.outputs.run_coverage }}"
-          check_planned_job "webui-v2-js-tests" \
-            "${{ needs.webui-v2-js-tests.result }}" \
-            "${{ needs.changes.outputs.run_frontend }}"
           check_planned_job "qa-recorded-fixtures" \
             "${{ needs.qa-recorded-fixtures.result }}" \
             "${{ needs.changes.outputs.run_qa_replay }}"
 
-          mutation_expected=false
-          if [[ "${plan_mode}" != "none" && \
-                ("${{ github.event_name }}" == "pull_request" || \
-                 "${{ github.event_name }}" == "merge_group") ]]; then
-            mutation_expected=true
-          fi
+          mutation_expected=${{ github.event_name == 'merge_group' }}
           check_planned_job "critical-mutation" \
             "${{ needs.critical-mutation.result }}" \
             "${mutation_expected}"

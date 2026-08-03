@@ -856,7 +856,7 @@ setup_url = "{expected_url}"
         let error = imported_extension_package(
             vec![(
                 "manifest.toml".to_string(),
-                include_str!("../../ironclaw_first_party_extensions/assets/github/manifest.toml")
+                include_str!("../../extensions/packages/github/manifest.toml")
                     .as_bytes()
                     .to_vec(),
             )],

@@ -251,7 +251,7 @@ activate / cleanup. Binaries supply adapters through
 generic ingress router, pairing seam, identity bindings, and the host-owned
 delivery coordinator — never per-channel host code. Start from the
 `reborn-extension-surfaces` skill; the worked example is the Slack package
-(`crates/ironclaw_first_party_extensions/assets/slack/`).
+(`crates/extensions/packages/slack/`).
 
 ## Capability dispatch
 

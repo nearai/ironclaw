@@ -534,18 +534,63 @@ fn reborn_contracts_crates_hold_no_framework_dependencies() {
     );
 }
 
-#[test]
-fn host_runtime_stays_memory_provider_neutral_and_only_composition_names_mem0() {
-    // The `ironclaw_memory_mem0` boundary rule's comment states that
-    // `ironclaw_host_runtime` must stay provider-agnostic and must NOT name the
-    // concrete mem0 provider crate; only the composition layer may depend on it
-    // (it is the one layer allowed to name concrete provider crates, building the
-    // `Arc<dyn MemoryService>` that the provider-neutral `MemoryServiceResolver`
-    // stores). That comment was previously unenforced. This test fails loudly if a
-    // future edit adds `ironclaw_memory_mem0` to `host_runtime/Cargo.toml` — or to
-    // any crate other than composition.
-    const MEM0: &str = "ironclaw_memory_mem0";
+/// Every memory *provider* crate. Both are packages under
+/// `crates/extensions/packages/` since WS2; the contract crate
+/// `ironclaw_memory` is deliberately not here — naming the contract is the
+/// point of having one.
+const MEMORY_PROVIDER_CRATES: &[&str] = &["ironclaw_memory_native", "ironclaw_memory_mem0"];
 
+/// Crates that still take a normal dependency on a memory provider, with the
+/// row that removes each one. **Shrink-only**: a stale entry fails, so this
+/// list can never quietly grow back after an edge is cut.
+///
+/// The target (PROPOSAL §8.2, amended 2026-07-29) is *"no crate outside the
+/// provider packages and the binary names a memory provider"* — composition
+/// consumes the contract only, and the binary links providers. Neither
+/// surviving edge is reachable by a move:
+///
+/// * `ironclaw_host_runtime` constructs `NativeMemoryService` itself, per
+///   invocation, inside `MemoryServiceResolver` (`memory_provider.rs`) and in
+///   `first_party_tools/memory.rs` + `user_profile_source.rs`. Cutting it is a
+///   port inversion, not a relocation. **CHECKLIST WS3** owns the first half:
+///   its row moves `host_runtime/first_party_tools/**` — the memory tools
+///   included — into `extensions/ironclaw_extension_support/`.
+/// * `ironclaw_reborn_composition` builds the `Arc<dyn MemoryService>` in
+///   `memory_provider_factory.rs`. Moving that to the binary is the same
+///   slice's second half.
+///
+/// WS2 deliberately did **not** paper over these by adding the providers to
+/// `CONCRETE_EXTENSION_CRATES`, which would have required re-opening that
+/// gate's `CONCRETE_DEPENDENCY_EXCEPTIONS` ledger — empty since DEL-7.
+const MEMORY_PROVIDER_DEPENDENT_RESIDUE: &[(&str, &str, &str)] = &[
+    (
+        "ironclaw_host_runtime",
+        "ironclaw_memory_native",
+        "WS3 — first-party memory tools move to extension_support",
+    ),
+    (
+        "ironclaw_reborn_composition",
+        "ironclaw_memory_native",
+        "WS3 — provider construction moves to the binary",
+    ),
+    (
+        "ironclaw_reborn_composition",
+        "ironclaw_memory_mem0",
+        "WS3 — provider construction moves to the binary",
+    ),
+];
+
+/// PROPOSAL §8.2: *"no crate outside the provider packages and the binary
+/// names a memory provider"*.
+///
+/// Replaces the narrower pre-WS2 rule ("only composition names `memory_mem0`"),
+/// which the 2026-07-29 amendment superseded when the providers became
+/// packages: composition is supposed to consume the contract, not link a
+/// provider, so a test that *blessed* composition was pinning the wrong shape.
+/// This one covers both providers and holds the surviving dependents as named,
+/// shrink-only residue instead.
+#[test]
+fn only_the_sanctioned_residue_names_a_memory_provider() {
     let metadata = cargo_metadata();
     let packages = metadata["packages"]
         .as_array()
@@ -555,25 +600,59 @@ fn host_runtime_stays_memory_provider_neutral_and_only_composition_names_mem0() 
         .filter_map(package_dependencies)
         .collect::<HashMap<_, _>>();
 
-    // host_runtime must not name the concrete mem0 provider.
-    assert_no_normal_workspace_deps(&dependencies, "ironclaw_host_runtime", [MEM0]);
+    // Guard against measuring nothing: the providers must be workspace members,
+    // or every edge onto them is invisible here.
+    for provider in MEMORY_PROVIDER_CRATES {
+        assert!(
+            dependencies.contains_key(*provider),
+            "{provider} is not in cargo metadata, so this gate would check no edges at all. \
+             If it was renamed or moved, repoint MEMORY_PROVIDER_CRATES in the same change."
+        );
+    }
 
-    // Only the composition layer (the mem0 crate itself aside) may take a normal
-    // dependency on the concrete mem0 provider.
-    let mut dependents = dependencies
+    let mut violations = Vec::new();
+    let mut used_residue = BTreeSet::new();
+    for provider in MEMORY_PROVIDER_CRATES {
+        for (crate_name, deps) in &dependencies {
+            if crate_name == provider || crate_name == "ironclaw" {
+                continue; // the provider itself, and the binary that links it
+            }
+            if !deps.iter().any(|dependency| dependency == provider) {
+                continue;
+            }
+            if MEMORY_PROVIDER_DEPENDENT_RESIDUE
+                .iter()
+                .any(|(dependent, named, _)| dependent == crate_name && named == provider)
+            {
+                used_residue.insert((crate_name.clone(), (*provider).to_string()));
+                continue;
+            }
+            violations.push(format!(
+                "{crate_name} takes a normal dependency on the memory provider {provider}; \
+                 only the provider packages and the binary may name one — everything else \
+                 resolves memory through the provider-neutral contract (PROPOSAL §8.2)"
+            ));
+        }
+    }
+    violations.sort_unstable();
+    assert!(
+        violations.is_empty(),
+        "memory-provider naming gate failed:\n{}",
+        violations.join("\n")
+    );
+
+    let stale: Vec<String> = MEMORY_PROVIDER_DEPENDENT_RESIDUE
         .iter()
-        .filter(|(crate_name, deps)| {
-            crate_name.as_str() != MEM0 && deps.iter().any(|dependency| dependency == MEM0)
+        .filter(|(dependent, provider, _)| {
+            !used_residue.contains(&((*dependent).to_string(), (*provider).to_string()))
         })
-        .map(|(crate_name, _)| crate_name.as_str())
-        .collect::<Vec<_>>();
-    dependents.sort_unstable();
-    assert_eq!(
-        dependents,
-        vec!["ironclaw_reborn_composition"],
-        "only ironclaw_reborn_composition may take a normal dependency on {MEM0}; \
-         ironclaw_host_runtime and every other crate must resolve memory through the \
-         provider-neutral MemoryServiceResolver"
+        .map(|(dependent, provider, owner)| format!("{dependent} -> {provider} ({owner})"))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "stale MEMORY_PROVIDER_DEPENDENT_RESIDUE entries — the edge is gone, delete the \
+         entry so the residue only ever shrinks:\n{}",
+        stale.join("\n")
     );
 }
 
@@ -753,7 +832,7 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
     let untrusted_src_roots = [
         "crates/ironclaw_capabilities/src",
         "crates/ironclaw_first_party_extension_ports/src",
-        "crates/ironclaw_first_party_extensions/src",
+        "crates/extensions/ironclaw_extension_support/src",
         "crates/ironclaw_extension_contracts/src",
         // WS2.4: the manager holds the extension-management capability
         // handlers, which is exactly the shape this guard covers.
@@ -763,9 +842,8 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
         "crates/ironclaw_product/src",
         "crates/ironclaw_product_contracts/src",
         "crates/ironclaw_webui/src",
-        "crates/ironclaw_telegram_extension/src",
-        "crates/ironclaw_slack_extension/src",
-        "crates/ironclaw_telegram_v2_adapter/src",
+        "crates/extensions/packages/telegram/src",
+        "crates/extensions/packages/slack/src",
     ];
 
     let mut violations = Vec::new();
@@ -876,7 +954,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             // assembly (which still enters through
             // `ironclaw_reborn_composition`).
             "ironclaw_extension_manager",
-            "ironclaw_first_party_extensions",
+            "ironclaw_extension_support",
             "ironclaw_host_api",
             "ironclaw_operator",
             // Same class again — the product tier's half of the neutral
@@ -2408,8 +2486,8 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
         "crates/ironclaw_reborn_event_store/src",
         "crates/ironclaw_reborn_openai_compat/src",
         "crates/ironclaw_product/src",
-        "crates/ironclaw_telegram_extension/src",
-        "crates/ironclaw_slack_extension/src",
+        "crates/extensions/packages/telegram/src",
+        "crates/extensions/packages/slack/src",
         "crates/ironclaw_outbound/src",
         "crates/ironclaw_conversations/src",
         "crates/ironclaw_turns/src",
@@ -3017,7 +3095,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
-                "ironclaw_first_party_extensions",
+                "ironclaw_extension_support",
                 "ironclaw_first_party_extension_ports",
                 "ironclaw_resources",
                 "ironclaw_approvals",
@@ -3039,7 +3117,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // They may consume scoped storage and pure safety helpers, but
             // must not receive ambient runtime authority or loop-facing
             // runtime handles.
-            crate_name: "ironclaw_first_party_extensions",
+            crate_name: "ironclaw_extension_support",
             forbidden: vec![
                 "ironclaw_legacy",
                 "ironclaw_approvals",
@@ -3243,7 +3321,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_capabilities",
                 "ironclaw_extension_host",
                 "ironclaw_extensions",
-                "ironclaw_first_party_extensions",
+                "ironclaw_extension_support",
                 "ironclaw_host_runtime",
                 "ironclaw_loop_host",
                 "ironclaw_mcp",
@@ -3276,7 +3354,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_conversations",
                 "ironclaw_extension_host",
                 "ironclaw_extensions",
-                "ironclaw_first_party_extensions",
+                "ironclaw_extension_support",
                 "ironclaw_host_ingress",
                 "ironclaw_host_runtime",
                 "ironclaw_loop_host",
@@ -3315,7 +3393,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // (`ironclaw_reborn_composition`), no transports
             // (`ironclaw_webui`, `ironclaw_reborn_openai_compat`), no extension
             // machinery (`ironclaw_extension_host`, `ironclaw_extensions`,
-            // `ironclaw_first_party_extensions`), no lanes
+            // `ironclaw_extension_support`), no lanes
             // (`ironclaw_host_runtime`, `ironclaw_mcp`, `ironclaw_wasm`,
             // `ironclaw_scripts`) and no turn kernel (`ironclaw_turns`,
             // `ironclaw_runner`, `ironclaw_loop_host`). Operator administers
@@ -3332,7 +3410,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             forbidden: vec![
                 "ironclaw_extension_host",
                 "ironclaw_extensions",
-                "ironclaw_first_party_extensions",
+                "ironclaw_extension_support",
                 "ironclaw_host_runtime",
                 "ironclaw_loop_host",
                 "ironclaw_mcp",
@@ -3358,8 +3436,8 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // `ironclaw_extension_contracts` (its implementors are exactly the
             // channel packages), the edge is gone from both `[dependencies]`
             // and `[dev-dependencies]`, and this rule keeps it gone.
-            // `ironclaw_telegram_v2_adapter` is the crate's own protocol half
-            // and stays allowed; `ironclaw_host_api` /
+            // The protocol half is now in-crate (WS2 merged
+            // `ironclaw_telegram_v2_adapter` into this package); `ironclaw_host_api` /
             // `ironclaw_extension_contracts` are the sanctioned contract deps.
             crate_name: "ironclaw_telegram_extension",
             forbidden: vec![
@@ -3545,7 +3623,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
                 "ironclaw_events",
-                "ironclaw_first_party_extensions",
+                "ironclaw_extension_support",
                 "ironclaw_first_party_extension_ports",
                 "ironclaw_host_runtime",
                 "ironclaw_secrets",
@@ -4087,7 +4165,7 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
     },
     LayerMatrixException {
         crate_name: "ironclaw_host_runtime",
-        dependency_name: "ironclaw_first_party_extensions",
+        dependency_name: "ironclaw_extension_support",
         introduced: "2026-07-09",
         removes_in: "W7",
         reason: "host_runtime still owns first-party extension activation wiring until kernel consolidation separates host policy from loop/product concerns",

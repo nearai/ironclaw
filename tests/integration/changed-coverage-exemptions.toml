@@ -728,7 +728,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_telegram_v2_adapter/src/payload.rs"
+path = "crates/extensions/packages/telegram/src/payload.rs"
 lines = [670, 671]
 owner = "@nearai/reborn"
 reason = "Body of a pre-existing `map_err` closure on the interaction-resolution parse, re-indented by rustfmt because the repointed call path (`ironclaw_product_contracts::interaction_commands::...`) is longer than the `ironclaw_host_api::product_adapter::...` one it replaced. No statement changed, the arm fires only on a parse rejection no Telegram fixture produces, and it was equally unreached before this PR."
@@ -772,7 +772,7 @@ issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
 [[exemption]]
-path = "crates/ironclaw_slack_extension/src/channel.rs"
+path = "crates/extensions/packages/slack/src/channel.rs"
 lines = [74]
 owner = "@nearai/reborn"
 reason = "Type position only: a function parameter's `&ironclaw_extension_contracts::channel_adapter::ChannelAttachmentRef` type, repointed when the channel-adapter DTO family left `ironclaw_host_api`. A parameter type carries no LLVM coverage region."
@@ -1169,3 +1169,62 @@ owner = "@nearai/reborn"
 reason = "Pre-existing and behaviourally untouched, at two sites. Lines 1414-1416 are the tail of `RebornRuntime::nearai_login_callback_mount`: the composition-local shim crates/ironclaw_reborn_composition/src/llm_admin/nearai_login_serve.rs was deleted (a 19-line file whose whole body re-wrapped the operator mount as `PublicRouteMount::new(mount.router, mount.descriptors)`), so the same four arguments -- `session, reload, boot, states` -- now go to `ironclaw_operator::nearai_login_callback_mount`, which returns the host-owned carrier directly. The pre-image (base runtime.rs:1411-1415) scored zero and the whole enclosing function scores zero in BOTH tracefiles (base 1401-1415, head 1396-1417), so nothing became untested; the callee itself IS covered, at crates/ironclaw_operator/src/llm_admin/nearai_login_serve.rs:86-104 with 2 hits per line. Line 3433 is the same shape one crate over: `ironclaw_extension_host::skill_learning::LiveSkillLearnedNotifier::new(skill_learning_publisher)` became `crate::model_gateway_assembly::LiveSkillLearnedNotifier::new(...)` and rustfmt collapsed the call from three lines to one; the pre-image (base runtime.rs:3433/3435) scored zero, and the entire surrounding skill-learning assembly block (3425-3440) scores zero in both tracefiles. Reaching either would need a fully LLM-wired `RebornRuntime` built through `build_runtime_with_resource_governor`, which no tier below E2E stands up."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
+
+# ---------------------------------------------------------------------------
+# WS2 package colocation. Nine lines across four package-inventory modules,
+# all the same shape: an `include_bytes!(concat!(…))` sitting inside a
+# `macro_rules!` BODY, whose only change is the asset path the package move
+# repointed (`../../assets/<ext>/…` -> `../../../packages/<ext>/…`).
+#
+# Why they cannot be measured, and why that is not a coverage gap:
+#   * A macro body is template text. LLVM emits coverage regions for the
+#     EXPANSION, attributed to the expansion site, never to the template line
+#     — so these line numbers can never carry a DA record no matter how many
+#     tests run. The expansions themselves are covered: the schema/prompt
+#     accessors these macros generate are exercised by
+#     `cargo test -p ironclaw_extension_support` (152 tests, all green).
+#   * The change is a string literal inside `concat!`, evaluated at compile
+#     time. If the path were wrong the crate would not build — which is a
+#     stronger guarantee than a coverage hit, and `scripts/ci/check-include-str-paths.sh`
+#     independently asserts every one of these targets exists on disk (119
+#     references checked).
+#
+# The mechanically-classifiable neighbours of these lines were NOT exempted —
+# `mechanically_uninstrumentable_lines` was extended instead, to recognize
+# inner attributes (`#![…]`) and `const`/`static` items. That closed
+# `packages/telegram/src/lib.rs` entirely and every `const MANIFEST: &str =
+# include_str!(…)` declaration in these same four files. Only the macro-body
+# residue is exempted here, because classifying macro template text correctly
+# needs a real Rust parser rather than a lexer.
+
+[[exemption]]
+path = "crates/extensions/ironclaw_extension_support/src/packages/github.rs"
+lines = [45, 53]
+owner = "@nearai/runtime"
+reason = "include_bytes! inside a macro_rules! body; the template line can never carry a DA record, and the only change is the WS2 asset-path repoint."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/extensions/ironclaw_extension_support/src/packages/gmail.rs"
+lines = [49, 57]
+owner = "@nearai/runtime"
+reason = "include_bytes! inside a macro_rules! body; the template line can never carry a DA record, and the only change is the WS2 asset-path repoint."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/extensions/ironclaw_extension_support/src/packages/notion.rs"
+lines = [47, 49, 58, 60]
+owner = "@nearai/runtime"
+reason = "include_bytes! inside a macro_rules! body, split across lines by rustfmt; the template lines can never carry a DA record, and the only change is the WS2 asset-path repoint."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-11-30"
+
+[[exemption]]
+path = "crates/extensions/ironclaw_extension_support/src/packages/slack.rs"
+lines = [54]
+owner = "@nearai/runtime"
+reason = "include_bytes! inside a macro_rules! body; the template line can never carry a DA record, and the only change is the WS2 asset-path repoint."
+issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-11-30"

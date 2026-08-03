@@ -12,19 +12,29 @@ use crate::first_party_tools::time::UNIX_MILLIS_THRESHOLD;
 pub(crate) fn resolve_native_memory_input_schema_ref(reference: &str) -> Option<Value> {
     let raw = match reference {
         "schemas/memory/document-read.input.v1.json" => {
-            include_str!("../../assets/memory_native/schemas/memory/document-read.input.v1.json")
+            include_str!(
+                "../../../extensions/packages/memory-native/schemas/memory/document-read.input.v1.json"
+            )
         }
         "schemas/memory/document-write.input.v1.json" => {
-            include_str!("../../assets/memory_native/schemas/memory/document-write.input.v1.json")
+            include_str!(
+                "../../../extensions/packages/memory-native/schemas/memory/document-write.input.v1.json"
+            )
         }
         "schemas/memory/search.input.v1.json" => {
-            include_str!("../../assets/memory_native/schemas/memory/search.input.v1.json")
+            include_str!(
+                "../../../extensions/packages/memory-native/schemas/memory/search.input.v1.json"
+            )
         }
         "schemas/memory/tree.input.v1.json" => {
-            include_str!("../../assets/memory_native/schemas/memory/tree.input.v1.json")
+            include_str!(
+                "../../../extensions/packages/memory-native/schemas/memory/tree.input.v1.json"
+            )
         }
         "schemas/memory/profile-set.input.v1.json" => {
-            include_str!("../../assets/memory_native/schemas/memory/profile-set.input.v1.json")
+            include_str!(
+                "../../../extensions/packages/memory-native/schemas/memory/profile-set.input.v1.json"
+            )
         }
         _ => return None,
     };

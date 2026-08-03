@@ -1273,7 +1273,7 @@ fn manifest_channel_account_setup_descriptors(
 /// neutral bundle set (extension-runtime DEL-7). The provider entry comes from
 /// `builtin_capability_policy` (no first-party dependency); each package's host
 /// authority grant is sourced from its injected `trust_effects` instead of a
-/// direct `ironclaw_first_party_extensions` call. Every entry is byte-identical
+/// direct `ironclaw_extension_support` call. Every entry is byte-identical
 /// to the one the inventory-driven builder produced — same id, local-manifest
 /// path, manifest digest, and effect list — so behavior is preserved exactly.
 pub fn production_first_party_trust_policy(
@@ -1337,7 +1337,7 @@ pub fn production_first_party_trust_policy(
 /// Inventory-driven trust policy for composition's own unit tests (mirrors the
 /// production builder, sourcing the neutral bundle set from the concrete
 /// inventory). Gated `#[cfg(test)]` because it names
-/// `ironclaw_first_party_extensions`, a dev-dependency; integration tests build
+/// `ironclaw_extension_support`, a dev-dependency; integration tests build
 /// their trust policy from `production_first_party_trust_policy` plus bundles
 /// they convert themselves (see `tests/support/first_party.rs`).
 #[cfg(test)]
