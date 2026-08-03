@@ -454,8 +454,11 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "${{ toJSON(matrix.bucket.exact_targets || fromJSON('[]')) }}",
             workflow,
         )
-        self.assertIn('"${incremental_env[@]}" cargo test', workflow)
-        self.assertIn('-p "${package}" "--${kind}" "${name}"', workflow)
+        self.assertIn(
+            '"${incremental_env[@]}" cargo test \\\n'
+            '                    -p "${package}" "--${kind}" "${name}"',
+            workflow,
+        )
 
     def test_pr_workflows_do_not_repeat_reborn_rust_contracts(self) -> None:
         code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
