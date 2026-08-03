@@ -18,7 +18,17 @@ pub(crate) struct DoctorCommand {
 
 impl DoctorCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
-        let dto = build_doctor_dto(&context);
+        let ambient_proxy_present = [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ]
+        .into_iter()
+        .any(|name| std::env::var_os(name).is_some());
+        let dto = build_doctor_dto_with_ambient_proxy_presence(&context, ambient_proxy_present);
         let mode = if self.json {
             OutputMode::Json
         } else {
@@ -28,7 +38,15 @@ impl DoctorCommand {
     }
 }
 
+#[cfg(test)]
 fn build_doctor_dto(context: &RebornCliContext) -> DoctorDto {
+    build_doctor_dto_with_ambient_proxy_presence(context, false)
+}
+
+fn build_doctor_dto_with_ambient_proxy_presence(
+    context: &RebornCliContext,
+    ambient_proxy_present: bool,
+) -> DoctorDto {
     let mut checks = Vec::new();
 
     let report = RebornDoctorReport::from_config(context.boot_config().clone());
@@ -60,6 +78,15 @@ fn build_doctor_dto(context: &RebornCliContext) -> DoctorDto {
 
     let providers_path = context.boot_config().home().providers_file_path();
     checks.push(check_providers_file(&providers_path));
+
+    if ambient_proxy_present {
+        checks.push(DoctorCheck {
+            name: "host_mediated_ambient_proxy".to_string(),
+            category: CheckCategory::Core,
+            outcome: CheckOutcome::Skip,
+            detail: "ambient proxy variables are configured but ignored by host-mediated ReqwestNetworkTransport so approved pinned destinations remain authoritative; LLM clients and sandbox egress use separate proxy policies".to_string(),
+        });
+    }
 
     let snapshot = reborn_runtime_readiness_snapshot();
 
