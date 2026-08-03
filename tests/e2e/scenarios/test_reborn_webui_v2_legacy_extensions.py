@@ -54,7 +54,7 @@ TOOL_SURFACES = [{"kind": "tool"}]
 TELEGRAM_MANIFEST = tomllib.loads(
     (
         Path(__file__).resolve().parents[3]
-        / "crates/ironclaw_first_party_extensions/assets/telegram/manifest.toml"
+        / "crates/extensions/packages/telegram/manifest.toml"
     ).read_text(encoding="utf-8")
 )
 TELEGRAM_PAIRING_INSTRUCTIONS = TELEGRAM_MANIFEST["channel"]["connection"]["instructions"]

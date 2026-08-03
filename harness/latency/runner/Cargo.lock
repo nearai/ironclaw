@@ -2865,7 +2865,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_first_party_extensions"
+name = "ironclaw_extension_support"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -2964,7 +2964,7 @@ dependencies = [
  "ironclaw_extensions",
  "ironclaw_extractors",
  "ironclaw_filesystem",
- "ironclaw_first_party_extensions",
+ "ironclaw_extension_support",
  "ironclaw_host_api",
  "ironclaw_mcp",
  "ironclaw_memory",

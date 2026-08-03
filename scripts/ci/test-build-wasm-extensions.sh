@@ -11,7 +11,7 @@
 # end to end.
 #
 # Why this file exists: the first-party manifest set used to be keyed to the
-# literal crates/ironclaw_first_party_extensions/assets/*/manifest.toml glob.
+# literal crates/extensions/packages/*/manifest.toml glob.
 # Under the target-architecture family move that glob matches nothing even
 # though the manifests are still there (docs/reborn/target-architecture/
 # CHECKLIST.md WS10, #6963). Discovery now resolves the owning crate by NAME
@@ -77,13 +77,13 @@ make_repo() {  # dir first_party_crate_dir
     done
     if [ -n "${fp}" ]; then
         mkdir -p "${dir}/${fp}"
-        printf '[package]\nname = "ironclaw_first_party_extensions"\n' > "${dir}/${fp}/Cargo.toml"
+        printf '[package]\nname = "ironclaw_extension_support"\n' > "${dir}/${fp}/Cargo.toml"
     fi
 }
 
 # A host-native manifest: enumerated by discovery, SKIPped by the builder, so no
 # toolchain is needed to prove the manifest was found.
-add_manifest() {  # assets_dir extension_id
+add_manifest() {  # packages_dir extension_id
     mkdir -p "$1/$2"
     printf 'schema_version = "reborn.extension_manifest.v3"\nid = "%s"\n\n[runtime]\nkind = "first_party"\nservice = "stub"\n' \
         "$2" > "$1/$2/manifest.toml"
@@ -105,9 +105,9 @@ run_first_party() {  # repo_dir
 # W1: POSITIVE — flat tree. Discovery resolves the crate and enumerates both
 #     manifests.
 # ---------------------------------------------------------------------------
-make_repo "${tmp}/flat" "crates/ironclaw_first_party_extensions"
-add_manifest "${tmp}/flat/crates/ironclaw_first_party_extensions/assets" slack
-add_manifest "${tmp}/flat/crates/ironclaw_first_party_extensions/assets" gmail
+make_repo "${tmp}/flat" "crates/extensions/ironclaw_extension_support"
+add_manifest "${tmp}/flat/crates/extensions/packages" slack
+add_manifest "${tmp}/flat/crates/extensions/packages" gmail
 run_first_party "${tmp}/flat"
 assert_rc       "W1 flat tree exits 0"          0 "${CAP_RC}"
 assert_contains "W1 flat finds slack"           "${CAP_OUT}" "SKIP first-party/slack"
@@ -117,9 +117,9 @@ assert_contains "W1 flat finds gmail"           "${CAP_OUT}" "SKIP first-party/g
 # W2: POSITIVE — the same crate nested under a family directory. This is the
 #     case the old glob missed while the manifests were still present.
 # ---------------------------------------------------------------------------
-make_repo "${tmp}/nested" "crates/substrates/ironclaw_first_party_extensions"
-add_manifest "${tmp}/nested/crates/substrates/ironclaw_first_party_extensions/assets" slack
-add_manifest "${tmp}/nested/crates/substrates/ironclaw_first_party_extensions/assets" gmail
+make_repo "${tmp}/nested" "crates/substrates/ironclaw_extension_support"
+add_manifest "${tmp}/nested/crates/substrates/packages" slack
+add_manifest "${tmp}/nested/crates/substrates/packages" gmail
 run_first_party "${tmp}/nested"
 assert_rc       "W2 nested tree exits 0"        0 "${CAP_RC}"
 assert_contains "W2 nested finds slack"         "${CAP_OUT}" "SKIP first-party/slack"
@@ -132,28 +132,29 @@ assert_contains "W2 nested finds gmail"         "${CAP_OUT}" "SKIP first-party/g
 make_repo "${tmp}/absent" ""
 run_first_party "${tmp}/absent"
 assert_rc       "W3 absent crate exits 1"       1 "${CAP_RC}"
-assert_contains "W3 absent crate names it"      "${CAP_OUT}" "expected exactly one crate named 'ironclaw_first_party_extensions'"
+assert_contains "W3 absent crate names it"      "${CAP_OUT}" "expected exactly one crate named 'ironclaw_extension_support'"
 
 # ---------------------------------------------------------------------------
 # W4: NEGATIVE — crate resolves but carries no manifests. Pins the empty-set
 #     guard that already existed (build_manifest_set's "no manifests found").
 # ---------------------------------------------------------------------------
-make_repo "${tmp}/empty" "crates/ironclaw_first_party_extensions"
-mkdir -p "${tmp}/empty/crates/ironclaw_first_party_extensions/assets"
+make_repo "${tmp}/empty" "crates/extensions/ironclaw_extension_support"
+mkdir -p "${tmp}/empty/crates/extensions/packages"
 run_first_party "${tmp}/empty"
-assert_rc       "W4 empty assets exits 1"       1 "${CAP_RC}"
-assert_contains "W4 empty assets refuses"       "${CAP_OUT}" "no manifests found"
+assert_rc       "W4 empty packages exits 1"     1 "${CAP_RC}"
+assert_contains "W4 empty packages refuses"     "${CAP_OUT}" "no manifests found"
 
 # ---------------------------------------------------------------------------
 # W5: NEGATIVE — a below-floor crate inventory must refuse rather than silently
 #     resolving nothing.
 # ---------------------------------------------------------------------------
 rm -rf "${tmp}/thin"
-mkdir -p "${tmp}/thin/scripts/ci/lib" "${tmp}/thin/crates/ironclaw_first_party_extensions/assets"
+mkdir -p "${tmp}/thin/scripts/ci/lib" "${tmp}/thin/crates/extensions/packages" \
+    "${tmp}/thin/crates/extensions/ironclaw_extension_support"
 cp "${script_under_test}" "${tmp}/thin/scripts/build-wasm-extensions.sh"
 cp "${crate_tree}" "${tmp}/thin/scripts/ci/lib/crate_tree.py"
-printf '[package]\nname = "ironclaw_first_party_extensions"\n' \
-    > "${tmp}/thin/crates/ironclaw_first_party_extensions/Cargo.toml"
+printf '[package]\nname = "ironclaw_extension_support"\n' \
+    > "${tmp}/thin/crates/extensions/ironclaw_extension_support/Cargo.toml"
 run_first_party "${tmp}/thin"
 assert_rc       "W5 thin inventory exits 1"     1 "${CAP_RC}"
 assert_contains "W5 thin inventory refuses"     "${CAP_OUT}" "crate discovery failed"
@@ -162,7 +163,7 @@ assert_contains "W5 thin inventory refuses"     "${CAP_OUT}" "crate discovery fa
 # W6: NEGATIVE — the registry tool set has the same empty-set guard. Pins that
 #     the other two manifest sets also refuse rather than exiting 0.
 # ---------------------------------------------------------------------------
-make_repo "${tmp}/notools" "crates/ironclaw_first_party_extensions"
+make_repo "${tmp}/notools" "crates/extensions/ironclaw_extension_support"
 run_set "${tmp}/notools" --tools
 assert_rc       "W6 empty registry/tools exits 1" 1 "${CAP_RC}"
 assert_contains "W6 empty registry/tools refuses" "${CAP_OUT}" "no manifests found"

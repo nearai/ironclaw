@@ -94,7 +94,11 @@ import tomllib
 import zipfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "lib"))
-from crate_tree import CrateTreeError, crate_directories  # noqa: E402
+from crate_tree import (  # noqa: E402
+    CrateTreeError,
+    crate_directories,
+    workspace_root_directories,
+)
 
 CRATES_ROOT = "crates"
 # A crate-relative Reborn production source: `src/` of the crate itself, at any
@@ -159,6 +163,13 @@ class ProductionPaths:
             # something" assertion: every path verdict below flows from this
             # inventory, so a broken tree cannot read as "nothing changed".
             self._crate_directories = crate_directories(repo_root)
+            # Separate workspace roots under `crates/` (the `wasm-src/` guest
+            # components, `ironclaw_silk_decoder`). Nothing here compiles them,
+            # so no line inside one can ever be covered — but they are also not
+            # "the inventory and the tree disagree", which is what
+            # `reject_unattributable` is for. Enumerated once, beside the
+            # inventory, so both answers come from the same walk.
+            self._workspace_roots = workspace_root_directories(repo_root)
         except CrateTreeError as error:
             raise GateError(
                 f"crate discovery failed, so no changed line can be attributed: {error}"
@@ -191,6 +202,11 @@ class ProductionPaths:
             return
         if self.owner(path) is not None:
             return
+        # Excluded by construction, not unattributable: a separate cargo
+        # workspace under `crates/` is never built or covered here, so "no
+        # crate owns it" is the correct and complete answer.
+        if any(path.startswith(f"{root}/") for root in self._workspace_roots):
+            return
         raise GateError(
             f"changed Rust file under {CRATES_ROOT}/ belongs to no discovered crate: "
             f"{path}. Refusing to treat it as 'not production' — an unattributable "
@@ -199,17 +215,30 @@ class ProductionPaths:
         )
 
     def diff_pathspecs(self) -> list[str]:
-        """Per-crate `git diff` pathspecs covering every crate's own `src/`.
+        """The pathspec for the production diff: the whole crates root.
 
-        Both forms are needed: git's pathspec `**` does not match the
-        zero-directory case, so `src/*.rs` is not covered by `src/**/*.rs`.
+        Deliberately NOT per-crate `<crate>/src/**` any more. Rename detection
+        needs both sides of a rename inside the same `git diff` invocation, and
+        a pathspec built from the *current* inventory cannot name the source of
+        a file whose crate DIRECTORY moved — `crates/ironclaw_memory_native/`
+        is not in the inventory once the crate lives at
+        `crates/extensions/packages/memory-native/`. `-M` then had nothing to
+        pair against and every surviving line of a moved file landed in the
+        denominator: measured on the WS2 package colocation, **33,026 added
+        production lines** across 95 files, none of them an actual edit.
+
+        That is the same defect `-M` was added for in PR #7005, one level up —
+        there it was a file moving within a crate, here it is the crate itself
+        moving — and it fails in the expensive direction, because the changed-
+        line coverage floor then demands coverage for a pure `git mv`.
+
+        Widening costs nothing in precision: `parse_diff` classifies each
+        destination path with `is_production()` and drops everything else, so
+        the denominator is unchanged for every non-move diff. It only makes the
+        rename pairing possible.
         """
 
-        pathspecs: list[str] = []
-        for directory in self._crate_directories:
-            pathspecs.append(f"{directory}/src/**/*.rs")
-            pathspecs.append(f"{directory}/src/*.rs")
-        return pathspecs
+        return [CRATES_ROOT]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -600,13 +629,20 @@ def mechanically_uninstrumentable_lines(source: str) -> set[int]:
     uninstrumentable: set[int] = set()
     attribute_depth = 0
     in_use = False
+    in_const = False
     for line_number, line in enumerate(lexical_lines, start=1):
         stripped = line.strip()
         if attribute_depth:
             uninstrumentable.add(line_number)
             attribute_depth += stripped.count("[") - stripped.count("]")
             continue
-        if stripped.startswith("#["):
+        # Outer (`#[...]`) and INNER (`#![...]`) attributes alike. The inner
+        # form was missing, and it is the one every crate root carries:
+        # `#![forbid(unsafe_code)]` on its own kept a moved `lib.rs` of pure
+        # `mod`/`pub use` declarations in the "absent from coverage" bucket,
+        # because one unclassified line is enough to defeat the
+        # `candidate_lines <= uninstrumentable_lines` escape.
+        if stripped.startswith("#[") or stripped.startswith("#!["):
             uninstrumentable.add(line_number)
             attribute_depth = stripped.count("[") - stripped.count("]")
             continue
@@ -618,6 +654,25 @@ def mechanically_uninstrumentable_lines(source: str) -> set[int]:
         if re.match(r"^(?:pub(?:\([^)]*\))?\s+)?use\b", stripped):
             uninstrumentable.add(line_number)
             in_use = ";" not in stripped
+            continue
+        # A `const`/`static` item is evaluated at compile time and carries no
+        # LLVM coverage region — an `include_str!`/`include_bytes!` initializer
+        # least of all. Spans to the terminating `;` exactly like `use`, so a
+        # multi-line initializer is covered too. Without this, repointing an
+        # asset path (the whole content of a package move) leaves a file whose
+        # only changed lines are const declarations, which reads as
+        # "contributed no instrumented lines" and fails closed.
+        if in_const:
+            uninstrumentable.add(line_number)
+            if ";" in stripped:
+                in_const = False
+            continue
+        if re.match(
+            r"^(?:pub(?:\([^)]*\))?\s+)?(?:const|static)\s+(?:mut\s+)?[A-Z_][A-Z0-9_]*\s*:",
+            stripped,
+        ):
+            uninstrumentable.add(line_number)
+            in_const = ";" not in stripped
             continue
         if re.fullmatch(
             r"(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?mod\s+[A-Za-z_]\w*\s*;",

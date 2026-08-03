@@ -1341,8 +1341,7 @@ async fn standalone_gsuite_installs_activates_and_dispatches_through_host_runtim
         .credential_account_service()
         .create_account(NewCredentialAccount {
             scope: auth_scope,
-            provider: ironclaw_first_party_extensions::google_provider_id()
-                .expect("Google provider id"),
+            provider: ironclaw_extension_support::google_provider_id().expect("Google provider id"),
             label: CredentialAccountLabel::new("work google").expect("valid label"),
             status: CredentialAccountStatus::Configured,
             ownership: CredentialOwnership::UserReusable,
@@ -2930,7 +2929,7 @@ fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
     // pin locks that the migration preserved slack's first-party grant and
     // its manifest-digest binding (wrong digest / wrong path → Sandbox).
     let policy = builtin_first_party_trust_policy().expect("trust policy");
-    let slack_bundle = ironclaw_first_party_extensions::packages::bundled_packages()
+    let slack_bundle = ironclaw_extension_support::packages::bundled_packages()
         .into_iter()
         .find(|bundle| bundle.id == "slack")
         .expect("slack is in the bundled inventory");
@@ -3006,7 +3005,7 @@ fn builtin_first_party_trust_policy_grants_migrated_gmail_via_inventory() {
     // first-party grant AND its manifest-digest binding (a wrong digest must
     // still fall back to Sandbox — the loop didn't drop the digest).
     let policy = builtin_first_party_trust_policy().expect("trust policy");
-    let gmail_bundle = ironclaw_first_party_extensions::packages::bundled_packages()
+    let gmail_bundle = ironclaw_extension_support::packages::bundled_packages()
         .into_iter()
         .find(|bundle| bundle.id == "gmail")
         .expect("gmail is in the bundled inventory");

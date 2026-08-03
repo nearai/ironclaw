@@ -356,10 +356,8 @@ fn prompt_description_files(
     let fixture_root = repo_root
         .join("tests/fixtures/extension_prompt_trust")
         .join(package_id);
-    let module = std::fs::read(
-        repo_root
-            .join("crates/ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm"),
-    )?;
+    let module =
+        std::fs::read(repo_root.join("crates/extensions/packages/github/wasm/github_tool.wasm"))?;
     let mut files = vec![
         (
             "manifest.toml".to_string(),

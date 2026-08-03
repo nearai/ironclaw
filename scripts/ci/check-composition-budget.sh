@@ -115,7 +115,7 @@ EOF
 # EXCLUDES slack/, telegram/ and extension_host/ — those subtrees are owned by
 # the separate channel/extension refactor, so this gate must not trip on or
 # govern their work. (telegram/ holds only the thin telegram_host_beta wiring
-# layer; the host domain itself lives in crates/ironclaw_telegram_extension.)
+# layer; the host domain itself lives in crates/extensions/packages/telegram.)
 DISPATCH_EXCLUDE_RE='/(slack|telegram|extension_host)/'
 
 # --- count Arc<dyn> dispatch sites in governed composition production code ----

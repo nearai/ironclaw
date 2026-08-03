@@ -151,6 +151,7 @@ jobs:
           scripts/ci/test-ci-comm-locale-pin.sh
           scripts/ci/test-classify-test-scope.sh
           scripts/ci/test-build-wasm-extensions.sh
+          scripts/ci/test-check-wasm-artifact-freshness.sh
           scripts/ci/test-package-feature-flags.sh
           python3 scripts/ci/test_changed_workspace_packages.py
           scripts/ci/test-reborn-crate-test-buckets.sh
@@ -170,6 +171,11 @@ jobs:
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: python3 scripts/check_no_panics.py --base "$BASE_SHA" --head HEAD
+      # A committed `.wasm` whose `wasm-src/` moved on without it ships stale
+      # behaviour: the rebuild job overwrites the artifact in the working tree
+      # before testing it, so it never compares against what is committed.
+      - name: Check committed WASM artifacts are not stale
+        run: python3 scripts/ci/check-wasm-artifact-freshness.py
       - name: Check composition mass budget
         run: bash scripts/ci/check-composition-budget.sh
       - name: Self-test the composition budget gate

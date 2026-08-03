@@ -86,7 +86,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_agent_loop` | `ironclaw_agent_loop` | Agent-loop framework state, planner/executor, strategy/family contracts, and test support. |
 | `ironclaw_loop_host` | `ironclaw_loop_host` | Adapts durable Reborn support boundaries into the narrow agent-loop host port. It should not own provider clients or runtime dispatchers. |
 | `ironclaw_turns` | `ironclaw_turns` | Host-layer turn coordination contracts. Use it for turn lifecycle boundaries between loop/product code and host services. |
-| `ironclaw_first_party_extensions` | `ironclaw_first_party_extensions` | Concrete first-party userland extension implementations behind scoped handles. |
+| `ironclaw_extension_support` | `ironclaw_extension_support` | Concrete first-party userland extension implementations behind scoped handles. |
 | `ironclaw_first_party_extension_ports` | `ironclaw_first_party_extension_ports` | Loop-facing adapters for first-party extensions: skill activation/context/execution ports over loop-host and turn-run contracts. |
 | `ironclaw_product` | `ironclaw_product` | Product contracts and orchestration: adapter shapes, inbound turns, idempotency, binding resolution, ProductSurface descriptors, and the durable ledger adapters (unconditional — the crate's only feature is `test-support`; the `host-auth-mint` mint gate went with WS1.5's sealed-evidence consolidation). |
 | `ironclaw_skills` | `ironclaw_skills` | Skill selection, scoring, and management. |
