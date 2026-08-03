@@ -784,6 +784,49 @@ async fn automatic_no_auth_empty_catalog_registers_before_catalog_discovery() {
         )),
         "a successful no-auth discovery must not re-open auth selection: {projected:#?}"
     );
+
+    let requests_before_explicit_no_auth = server.requests().len();
+    services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(webui_gate_resource_scope_for_owner(
+                "hosted-mcp-no-auth-empty-catalog",
+            )),
+            LifecycleProductAction::ExtensionRegisterHostedMcp {
+                request: registration_request_with_id(
+                    "explicit-no-auth",
+                    HostedMcpAuthSelection::NoAuth,
+                ),
+            },
+        )
+        .await
+        .expect("an explicit no-auth choice registers without auth preflight");
+    assert_eq!(
+        server.requests().len(),
+        requests_before_explicit_no_auth,
+        "explicit no-auth registration must not probe the MCP before persistence"
+    );
+
+    let oauth_error = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(webui_gate_resource_scope_for_owner(
+                "hosted-mcp-no-auth-empty-catalog",
+            )),
+            LifecycleProductAction::ExtensionRegisterHostedMcp {
+                request: registration_request_with_id(
+                    "oauth-against-no-auth",
+                    HostedMcpAuthSelection::OAuth {
+                        client_profile_id: None,
+                    },
+                ),
+            },
+        )
+        .await
+        .expect_err("explicit OAuth must reject a server that accepts unauthenticated access");
+    assert_eq!(oauth_error.code, ProductSurfaceErrorCode::InvalidRequest);
+    assert_eq!(oauth_error.kind, ProductSurfaceErrorKind::Validation);
+    assert_eq!(oauth_error.status_code, 400);
 }
 
 #[tokio::test]
@@ -802,10 +845,27 @@ async fn legacy_auto_manifest_selects_bearer_through_lifecycle_and_checkpoints_s
     )
     .await;
 
+    let automatic_error = restored
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionSelectHostedMcpAuth {
+                package_ref: fixture_package_ref(),
+                auth_selection: HostedMcpAuthSelection::Auto,
+            },
+        )
+        .await
+        .expect_err("auth recovery requires an explicit user selection");
+    assert_eq!(
+        automatic_error.code,
+        ProductSurfaceErrorCode::InvalidRequest
+    );
+    assert_eq!(automatic_error.kind, ProductSurfaceErrorKind::Validation);
+
     let selected = restored
         .lifecycle_service
         .execute(
-            lifecycle_product_context(scope),
+            lifecycle_product_context(scope.clone()),
             LifecycleProductAction::ExtensionSelectHostedMcpAuth {
                 package_ref: fixture_package_ref(),
                 auth_selection: HostedMcpAuthSelection::Bearer,
@@ -832,6 +892,25 @@ async fn legacy_auto_manifest_selects_bearer_through_lifecycle_and_checkpoints_s
             .map(|mcp| &mcp.registration_auth),
         Some(HostedMcpAuthSelection::Bearer)
     ));
+
+    let reselection_error = restored
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope),
+            LifecycleProductAction::ExtensionSelectHostedMcpAuth {
+                package_ref: fixture_package_ref(),
+                auth_selection: HostedMcpAuthSelection::OAuth {
+                    client_profile_id: None,
+                },
+            },
+        )
+        .await
+        .expect_err("checkpointed bearer setup cannot be overwritten by another auth selection");
+    assert_eq!(
+        reselection_error.code,
+        ProductSurfaceErrorCode::InvalidRequest
+    );
+    assert_eq!(reselection_error.kind, ProductSurfaceErrorKind::Validation);
 }
 
 #[tokio::test]
@@ -882,6 +961,75 @@ async fn legacy_auto_manifest_challenged_by_oauth_checkpoints_oauth_requirements
     assert!(manifest.resolved().auth.iter().any(|auth| matches!(
         &auth.setup,
         ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth { .. }
+    )));
+}
+
+#[tokio::test]
+async fn legacy_auto_manifest_without_oauth_client_path_requires_explicit_selection() {
+    let oauth = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::OAuthWithoutChallenge {
+            access_token: "oauth-token".to_string(),
+        },
+        Vec::new(),
+    )
+    .await;
+    oauth.script_authorization_server_response(ScriptedMetadataResponse::new(
+        axum::http::StatusCode::OK,
+        serde_json::to_vec(&json!({
+            "issuer": "https://auth.example.test",
+            "authorization_endpoint": "https://auth.example.test/authorize",
+            "token_endpoint": "https://auth.example.test/token",
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "code_challenge_methods_supported": ["S256"]
+        }))
+        .expect("authorization metadata without DCR serializes"),
+    ));
+    let (restored, scope) = restored_legacy_hosted_mcp(
+        "hosted-mcp-legacy-auto-without-client-path",
+        HostedMcpAuthSelection::Auto,
+        Arc::new(HostedMcpRegistrationNetworkEgress::for_server(&oauth)),
+    )
+    .await;
+
+    let activated = restored
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionActivate {
+                package_ref: fixture_package_ref(),
+            },
+        )
+        .await
+        .expect("missing OAuth client setup returns an explicit auth choice");
+    assert!(activated.blockers.iter().any(|blocker| matches!(
+        blocker,
+        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
+            ref_id: Some(ref_id),
+        } if ref_id.as_str()
+            == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
+    )));
+    assert!(
+        !activated.blockers.iter().any(|blocker| matches!(
+            blocker,
+            ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential {
+                ..
+            }
+        )),
+        "unresolved automatic auth must request a choice before credential setup"
+    );
+
+    let projected = restored
+        .lifecycle_service
+        .project_package(lifecycle_product_context(scope), fixture_package_ref())
+        .await
+        .expect("the unresolved auth choice reprojects");
+    assert!(projected.blockers.iter().any(|blocker| matches!(
+        blocker,
+        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
+            ref_id: Some(ref_id),
+        } if ref_id.as_str()
+            == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
     )));
 }
 

@@ -1550,6 +1550,22 @@ reason = "Pre-existing and behaviourally untouched, at two sites. Lines 1414-141
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
+[[exemption]]
+path = "crates/ironclaw_product_contracts/src/product_wire.rs"
+lines = [1376]
+owner = "@nearai/reborn"
+reason = "Serde struct-field declaration for the caller-visible hosted-MCP setup message. The public ProductSurface contract test exercises serialization and verifies the message is not exposed in the sanitized validation error, but LLVM cannot emit a DA record for a field declaration."
+issue = "https://github.com/nearai/ironclaw/issues/6930"
+review_after = "2026-11-03"
+
+[[exemption]]
+path = "crates/ironclaw_product_contracts/src/surface.rs"
+lines = [312]
+owner = "@nearai/reborn"
+reason = "Enum-variant declaration for the hosted-MCP auth-selection validation code. The public ProductSurface contract test serializes and asserts auth_selection_required, but LLVM cannot emit a DA record for an enum variant declaration."
+issue = "https://github.com/nearai/ironclaw/issues/6930"
+review_after = "2026-11-03"
+
 # ---------------------------------------------------------------------------
 # WS2 package colocation. Nine lines across four package-inventory modules,
 # all the same shape: an `include_bytes!(concat!(…))` sitting inside a
