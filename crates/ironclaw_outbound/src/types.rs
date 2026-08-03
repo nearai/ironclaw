@@ -193,11 +193,11 @@ pub enum OutboundDeliveryStatus {
     /// Coordinator lifecycle: the attempt is persisted, no vendor egress has
     /// happened yet (crash here → safe to retry).
     Prepared,
-    /// Coordinator lifecycle: durable sole-egress ownership was claimed before
-    /// fallible target/channel resolution and attachment materialization. This
-    /// state does not prove that the vendor was contacted. After a crash it
-    /// becomes [`Self::Unknown`] because the vendor may still have accepted the
-    /// message; never blindly resend it.
+    /// Coordinator lifecycle: after target/channel/context resolution and
+    /// attachment materialization, durable sole-egress ownership was claimed
+    /// immediately before adapter egress. This state marks vendor-contact
+    /// ambiguity rather than proving contact. After a crash it becomes
+    /// [`Self::Unknown`]; never blindly resend it.
     Sending,
     /// Legacy pre-coordinator state (kept for persisted rows).
     Pending,
