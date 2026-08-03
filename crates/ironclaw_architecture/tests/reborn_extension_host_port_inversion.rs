@@ -36,6 +36,10 @@ mod ratchet_support;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::OnceLock;
+
+use serde_json::Value;
 
 use ratchet_support::{
     TypeDefOccurrence, cfg_test_only_files, collect_type_defs, names_crate, out_of_line_mod_decls,
@@ -150,8 +154,70 @@ const PRODUCT_DEFINED_TRAITS_EXTENSION_MANAGER_STILL_IMPLEMENTS: &[(&str, &str)]
      is narrowed out (the same blocker as the host's AuthChallengeProvider row)",
 )];
 
-fn crate_src(root: &Path, name: &str) -> PathBuf {
-    root.join("crates").join(name).join("src")
+/// Workspace package metadata, resolved once per test binary.
+///
+/// The move-order proof (CHECKLIST WS2's last row) turns on this: every path
+/// this gate reads is derived from `cargo metadata`'s `manifest_path`, never
+/// assembled as `crates/<name>`. WS7 moves these crates into family
+/// directories, and a literal path would then resolve to nothing — which for
+/// a scan means walking an empty tree, and for a manifest guard means an
+/// `exists()` check that quietly stops guarding. Resolved through cargo, a
+/// crate that is not a workspace member is a **panic**, and one that moved is
+/// simply followed.
+fn workspace_metadata() -> &'static Value {
+    static METADATA: OnceLock<Value> = OnceLock::new();
+    METADATA.get_or_init(|| {
+        let manifest_path = workspace_root().join("Cargo.toml");
+        let output = Command::new("cargo")
+            .args([
+                "metadata",
+                "--format-version",
+                "1",
+                "--no-deps",
+                "--manifest-path",
+            ])
+            .arg(&manifest_path)
+            .output()
+            .unwrap_or_else(|error| panic!("failed to run cargo metadata: {error}"));
+        assert!(
+            output.status.success(),
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("cargo metadata output must be JSON")
+    })
+}
+
+/// The `cargo metadata` package entry for a workspace crate. Absence is fatal
+/// on purpose — see [`workspace_metadata`].
+fn package(name: &str) -> &'static Value {
+    workspace_metadata()["packages"]
+        .as_array()
+        .expect("cargo metadata packages")
+        .iter()
+        .find(|package| package["name"].as_str() == Some(name))
+        .unwrap_or_else(|| {
+            panic!(
+                "{name} is not a workspace member; this gate resolves every path through \
+                 cargo metadata, so an unregistered crate must fail loudly rather than \
+                 leave the scans walking a directory that is not there"
+            )
+        })
+}
+
+/// A workspace crate's directory, taken from its manifest's real location.
+fn crate_dir(name: &str) -> PathBuf {
+    let manifest = package(name)["manifest_path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{name} has no manifest_path in cargo metadata"));
+    Path::new(manifest)
+        .parent()
+        .unwrap_or_else(|| panic!("{name}'s manifest_path has no parent directory"))
+        .to_path_buf()
+}
+
+fn crate_src(name: &str) -> PathBuf {
+    crate_dir(name).join("src")
 }
 
 fn is_rust_identifier(ident: &str) -> bool {
@@ -163,10 +229,10 @@ fn is_rust_identifier(ident: &str) -> bool {
     chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-fn traits_defined_in(root: &Path, crate_name: &str) -> BTreeSet<String> {
+fn traits_defined_in(crate_name: &str) -> BTreeSet<String> {
     let mut found: BTreeMap<String, Vec<TypeDefOccurrence>> = BTreeMap::new();
     collect_type_defs(
-        &crate_src(root, crate_name),
+        &crate_src(crate_name),
         &["trait "],
         &is_rust_identifier,
         &[],
@@ -325,12 +391,11 @@ fn implemented_trait_names(source: &str) -> BTreeSet<String> {
 /// front: they are test code wearing a production filename, and a test double
 /// in one of them must satisfy nothing (see `cfg_test_only_files`).
 fn traits_implemented_by(
-    root: &Path,
     crate_name: &str,
     referenced_crate: &str,
     minimum_files: usize,
 ) -> BTreeSet<String> {
-    let src = crate_src(root, crate_name);
+    let src = crate_src(crate_name);
     let files = production_rust_files(&src);
     assert!(
         files.len() >= minimum_files,
@@ -360,9 +425,8 @@ fn assert_product_trait_residue_is_exact(
     residue: &[(&str, &str)],
     baseline: usize,
 ) {
-    let root = workspace_root();
-    let product_traits = traits_defined_in(&root, PRODUCT);
-    let implemented = traits_implemented_by(&root, crate_name, PRODUCT, minimum_files);
+    let product_traits = traits_defined_in(PRODUCT);
+    let implemented = traits_implemented_by(crate_name, PRODUCT, minimum_files);
 
     let found: BTreeSet<String> = implemented.intersection(&product_traits).cloned().collect();
     let frozen: BTreeSet<String> = residue
@@ -420,11 +484,10 @@ fn extension_manager_implements_only_the_frozen_residue_of_product_defined_trait
 
 #[test]
 fn inverted_ports_are_declared_in_contracts_and_implemented_below_product() {
-    let root = workspace_root();
-    let contract_traits = traits_defined_in(&root, PRODUCT_CONTRACTS);
-    let product_traits = traits_defined_in(&root, PRODUCT);
-    let host_impls = traits_implemented_by(&root, EXTENSION_HOST, PRODUCT_CONTRACTS, 21);
-    let manager_impls = traits_implemented_by(&root, EXTENSION_MANAGER, PRODUCT_CONTRACTS, 10);
+    let contract_traits = traits_defined_in(PRODUCT_CONTRACTS);
+    let product_traits = traits_defined_in(PRODUCT);
+    let host_impls = traits_implemented_by(EXTENSION_HOST, PRODUCT_CONTRACTS, 21);
+    let manager_impls = traits_implemented_by(EXTENSION_MANAGER, PRODUCT_CONTRACTS, 10);
 
     let mut violations = Vec::new();
     for (port, implementor) in INVERTED_PORT_IMPLEMENTORS {
@@ -514,12 +577,11 @@ const EXTENSION_HOST_FILES_STILL_NAMING_THE_WORKFLOW_ERROR: &[(&str, &str)] = &[
 /// An unreadable file is fatal, not skipped — a silent skip is how this scan
 /// would go quietly vacuous.
 fn production_files_naming(
-    root: &Path,
     crate_name: &str,
     type_name: &str,
     minimum_files: usize,
 ) -> BTreeSet<String> {
-    let src = crate_src(root, crate_name);
+    let src = crate_src(crate_name);
     let files = production_rust_files(&src);
     assert!(
         files.len() >= minimum_files,
@@ -543,8 +605,7 @@ fn production_files_naming(
 
 #[test]
 fn extension_host_speaks_the_contract_error_everywhere_but_the_frozen_residue_files() {
-    let root = workspace_root();
-    let found = production_files_naming(&root, EXTENSION_HOST, "ProductSurfaceFailure", 21);
+    let found = production_files_naming(EXTENSION_HOST, "ProductSurfaceFailure", 21);
     let frozen: BTreeSet<String> = EXTENSION_HOST_FILES_STILL_NAMING_THE_WORKFLOW_ERROR
         .iter()
         .map(|(file, _)| (*file).to_string())
@@ -581,9 +642,8 @@ fn extension_host_speaks_the_contract_error_everywhere_but_the_frozen_residue_fi
     // claim exactly: the boundary error is still the vocabulary of the whole
     // lifecycle surface, wherever that surface now lives. Each half is also
     // held above zero so the sum cannot be satisfied by one crate alone.
-    let host_users = production_files_naming(&root, EXTENSION_HOST, "ProductOperationFailure", 21);
-    let manager_users =
-        production_files_naming(&root, EXTENSION_MANAGER, "ProductOperationFailure", 10);
+    let host_users = production_files_naming(EXTENSION_HOST, "ProductOperationFailure", 21);
+    let manager_users = production_files_naming(EXTENSION_MANAGER, "ProductOperationFailure", 10);
     assert!(
         !host_users.is_empty() && !manager_users.is_empty(),
         "both halves of the lifecycle surface must speak the contract error; \
@@ -598,10 +658,86 @@ fn extension_host_speaks_the_contract_error_everywhere_but_the_frozen_residue_fi
     );
 }
 
+/// CHECKLIST WS2's closing row — the **move-order proof**, stated as the
+/// property it is rather than as a one-off audit: `ironclaw_extension_host`'s
+/// manifest lists no `ironclaw_product` dependency *under any name* once the
+/// residue is gone, and the manifest is found through `cargo metadata` rather
+/// than at `crates/ironclaw_extension_host/Cargo.toml`.
+///
+/// Two failure modes it closes, both of which are silent today:
+///
+/// - **A rename blinds the source scans.** Every residue list in this file and
+///   in `reborn_extension_manager_split.rs` matches the literal crate name, so
+///   `p = { package = "ironclaw_product" }` would let the edge grow with every
+///   list still passing. (Same rule the manager half already carries; the host
+///   half had none.)
+/// - **A directory move blinds the manifest guard.** The literal-path idiom
+///   used elsewhere in this suite is `if manifest.exists() { assert!(…) }`,
+///   which after WS7 moves the crate stops asserting instead of failing.
+///   Resolved through cargo, an unregistered crate panics in [`package`] and a
+///   relocated one is simply followed.
+///
+/// The dependency is asserted to exist **exactly while** the residue is
+/// non-empty, so the last residue row and the manifest edge have to go in the
+/// same change — in either direction.
+#[test]
+fn the_extension_host_manifest_names_product_only_while_a_residue_needs_it() {
+    let host = package(EXTENSION_HOST);
+
+    // The resolution is live, not vacuous: whatever cargo reported is the
+    // directory the scans in this file actually walk.
+    let lib = crate_src(EXTENSION_HOST).join("lib.rs");
+    assert!(
+        lib.is_file(),
+        "cargo metadata put {EXTENSION_HOST} at {}, which holds no src/lib.rs — the \
+         manifest_path resolution is wrong, and every scan in this file reads from it",
+        crate_dir(EXTENSION_HOST).display()
+    );
+
+    let product_deps: Vec<&Value> = host["dependencies"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|dependency| dependency["name"].as_str() == Some(PRODUCT))
+        .collect();
+    for dependency in &product_deps {
+        assert!(
+            dependency["rename"].is_null(),
+            "{EXTENSION_HOST} renames its {PRODUCT} dependency to {:?}. Every residue list \
+             in this suite matches the real crate name, so a rename lets the edge grow with \
+             all of them still green",
+            dependency["rename"]
+        );
+    }
+
+    let has_normal_dep = product_deps
+        .iter()
+        .any(|dependency| dependency["kind"].as_str().unwrap_or("normal") == "normal");
+    let residue_is_open = !PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS.is_empty();
+    assert_eq!(
+        has_normal_dep, residue_is_open,
+        "{EXTENSION_HOST}'s normal dependency on {PRODUCT} must exist exactly while its \
+         port residue is non-empty. Residue open: {residue_is_open}; manifest edge present: \
+         {has_normal_dep}. When the last residue row goes, delete the manifest edge in the \
+         same change (and vice versa) — that pairing IS the move-order proof"
+    );
+}
+
+/// The other half of the move-order proof: the resolution itself is loud.
+///
+/// A name cargo does not know must **panic**, not hand back a path that
+/// happens not to exist — because a non-existent path is exactly what a
+/// literal `crates/<name>` produces after WS7 moves a crate, and every scan
+/// in this file would then walk nothing and pass.
+#[test]
+#[should_panic(expected = "is not a workspace member")]
+fn a_crate_cargo_does_not_know_fails_loudly_rather_than_resolving_to_a_dead_path() {
+    let _ = crate_dir("ironclaw_extension_host_relocated_by_ws7");
+}
+
 #[test]
 fn the_boundary_error_names_no_type_the_contracts_crate_may_not_depend_on() {
-    let root = workspace_root();
-    let path = crate_src(&root, PRODUCT_CONTRACTS).join("error.rs");
+    let path = crate_src(PRODUCT_CONTRACTS).join("error.rs");
     let source = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     let code = strip_comments_and_strings(&source);
@@ -794,8 +930,7 @@ fn mod_decl_scanner_reads_gating_and_declaration_shapes() {
 /// update or delete this pin in the same change.)
 #[test]
 fn files_reachable_only_through_cfg_test_modules_are_not_production() {
-    let root = workspace_root();
-    let src = crate_src(&root, EXTENSION_HOST);
+    let src = crate_src(EXTENSION_HOST);
     let test_only = cfg_test_only_files(&src);
     let evader = src.join("channel_host").join("e2e_auth_challenge.rs");
     assert!(

@@ -39,7 +39,6 @@ pub mod channel_identity_store;
 pub mod channel_lifecycle;
 pub mod channel_outbound_targets;
 pub mod channel_pairing;
-pub mod channel_pairing_serve;
 pub mod channel_subject_routes;
 pub mod channel_triggered_delivery;
 pub mod deployment_channels;

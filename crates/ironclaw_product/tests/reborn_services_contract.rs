@@ -6692,7 +6692,7 @@ async fn list_extensions_golden_wire_multi_surface_extension_freezes_accounts_li
 /// projection through the real descriptor-backed `EXTENSIONS_VIEW` seam.
 struct FailedStateLifecycleService {
     extension: LifecycleInstalledExtensionSummary,
-    activation_errors: std::collections::HashMap<String, String>,
+    activation_errors: std::collections::HashMap<ExtensionId, String>,
 }
 
 #[async_trait]
@@ -6726,7 +6726,7 @@ impl LifecycleProductService for FailedStateLifecycleService {
     async fn installed_activation_errors(
         &self,
         _context: LifecycleProductContext,
-    ) -> Result<std::collections::HashMap<String, String>, ProductSurfaceError> {
+    ) -> Result<std::collections::HashMap<ExtensionId, String>, ProductSurfaceError> {
         Ok(self.activation_errors.clone())
     }
 }
@@ -6804,10 +6804,21 @@ async fn list_extensions_surfaces_failed_state_expired_account_and_activation_er
             phase: InstallationState::Failed,
             install_scope: None,
         },
-        activation_errors: std::collections::HashMap::from([(
-            "acme".to_string(),
-            "activation failed: runtime credential rejected".to_string(),
-        )]),
+        activation_errors: std::collections::HashMap::from([
+            (
+                ExtensionId::new("acme").expect("valid extension id"),
+                "activation failed: runtime credential rejected".to_string(),
+            ),
+            // A *different* extension's failure sits in the same map. The key
+            // is an `ExtensionId`, so the only way this reason could land on
+            // the acme card is a genuine lookup bug — which is exactly what a
+            // `String` key made indistinguishable from a package id, a display
+            // name, or an installation id being keyed in by mistake.
+            (
+                ExtensionId::new("other-extension").expect("valid extension id"),
+                "activation failed: a different extension entirely".to_string(),
+            ),
+        ]),
     }))
     .with_channel_connection_service(Arc::new(AccountStatusConnectionService {
         // The caller still holds a binding (connected), yet the durable
@@ -6849,6 +6860,12 @@ async fn list_extensions_surfaces_failed_state_expired_account_and_activation_er
         info.activation_error.as_deref(),
         Some("activation failed: runtime credential rejected"),
         "the installation record's last_error must reach the projected DTO",
+    );
+    assert_ne!(
+        info.activation_error.as_deref(),
+        Some("activation failed: a different extension entirely"),
+        "each card carries its OWN extension's reason; the map is keyed by \
+         ExtensionId precisely so a neighbouring failure cannot land here",
     );
 
     // (b) The auth account projects its real §6.3 state + typed last error,
@@ -11530,6 +11547,47 @@ async fn extension_import_is_available_as_product_capability() {
         Resolution::Done(outcome) if outcome.verdict.is_success()
     ));
     assert_eq!(lifecycle_service.imported_bundles(), vec![bundle]);
+}
+
+/// The other half of the import capability: what a runtime that never wired a
+/// bundle importer answers. Driven **through the surface**, not against the
+/// trait default, because that is where the status the browser sees is
+/// decided — `RebornServices` is constructed exactly as composition
+/// constructs it and then simply not given a lifecycle service, which leaves
+/// the `UnsupportedLifecycleProductService` default in place.
+///
+/// It must be `Unavailable`/503, never `InvalidRequest`/400: the caller
+/// uploaded a bundle nothing ever looked at, so there is nothing about their
+/// request to fault. (Flipped 2026-08-02 by the CHECKLIST WS2 "four WS2.1
+/// follow-ups" row; the code used to be 400.)
+#[tokio::test]
+async fn webui_extension_import_reports_unavailable_when_no_service_is_wired() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    let bundle: Vec<u8> = b"PK\x03\x04\x00\xff\xfe binary zip bytes".to_vec();
+
+    let error = services
+        .invoke(
+            caller(),
+            CapabilityId::new(EXTENSION_IMPORT_CAPABILITY_ID).expect("capability id"),
+            json!({ "bundle_base64": STANDARD.encode(&bundle) }),
+            ActivityId::new(),
+        )
+        .await
+        .expect_err("a runtime with no bundle importer must refuse the import");
+
+    assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
+    assert_eq!(error.status_code, 503);
+    assert!(
+        !error.retryable,
+        "an unwired capability does not become wired by retrying"
+    );
+    // The request itself was never faulted: a validation error would carry the
+    // offending field, and this one has none.
+    assert!(error.field.is_none());
+    assert!(error.validation_code.is_none());
 }
 
 #[tokio::test]

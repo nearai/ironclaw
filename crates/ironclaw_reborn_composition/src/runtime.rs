@@ -1187,17 +1187,17 @@ impl RebornRuntime {
         Some(service.connection_notices().clone())
     }
 
-    /// The production protected pairing route mount (`pairing/{mint,status,
-    /// unpair}`) over the composed pairing registry. Tests only.
+    /// The composed pairing registry, for building the protected pairing
+    /// route mount (`pairing/{mint,status,unpair}`). Tests only.
+    ///
+    /// Composition hands out the *registry*, not the mount: the routes live in
+    /// `ironclaw_webui` (PROPOSAL §6.9.4) and this crate does not depend on
+    /// the transport — `ironclaw_webui` is a dev-dependency here, not a
+    /// normal one, and building the mount from production code would make it
+    /// a normal one.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn channel_pairing_route_mount_for_test(
-        &self,
-    ) -> Option<ironclaw_host_ingress::ProtectedRouteMount> {
-        self.channel_pairing.as_ref().map(|registry| {
-            ironclaw_extension_host::channel_pairing_serve::channel_pairing_route_mount(Arc::clone(
-                registry,
-            ))
-        })
+    pub fn channel_pairing_registry_for_test(&self) -> Option<Arc<ChannelPairingRegistry>> {
+        self.channel_pairing.as_ref().map(Arc::clone)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1588,16 +1588,14 @@ impl RebornRuntime {
     /// provisioning opens the caller's direct conversation through the
     /// extension's own adapter. `None` when the composed runtime carries no
     /// durable channel-identity storage.
-    /// The bearer-authed generic pairing route mount (`WebGeneratedCode`
-    /// channels), when the composed runtime built any pairing service.
-    pub fn channel_pairing_route_mount(
-        &self,
-    ) -> Option<ironclaw_host_ingress::ProtectedRouteMount> {
-        self.channel_pairing.as_ref().map(|registry| {
-            ironclaw_extension_host::channel_pairing_serve::channel_pairing_route_mount(
-                std::sync::Arc::clone(registry),
-            )
-        })
+    /// The composed pairing registry for the bearer-authed generic pairing
+    /// routes (`WebGeneratedCode` channels), when the composed runtime built
+    /// any pairing service. The binary turns it into a route mount through
+    /// `ironclaw_webui::channel_pairing_route_mount` — see
+    /// `channel_pairing_registry_for_test` for why the mount is not built
+    /// here.
+    pub fn channel_pairing_registry(&self) -> Option<Arc<ChannelPairingRegistry>> {
+        self.channel_pairing.as_ref().map(Arc::clone)
     }
 
     pub fn channel_identity_binding_config(

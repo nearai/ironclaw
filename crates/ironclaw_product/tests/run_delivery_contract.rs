@@ -23,7 +23,7 @@ use ironclaw_host_api::turn::{
 };
 use ironclaw_host_api::{
     attachment::WorkspaceFile,
-    ids::{AgentId, TenantId, ThreadId, UserId},
+    ids::{AgentId, ExtensionId, TenantId, ThreadId, UserId},
     path::ScopedPath,
 };
 use ironclaw_outbound::{
@@ -314,8 +314,9 @@ struct StaticResolver {
 impl ChannelDeliveryResolver for StaticResolver {
     fn resolve_channel_delivery(&self, extension_id: &str) -> Option<ResolvedChannelDelivery> {
         Some(ResolvedChannelDelivery {
-            extension_id: extension_id.to_string(),
-            installation_id: "install_alpha".to_string(),
+            extension_id: ExtensionId::new(extension_id).expect("valid extension id"),
+            installation_id: AdapterInstallationId::new("install_alpha")
+                .expect("valid installation id"),
             adapter: Arc::clone(&self.adapter) as Arc<dyn ChannelAdapter>,
             egress: Arc::new(DenyAllEgress),
         })
@@ -326,7 +327,12 @@ struct NoStoredReplyContext;
 
 #[async_trait]
 impl DeliveryReplyContextSource for NoStoredReplyContext {
-    async fn reply_context(&self, _: &str, _: &str, _: &str) -> Option<Vec<u8>> {
+    async fn reply_context(
+        &self,
+        _: &ExtensionId,
+        _: &AdapterInstallationId,
+        _: &str,
+    ) -> Option<Vec<u8>> {
         None
     }
 }
@@ -447,7 +453,7 @@ impl BlockedAuthPromptSource for OAuthPromptSource {
     ) -> Result<AuthPromptView, ProductAdapterError> {
         Ok(AuthPromptView {
             turn_run_id: request.run_id,
-            auth_request_ref: request.gate_ref.to_string(),
+            auth_request_ref: request.gate_ref.as_str().to_string(),
             invocation_id: None,
             headline: "Authentication required".to_string(),
             body: request.body,

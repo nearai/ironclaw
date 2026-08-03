@@ -422,7 +422,7 @@ async fn blocked_prompt_payload(
                 fallback_owner_user_id: event.owner_user_id.as_ref().unwrap_or(caller_user_id),
                 scope: &event.scope,
                 run_id: event.run_id,
-                gate_ref: &gate_ref_str,
+                gate_ref,
                 invocation_id: blocked_invocation_id,
                 body: event
                     .sanitized_reason

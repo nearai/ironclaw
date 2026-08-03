@@ -12,14 +12,14 @@
 //! product's).
 
 use async_trait::async_trait;
-use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::ids::{AgentId, ExtensionId, ProjectId, TenantId, UserId};
 use serde::Serialize;
 
 use crate::command::ProductCommandContext;
 use crate::package_lifecycle::{
     LifecyclePackageRef, LifecycleProductAction, LifecycleProductResponse,
 };
-use crate::surface::{ProductSurfaceError, ProductSurfaceErrorCode};
+use crate::surface::ProductSurfaceError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LifecycleProductSurfaceContext {
@@ -55,38 +55,22 @@ pub trait LifecycleProductService: Send + Sync {
     /// Import a standalone extension from an uploaded bundle (zip bytes) — the
     /// WebUI "Install Tool" path. Only the local runtime service implements it.
     ///
-    /// The default refuses with `InvalidRequest`/400. ✎ **Known mismatch,
-    /// carried verbatim by the WS2.1 move and deliberately not changed in a
-    /// move-shaped PR**: the wording that used to sit here said "unavailable",
-    /// which is a different code (503) and a different meaning — 400 says the
-    /// caller's request was malformed, and an unwired capability is not the
-    /// caller's fault. Changing it changes an HTTP status on a live route, so
-    /// it belongs in its own change with the WebUI path re-checked;
-    /// `bundle_import_defaults_to_an_invalid_request_rather_than_silently_succeeding`
-    /// pins today's behavior so the flip cannot happen silently. The flip —
-    /// and this test's assertion with it — is owned by the CHECKLIST WS2 row
-    /// "The four WS2.1 follow-ups", which sizes it as the behavior change it
-    /// is rather than as a signature correction.
-    ///
-    /// ✎ **Known stringly-typed signature, carried verbatim by the WS2.1
-    /// move.** The key should be `ExtensionId`, not `String` — the host
-    /// implementation already holds a typed `ExtensionId` and stringifies only
-    /// to satisfy this signature. Retyping it changes the contract for every
-    /// implementor, which PLAN operating principle 2 keeps out of a move-shaped
-    /// PR; it is owned by the CHECKLIST WS2 row "The four WS2.1 follow-ups".
-    /// It is independent of the `ProductSurfaceFailure` slice — `ExtensionId`
-    /// is `host_api` vocabulary this crate may already name — so it need not
-    /// wait on it.
+    /// The default refuses with `Unavailable`/503: the bundle importer is a
+    /// runtime capability a deployment either wired or did not, and a caller
+    /// who uploaded a perfectly good zip did nothing wrong. 400 would blame
+    /// them for it. ✎ **Flipped 2026-08-02 (CHECKLIST WS2, the "four WS2.1
+    /// follow-ups" row) from `InvalidRequest`/400**, which the WS2.1 move had
+    /// carried verbatim against its own prose;
+    /// `bundle_import_defaults_to_service_unavailable` here and
+    /// `webui_extension_import_reports_unavailable_when_no_service_is_wired`
+    /// in `ironclaw_product`'s surface contract pin the code at both tiers so
+    /// it cannot drift back silently.
     async fn import_extension_bundle(
         &self,
         _context: LifecycleProductContext,
         _bundle: Vec<u8>,
     ) -> Result<LifecycleProductResponse, ProductSurfaceError> {
-        Err(ProductSurfaceError::from_status(
-            ProductSurfaceErrorCode::InvalidRequest,
-            400,
-            false,
-        ))
+        Err(ProductSurfaceError::unavailable(false))
     }
 
     /// Redacted activation error for each installed extension whose activation
@@ -100,10 +84,16 @@ pub trait LifecycleProductService: Send + Sync {
     /// errors reports no reason and the wire's `activation_error` stays absent;
     /// the production extension-host service overrides this to read the
     /// installation records' `last_error`.
+    ///
+    /// ✎ **Key retyped `String` → `ExtensionId` 2026-08-02** (CHECKLIST WS2,
+    /// the "four WS2.1 follow-ups" row): the doc always said "keyed by
+    /// extension id" and every consumer looks the key up with an `ExtensionId`
+    /// in hand, so the `String` only bought a place for a package id, a
+    /// display name, or an installation id to be keyed in undetected.
     async fn installed_activation_errors(
         &self,
         _context: LifecycleProductContext,
-    ) -> Result<std::collections::HashMap<String, String>, ProductSurfaceError> {
+    ) -> Result<std::collections::HashMap<ExtensionId, String>, ProductSurfaceError> {
         Ok(std::collections::HashMap::new())
     }
 }
@@ -114,6 +104,7 @@ mod tests {
     use ironclaw_extension_contracts::state::InstallationState;
 
     use crate::package_lifecycle::LifecyclePackageKind;
+    use crate::surface::ProductSurfaceErrorCode;
 
     /// A service that implements only the two required methods, so the two
     /// defaults below are exercised as written rather than through an
@@ -181,16 +172,25 @@ mod tests {
         assert_eq!(projected.package_ref, Some(package_ref()));
     }
 
-    /// Pins today's behavior, not the desired one — see the mismatch note on
-    /// `import_extension_bundle`. The point that matters either way: a service
-    /// without bundle support must *refuse*, never return success.
+    /// A service without bundle support must *refuse*, never return success —
+    /// and it must refuse as an unwired capability (503), not as a malformed
+    /// request (400): the bytes were never inspected, so nothing about the
+    /// caller's request has been judged. The status code is asserted beside
+    /// the error code because the WebUI maps the code straight onto the HTTP
+    /// response, and a code/status pair that disagrees is how a 503 reaches a
+    /// browser wearing a 400.
     #[tokio::test]
-    async fn bundle_import_defaults_to_an_invalid_request_rather_than_silently_succeeding() {
+    async fn bundle_import_defaults_to_service_unavailable() {
         let error = MinimalLifecycleService
             .import_extension_bundle(surface_context(), vec![0x50, 0x4b])
             .await
             .expect_err("a service that does not implement bundle import must refuse");
-        assert_eq!(error.code, ProductSurfaceErrorCode::InvalidRequest);
+        assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
+        assert_eq!(error.status_code, 503);
+        assert!(
+            !error.retryable,
+            "an unwired capability does not become wired by retrying"
+        );
     }
 
     #[tokio::test]

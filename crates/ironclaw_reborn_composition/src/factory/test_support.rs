@@ -201,7 +201,7 @@ impl RebornRuntimeStores {
 
     /// Mint (or rotate) a pairing code through the composed generic pairing
     /// service — tests only. Mirrors the production `pairing/mint` route
-    /// handler in `channel_pairing_serve`; returns the code text.
+    /// handler in `ironclaw_webui::channel_pairing`; returns the code text.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn pairing_mint_for_test(
         &self,

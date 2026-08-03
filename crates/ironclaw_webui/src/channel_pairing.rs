@@ -1,5 +1,12 @@
 //! Bearer-authed generic pairing routes for `WebGeneratedCode` channels.
 //!
+//! These are WebUI product routes — `/api/webchat/v2/...`, bearer-authed by
+//! this crate's own middleware — so they live here beside the rest of the v2
+//! route surface (PROPOSAL §6.8.2 "Axum pairing routes → `webui`", §6.9.4
+//! "gains the pairing routes from `extension_host`"). The pairing **service
+//! core** stays in `ironclaw_extension_host`, which §6.8.2 reserves it to;
+//! this module is the transport over it and holds no pairing semantics.
+//!
 //! Mounted through the shared [`ProtectedRouteMount`] seam (inside the WebUI
 //! bearer-auth layer, with descriptor-driven body/rate limits):
 //!
@@ -17,10 +24,6 @@
 
 use std::sync::Arc;
 
-use crate::channel_pairing::{
-    ChannelPairingError, ChannelPairingIssue, ChannelPairingRegistry, ChannelPairingService,
-    ChannelPairingStatus,
-};
 use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -35,6 +38,10 @@ use ironclaw_host_api::ingress::{
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use serde::Serialize;
 
+use ironclaw_extension_host::channel_pairing::{
+    ChannelPairingError, ChannelPairingIssue, ChannelPairingRegistry, ChannelPairingService,
+    ChannelPairingStatus,
+};
 use ironclaw_host_ingress::ProtectedRouteMount;
 
 const MINT_PATH: &str = "/api/webchat/v2/extensions/{extension_id}/pairing/mint";

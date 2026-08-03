@@ -34,12 +34,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use ratchet_support::{
-    TypeDefOccurrence, collect_type_defs, strip_comments_and_strings, workspace_root,
+    TypeDefOccurrence, collect_type_defs, production_rust_files, strip_comments_and_strings,
+    workspace_root,
 };
 
 const PRODUCT: &str = "ironclaw_product";
 const PRODUCT_CONTRACTS: &str = "ironclaw_product_contracts";
 const WEBUI: &str = "ironclaw_webui";
+const EXTENSION_HOST: &str = "ironclaw_extension_host";
 const OPENAI_COMPAT: &str = "ironclaw_reborn_openai_compat";
 
 /// `ironclaw_product` symbols `ironclaw_webui` still names in production code,
@@ -651,6 +653,68 @@ fn import_scanner_reads_symbols_out_of_real_use_shapes() {
         !found.contains("Renamed"),
         "the alias is local; the residue list is keyed by the exported name: {found:?}"
     );
+}
+
+/// CHECKLIST WS5's `webui` row ("gains pairing routes") and its WS2 twin
+/// ("relocate extension_host strays: `channel_pairing_serve.rs` Axum routes →
+/// `webui`"), executed 2026-08-02 and pinned here.
+///
+/// PROPOSAL §6.8.2 sheds "Axum pairing routes → `webui`" and §6.9.4 has this
+/// crate gain them. The reason it matters beyond tidiness: the extension host
+/// re-layers `products` → `loops` (§12.1c), and a crate below product cannot
+/// own a bearer-authed product route surface. Its **only** remaining Axum
+/// surface is the vendor-blind channel *ingress* router
+/// (`extension_ingress::serve_mount`), which is its job by charter.
+///
+/// Stated as a path-prefix rule rather than a module-name rule so
+/// reintroducing the routes under any other filename fails too. This is not a
+/// workspace-wide "only webui serves `/api/webchat/`" claim — `ironclaw_operator`
+/// serves the NEAR AI login callback under that prefix by charter (§6.9.2) —
+/// it is a claim about the crate the stray left.
+#[test]
+fn the_extension_host_serves_no_webui_product_routes_and_webui_holds_the_pairing_ones() {
+    let root = workspace_root();
+    let src = crate_src(&root, EXTENSION_HOST);
+    let files = production_rust_files(&src);
+    assert!(
+        files.len() >= 60,
+        "expected to walk {EXTENSION_HOST}'s source tree; found {} files — a broken path \
+         must fail loudly rather than report a clean, vacuously passing scan",
+        files.len()
+    );
+    let offenders: Vec<String> = files
+        .iter()
+        .filter(|file| {
+            std::fs::read_to_string(file)
+                .unwrap_or_else(|error| panic!("read {}: {error}", file.display()))
+                .contains("/api/webchat/")
+        })
+        .map(|file| {
+            file.strip_prefix(&root)
+                .unwrap_or(file)
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "{EXTENSION_HOST} declares WebUI product routes in {offenders:?}. Those belong in \
+         {WEBUI} (PROPOSAL §6.8.2 shed list, §6.9.4); the extension host's only route \
+         surface is the generic channel ingress router"
+    );
+
+    // The positive half, so "no offenders" cannot be an artefact of the routes
+    // having been deleted rather than moved.
+    let pairing = crate_src(&root, WEBUI).join("channel_pairing.rs");
+    let source = std::fs::read_to_string(&pairing)
+        .unwrap_or_else(|error| panic!("read {}: {error}", pairing.display()));
+    for pattern in ["pairing/mint", "pairing/status", "pairing/unpair"] {
+        assert!(
+            source.contains(pattern),
+            "{WEBUI}'s channel_pairing.rs must serve {pattern} — the WS2 stray moved here, \
+             it was not dropped"
+        );
+    }
 }
 
 #[test]
