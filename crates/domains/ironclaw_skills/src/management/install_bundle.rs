@@ -32,6 +32,10 @@ pub struct SkillInstallFile<'a> {
     pub contents: &'a [u8],
 }
 
+pub fn validate_install_bundle_relative_path(path: &str) -> Result<(), SkillManagementError> {
+    normalize_install_relative_path(path).map(|_| ())
+}
+
 pub(crate) struct SkillBundleSnapshot {
     files: Vec<OwnedSkillBundleFile>,
     source: SkillSource,
@@ -605,8 +609,10 @@ mod tests {
             "nested/\0file.txt",
             "nested/\nfile.txt",
             "https://example.com/file.txt",
+            SKILL_FILE_NAME,
+            INSTALL_METADATA_FILE_NAME,
         ] {
-            assert!(normalize_install_relative_path(path).is_err());
+            assert!(validate_install_bundle_relative_path(path).is_err());
         }
     }
 

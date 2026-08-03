@@ -144,6 +144,13 @@ pub enum RuntimeCredentialTarget {
     PathPlaceholder {
         placeholder: String,
     },
+    /// Compose an RFC 7617 `Authorization: Basic` header from a manifest-declared
+    /// username and the resolved secret. The host owns the `username:secret`
+    /// join and the base64 encoding, so a manifest can never smuggle a
+    /// pre-encoded credential or a second field past the colon.
+    Basic {
+        username: String,
+    },
     /// Insert the resolved secret as a JSON string at the RFC 6901 pointer in
     /// the request's JSON body (e.g. a vendor webhook-registration call whose
     /// API takes the shared secret as a body field). The host parses the
@@ -206,6 +213,19 @@ impl RuntimeCredentialTarget {
             }
             Self::PathPlaceholder { placeholder } => {
                 validate_runtime_credential_path_placeholder(placeholder)?;
+            }
+            Self::Basic { username } => {
+                validate_runtime_credential_fragment_non_empty_no_control(
+                    "basic_username",
+                    username,
+                    "must not be empty or contain NUL/control characters",
+                )?;
+                if username.contains(':') {
+                    return Err(HostApiError::invalid_runtime_credential_target(
+                        "basic_username",
+                        "must not contain ':', which RFC 7617 reserves as the credential delimiter",
+                    ));
+                }
             }
             Self::BodyJsonPointer { pointer, .. } => {
                 validate_runtime_credential_body_pointer(pointer)?;

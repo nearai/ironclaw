@@ -10,10 +10,10 @@ use ironclaw_host_api::{
 };
 
 use crate::{
-    SkillContentRequest, SkillContentResult, SkillInstallRequest, SkillInstallResult,
-    SkillInstallSource, SkillManagementContext, SkillManagementError, SkillRemoveRequest,
-    SkillRemoveResult, SkillSearchRequest, SkillSearchResult, SkillSummary, SkillUpdateRequest,
-    SkillUpdateResult, install_skill, list_skills,
+    SkillContentRequest, SkillContentResult, SkillInstallFile, SkillInstallRequest,
+    SkillInstallResult, SkillInstallSource, SkillManagementContext, SkillManagementError,
+    SkillRemoveRequest, SkillRemoveResult, SkillSearchRequest, SkillSearchResult, SkillSummary,
+    SkillUpdateRequest, SkillUpdateResult, install_skill, list_skills,
     management::{
         SKILL_FILE_NAME, SkillBundleSnapshot, USER_SKILLS_ROOT, capture_skill_bundle,
         restore_skill_bundle,
@@ -196,6 +196,7 @@ impl ScopedSkillManagementPort {
         scope: ResourceScope,
         name: Option<&str>,
         content: &str,
+        files: &[SkillInstallFile<'_>],
         source_url: &str,
     ) -> Result<SkillInstallResult, ScopedSkillManagementError> {
         let context = self.context_for_scope(scope)?;
@@ -204,7 +205,7 @@ impl ScopedSkillManagementPort {
             SkillInstallRequest {
                 name,
                 content,
-                files: &[],
+                files,
                 source: SkillInstallSource::InstalledUrl,
                 source_url: Some(source_url),
             },
@@ -322,6 +323,7 @@ mod tests {
             scope.clone(),
             None,
             content,
+            &[],
             "https://hub.example/scoped-snapshot/SKILL.md",
         )
         .await
