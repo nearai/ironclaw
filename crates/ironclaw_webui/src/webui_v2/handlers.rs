@@ -908,7 +908,9 @@ fn workspace_served_path(
     requested: &str,
     projection: Option<String>,
 ) -> (String, Option<String>) {
-    if *mount == FsMount::Workspace && let Some(prefix) = projection {
+    if *mount == FsMount::Workspace
+        && let Some(prefix) = projection
+    {
         let trimmed = requested.trim_matches('/');
         let served = if trimmed.is_empty() {
             prefix.clone()

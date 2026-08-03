@@ -7997,8 +7997,7 @@ async fn browse_fs_dir_prefixes_workspace_path_with_scoped_projection() {
     let calls = services.browse_fs_calls.lock().expect("lock");
     assert_eq!(calls.len(), 1);
     assert_eq!(
-        calls[0].path,
-        "tenants/tenant-alpha/users/user-alpha",
+        calls[0].path, "tenants/tenant-alpha/users/user-alpha",
         "workspace list must be confined to the caller subtree under scoped projection"
     );
 }
@@ -8071,8 +8070,7 @@ async fn browse_fs_dir_scopes_workspace_for_non_operator_even_when_state_flag_of
     let calls = services.browse_fs_calls.lock().expect("lock");
     assert_eq!(calls.len(), 1);
     assert_eq!(
-        calls[0].path,
-        "tenants/tenant-alpha/users/user-alpha/notes/idea.md",
+        calls[0].path, "tenants/tenant-alpha/users/user-alpha/notes/idea.md",
         "non-operator callers must be scoped to their own workspace subtree"
     );
 }
