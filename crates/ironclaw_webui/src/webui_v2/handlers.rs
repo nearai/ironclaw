@@ -785,7 +785,7 @@ pub async fn browse_fs_dir(
         .unwrap_or_default();
     let projection = workspace_projection_for(&state, &caller, &capabilities);
     let (served_path, scoped_prefix) =
-        workspace_served_path(&query.mount, &requested_path, projection);
+        workspace_served_path(&query.mount, &requested_path, projection)?;
     let surface = state.bind_services(caller);
     let request = RebornFsListRequest {
         mount: query.mount,
@@ -814,7 +814,7 @@ pub async fn stat_fs_path(
     let requested_path = require_fs_browse_path(query.path)?;
     let projection = workspace_projection_for(&state, &caller, &capabilities);
     let (served_path, scoped_prefix) =
-        workspace_served_path(&query.mount, &requested_path, projection);
+        workspace_served_path(&query.mount, &requested_path, projection)?;
     let surface = state.bind_services(caller);
     let request = RebornFsStatRequest {
         mount: query.mount,
@@ -841,7 +841,7 @@ pub async fn read_fs_file(
     let requested_path = require_fs_browse_path(query.path)?;
     let projection = workspace_projection_for(&state, &caller, &capabilities);
     let (served_path, scoped_prefix) =
-        workspace_served_path(&query.mount, &requested_path, projection);
+        workspace_served_path(&query.mount, &requested_path, projection)?;
     let request = RebornFsReadRequest {
         mount: query.mount,
         path: served_path,
@@ -907,19 +907,30 @@ fn workspace_served_path(
     mount: &FsMount,
     requested: &str,
     projection: Option<String>,
-) -> (String, Option<String>) {
+) -> Result<(String, Option<String>), WebUiV2HttpError> {
     if *mount == FsMount::Workspace
         && let Some(prefix) = projection
     {
         let trimmed = requested.trim_matches('/');
+        // Reject parent-directory traversal before prepending the caller prefix.
+        // A `..` segment would otherwise become `tenants/{tenant}/users/{user}/../other`,
+        // which the product layer rejects too, but defense in depth keeps the
+        // browser from ever dispatching an escape attempt to the product layer.
+        if trimmed.split('/').any(|segment| segment == "..") {
+            return Err(ProductSurfaceError::validation(
+                "path",
+                ProductSurfaceValidationCode::InvalidValue,
+            )
+            .into());
+        }
         let served = if trimmed.is_empty() {
             prefix.clone()
         } else {
             format!("{prefix}/{trimmed}")
         };
-        return (served, Some(prefix));
+        return Ok((served, Some(prefix)));
     }
-    (requested.to_string(), None)
+    Ok((requested.to_string(), None))
 }
 
 /// Strip a caller-scoped workspace prefix from a path the product layer echoed

@@ -8111,6 +8111,86 @@ async fn stat_fs_path_prefixes_workspace_path_with_scoped_projection() {
 }
 
 #[tokio::test]
+async fn read_fs_file_prefixes_workspace_path_with_scoped_projection() {
+    // The download route applies the same caller-subtree prefixing as list/stat.
+    // The stub records the dispatched command input, so assert it received the
+    // prefixed path (the caller can never request another user's subtree).
+    let services = Arc::new(StubServices::default());
+    let caller = caller_for_user("user-alpha");
+    let router = webui_v2_router(
+        WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_workspace_requires_scoped_projection(true),
+    )
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: false,
+    }));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/content?mount=workspace&path=report.md")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.surface_calls.lock().expect("lock");
+    let read_call = calls
+        .iter()
+        .rev()
+        .find(|call| call.call_id == "fs.read")
+        .expect("fs.read command dispatched");
+    let request: RebornFsReadRequest =
+        serde_json::from_value(read_call.input.clone()).expect("fs read input");
+    assert_eq!(
+        request.path, "tenants/tenant-alpha/users/user-alpha/report.md",
+        "read_fs_file must confine the workspace download to the caller subtree under scoped projection"
+    );
+}
+
+#[tokio::test]
+async fn browse_fs_dir_rejects_parent_traversal_under_scoped_projection() {
+    // A `..` segment must be rejected before the caller prefix is prepended, so
+    // `../other-user/secret` can never become `tenants/.../users/.../../other-user`.
+    let services = Arc::new(StubServices::default());
+    let caller = caller_for_user("user-alpha");
+    let router = webui_v2_router(
+        WebUiV2State::new(services.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+            .with_workspace_requires_scoped_projection(true),
+    )
+    .layer(axum::Extension(caller))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: false,
+    }));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/fs/list?mount=workspace&path=../tenant-b/users/bob/secret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "parent-directory traversal must be rejected before dispatching to the product layer"
+    );
+    let calls = services.browse_fs_calls.lock().expect("lock");
+    assert!(
+        calls.is_empty(),
+        "traversal request must not reach the product layer"
+    );
+}
+
+#[tokio::test]
 async fn stat_fs_path_rejects_blank_path() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services);
