@@ -1037,12 +1037,11 @@ fn coordinator_with_settlement_failure(
     adapter: &Arc<ScriptedChannelAdapter>,
     timing: SettlementFailureTiming,
     channel_unavailable: bool,
-) -> (Arc<PausingRecoveryStore>, DeliveryCoordinator) {
-    let decorated = Arc::new(PausingRecoveryStore {
+) -> (Arc<RecoveryTestStore>, DeliveryCoordinator) {
+    let decorated = Arc::new(RecoveryTestStore {
         inner: Arc::clone(store),
-        snapshot_listed: Arc::new(Barrier::new(1)),
-        resume_recovery: Arc::new(Barrier::new(1)),
-        pause_recovery: false,
+        pause_after_snapshot: None,
+        fail_recovery_for: None,
         claim_ordered_recovery: None,
         fail_prepared_existing: None,
         settlement_failure: Some(timing),
@@ -3032,6 +3031,7 @@ async fn coordinator_recovery_continues_after_a_per_attempt_store_failure() {
         fail_recovery_for: Some(seeded[1].delivery_id),
         claim_ordered_recovery: None,
         fail_prepared_existing: None,
+        settlement_failure: None,
         authoritative_attempts: Mutex::new(HashMap::new()),
         list_calls: AtomicU8::new(0),
     });
