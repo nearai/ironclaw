@@ -21,6 +21,22 @@ import {
 import { isValidWorkspaceFilePath } from "../../../lib/workspace-file-links";
 
 const FS_BASE = "/api/webchat/v2/fs";
+const WORKSPACE_MOUNT = "workspace";
+const MEMORY_MOUNT = "memory";
+
+type WorkspaceCurrentUser =
+  | {
+      tenant_id?: string | null;
+      user_id?: string | null;
+    }
+  | null
+  | undefined;
+
+type WorkspaceOptions = {
+  currentUser?: WorkspaceCurrentUser;
+  requireScopedWorkspace?: boolean;
+  threadId?: string | null;
+};
 
 // Largest payload we will inline as text in the viewer. Anything larger is
 // offered as a download instead of being read into the page.
@@ -30,10 +46,6 @@ const MAX_INLINE_TEXT_BYTES = 1024 * 1024;
 // preview. Above this, offer a download instead so a huge image can't hang the
 // tab by being read into memory.
 const MAX_INLINE_IMAGE_BYTES = 8 * 1024 * 1024;
-
-type WorkspaceScope = {
-  threadId?: string | null;
-};
 
 function splitQualified(qualifiedPath) {
   const segments = String(qualifiedPath || "")
@@ -45,6 +57,262 @@ function splitQualified(qualifiedPath) {
 
 function joinQualified(mount, relativePath) {
   return relativePath ? `${mount}/${relativePath}` : mount;
+}
+
+function joinRelative(base, relativePath) {
+  const basePath = String(base || "").replace(/^\/+|\/+$/g, "");
+  const relative = String(relativePath || "").replace(/^\/+|\/+$/g, "");
+  if (!basePath) return relative;
+  return relative ? `${basePath}/${relative}` : basePath;
+}
+
+function stripRelativePrefix(path, prefix) {
+  const value = String(path || "").replace(/^\/+/, "");
+  const base = String(prefix || "").replace(/^\/+|\/+$/g, "");
+  if (!base) return value;
+  if (value === base) return "";
+  return value.startsWith(`${base}/`) ? value.slice(base.length + 1) : value;
+}
+
+function userScopedPrefix(currentUser: WorkspaceCurrentUser) {
+  const tenantId = String(currentUser?.tenant_id || "").replace(/^\/+|\/+$/g, "");
+  const userId = String(currentUser?.user_id || "").replace(/^\/+|\/+$/g, "");
+  if (!tenantId || !userId) return "";
+  return `tenants/${tenantId}/users/${userId}`;
+}
+
+function scopedUserUnavailable(
+  currentUser: WorkspaceCurrentUser,
+  requireScopedWorkspace: boolean,
+) {
+  return requireScopedWorkspace && !userScopedPrefix(currentUser);
+}
+
+function emptyDirectoryResponse() {
+  return { entries: [] };
+}
+
+function isDirectoryEntry(entry) {
+  return entry?.kind === "directory";
+}
+
+function hasDirectoryNamed(response, name) {
+  return (response?.entries || []).some(
+    (entry) => entry.name === name && isDirectoryEntry(entry)
+  );
+}
+
+function isMemorySidecarEntry(entry) {
+  const name = String(entry?.name || "");
+  return (
+    name.endsWith(".meta") ||
+    name.endsWith(".chunks") ||
+    name.endsWith(".versions")
+  );
+}
+
+function memoryVisibleEntries(response) {
+  return (response?.entries || []).filter((entry) => !isMemorySidecarEntry(entry));
+}
+
+function soleVisibleDirectory(response) {
+  const entries = memoryVisibleEntries(response);
+  if (entries.length !== 1 || !isDirectoryEntry(entries[0])) return null;
+  return entries[0];
+}
+
+function splitRelative(relativePath) {
+  return String(relativePath || "")
+    .split("/")
+    .filter(Boolean);
+}
+
+function isNotFound(error) {
+  return error?.status === 404;
+}
+
+function fsListUrl(mount, relativePath) {
+  const url = new URL(`${FS_BASE}/list`, window.location.origin);
+  url.searchParams.set("mount", mount);
+  if (relativePath) url.searchParams.set("path", relativePath);
+  return url.pathname + url.search;
+}
+
+async function fetchFsList(mount, relativePath) {
+  return apiFetch(fsListUrl(mount, relativePath));
+}
+
+// Hosted WebUI storage exposes caller files below a tenant/user subtree. Local
+// single-user workspaces usually do not, so raw-root fallback is allowed only
+// when the deployment did not require scoped workspace projection and the raw
+// root does not look like the hosted multi-user container.
+async function resolveWorkspaceRootWithOptions(
+  currentUser: WorkspaceCurrentUser,
+  requireScopedWorkspace: boolean,
+) {
+  const prefix = userScopedPrefix(currentUser);
+  if (!prefix) {
+    return {
+      prefix: "",
+      rootResponse: requireScopedWorkspace ? emptyDirectoryResponse() : null,
+    };
+  }
+  try {
+    const rootResponse = await fetchFsList(WORKSPACE_MOUNT, prefix);
+    return { prefix, rootResponse };
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+    const rootResponse = await fetchFsList(WORKSPACE_MOUNT, "");
+    if (requireScopedWorkspace || hasDirectoryNamed(rootResponse, "tenants")) {
+      return { prefix, rootResponse: emptyDirectoryResponse() };
+    }
+    return { prefix: "", rootResponse };
+  }
+}
+
+async function resolveWorkspaceDirectory(
+  relativePath,
+  currentUser: WorkspaceCurrentUser,
+  requireScopedWorkspace: boolean,
+) {
+  if (scopedUserUnavailable(currentUser, requireScopedWorkspace)) {
+    return { actualPath: "", response: emptyDirectoryResponse() };
+  }
+  const resolved = await resolveWorkspaceRootWithOptions(
+    currentUser,
+    requireScopedWorkspace,
+  );
+  if (resolved.prefix) {
+    const actualPath = joinRelative(resolved.prefix, relativePath);
+    if (!relativePath) return { actualPath, response: resolved.rootResponse };
+    return { actualPath, response: await fetchFsList(WORKSPACE_MOUNT, actualPath) };
+  }
+  if (!relativePath && resolved.rootResponse) {
+    return { actualPath: "", response: resolved.rootResponse };
+  }
+  return { actualPath: relativePath, response: await fetchFsList(WORKSPACE_MOUNT, relativePath) };
+}
+
+async function resolveWorkspacePath(
+  relativePath,
+  currentUser: WorkspaceCurrentUser,
+  requireScopedWorkspace: boolean,
+) {
+  const { prefix } = await resolveWorkspaceRootWithOptions(
+    currentUser,
+    requireScopedWorkspace,
+  );
+  return prefix ? joinRelative(prefix, relativePath) : relativePath;
+}
+
+function shouldCollapseMemoryDirectory(actualPath, directoryName) {
+  return (
+    directoryName === "agents" ||
+    directoryName === "projects" ||
+    actualPath.endsWith("/agents") ||
+    actualPath.endsWith("/projects")
+  );
+}
+
+async function collapseMemoryDirectory(actualPath, response) {
+  let nextPath = actualPath;
+  let nextResponse = response;
+
+  for (let i = 0; i < 8; i += 1) {
+    const directory = soleVisibleDirectory(nextResponse);
+    if (!directory || !shouldCollapseMemoryDirectory(nextPath, directory.name)) break;
+    nextPath = joinRelative(nextPath, directory.name);
+    nextResponse = await fetchFsList(MEMORY_MOUNT, nextPath);
+  }
+
+  return { actualPath: nextPath, response: nextResponse };
+}
+
+async function resolveMemoryDirectory(
+  relativePath,
+  currentUser: WorkspaceCurrentUser,
+  requireScopedWorkspace: boolean,
+) {
+  const prefix = userScopedPrefix(currentUser);
+  if (!prefix) {
+    if (requireScopedWorkspace) {
+      return { actualPath: "", response: emptyDirectoryResponse() };
+    }
+    return { actualPath: relativePath, response: await fetchFsList(MEMORY_MOUNT, relativePath) };
+  }
+
+  let actualPath = prefix;
+  let response;
+  try {
+    response = await fetchFsList(MEMORY_MOUNT, actualPath);
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+    response = emptyDirectoryResponse();
+  }
+
+  let resolved = await collapseMemoryDirectory(actualPath, response);
+  actualPath = resolved.actualPath;
+  response = resolved.response;
+
+  for (const segment of splitRelative(relativePath)) {
+    actualPath = joinRelative(actualPath, segment);
+    response = await fetchFsList(MEMORY_MOUNT, actualPath);
+    resolved = await collapseMemoryDirectory(actualPath, response);
+    actualPath = resolved.actualPath;
+    response = resolved.response;
+  }
+
+  return { actualPath, response };
+}
+
+async function resolveMemoryPath(
+  relativePath,
+  currentUser: WorkspaceCurrentUser,
+  requireScopedWorkspace: boolean,
+) {
+  const segments = splitRelative(relativePath);
+  const basename = segments.pop();
+  if (scopedUserUnavailable(currentUser, requireScopedWorkspace)) return "";
+  if (!basename || !userScopedPrefix(currentUser)) return relativePath;
+  const { actualPath } = await resolveMemoryDirectory(
+    segments.join("/"),
+    currentUser,
+    requireScopedWorkspace,
+  );
+  return joinRelative(actualPath, basename);
+}
+
+async function resolveDirectory(
+  mount,
+  path,
+  { currentUser, requireScopedWorkspace = false }: WorkspaceOptions,
+) {
+  if (mount === WORKSPACE_MOUNT) {
+    return resolveWorkspaceDirectory(path, currentUser, requireScopedWorkspace);
+  }
+  if (mount === MEMORY_MOUNT) {
+    return resolveMemoryDirectory(path, currentUser, requireScopedWorkspace);
+  }
+  return { actualPath: path, response: await fetchFsList(mount, path) };
+}
+
+async function resolveFilePath(
+  mount,
+  path,
+  { currentUser, requireScopedWorkspace = false }: WorkspaceOptions,
+) {
+  if (mount === WORKSPACE_MOUNT) {
+    return resolveWorkspacePath(path, currentUser, requireScopedWorkspace);
+  }
+  if (mount === MEMORY_MOUNT) {
+    return resolveMemoryPath(path, currentUser, requireScopedWorkspace);
+  }
+  return path;
+}
+
+function visibleResponseEntries(mount, response) {
+  if (mount === MEMORY_MOUNT) return memoryVisibleEntries(response);
+  return response?.entries || [];
 }
 
 function projectPathFromQualified(qualifiedPath) {
@@ -139,7 +407,11 @@ export async function listFsMounts() {
 // returned entry's `path` is qualified so the tree can recurse with it directly.
 export async function listWorkspace(
   qualifiedPath = "",
-  { threadId }: WorkspaceScope = {},
+  {
+    currentUser,
+    requireScopedWorkspace = false,
+    threadId,
+  }: WorkspaceOptions = {},
 ) {
   if (threadId) {
     if (!qualifiedPath) {
@@ -160,7 +432,6 @@ export async function listWorkspace(
       }),
     };
   }
-
   if (!qualifiedPath) {
     // Keep the backend area id in the query cache. Presentation components
     // translate known areas at render time so changing languages updates the
@@ -176,13 +447,13 @@ export async function listWorkspace(
   }
 
   const { mount, path } = splitQualified(qualifiedPath);
-  const url = new URL(`${FS_BASE}/list`, window.location.origin);
-  url.searchParams.set("mount", mount);
-  if (path) url.searchParams.set("path", path);
-  const response = await apiFetch(url.pathname + url.search);
-  const entries = (response?.entries || []).map((entry) => ({
+  const { actualPath, response } = await resolveDirectory(mount, path, {
+    currentUser,
+    requireScopedWorkspace,
+  });
+  const entries = visibleResponseEntries(mount, response).map((entry) => ({
     name: entry.name,
-    path: joinQualified(mount, entry.path),
+    path: joinQualified(mount, joinRelative(path, stripRelativePrefix(entry.path, actualPath))),
     is_dir: entry.kind === "directory",
   }));
   return { entries };
@@ -193,11 +464,22 @@ export async function listWorkspace(
 // `{ kind: "binary", download_path, ... }`, or `{ kind: "directory" }`.
 export async function readWorkspaceFile(
   qualifiedPath,
-  { threadId }: WorkspaceScope = {},
+  {
+    currentUser,
+    requireScopedWorkspace = false,
+    threadId,
+  }: WorkspaceOptions = {},
 ) {
   const { mount, path } = splitQualified(qualifiedPath);
   if (!mount || !path) {
     // A mount root is a directory, not a previewable file.
+    return { kind: "directory", path: qualifiedPath };
+  }
+  if (
+    !threadId &&
+    (mount === WORKSPACE_MOUNT || mount === MEMORY_MOUNT) &&
+    scopedUserUnavailable(currentUser, requireScopedWorkspace)
+  ) {
     return { kind: "directory", path: qualifiedPath };
   }
 
@@ -208,11 +490,15 @@ export async function readWorkspaceFile(
     statResponse = await statProjectFile({ threadId, path: projectPath });
     download = projectFileContentUrl({ threadId, path: projectPath });
   } else {
+    const actualPath = await resolveFilePath(mount, path, {
+      currentUser,
+      requireScopedWorkspace,
+    });
     const statUrl = new URL(`${FS_BASE}/stat`, window.location.origin);
     statUrl.searchParams.set("mount", mount);
-    statUrl.searchParams.set("path", path);
+    statUrl.searchParams.set("path", actualPath);
     statResponse = await apiFetch(statUrl.pathname + statUrl.search);
-    download = contentUrl(mount, path);
+    download = contentUrl(mount, actualPath);
   }
   const stat = statResponse?.stat || {};
   const mime = stat.mime_type || "application/octet-stream";

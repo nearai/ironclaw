@@ -165,9 +165,9 @@ pub struct WebUiV2SessionResponse {
     pub tenant_id: String,
     pub user_id: String,
     pub capabilities: WebUiV2Capabilities,
-    /// Deployment-wide feature gates the browser uses to show/hide
-    /// not-yet-finished surfaces. Distinct from `capabilities`, which are
-    /// per-token authorization flags.
+    /// Effective feature gates the browser uses to show/hide or constrain
+    /// surfaces. Distinct from `capabilities`, which are per-token
+    /// authorization flags.
     pub features: WebUiV2Features,
     /// Inline-attachment contract (allowed `accept` tokens + size budgets)
     /// the browser advertises on its file picker. Generated from the shared
@@ -176,10 +176,11 @@ pub struct WebUiV2SessionResponse {
     pub attachments: AttachmentCapabilities,
 }
 
-/// Deployment-wide WebUI feature gates surfaced to the browser on
-/// `GET /session`. These are global "is this surface ready to show"
-/// toggles, not per-caller authorization — keep authorization in
-/// [`WebUiV2Capabilities`].
+/// Effective WebUI feature gates surfaced to the browser on `GET /session`.
+/// Most are deployment-level "is this surface ready to show" toggles. Keep
+/// authorization in [`WebUiV2Capabilities`]; feature values may still be
+/// derived from capabilities when they describe effective browser behavior for
+/// the authenticated bearer.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct WebUiV2Features {
     /// Reborn Projects surface (the conversations-panel entry + the
@@ -187,6 +188,11 @@ pub struct WebUiV2Features {
     /// `IRONCLAW_REBORN_PROJECTS`, while the surface is still being
     /// finished.
     pub reborn_projects: bool,
+    /// Whether the browser must hide raw workspace fallback and only show the
+    /// caller-scoped workspace projection. Hosted deployments enable this to
+    /// avoid showing artifacts from a shared `/workspace` root; local
+    /// deployments keep it disabled so single-user workspaces remain visible.
+    pub workspace_requires_scoped_projection: bool,
     /// QA-only run and full-thread artifact export surface. Hidden and
     /// unmounted unless the deployment explicitly opts in.
     pub regression_artifact_export: bool,
@@ -213,12 +219,15 @@ pub async fn get_session(
     let tenant_id = caller.tenant_id.to_string();
     let user_id = caller.user_id.to_string();
     let global_auto_approve = global_auto_approve_enabled(&state, caller).await;
+    let workspace_requires_scoped_projection =
+        state.workspace_requires_scoped_projection() || !capabilities.operator_webui_config;
     Json(WebUiV2SessionResponse {
         tenant_id,
         user_id,
         capabilities,
         features: WebUiV2Features {
             reborn_projects: state.reborn_projects_enabled(),
+            workspace_requires_scoped_projection,
             regression_artifact_export: state.regression_artifact_export_enabled(),
             global_auto_approve,
         },

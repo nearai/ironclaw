@@ -15,7 +15,7 @@ use ironclaw_reborn_composition::{
     RebornHostBindings, RebornReadiness, RebornRuntimeIdentity, RebornRuntimeInput,
     TriggerFireAccessPolicy, build_reborn_runtime,
 };
-use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
+use ironclaw_reborn_config::{IdentitySection, RebornProfile, seed_default_config_file_if_missing};
 use ironclaw_webui::{
     DeferredWebuiRouterHandle, EnvBearerAuthenticator, ProductAuthRouteState,
     RebornWebuiServeError, RebornWebuiServeOptions, WebuiAuthenticator, WebuiServeConfig,
@@ -543,7 +543,10 @@ impl ServeCommand {
 
             let mut serve_config =
                 WebuiServeConfig::new(tenant_id.clone(), authenticator, allowed_origins)
-                    .with_default_agent_id(default_agent_id.clone());
+                    .with_default_agent_id(default_agent_id.clone())
+                    .with_workspace_requires_scoped_projection(
+                        profile_requires_scoped_workspace_projection(profile),
+                    );
             if let Some(project_id) = default_project_id.clone() {
                 serve_config = serve_config.with_default_project_id(project_id);
             }
@@ -654,6 +657,13 @@ impl ServeCommand {
 
         Ok(())
     }
+}
+
+fn profile_requires_scoped_workspace_projection(profile: RebornProfile) -> bool {
+    !matches!(
+        profile,
+        RebornProfile::Standalone | RebornProfile::StandaloneUnrestricted
+    )
 }
 
 struct StartupServe {
@@ -1076,6 +1086,31 @@ mod tests {
     use super::*;
 
     const WEBUI_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
+
+    #[test]
+    fn workspace_projection_scope_follows_deployment_profile() {
+        for profile in [
+            RebornProfile::Standalone,
+            RebornProfile::StandaloneUnrestricted,
+        ] {
+            assert!(
+                !profile_requires_scoped_workspace_projection(profile),
+                "local profile {profile:?} must retain raw workspace fallback"
+            );
+        }
+
+        for profile in [
+            RebornProfile::HostedSingleTenant,
+            RebornProfile::HostedSingleTenantVolume,
+            RebornProfile::Production,
+            RebornProfile::MigrationDryRun,
+        ] {
+            assert!(
+                profile_requires_scoped_workspace_projection(profile),
+                "hosted profile {profile:?} must require caller-scoped workspace projection"
+            );
+        }
+    }
 
     #[test]
     fn present_unicode_env_var_treats_unset_as_none() {
