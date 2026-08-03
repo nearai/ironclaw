@@ -153,9 +153,9 @@ h1,h2,h3,p{margin:0}
 .connect .ch .t{font-size:13px;font-weight:600;color:var(--v2-text-strong)}
 .connect .ch .s{font-size:12px;color:var(--v2-text-muted)}
 .connect .apps{display:flex;flex-wrap:wrap;gap:9px;align-items:center}
-.connectall{margin-left:auto;display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border-radius:9px;font:inherit;font-size:12.5px;font-weight:600;cursor:pointer;color:#fff;border:1px solid rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%)}
-.connectall:hover{background:radial-gradient(ellipse 200% 220% at 50% 110%,#5BBAF5 0%,#2882c8 60%)}
-.connectall svg{width:14px;height:14px}
+.connectall{margin-left:auto;display:inline-flex;align-items:center;padding:3px 4px;border:0;background:transparent;color:var(--v2-accent-text);font:inherit;font-size:12.5px;font-weight:560;cursor:pointer;border-radius:6px}
+.connectall:hover{color:var(--v2-accent-strong);text-decoration:underline;text-underline-offset:2px}
+.connectall:focus-visible{outline:2px solid color-mix(in srgb,var(--v2-accent) 45%,transparent);outline-offset:2px}
 .cpill{display:inline-flex;align-items:center;gap:9px;border:1px solid var(--v2-panel-border);background:var(--v2-surface);border-radius:12px;padding:7px 11px 7px 8px;cursor:pointer;font:inherit;transition:border-color .15s,background .15s}
 .cpill:hover{border-color:color-mix(in srgb,var(--v2-accent) 42%,var(--v2-panel-border))}
 .cpill .appchip{width:24px;height:24px;border-radius:7px;display:grid;place-items:center;border:1px solid;flex:none}
@@ -449,7 +449,7 @@ h1,h2,h3,p{margin:0}
           <div class="rev flagwrap" id="connectBlock">
             <span class="flag"><span class="tag ship">Shipped</span></span>
             <div class="connect">
-              <div class="ch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg><span class="t">Connect your tools</span><span class="s" id="connectSub">one tap each · add more later</span><button class="connectall" id="connectAllBtn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Connect all</button></div>
+              <div class="ch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg><span class="t">Connect your tools</span><span class="s" id="connectSub">one tap each · add more later</span><button class="connectall" id="connectAllBtn" type="button">Connect all</button></div>
               <div class="apps" id="appRow"></div>
             </div>
           </div>
