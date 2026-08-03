@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_event_projections::ProjectionCursor as OutboundProjectionCursor;
 use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::preference_target::{
     PreferenceTargetCodec, PreferenceTargetEncodeRequest,
@@ -27,10 +28,16 @@ use ironclaw_host_api::{
     path::ScopedPath,
 };
 use ironclaw_outbound::{
-    CommunicationModality, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    DeliveredGateRouteStore, DeliveryDefaultScope, OutboundStateStore, OutboundStateStorePort,
-    TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
-    TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryStore,
+    AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendRequest, CommunicationModality,
+    CommunicationPreferenceRecord, CommunicationPreferenceRepository, DeliveredGateRouteStore,
+    DeliveryDefaultScope, DeliveryFailureKind, FailPreparedDeliveryAttemptRequest,
+    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryStatus, OutboundError,
+    OutboundPushPlan, OutboundPushTargetRequest, OutboundStateStore, OutboundStateStorePort,
+    ProjectionSubscriptionRecord, RecoverInterruptedDeliveryRequest, RunDeliveryCleanupRecord,
+    RunDeliveryCleanupRequest, RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord,
+    RunFinalReplyTargetRequest, ThreadNotificationPolicy, TriggerCommunicationContext,
+    TriggerFireSlot, TriggerOriginRef, TriggerSourceKind, TriggeredRunDeliveryOutcomeKind,
+    TriggeredRunDeliveryStore, UpdateDeliveryStatusRequest,
 };
 use ironclaw_product::{
     AdapterInstallationId, AuthPromptView, AuthRequirement, ChannelError, DeliveryReport,
@@ -42,8 +49,9 @@ use ironclaw_product::{
     VerifiedInbound,
 };
 use ironclaw_product::{
-    DeliveryCoordinator, DeliveryRetryPolicy, RunDeliveryObserver, RunDeliveryServices,
-    RunDeliverySettings, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
+    CoordinatedDeliveryOutcome, DeliveryCoordinator, DeliveryRetryPolicy, RunDeliveryObserver,
+    RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
+    TriggeredRunDeliveryRequest,
 };
 use ironclaw_product::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsStat,
@@ -335,6 +343,201 @@ impl DeliveryReplyContextSource for NoStoredReplyContext {
         _: &str,
     ) -> Option<Vec<u8>> {
         None
+    }
+}
+
+/// Forces the coordinator to lose its egress claim after a competing writer
+/// has durably moved the same attempt to `observed_status`. The production
+/// caller still drives the real policy/coordinator path; only the exact
+/// cross-worker race is controlled here.
+struct ClaimLossStore {
+    inner: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    observed_status: OutboundDeliveryStatus,
+    failure_kind: Option<DeliveryFailureKind>,
+    claim_calls: Arc<AtomicUsize>,
+    claim_loss_on: usize,
+}
+
+#[async_trait]
+impl OutboundStateStorePort for ClaimLossStore {
+    async fn put_run_delivery_cleanup(
+        &self,
+        record: RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.put_run_delivery_cleanup(record).await
+    }
+
+    async fn load_run_delivery_cleanup(
+        &self,
+        request: RunDeliveryCleanupRequest,
+    ) -> Result<Vec<RunDeliveryCleanupRecord>, OutboundError> {
+        self.inner.load_run_delivery_cleanup(request).await
+    }
+
+    async fn complete_run_delivery_cleanup(
+        &self,
+        record: &RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.complete_run_delivery_cleanup(record).await
+    }
+
+    async fn put_run_final_reply_handoff(
+        &self,
+        record: RunFinalReplyHandoffRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.put_run_final_reply_handoff(record).await
+    }
+
+    async fn list_pending_run_final_reply_handoffs(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<RunFinalReplyHandoffRecord>, OutboundError> {
+        self.inner
+            .list_pending_run_final_reply_handoffs(limit)
+            .await
+    }
+
+    async fn list_pending_run_final_reply_handoffs_after(
+        &self,
+        after: Option<&RunFinalReplyHandoffRecord>,
+        limit: usize,
+    ) -> Result<Vec<RunFinalReplyHandoffRecord>, OutboundError> {
+        self.inner
+            .list_pending_run_final_reply_handoffs_after(after, limit)
+            .await
+    }
+
+    async fn complete_run_final_reply_handoff(
+        &self,
+        record: &RunFinalReplyHandoffRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.complete_run_final_reply_handoff(record).await
+    }
+
+    async fn load_run_final_reply_handoff_cursor(&self) -> Result<EventCursor, OutboundError> {
+        self.inner.load_run_final_reply_handoff_cursor().await
+    }
+
+    async fn advance_run_final_reply_handoff_cursor(
+        &self,
+        cursor: EventCursor,
+    ) -> Result<(), OutboundError> {
+        self.inner
+            .advance_run_final_reply_handoff_cursor(cursor)
+            .await
+    }
+
+    async fn put_run_final_reply_target(
+        &self,
+        record: RunFinalReplyTargetRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.put_run_final_reply_target(record).await
+    }
+
+    async fn load_run_final_reply_target(
+        &self,
+        request: RunFinalReplyTargetRequest,
+    ) -> Result<Option<RunFinalReplyTargetRecord>, OutboundError> {
+        self.inner.load_run_final_reply_target(request).await
+    }
+
+    async fn put_thread_notification_policy(
+        &self,
+        policy: ThreadNotificationPolicy,
+    ) -> Result<(), OutboundError> {
+        self.inner.put_thread_notification_policy(policy).await
+    }
+
+    async fn load_thread_notification_policy(
+        &self,
+        scope: TurnScope,
+    ) -> Result<ThreadNotificationPolicy, OutboundError> {
+        self.inner.load_thread_notification_policy(scope).await
+    }
+
+    async fn plan_push_targets(
+        &self,
+        request: OutboundPushTargetRequest,
+    ) -> Result<OutboundPushPlan, OutboundError> {
+        self.inner.plan_push_targets(request).await
+    }
+
+    async fn upsert_subscription(
+        &self,
+        record: ProjectionSubscriptionRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.upsert_subscription(record).await
+    }
+
+    async fn load_subscription_cursor(
+        &self,
+        request: LoadSubscriptionCursorRequest,
+    ) -> Result<Option<OutboundProjectionCursor>, OutboundError> {
+        self.inner.load_subscription_cursor(request).await
+    }
+
+    async fn advance_subscription_cursor(
+        &self,
+        request: AdvanceSubscriptionCursorRequest,
+    ) -> Result<(), OutboundError> {
+        self.inner.advance_subscription_cursor(request).await
+    }
+
+    async fn record_delivery_attempt(
+        &self,
+        attempt: OutboundDeliveryAttempt,
+    ) -> Result<(), OutboundError> {
+        self.inner.record_delivery_attempt(attempt).await
+    }
+
+    async fn claim_delivery_attempt_for_send(
+        &self,
+        request: ClaimDeliveryAttemptForSendRequest,
+    ) -> Result<bool, OutboundError> {
+        let claim_call = self.claim_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if claim_call != self.claim_loss_on {
+            return self.inner.claim_delivery_attempt_for_send(request).await;
+        }
+        self.inner
+            .update_delivery_status(UpdateDeliveryStatusRequest {
+                delivery_id: request.delivery_id,
+                scope: request.scope,
+                status: self.observed_status,
+                updated_at: Utc::now(),
+                failure_kind: self.failure_kind,
+            })
+            .await?;
+        Ok(false)
+    }
+
+    async fn fail_prepared_delivery_attempt(
+        &self,
+        request: FailPreparedDeliveryAttemptRequest,
+    ) -> Result<bool, OutboundError> {
+        self.inner.fail_prepared_delivery_attempt(request).await
+    }
+
+    async fn recover_interrupted_delivery_attempt(
+        &self,
+        request: RecoverInterruptedDeliveryRequest,
+    ) -> Result<bool, OutboundError> {
+        self.inner
+            .recover_interrupted_delivery_attempt(request)
+            .await
+    }
+
+    async fn update_delivery_status(
+        &self,
+        request: UpdateDeliveryStatusRequest,
+    ) -> Result<(), OutboundError> {
+        self.inner.update_delivery_status(request).await
+    }
+
+    async fn list_delivery_attempts(
+        &self,
+        scope: TurnScope,
+    ) -> Result<Vec<OutboundDeliveryAttempt>, OutboundError> {
+        self.inner.list_delivery_attempts(scope).await
     }
 }
 
@@ -750,6 +953,85 @@ fn build_harness_with_settings(
     }
 }
 
+fn build_claim_loss_observer_harness(
+    states: Vec<ScriptedRunState>,
+    observed_status: OutboundDeliveryStatus,
+    failure_kind: Option<DeliveryFailureKind>,
+    claim_loss_on: usize,
+    auth_url: Option<&str>,
+) -> (Harness, Arc<AtomicUsize>) {
+    let adapter = Arc::new(RecordingChannelAdapter::new());
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let route_store =
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
+    let threads = Arc::new(InMemorySessionThreadService::default());
+    let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
+    let claim_calls = Arc::new(AtomicUsize::new(0));
+    let claim_loss_store = Arc::new(ClaimLossStore {
+        inner: Arc::clone(&store),
+        observed_status,
+        failure_kind,
+        claim_calls: Arc::clone(&claim_calls),
+        claim_loss_on,
+    });
+    let coordinator = Arc::new(DeliveryCoordinator::new(
+        claim_loss_store as Arc<dyn OutboundStateStorePort>,
+        Arc::new(StaticResolver {
+            adapter: Arc::clone(&adapter),
+        }),
+        Arc::new(NoStoredReplyContext),
+        DeliveryRetryPolicy {
+            max_attempts: 2,
+            backoff: Duration::ZERO,
+        },
+    ));
+    let services = RunDeliveryServices {
+        binding_service: Arc::new(StaticBindingService {
+            binding: binding(),
+            fail: false,
+        }),
+        thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
+        turn_coordinator: Arc::clone(&turns) as Arc<dyn TurnCoordinator>,
+        outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
+        route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
+        communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
+        project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
+        coordinator,
+        extension_id: EXTENSION_ID.to_string(),
+        fallback_notice_scope: fallback_scope(),
+        approval_context: None,
+        blocked_auth_prompts: auth_url.map(|url| {
+            Arc::new(OAuthPromptSource {
+                authorization_url: Some(url.to_string()),
+            }) as Arc<dyn BlockedAuthPromptSource>
+        }),
+        auth_flow_cancel: None,
+    };
+    let connection_notices = ChannelConnectionNoticePolicy::generic("Acme");
+    let observer = Arc::new(RunDeliveryObserver::with_settings_and_connection_notices(
+        services,
+        RunDeliverySettings {
+            poll_interval: Duration::from_millis(1),
+            max_wait: Duration::from_millis(15),
+            max_concurrent_deliveries: NonZeroUsize::new(4).expect("nz"),
+            max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
+        },
+        connection_notices.clone(),
+    ));
+    let harness = Harness {
+        observer,
+        connection_notices,
+        adapter,
+        store,
+        route_store,
+        turns,
+        threads,
+        project_files,
+    };
+    (harness, claim_calls)
+}
+
 async fn seed_final_message(threads: &InMemorySessionThreadService, run_id: TurnRunId, text: &str) {
     seed_final_message_with_attachments(threads, run_id, text, Vec::new()).await;
 }
@@ -789,6 +1071,48 @@ async fn seed_final_message_with_attachments(
 }
 
 // ── Observer rows ──────────────────────────────────────────────────────────
+
+#[test]
+fn coordinator_claim_loss_outcome_preserves_the_observed_non_success_state() {
+    let cases = [
+        (OutboundDeliveryStatus::Sending, None),
+        (OutboundDeliveryStatus::Unknown, None),
+        (OutboundDeliveryStatus::Pending, None),
+        (
+            OutboundDeliveryStatus::Failed,
+            Some(DeliveryFailureKind::Rejected),
+        ),
+        (
+            OutboundDeliveryStatus::DeadLettered,
+            Some(DeliveryFailureKind::TransportUnavailable),
+        ),
+    ];
+
+    for (status, failure_kind) in cases {
+        let outcome = CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
+            status,
+            failure_kind,
+        };
+        match outcome {
+            CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
+                status: observed_status,
+                failure_kind: observed_failure_kind,
+            } => {
+                assert_eq!(observed_status, status);
+                assert_eq!(observed_failure_kind, failure_kind);
+            }
+            CoordinatedDeliveryOutcome::DuplicateSuppressed { .. }
+            | CoordinatedDeliveryOutcome::Delivered { .. } => {
+                panic!("{status:?} must never be represented as delivered success")
+            }
+            CoordinatedDeliveryOutcome::Failed { .. }
+            | CoordinatedDeliveryOutcome::NoDelivery
+            | CoordinatedDeliveryOutcome::Rejected { .. } => {
+                panic!("claim loss must preserve the observed durable row")
+            }
+        }
+    }
+}
 
 #[tokio::test]
 async fn observer_delivers_final_reply_through_the_coordinator() {
@@ -1363,6 +1687,158 @@ async fn observer_records_gate_route_after_approval_prompt() {
             .conversation_fingerprint(),
         source_fingerprint,
         "conversation_fingerprint must exclude the reply-target hint"
+    );
+}
+
+#[tokio::test]
+async fn observer_claim_loser_never_publishes_a_gate_route_without_confirmed_delivery() {
+    const GATE_REF: &str = "gate:claim-loser-approval";
+    let unconfirmed_states = [
+        (OutboundDeliveryStatus::Sending, None),
+        (OutboundDeliveryStatus::Unknown, None),
+        (OutboundDeliveryStatus::Pending, None),
+        (
+            OutboundDeliveryStatus::Failed,
+            Some(DeliveryFailureKind::Rejected),
+        ),
+        (
+            OutboundDeliveryStatus::DeadLettered,
+            Some(DeliveryFailureKind::TransportUnavailable),
+        ),
+    ];
+
+    for (index, (status, failure_kind)) in unconfirmed_states.into_iter().enumerate() {
+        let (harness, _) = build_claim_loss_observer_harness(
+            vec![scripted_state(TurnStatus::BlockedApproval, Some(GATE_REF))],
+            status,
+            failure_kind,
+            1,
+            None,
+        );
+        let run_id = TurnRunId::new();
+
+        harness
+            .observer
+            .observe_ack(
+                user_message_envelope(
+                    ProductTriggerReason::DirectChat,
+                    &format!("evt-claim-loser-gate-{index}"),
+                ),
+                accepted_ack(run_id),
+            )
+            .await;
+
+        assert!(
+            harness.adapter.envelopes().is_empty(),
+            "a {status:?} claim loser must not call the adapter"
+        );
+        assert!(
+            harness
+                .route_store
+                .load_delivered_gate_route(&tenant(), &user(), GATE_REF)
+                .await
+                .expect("route lookup")
+                .is_none(),
+            "a {status:?} row is not evidence that this approval prompt was delivered"
+        );
+    }
+}
+
+#[tokio::test]
+async fn observer_only_a_durable_delivered_claim_loss_may_publish_the_gate_route() {
+    const GATE_REF: &str = "gate:confirmed-duplicate-approval";
+    let (harness, _) = build_claim_loss_observer_harness(
+        vec![scripted_state(TurnStatus::BlockedApproval, Some(GATE_REF))],
+        OutboundDeliveryStatus::Delivered,
+        None,
+        1,
+        None,
+    );
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-confirmed-duplicate"),
+            accepted_ack(TurnRunId::new()),
+        )
+        .await;
+
+    assert!(harness.adapter.envelopes().is_empty());
+    assert!(
+        harness
+            .route_store
+            .load_delivered_gate_route(&tenant(), &user(), GATE_REF)
+            .await
+            .expect("route lookup")
+            .is_some(),
+        "observed durable Delivered is the sole claim-loss state that confirms delivery"
+    );
+}
+
+#[tokio::test]
+async fn observer_unconfirmed_terminal_claim_loss_does_not_poison_the_delivered_run_ledger() {
+    let (harness, claim_calls) = build_claim_loss_observer_harness(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        OutboundDeliveryStatus::Unknown,
+        None,
+        1,
+        None,
+    );
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "truthful final reply").await;
+
+    for event_id in ["evt-terminal-claim-loser-a", "evt-terminal-claim-loser-b"] {
+        harness
+            .observer
+            .observe_ack(
+                user_message_envelope(ProductTriggerReason::DirectChat, event_id),
+                accepted_ack(run_id),
+            )
+            .await;
+    }
+
+    assert_eq!(
+        claim_calls.load(Ordering::SeqCst),
+        2,
+        "an Unknown claim loser must not record the run as delivered and suppress a later replay"
+    );
+    assert!(harness.adapter.envelopes().is_empty());
+}
+
+#[tokio::test]
+async fn observer_unconfirmed_terminal_claim_loss_does_not_clean_up_a_truthfully_delivered_prompt()
+{
+    let (harness, claim_calls) = build_claim_loss_observer_harness(
+        vec![
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::BlockedAuth, Some("gate:auth-before-claim-loss")),
+            scripted_state(TurnStatus::Completed, None),
+        ],
+        OutboundDeliveryStatus::Unknown,
+        None,
+        2,
+        Some("https://provider.example/oauth"),
+    );
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "final reply is still unconfirmed").await;
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-cleanup-claim-loser"),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    assert_eq!(claim_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        harness.adapter.envelopes().len(),
+        1,
+        "the delivered auth prompt remains actionable until a terminal notification is confirmed"
+    );
+    assert!(
+        harness.adapter.retracted_refs().is_empty(),
+        "an unconfirmed terminal loser must not queue or publish stale-prompt cleanup"
     );
 }
 
@@ -2061,6 +2537,7 @@ struct TriggeredHarness {
     driver: TriggeredRunDeliveryDriver,
     adapter: Arc<RecordingChannelAdapter>,
     store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    route_store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     delivery_store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     turns: Arc<ScriptedTurnCoordinator>,
     threads: Arc<InMemorySessionThreadService>,
@@ -2134,11 +2611,93 @@ fn build_triggered_harness(
         driver,
         adapter,
         store,
+        route_store,
         delivery_store,
         turns,
         threads,
         project_files,
     }
+}
+
+fn build_claim_loss_triggered_harness(
+    state: ScriptedRunState,
+    observed_status: OutboundDeliveryStatus,
+    failure_kind: Option<DeliveryFailureKind>,
+) -> (TriggeredHarness, Arc<AtomicUsize>) {
+    let adapter = Arc::new(RecordingChannelAdapter::new());
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let route_store =
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let delivery_store =
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let turns = Arc::new(ScriptedTurnCoordinator::with_states(vec![state]));
+    let threads = Arc::new(InMemorySessionThreadService::default());
+    let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
+    let claim_calls = Arc::new(AtomicUsize::new(0));
+    let coordinator = Arc::new(DeliveryCoordinator::new(
+        Arc::new(ClaimLossStore {
+            inner: Arc::clone(&store),
+            observed_status,
+            failure_kind,
+            claim_calls: Arc::clone(&claim_calls),
+            claim_loss_on: 1,
+        }) as Arc<dyn OutboundStateStorePort>,
+        Arc::new(StaticResolver {
+            adapter: Arc::clone(&adapter),
+        }),
+        Arc::new(NoStoredReplyContext),
+        DeliveryRetryPolicy {
+            max_attempts: 2,
+            backoff: Duration::ZERO,
+        },
+    ));
+    let services = RunDeliveryServices {
+        binding_service: Arc::new(StaticBindingService {
+            binding: binding(),
+            fail: true,
+        }),
+        thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
+        turn_coordinator: Arc::clone(&turns) as Arc<dyn TurnCoordinator>,
+        outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
+        route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
+        communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
+        project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
+        coordinator,
+        extension_id: EXTENSION_ID.to_string(),
+        fallback_notice_scope: fallback_scope(),
+        approval_context: None,
+        blocked_auth_prompts: None,
+        auth_flow_cancel: None,
+    };
+    let driver = TriggeredRunDeliveryDriver::with_settings(
+        services,
+        RunDeliverySettings {
+            poll_interval: Duration::from_millis(1),
+            max_wait: Duration::from_millis(15),
+            max_concurrent_deliveries: NonZeroUsize::new(4).expect("nz"),
+            max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
+        },
+        Arc::clone(&delivery_store) as Arc<dyn TriggeredRunDeliveryStore>,
+        Arc::new(StaticCodec {
+            conversation: ExternalConversationRef::new(Some("space-1"), "dm-creator", None, None)
+                .expect("conversation"),
+            personal_dm: true,
+        }),
+        agent(),
+    );
+    (
+        TriggeredHarness {
+            driver,
+            adapter,
+            store,
+            route_store,
+            delivery_store,
+            turns,
+            threads,
+            project_files,
+        },
+        claim_calls,
+    )
 }
 
 async fn seed_preference(store: &OutboundStateStore<ironclaw_filesystem::InMemoryBackend>) {
@@ -2358,6 +2917,90 @@ async fn triggered_driver_delivers_distinct_same_kind_gates_once_each() {
         projection_refs, expected,
         "the triggered caller must pass each canonical gate_ref into the pinned digest contract \
          while preserving the legacy final ID"
+    );
+}
+
+#[tokio::test]
+async fn triggered_claim_loser_records_no_delivered_outcome_marker_or_gate_route() {
+    const GATE_REF: &str = "gate:triggered-claim-loser";
+    let unconfirmed_states = [
+        (OutboundDeliveryStatus::Sending, None),
+        (OutboundDeliveryStatus::Unknown, None),
+        (OutboundDeliveryStatus::Pending, None),
+        (
+            OutboundDeliveryStatus::Failed,
+            Some(DeliveryFailureKind::Rejected),
+        ),
+        (
+            OutboundDeliveryStatus::DeadLettered,
+            Some(DeliveryFailureKind::TransportUnavailable),
+        ),
+    ];
+
+    for (status, failure_kind) in unconfirmed_states {
+        let (harness, claim_calls) = build_claim_loss_triggered_harness(
+            scripted_state(TurnStatus::BlockedApproval, Some(GATE_REF)),
+            status,
+            failure_kind,
+        );
+        seed_preference(&harness.store).await;
+        let run_id = TurnRunId::new();
+
+        harness
+            .driver
+            .on_trigger_submitted(triggered_request(run_id, false))
+            .await;
+
+        assert_eq!(
+            wait_for_outcome(&harness.delivery_store, run_id).await,
+            TriggeredRunDeliveryOutcomeKind::Failed,
+            "a {status:?} existing row must remain non-success"
+        );
+        assert_eq!(claim_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            harness.adapter.envelopes().is_empty(),
+            "the losing worker must never drive vendor egress"
+        );
+        assert!(
+            harness
+                .route_store
+                .load_delivered_gate_route(&tenant(), &user(), GATE_REF)
+                .await
+                .expect("route lookup")
+                .is_none(),
+            "unconfirmed delivery must not publish a gate route or advance the blocked marker"
+        );
+    }
+}
+
+#[tokio::test]
+async fn triggered_observed_delivered_duplicate_is_the_only_confirmed_claim_loss() {
+    const GATE_REF: &str = "gate:triggered-confirmed-duplicate";
+    let (harness, _) = build_claim_loss_triggered_harness(
+        scripted_state(TurnStatus::BlockedApproval, Some(GATE_REF)),
+        OutboundDeliveryStatus::Delivered,
+        None,
+    );
+    seed_preference(&harness.store).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Delivered
+    );
+    assert!(harness.adapter.envelopes().is_empty());
+    assert!(
+        harness
+            .route_store
+            .load_delivered_gate_route(&tenant(), &user(), GATE_REF)
+            .await
+            .expect("route lookup")
+            .is_some()
     );
 }
 

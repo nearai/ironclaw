@@ -502,6 +502,8 @@ struct ScriptedChannelAdapter {
     observed_status: Mutex<Vec<ironclaw_outbound::OutboundDeliveryStatus>>,
     store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     scope: TurnScope,
+    delivery_started: Option<Arc<tokio::sync::Semaphore>>,
+    delivery_release: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl ScriptedChannelAdapter {
@@ -516,7 +518,35 @@ impl ScriptedChannelAdapter {
             observed_status: Mutex::new(Vec::new()),
             store,
             scope,
+            delivery_started: None,
+            delivery_release: None,
         }
+    }
+
+    fn new_paused(
+        store: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+        scope: TurnScope,
+        reports: Vec<Result<DeliveryReport, ChannelError>>,
+    ) -> (
+        Self,
+        Arc<tokio::sync::Semaphore>,
+        Arc<tokio::sync::Semaphore>,
+    ) {
+        let delivery_started = Arc::new(tokio::sync::Semaphore::new(0));
+        let delivery_release = Arc::new(tokio::sync::Semaphore::new(0));
+        (
+            Self {
+                reports: Mutex::new(reports.into_iter().collect()),
+                envelopes: Mutex::new(Vec::new()),
+                observed_status: Mutex::new(Vec::new()),
+                store,
+                scope,
+                delivery_started: Some(Arc::clone(&delivery_started)),
+                delivery_release: Some(Arc::clone(&delivery_release)),
+            },
+            delivery_started,
+            delivery_release,
+        )
     }
 
     fn deliver_calls(&self) -> usize {
@@ -558,6 +588,14 @@ impl ChannelAdapter for ScriptedChannelAdapter {
             .lock()
             .expect("envelopes lock")
             .push(envelope);
+        if let (Some(started), Some(release)) = (&self.delivery_started, &self.delivery_release) {
+            started.add_permits(1);
+            let permit = release
+                .acquire()
+                .await
+                .expect("test delivery release remains open");
+            permit.forget();
+        }
         self.reports
             .lock()
             .expect("reports lock")
@@ -1298,6 +1336,205 @@ async fn concurrent_coordinators_claim_one_durable_delivery_before_egress() {
         1,
         "both coordinators address one stable durable delivery fact"
     );
+}
+
+#[tokio::test]
+async fn claim_loser_observes_sending_without_reporting_the_owners_later_failure_as_success() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let policy = configured_policy(&store, &validator);
+    let resolver = FakeProductOutboundTargetResolver;
+    let (adapter, delivery_started, delivery_release) = ScriptedChannelAdapter::new_paused(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Permanent {
+                reason: "owner failed after claiming egress".to_string(),
+            }],
+        })],
+    );
+    let adapter = Arc::new(adapter);
+    let coordinator = coordinator_over(&store, &adapter);
+    let delivery = delivery_request(scope.clone());
+    let owner_thread_scope = project_thread_scope();
+    let loser_thread_scope = project_thread_scope();
+
+    let owner = coordinator.deliver(
+        &policy,
+        &preferences,
+        &resolver,
+        &NO_PROJECT_FILESYSTEM,
+        CoordinatedDeliveryRequest {
+            intent: DeliveryIntent::FinalReply,
+            delivery: delivery.clone(),
+            parts: vec![ironclaw_product::OutboundPart::Text(
+                "one durable fact".to_string(),
+            )],
+            attachments: Vec::new(),
+            thread_anchor: None,
+            require_direct_message_target: false,
+            extension_id: "vendorx",
+            thread_scope: &owner_thread_scope,
+        },
+    );
+    let loser = async {
+        let started = delivery_started
+            .acquire()
+            .await
+            .expect("test delivery start remains open");
+        started.forget();
+        let outcome = coordinator
+            .deliver(
+                &policy,
+                &preferences,
+                &resolver,
+                &NO_PROJECT_FILESYSTEM,
+                CoordinatedDeliveryRequest {
+                    intent: DeliveryIntent::FinalReply,
+                    delivery,
+                    parts: vec![ironclaw_product::OutboundPart::Text(
+                        "one durable fact".to_string(),
+                    )],
+                    attachments: Vec::new(),
+                    thread_anchor: None,
+                    require_direct_message_target: false,
+                    extension_id: "vendorx",
+                    thread_scope: &loser_thread_scope,
+                },
+            )
+            .await;
+        delivery_release.add_permits(1);
+        outcome
+    };
+
+    let (owner, loser) = tokio::join!(owner, loser);
+    assert!(matches!(
+        owner.expect("owner returns its terminal adapter outcome"),
+        CoordinatedDeliveryOutcome::Failed {
+            failure_kind: DeliveryFailureKind::Rejected,
+            ..
+        }
+    ));
+    assert!(matches!(
+        loser.expect("claim loss is a typed non-success outcome"),
+        CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
+            status: OutboundDeliveryStatus::Sending,
+            failure_kind: None,
+        }
+    ));
+    assert_eq!(
+        adapter.deliver_calls(),
+        1,
+        "the losing coordinator must not drive a second adapter call"
+    );
+    let attempts = store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("load settled attempt");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].status, OutboundDeliveryStatus::Failed);
+    assert_eq!(
+        attempts[0].failure_kind,
+        Some(DeliveryFailureKind::Rejected)
+    );
+}
+
+#[tokio::test]
+async fn claim_loser_observes_sending_without_reporting_the_owners_later_crash_as_success() {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let policy = configured_policy(&store, &validator);
+    let resolver = FakeProductOutboundTargetResolver;
+    let (adapter, delivery_started, _delivery_release) = ScriptedChannelAdapter::new_paused(
+        Arc::clone(&store),
+        scope.clone(),
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("owner-never-settles")],
+        })],
+    );
+    let adapter = Arc::new(adapter);
+    let coordinator = coordinator_over(&store, &adapter);
+    let delivery = delivery_request(scope.clone());
+    let owner_thread_scope = project_thread_scope();
+    let loser_thread_scope = project_thread_scope();
+    let mut owner = Box::pin(coordinator.deliver(
+        &policy,
+        &preferences,
+        &resolver,
+        &NO_PROJECT_FILESYSTEM,
+        CoordinatedDeliveryRequest {
+            intent: DeliveryIntent::FinalReply,
+            delivery: delivery.clone(),
+            parts: vec![ironclaw_product::OutboundPart::Text(
+                "one durable fact".to_string(),
+            )],
+            attachments: Vec::new(),
+            thread_anchor: None,
+            require_direct_message_target: false,
+            extension_id: "vendorx",
+            thread_scope: &owner_thread_scope,
+        },
+    ));
+
+    tokio::select! {
+        result = &mut owner => panic!("owner unexpectedly settled before the crash: {result:?}"),
+        started = delivery_started.acquire() => {
+            started.expect("test delivery start remains open").forget();
+        }
+    }
+    let loser = coordinator
+        .deliver(
+            &policy,
+            &preferences,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            CoordinatedDeliveryRequest {
+                intent: DeliveryIntent::FinalReply,
+                delivery,
+                parts: vec![ironclaw_product::OutboundPart::Text(
+                    "one durable fact".to_string(),
+                )],
+                attachments: Vec::new(),
+                thread_anchor: None,
+                require_direct_message_target: false,
+                extension_id: "vendorx",
+                thread_scope: &loser_thread_scope,
+            },
+        )
+        .await
+        .expect("claim loss is a typed non-success outcome");
+    assert!(matches!(
+        loser,
+        CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
+            status: OutboundDeliveryStatus::Sending,
+            failure_kind: None,
+        }
+    ));
+
+    drop(owner);
+    assert_eq!(
+        coordinator
+            .recover_interrupted_deliveries(scope.clone())
+            .await
+            .expect("crash recovery"),
+        1
+    );
+    assert_eq!(adapter.deliver_calls(), 1);
+    let attempts = store
+        .list_delivery_attempts(scope)
+        .await
+        .expect("load recovered attempt");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].status, OutboundDeliveryStatus::Unknown);
+    assert_eq!(attempts[0].failure_kind, None);
 }
 
 #[tokio::test]
