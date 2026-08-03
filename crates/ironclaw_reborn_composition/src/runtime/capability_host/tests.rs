@@ -2236,6 +2236,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["*"]
         );
+        assert!(
+            extension_register_grant
+                .constraints
+                .network
+                .deny_private_ip_ranges
+        );
 
         let extension_remove_grant = grant_for(EXTENSION_REMOVE_CAPABILITY_ID);
         assert_eq!(
