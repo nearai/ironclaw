@@ -2193,6 +2193,7 @@ impl AuthRecipeResolver for RequesterAwareRecipeResolver {
     async fn resolve(
         &self,
         requester_extension: Option<&ExtensionId>,
+        _caller: Option<&ironclaw_host_api::ids::UserId>,
         vendor: &str,
     ) -> Option<ResolvedVendorAuthRecipe> {
         let extension = requester_extension?;

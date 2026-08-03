@@ -421,6 +421,7 @@ async fn vendor_oauth_callback_attempt(
         .recipes()
         .resolve(
             flow_identity.requester_extension.as_ref(),
+            Some(&callback_scope.resource.user_id),
             provider.as_str(),
         )
         .await

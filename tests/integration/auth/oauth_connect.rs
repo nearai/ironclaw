@@ -21,11 +21,12 @@ use chrono::{Duration, Utc};
 use common::{authorized_callback_request, hex64, new_flow_request, test_scope};
 use ironclaw_auth::AuthProviderClient;
 use ironclaw_auth::{
-    AuthErrorCode, AuthFlowId, AuthProviderId, AuthorizationCodeHash, CredentialAccountLabel,
-    CredentialAccountListRequest, CredentialAccountLookupRequest, CredentialAccountStatus,
-    CredentialOwnership, NewCredentialAccount, OAuthAuthorizationCode,
-    OAuthProviderCallbackRequest, OAuthProviderExchangeContext, OpaqueStateHash, PkceVerifierHash,
-    PkceVerifierSecret, PrepareOAuthFlowRequest, ProviderScope,
+    AuthErrorCode, AuthFlowId, AuthProductScope, AuthProviderId, AuthSurface,
+    AuthorizationCodeHash, CredentialAccountLabel, CredentialAccountListRequest,
+    CredentialAccountLookupRequest, CredentialAccountStatus, CredentialOwnership,
+    NewCredentialAccount, OAuthAuthorizationCode, OAuthProviderCallbackRequest,
+    OAuthProviderExchangeContext, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
+    PrepareOAuthFlowRequest, ProviderScope,
 };
 use ironclaw_extensions::{
     ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
@@ -33,8 +34,9 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
-    ids::{ExtensionId, SecretHandle},
+    ids::{ExtensionId, SecretHandle, UserId},
     path::VirtualPath,
+    resource::ResourceScope,
 };
 use ironclaw_reborn_composition::test_support::{
     ScriptedOAuthTokenEgress, build_oauth_product_auth_for_test,
@@ -342,6 +344,72 @@ async fn one_google_authorization_satisfies_every_installed_google_extension() {
     );
 }
 
+/// Registration is tenant-wide; installation is per user. The scope ceiling
+/// must follow the INSTALL, so one user's consent screen never carries scopes
+/// for an extension a DIFFERENT user installed (#7078).
+#[tokio::test]
+async fn one_users_consent_never_carries_another_users_installed_scopes() {
+    let gmail_scopes = provider_scopes(&runtime_credential_requirements(&bundled_manifest_record(
+        "gmail",
+    )));
+    let drive_scopes = provider_scopes(&runtime_credential_requirements(&bundled_manifest_record(
+        "google-drive",
+    )));
+
+    // alice installed gmail; bob installed google-drive. Both manifests are
+    // registered tenant-wide, as registration always is.
+    let store = installed_store_for_users(&[("gmail", "alice"), ("google-drive", "bob")]).await;
+    let resolver =
+        Arc::new(ironclaw_extension_host::InstalledManifestAuthRecipeResolver::new(store));
+    let engine = engine_over_resolver(
+        resolver,
+        Arc::new(ScriptedOAuthTokenEgress::with_access_token("itest-token")),
+    );
+
+    let alice = AuthProductScope::new(
+        ResourceScope::local_default(
+            UserId::new("alice").expect("alice"),
+            ironclaw_host_api::ids::InvocationId::new(),
+        )
+        .expect("alice scope"),
+        AuthSurface::Callback,
+    );
+    let prepared = engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "google".to_string(),
+            requester_extension: Some(ExtensionId::new("gmail").expect("gmail extension id")),
+            scope: alice,
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("google").unwrap(),
+            requested_scopes: gmail_scopes.clone(),
+        })
+        .await
+        .expect("alice's gmail connect flow prepares");
+
+    let consented = url::Url::parse(prepared.authorization_url.as_str())
+        .unwrap()
+        .query_pairs()
+        .find(|(key, _)| key == "scope")
+        .map(|(_, value)| value.to_string())
+        .expect("authorize URL carries a scope param");
+
+    for own in &gmail_scopes {
+        assert!(
+            consented.contains(own.as_str()),
+            "alice must still consent to the extension she installed; {} missing from {consented}",
+            own.as_str()
+        );
+    }
+    for other in &drive_scopes {
+        assert!(
+            !consented.contains(other.as_str()),
+            "google-drive is BOB's install — its scopes must never reach alice's \
+             consent screen; {} appeared in {consented}",
+            other.as_str()
+        );
+    }
+}
+
 /// A sibling extension uninstalled while the user is on the vendor's consent
 /// screen must not fail the requesting extension's own callback.
 ///
@@ -531,6 +599,45 @@ async fn google_consent_is_bounded_by_installed_extensions() {
         !missing.is_empty(),
         "a gmail-only account must NOT satisfy google-drive — otherwise the          one-authorization assertion in the test above proves nothing"
     );
+}
+
+/// A per-user installation: the membership rows that record WHO installed an
+/// extension, as opposed to the tenant-wide registration of its manifest.
+async fn installed_store_for_users(packages: &[(&str, &str)]) -> Arc<ExtensionInstallationStore> {
+    let store = ExtensionInstallationStore::load_at(
+        Arc::new(InMemoryBackend::new()),
+        VirtualPath::new("/system/extensions/.installations/oauth-connect-multiuser")
+            .expect("valid installation root"),
+        ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
+        ironclaw_host_runtime::default_host_api_contract_registry().expect("host API contracts"),
+    )
+    .await
+    .expect("filesystem installation store");
+    for (package, owner) in packages {
+        let record = bundled_manifest_record(package);
+        let extension_id = record.extension_id().clone();
+        store
+            .upsert_manifest_and_installation(
+                record,
+                ExtensionInstallation::new(
+                    ExtensionInstallationId::new(format!("itest-{package}"))
+                        .expect("installation id"),
+                    extension_id.clone(),
+                    ExtensionManifestRef::new(extension_id, None),
+                    Vec::new(),
+                    Utc::now(),
+                    ironclaw_extensions::InstallationOwner::Users {
+                        user_ids: [UserId::new(*owner).expect("owner user id")]
+                            .into_iter()
+                            .collect(),
+                    },
+                )
+                .expect("installation"),
+            )
+            .await
+            .expect("persist install");
+    }
+    Arc::new(store)
 }
 
 /// The real durable installation store, holding exactly `packages` — the

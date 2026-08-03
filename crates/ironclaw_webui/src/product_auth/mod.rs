@@ -2249,6 +2249,7 @@ mod tests {
         async fn resolve(
             &self,
             requester_extension: Option<&ExtensionId>,
+            _caller: Option<&ironclaw_host_api::ids::UserId>,
             vendor: &str,
         ) -> Option<ironclaw_auth::ResolvedVendorAuthRecipe> {
             self.calls

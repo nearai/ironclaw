@@ -37,7 +37,11 @@ use async_trait::async_trait;
 use ironclaw_extension_contracts::recipe::{
     OAuth2CodeRecipe, PkceMode, RecipeClientCredentials, VendorAuthRecipe,
 };
-use ironclaw_host_api::{http::RuntimeHttpEgress, ids::ExtensionId, resource::ResourceScope};
+use ironclaw_host_api::{
+    http::RuntimeHttpEgress,
+    ids::{ExtensionId, UserId},
+    resource::ResourceScope,
+};
 use ironclaw_secrets::SecretStorePort;
 use secrecy::SecretString;
 use url::Url;
@@ -80,11 +84,18 @@ pub struct ResolvedVendorAuthRecipe {
 #[async_trait]
 pub trait AuthRecipeResolver: Send + Sync + fmt::Debug {
     /// Resolve only the recipe declared by the requesting installed extension.
-    /// `None` is reserved for built-in/static callers; installed-manifest
-    /// resolvers must fail closed when it is absent.
+    /// `requester_extension` is `None` for built-in/static callers;
+    /// installed-manifest resolvers must fail closed when it is absent.
+    ///
+    /// `caller` is the user the flow authorizes for. A shared vendor's scope
+    /// ceiling is the union across the extensions that user INSTALLED, so a
+    /// resolver reading installation state must narrow to them — registration
+    /// is tenant-wide, installation is per user, and pooling the two would put
+    /// another user's extensions on this user's consent screen.
     async fn resolve(
         &self,
         requester_extension: Option<&ExtensionId>,
+        caller: Option<&UserId>,
         vendor: &str,
     ) -> Option<ResolvedVendorAuthRecipe>;
 }
@@ -121,6 +132,7 @@ impl AuthRecipeResolver for StaticAuthRecipeResolver {
     async fn resolve(
         &self,
         _requester_extension: Option<&ExtensionId>,
+        _caller: Option<&UserId>,
         vendor: &str,
     ) -> Option<ResolvedVendorAuthRecipe> {
         self.recipes.get(vendor).cloned()
@@ -293,9 +305,14 @@ impl AuthEngine {
     async fn resolved_recipe(
         &self,
         requester_extension: Option<&ExtensionId>,
+        caller: Option<&UserId>,
         vendor: &str,
     ) -> Result<ResolvedVendorAuthRecipe, AuthProductError> {
-        match self.recipes.resolve(requester_extension, vendor).await {
+        match self
+            .recipes
+            .resolve(requester_extension, caller, vendor)
+            .await
+        {
             Some(resolved) => Ok(resolved),
             None => {
                 // Every caller maps this to an opaque `malformed_config`
@@ -315,6 +332,7 @@ impl AuthEngine {
     async fn oauth2_recipe(
         &self,
         requester_extension: Option<&ExtensionId>,
+        caller: Option<&UserId>,
         vendor: &str,
     ) -> Result<
         (
@@ -324,7 +342,9 @@ impl AuthEngine {
         ),
         AuthProductError,
     > {
-        let resolved = self.resolved_recipe(requester_extension, vendor).await?;
+        let resolved = self
+            .resolved_recipe(requester_extension, caller, vendor)
+            .await?;
         match resolved.recipe {
             VendorAuthRecipe::Oauth2Code(recipe) => Ok((
                 recipe,
@@ -381,7 +401,11 @@ impl AuthEngine {
         request: PrepareOAuthFlowRequest,
     ) -> Result<PreparedOAuthFlow, AuthProductError> {
         let (recipe, resource, protected_resource_metadata_url) = self
-            .oauth2_recipe(request.requester_extension.as_ref(), &request.vendor)
+            .oauth2_recipe(
+                request.requester_extension.as_ref(),
+                Some(&request.scope.resource.user_id),
+                &request.vendor,
+            )
             .await?;
         // Enforce the recipe invariants at execution time; manifest-parse
         // validation is not trusted alone (AUTH-2).
@@ -452,7 +476,11 @@ impl AuthProviderClient for AuthEngine {
             return Err(AuthProductError::CrossScopeDenied);
         }
         let (recipe, resource, _) = self
-            .oauth2_recipe(None, request.provider.as_str())
+            .oauth2_recipe(
+                None,
+                Some(&context.scope.resource.user_id),
+                request.provider.as_str(),
+            )
             .await
             .map_err(|_| AuthProductError::TokenExchangeFailed)?;
         // Widening past the ceiling is rejected before the vendor call, on
@@ -473,7 +501,11 @@ impl AuthProviderClient for AuthEngine {
             return Err(AuthProductError::CrossScopeDenied);
         }
         let (recipe, resource, _) = self
-            .oauth2_recipe(requester_extension.as_ref(), request.provider.as_str())
+            .oauth2_recipe(
+                requester_extension.as_ref(),
+                Some(&context.scope.resource.user_id),
+                request.provider.as_str(),
+            )
             .await
             .map_err(|_| AuthProductError::TokenExchangeFailed)?;
         // An extension-scoped flow persists the shared-vendor ceiling as it
@@ -499,7 +531,11 @@ impl AuthProviderClient for AuthEngine {
             return Err(AuthProductError::CrossScopeDenied);
         }
         let (recipe, resource, _) = self
-            .oauth2_recipe(None, request.provider.as_str())
+            .oauth2_recipe(
+                None,
+                Some(&request.scope.resource.user_id),
+                request.provider.as_str(),
+            )
             .await
             .map_err(|_| AuthProductError::RefreshFailed)?;
         self.execute_oauth_refresh(request, recipe, resource).await
@@ -515,7 +551,11 @@ impl AuthProviderClient for AuthEngine {
             return Err(AuthProductError::CrossScopeDenied);
         }
         let (recipe, resource, _) = self
-            .oauth2_recipe(requester_extension.as_ref(), request.provider.as_str())
+            .oauth2_recipe(
+                requester_extension.as_ref(),
+                Some(&request.scope.resource.user_id),
+                request.provider.as_str(),
+            )
             .await
             .map_err(|_| AuthProductError::RefreshFailed)?;
         self.execute_oauth_refresh(request, recipe, resource).await

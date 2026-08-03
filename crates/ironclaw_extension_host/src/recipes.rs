@@ -10,14 +10,14 @@
 //! presentation metadata, the scope ceiling is the union across extensions,
 //! and an incompatible pair is a conflict.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_auth::{AuthRecipeResolver, ResolvedVendorAuthRecipe};
 use ironclaw_extension_contracts::recipe::VendorAuthRecipe;
 use ironclaw_extensions::{ExtensionInstallationStorePort, ResolvedExtensionManifest};
-use ironclaw_host_api::ids::ExtensionId;
+use ironclaw_host_api::ids::{ExtensionId, UserId};
 
 use crate::SnapshotWatch;
 
@@ -133,10 +133,23 @@ impl AuthRecipeResolver for InstalledManifestAuthRecipeResolver {
     async fn resolve(
         &self,
         requester_extension: Option<&ExtensionId>,
+        caller: Option<&UserId>,
         vendor: &str,
     ) -> Option<ResolvedVendorAuthRecipe> {
-        // The scope ceiling is the UNION across every installed extension
-        // declaring this vendor, not just the requester's own manifest.
+        // The scope ceiling is the union across every extension THIS CALLER
+        // installed that declares the vendor — not every extension registered
+        // in the deployment.
+        //
+        // Registration and installation are different layers: a manifest row
+        // is tenant-wide ("this extension is registered here, and this is its
+        // recipe"), while membership rows record who actually installed it.
+        // Unioning over registrations pooled other users' extensions into this
+        // caller's consent screen, so a user who installed only Gmail was asked
+        // to grant Drive because somebody else had installed Drive (#7078).
+        //
+        // `list_installations` is the membership-aware read: it already drops
+        // removed and lease-held rows, and carries the `InstallationOwner` that
+        // `visible_to` needs.
         //
         // This resolver is the path connect flows actually take: they run
         // before activation completes, so the active snapshot is still empty
@@ -147,10 +160,24 @@ impl AuthRecipeResolver for InstalledManifestAuthRecipeResolver {
         // scopes and wipes every sibling's, leaving already-connected
         // extensions reporting that setup is still needed.
         //
-        // silent-ok: list_manifests read for recipe resolution; AuthRecipeResolver is Option-valued, so a store failure must fail closed (no recipe) rather than resolve to none.
+        // silent-ok: installation/manifest reads for recipe resolution; AuthRecipeResolver is Option-valued, so a store failure must fail closed (no recipe) rather than resolve to none.
+        let installations = self.store.list_installations().await.ok()?;
+        let installed_for_caller: BTreeSet<ExtensionId> = installations
+            .into_iter()
+            .filter(|installation| match caller {
+                Some(caller) => installation.owner().visible_to(caller),
+                // No caller identity: fail closed to the requester's own
+                // manifest rather than pooling the whole deployment.
+                None => Some(installation.extension_id()) == requester_extension,
+            })
+            .map(|installation| installation.extension_id().clone())
+            .collect();
         let records = self.store.list_manifests().await.ok()?;
-        let manifests: Vec<&ResolvedExtensionManifest> =
-            records.iter().map(|record| record.resolved()).collect();
+        let manifests: Vec<&ResolvedExtensionManifest> = records
+            .iter()
+            .filter(|record| installed_for_caller.contains(record.extension_id()))
+            .map(|record| record.resolved())
+            .collect();
         match unified_vendor_recipes(manifests) {
             Ok(recipes) => recipes.into_iter().find(|recipe| recipe.vendor == vendor),
             Err(conflict) => {
@@ -161,7 +188,6 @@ impl AuthRecipeResolver for InstalledManifestAuthRecipeResolver {
                     %conflict,
                     "installed manifests carry conflicting vendor recipes"
                 );
-                let _ = requester_extension;
                 None
             }
         }
@@ -198,6 +224,7 @@ impl AuthRecipeResolver for SnapshotAuthRecipeResolver {
     async fn resolve(
         &self,
         requester_extension: Option<&ExtensionId>,
+        caller: Option<&UserId>,
         vendor: &str,
     ) -> Option<ResolvedVendorAuthRecipe> {
         // The scope ceiling for a vendor is the UNION across every installed
@@ -231,7 +258,9 @@ impl AuthRecipeResolver for SnapshotAuthRecipeResolver {
                 tracing::warn!(%conflict, "active snapshot carries conflicting vendor recipes");
             }
         }
-        self.fallback.resolve(requester_extension, vendor).await
+        self.fallback
+            .resolve(requester_extension, caller, vendor)
+            .await
     }
 }
 

@@ -63,7 +63,11 @@ impl OAuthGateFlowDriver {
             if self
                 .engine
                 .recipes()
-                .resolve(Some(&requirement.requester_extension), vendor)
+                .resolve(
+                    Some(&requirement.requester_extension),
+                    Some(request.owner_user_id),
+                    vendor,
+                )
                 .await
                 .is_none()
             {
