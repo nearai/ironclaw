@@ -1792,21 +1792,13 @@ async fn observer_claim_loser_never_publishes_a_gate_route_without_confirmed_del
 
         let texts = harness.adapter.texts();
         assert_eq!(
-            texts.len(),
-            1,
-            "only delivery-error feedback may reach the adapter after an unconfirmed gate"
-        );
-        assert_eq!(
-            texts
-                .iter()
-                .filter(|text| text.as_str() == DELIVERY_ERROR_FEEDBACK_TEXT)
-                .count(),
-            1,
-            "a {status:?} approval claim loser posts exactly one delivery-error feedback"
+            texts,
+            Vec::<String>::new(),
+            "a {status:?} approval claim loser must not emit the prompt or failure feedback"
         );
         assert!(
-            !texts.iter().any(|text| text.contains("Approval needed")),
-            "a {status:?} claim loser must not publish the unconfirmed approval prompt"
+            harness.adapter.envelopes().is_empty(),
+            "a {status:?} approval claim loser must produce zero adapter envelopes"
         );
         assert!(
             harness
@@ -1816,6 +1808,26 @@ async fn observer_claim_loser_never_publishes_a_gate_route_without_confirmed_del
                 .expect("route lookup")
                 .is_none(),
             "a {status:?} row is not evidence that this approval prompt was delivered"
+        );
+        let attempts = harness
+            .store
+            .list_delivery_attempts(binding_scope())
+            .await
+            .expect("attempts");
+        assert_eq!(
+            attempts.len(),
+            1,
+            "claim loss must not persist a separate FailureNotice attempt"
+        );
+        assert_eq!(attempts[0].status, status);
+        assert_eq!(attempts[0].failure_kind, failure_kind);
+        assert!(
+            attempts[0]
+                .candidate
+                .projection_ref
+                .as_str()
+                .starts_with("run-notification:approval:"),
+            "the sole durable row must be the original unconfirmed gate notification"
         );
     }
 }
@@ -1878,23 +1890,36 @@ async fn observer_unconfirmed_terminal_claim_loss_does_not_poison_the_delivered_
         2,
         "an Unknown claim loser must not record the run as delivered and suppress a later replay"
     );
-    let texts = harness.adapter.texts();
     assert_eq!(
-        texts.len(),
-        2,
-        "two failed final-reply attempts produce only their two feedback messages"
-    );
-    assert_eq!(
-        texts
-            .iter()
-            .filter(|text| text.as_str() == DELIVERY_ERROR_FEEDBACK_TEXT)
-            .count(),
-        2,
-        "each unconfirmed final-reply attempt posts one delivery-error feedback"
+        harness.adapter.texts(),
+        Vec::<String>::new(),
+        "repeated Unknown claim loss must not emit the final reply or failure feedback"
     );
     assert!(
-        !texts.iter().any(|text| text == "truthful final reply"),
-        "neither unconfirmed attempt may publish the truthful final reply"
+        harness.adapter.envelopes().is_empty(),
+        "repeated Unknown claim loss must produce zero adapter envelopes"
+    );
+    let attempts = harness
+        .store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("attempts");
+    assert_eq!(
+        attempts.len(),
+        1,
+        "the stable final-delivery identity must be retried without persisting feedback attempts"
+    );
+    assert!(
+        attempts.iter().all(|attempt| {
+            attempt.status == OutboundDeliveryStatus::Unknown
+                && attempt.failure_kind.is_none()
+                && attempt
+                    .candidate
+                    .projection_ref
+                    .as_str()
+                    .starts_with("run-notification:final:")
+        }),
+        "the durable row must preserve the authoritative Unknown final-delivery state"
     );
 }
 
@@ -1931,8 +1956,8 @@ async fn observer_unconfirmed_terminal_claim_loss_does_not_clean_up_a_truthfully
     let texts = harness.adapter.texts();
     assert_eq!(
         texts.len(),
-        2,
-        "only the confirmed auth prompt and delivery-error feedback reach the adapter"
+        1,
+        "only the already-confirmed auth prompt may reach the adapter"
     );
     assert_eq!(
         texts
@@ -1947,8 +1972,8 @@ async fn observer_unconfirmed_terminal_claim_loss_does_not_clean_up_a_truthfully
             .iter()
             .filter(|text| text.as_str() == DELIVERY_ERROR_FEEDBACK_TEXT)
             .count(),
-        1,
-        "the unconfirmed final reply posts one delivery-error feedback"
+        0,
+        "the unconfirmed final reply must not post delivery-error feedback"
     );
     assert!(
         !texts
@@ -1959,6 +1984,121 @@ async fn observer_unconfirmed_terminal_claim_loss_does_not_clean_up_a_truthfully
     assert!(
         harness.adapter.retracted_refs().is_empty(),
         "an unconfirmed terminal loser must not queue or publish stale-prompt cleanup"
+    );
+    let attempts = harness
+        .store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("attempts");
+    assert_eq!(
+        attempts.len(),
+        2,
+        "only the confirmed auth prompt and unconfirmed final attempt may be persisted"
+    );
+    assert!(
+        attempts.iter().any(|attempt| {
+            attempt.status == OutboundDeliveryStatus::Delivered
+                && attempt.failure_kind.is_none()
+                && attempt
+                    .candidate
+                    .projection_ref
+                    .as_str()
+                    .starts_with("run-notification:auth:")
+        }),
+        "the auth prompt remains the only confirmed adapter delivery"
+    );
+    assert!(
+        attempts.iter().any(|attempt| {
+            attempt.status == OutboundDeliveryStatus::Unknown
+                && attempt.failure_kind.is_none()
+                && attempt
+                    .candidate
+                    .projection_ref
+                    .as_str()
+                    .starts_with("run-notification:final:")
+        }),
+        "the final attempt must retain its authoritative Unknown state"
+    );
+    assert!(
+        attempts.iter().all(|attempt| !attempt
+            .candidate
+            .projection_ref
+            .as_str()
+            .starts_with("system-notice:failure-notice:")),
+        "claim loss must not persist a FailureNotice attempt"
+    );
+}
+
+#[tokio::test]
+async fn observer_owner_terminal_delivery_failure_posts_exactly_one_failure_notice() {
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "owner delivery will fail").await;
+    harness
+        .adapter
+        .reports
+        .lock()
+        .expect("reports lock")
+        .push_back(DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Permanent {
+                reason: "scripted permanent failure".to_string(),
+            }],
+        });
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(
+                ProductTriggerReason::DirectChat,
+                "evt-owner-terminal-failure",
+            ),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| text.as_str() == DELIVERY_ERROR_FEEDBACK_TEXT)
+            .count(),
+        1,
+        "an actual owner-side terminal failure still posts exactly one FailureNotice"
+    );
+    let attempts = harness
+        .store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("attempts");
+    assert_eq!(attempts.len(), 2, "failed final plus one FailureNotice");
+    assert!(
+        attempts.iter().any(|attempt| {
+            attempt.status == OutboundDeliveryStatus::Failed
+                && attempt.failure_kind == Some(DeliveryFailureKind::Rejected)
+                && attempt
+                    .candidate
+                    .projection_ref
+                    .as_str()
+                    .starts_with("run-notification:final:")
+        }),
+        "the owner path must reach CoordinatedDeliveryOutcome::Failed"
+    );
+    assert_eq!(
+        attempts
+            .iter()
+            .filter(|attempt| attempt
+                .candidate
+                .projection_ref
+                .as_str()
+                .starts_with("system-notice:failure-notice:"))
+            .count(),
+        1,
+        "failure feedback suppression must be specific to DeliveryUnconfirmed"
     );
 }
 
