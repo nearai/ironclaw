@@ -33,6 +33,11 @@ mod ratchet_support;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use std::process::Command;
+use std::sync::OnceLock;
+
+use serde_json::Value;
+
 use ratchet_support::{
     TypeDefOccurrence, collect_type_defs, production_rust_files, strip_comments_and_strings,
     workspace_root,
@@ -276,8 +281,55 @@ const NORMALIZATION_THAT_STAYED_IN_PRODUCT: &[&str] = &[
     "ProductInboundCommand",
 ];
 
-fn crate_src(root: &Path, name: &str) -> PathBuf {
-    root.join("crates").join(name).join("src")
+/// Workspace package metadata, resolved once per test binary.
+///
+/// Same reason as `reborn_extension_host_port_inversion.rs`: WS7 moves these
+/// crates into family directories, and a literal `crates/<name>` would then
+/// resolve to nothing. Through cargo, a crate that is not a workspace member
+/// is a panic and one that moved is simply followed.
+fn workspace_metadata() -> &'static Value {
+    static METADATA: OnceLock<Value> = OnceLock::new();
+    METADATA.get_or_init(|| {
+        let manifest_path = workspace_root().join("Cargo.toml");
+        let output = Command::new("cargo")
+            .args([
+                "metadata",
+                "--format-version",
+                "1",
+                "--no-deps",
+                "--manifest-path",
+            ])
+            .arg(&manifest_path)
+            .output()
+            .unwrap_or_else(|error| panic!("failed to run cargo metadata: {error}"));
+        assert!(
+            output.status.success(),
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("cargo metadata output must be JSON")
+    })
+}
+
+/// A workspace crate's directory, taken from its manifest's real location.
+fn crate_dir(name: &str) -> PathBuf {
+    let package = workspace_metadata()["packages"]
+        .as_array()
+        .expect("cargo metadata packages")
+        .iter()
+        .find(|package| package["name"].as_str() == Some(name))
+        .unwrap_or_else(|| panic!("{name} is not a workspace member"));
+    let manifest = package["manifest_path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{name} has no manifest_path in cargo metadata"));
+    Path::new(manifest)
+        .parent()
+        .unwrap_or_else(|| panic!("{name}'s manifest_path has no parent directory"))
+        .to_path_buf()
+}
+
+fn crate_src(name: &str) -> PathBuf {
+    crate_dir(name).join("src")
 }
 
 fn is_rust_identifier(ident: &str) -> bool {
@@ -289,10 +341,10 @@ fn is_rust_identifier(ident: &str) -> bool {
     chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-fn items_defined_in(root: &Path, crate_name: &str) -> BTreeSet<String> {
+fn items_defined_in(crate_name: &str) -> BTreeSet<String> {
     let mut found: BTreeMap<String, Vec<TypeDefOccurrence>> = BTreeMap::new();
     collect_type_defs(
-        &crate_src(root, crate_name),
+        &crate_src(crate_name),
         &[
             "struct ", "enum ", "trait ", "const ", "type ", "fn ", "static ",
         ],
@@ -447,9 +499,9 @@ fn product_symbols_in(source: &str) -> BTreeSet<String> {
     names
 }
 
-fn product_symbols_named_by(root: &Path, crate_name: &str) -> (BTreeSet<String>, usize) {
+fn product_symbols_named_by(crate_name: &str) -> (BTreeSet<String>, usize) {
     let mut files = Vec::new();
-    rust_files(&crate_src(root, crate_name), &mut files);
+    rust_files(&crate_src(crate_name), &mut files);
     assert!(
         files.len() > 5,
         "expected to walk {crate_name}'s source tree; found {} files",
@@ -503,9 +555,7 @@ fn assert_residue(
 
 #[test]
 fn transports_name_only_the_frozen_residue_of_product_symbols() {
-    let root = workspace_root();
-
-    let (webui, webui_files) = product_symbols_named_by(&root, WEBUI);
+    let (webui, webui_files) = product_symbols_named_by(WEBUI);
     assert_residue(
         WEBUI,
         &webui,
@@ -513,7 +563,7 @@ fn transports_name_only_the_frozen_residue_of_product_symbols() {
         WEBUI_PRODUCT_SYMBOL_BASELINE,
     );
 
-    let (compat, compat_files) = product_symbols_named_by(&root, OPENAI_COMPAT);
+    let (compat, compat_files) = product_symbols_named_by(OPENAI_COMPAT);
     assert_residue(
         OPENAI_COMPAT,
         &compat,
@@ -536,9 +586,8 @@ fn transports_name_only_the_frozen_residue_of_product_symbols() {
 
 #[test]
 fn inverted_boundary_vocabulary_is_declared_in_contracts_and_not_in_product() {
-    let root = workspace_root();
-    let contracts = items_defined_in(&root, PRODUCT_CONTRACTS);
-    let product = items_defined_in(&root, PRODUCT);
+    let contracts = items_defined_in(PRODUCT_CONTRACTS);
+    let product = items_defined_in(PRODUCT);
 
     let mut violations = Vec::new();
     for name in INVERTED_BOUNDARY_TYPES {
@@ -577,9 +626,8 @@ fn inverted_boundary_vocabulary_is_declared_in_contracts_and_not_in_product() {
 
 #[test]
 fn the_frozen_operation_inventory_stays_in_product() {
-    let root = workspace_root();
-    let contracts = items_defined_in(&root, PRODUCT_CONTRACTS);
-    let product = items_defined_in(&root, PRODUCT);
+    let contracts = items_defined_in(PRODUCT_CONTRACTS);
+    let product = items_defined_in(PRODUCT);
 
     let mut violations = Vec::new();
     for name in FROZEN_INVENTORY_CONSTANTS {
@@ -674,7 +722,7 @@ fn import_scanner_reads_symbols_out_of_real_use_shapes() {
 #[test]
 fn the_extension_host_serves_no_webui_product_routes_and_webui_holds_the_pairing_ones() {
     let root = workspace_root();
-    let src = crate_src(&root, EXTENSION_HOST);
+    let src = crate_src(EXTENSION_HOST);
     let files = production_rust_files(&src);
     assert!(
         files.len() >= 60,
@@ -705,7 +753,7 @@ fn the_extension_host_serves_no_webui_product_routes_and_webui_holds_the_pairing
 
     // The positive half, so "no offenders" cannot be an artefact of the routes
     // having been deleted rather than moved.
-    let pairing = crate_src(&root, WEBUI).join("channel_pairing.rs");
+    let pairing = crate_src(WEBUI).join("channel_pairing.rs");
     let source = std::fs::read_to_string(&pairing)
         .unwrap_or_else(|error| panic!("read {}: {error}", pairing.display()));
     for pattern in ["pairing/mint", "pairing/status", "pairing/unpair"] {
