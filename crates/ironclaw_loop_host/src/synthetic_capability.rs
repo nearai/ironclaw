@@ -161,6 +161,7 @@ impl SyntheticCapabilityDescriptor {
             capability_id: self.capability_id.clone(),
             name: self.provider_tool_name.clone(),
             description: self.description.clone(),
+            description_trust: Default::default(),
             parameters: self.parameters_schema.clone(),
         }
     }

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, prompt-build event instrumentation extends the owning executor mock, plan #5981
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
@@ -689,6 +690,10 @@ impl ironclaw_loop_contracts::LoopPromptPort for MockHost {
         &self,
         request: LoopPromptBundleRequest,
     ) -> Result<LoopPromptBundle, AgentLoopHostError> {
+        self.events
+            .lock()
+            .expect("lock")
+            .push("build_prompt_bundle".to_string());
         self.prompt_requests.lock().expect("lock").push(request);
         if let Some(error) = self.prompt_bundle_failure.clone() {
             return Err(error);

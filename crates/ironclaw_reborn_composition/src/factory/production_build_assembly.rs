@@ -7,6 +7,7 @@ pub(super) async fn build_production_shaped(
     let RebornHostBindings {
         deployment,
         storage,
+        ironhub_manifest_url,
         production_trust_policy,
         // Compatibility input; the build mints one shared scheduler channel.
         turn_run_wake_notifier: _,
@@ -83,6 +84,7 @@ pub(super) async fn build_production_shaped(
         first_party_bundles,
         first_party_registrars,
         credential_account_visibility_policy,
+        ironhub_manifest_url,
         workspace_filesystems: None,
         standalone_storage_root: None,
         default_system_prompt_path: None,
@@ -348,6 +350,7 @@ pub(super) struct RebornProductionBuildContext {
         Vec<Arc<dyn ironclaw_extension_host::FirstPartyHandlerRegistrar>>,
     pub(super) credential_account_visibility_policy:
         Option<Arc<dyn ironclaw_auth::RuntimeCredentialAccountVisibilityPolicy>>,
+    pub(super) ironhub_manifest_url: ironclaw_extension_manager::ironhub::IronhubManifestUrl,
     pub(super) workspace_filesystems: Option<WorkspaceFilesystems>,
     pub(super) standalone_storage_root: Option<PathBuf>,
     pub(super) default_system_prompt_path: Option<PathBuf>,

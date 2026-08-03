@@ -166,6 +166,10 @@ impl AdmissionRejection {
     }
 }
 
+fn steering_allowed_default() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnRunState {
     pub scope: TurnScope,
@@ -179,6 +183,13 @@ pub struct TurnRunState {
     pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub resolved_run_profile_id: RunProfileId,
     pub resolved_run_profile_version: RunProfileVersion,
+    /// Whether the resolved run profile admits mid-run steering input
+    /// (`SteeringPolicy::allow_steering`, snapshotted at submit resolution).
+    /// The busy-submit enqueue gateway consults this before queueing a message
+    /// for the active run; `false` falls back to the `RejectedBusy` outcome.
+    /// Legacy persisted rows predate the field and default to allowed.
+    #[serde(default = "steering_allowed_default")]
+    pub allow_steering: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_model_route: Option<LoopModelRouteSnapshot>,
     /// Cumulative provider-reported token usage for this run's model calls,

@@ -1110,6 +1110,23 @@ mod tests {
         assert!(!invalid.retryable);
     }
 
+    #[test]
+    fn installed_skill_source_remains_installed_in_lifecycle_projection() {
+        let projected = skill_summary(ironclaw_skills::SkillSummary {
+            name: "registry-skill".to_string(),
+            version: "1.0.0".to_string(),
+            description: "installed from a verified catalog".to_string(),
+            source: ironclaw_skills::ManagedSkillSource::Installed,
+            keywords: Vec::new(),
+            tags: Vec::new(),
+            requires_skills: Vec::new(),
+            auto_activate: false,
+        })
+        .expect("valid skill summary");
+
+        assert_eq!(projected.source, LifecycleSkillSource::Installed);
+    }
+
     #[tokio::test]
     async fn skill_lifecycle_service_installs_lists_and_removes_via_skill_management() {
         let (_dir, storage_root, service) = lifecycle_fixture();

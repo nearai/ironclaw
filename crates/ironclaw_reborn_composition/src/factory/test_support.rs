@@ -353,6 +353,7 @@ impl RebornRuntimeStores {
             crate::extension_host_assembly::ChannelHostAssemblyWiring {
                 thread_service: wiring.thread_service,
                 turn_coordinator: wiring.turn_coordinator,
+                input_enqueue: Arc::new(ironclaw_loop_host::RejectingInputEnqueue),
                 approval_interaction: None,
                 auth_interaction: None,
                 identity: wiring.identity,

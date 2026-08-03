@@ -49,10 +49,9 @@ use super::{
     AgentLoopExecutor, AgentLoopExecutorError, AssistantReplyInput, AssistantReplyStage, BatchStep,
     BudgetInput, BudgetStage, BudgetStep, CanonicalAgentLoopExecutor, CapabilityInput,
     CapabilityStage, DrainInput, ExecutorStage, ExitInput, ExitStage, GateInput, GateStage,
-    HostStage, InputStage, InputStep, ModelInput, ModelStage, PendingInputAck, PromptInput,
-    PromptStage, PromptStep, StageContext, StopInput, StopStage, StopStep, TurnCompletedStep,
-    UserFacingInputDrainMode, consume_drainable_inputs, sanitize_result_ref_suffix,
-    synthetic_provider_error_result_ref,
+    HostStage, InputStage, InputStep, ModelInput, ModelStage, PromptInput, PromptStage, PromptStep,
+    StageContext, TurnCompletedStep, UserFacingInputDrainMode, consume_drainable_inputs,
+    sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
 };
 
 #[allow(dead_code)]
@@ -235,12 +234,82 @@ async fn reply_only_drains_follow_up_before_stop_strategy_completes() {
         host.acked_input_tokens(),
         vec![LoopInputAckToken::new("input-ack:after-follow-up").expect("valid")]
     );
+    // Three before-model checkpoints: one per iteration from the spine, plus
+    // the follow-up drain's own cursor checkpoint (written so the drained
+    // input can be acked — and become model-visible — before the next prompt
+    // is built).
     assert_eq!(
         host.checkpoint_kinds(),
         vec![
             LoopCheckpointKind::BeforeModel,
             LoopCheckpointKind::BeforeModel,
+            LoopCheckpointKind::BeforeModel,
             LoopCheckpointKind::Final,
+        ]
+    );
+    assert_eq!(final_staged_state(&host).stop_state.turns_completed, 2);
+}
+
+#[tokio::test]
+async fn reply_only_drains_steering_arriving_at_exit_boundary() {
+    // Regression: a `Steering` input that arrives while the run's FINAL model
+    // call is in flight is only observable at the reply-only exit boundary —
+    // the steering drain at iteration start has already run. The follow-up
+    // drain must consume it and force one more iteration (so the model sees
+    // the message), rather than completing the run and stranding the input
+    // unconsumed at the queue head.
+    let host = MockHost::new(vec![reply_response(), reply_response()]);
+    let run_context = host.run_context().clone();
+    let host = host.with_input_batches(vec![
+        LoopInputBatch {
+            inputs: Vec::new(),
+            input_acks: Vec::new(),
+            next_cursor: input_cursor(&run_context, "input-cursor:no-input"),
+        },
+        LoopInputBatch {
+            inputs: vec![LoopInput::Steering {
+                message_ref: message_ref("msg:late-steering"),
+            }],
+            input_acks: vec![input_ack(
+                &run_context,
+                "input-cursor:after-late-steering",
+                "input-ack:after-late-steering",
+            )],
+            next_cursor: input_cursor(&run_context, "input-cursor:after-late-steering"),
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(
+        host.model_requests().len(),
+        2,
+        "the late steering input must force one more model iteration"
+    );
+    assert_eq!(
+        host.acked_input_tokens(),
+        vec![LoopInputAckToken::new("input-ack:after-late-steering").expect("valid")]
+    );
+    // Ordering, not just occurrence: the forced extra iteration must build its
+    // prompt AFTER the drain's durable cursor checkpoint and ack — the ack is
+    // what makes the queued row model-visible, so an iteration forced with the
+    // ack still pending would feed the model a prompt without the message.
+    assert_eq!(
+        host.events(),
+        vec![
+            "build_prompt_bundle".to_string(),
+            "checkpoint:before_model".to_string(),
+            "checkpoint:before_model".to_string(),
+            "ack_inputs".to_string(),
+            "build_prompt_bundle".to_string(),
+            "checkpoint:before_model".to_string(),
+            "checkpoint:final".to_string(),
         ]
     );
     assert_eq!(final_staged_state(&host).stop_state.turns_completed, 2);
@@ -293,13 +362,7 @@ async fn budget_stage_exits_at_iteration_limit() {
     state.terminal_warning_state.clear_active();
 
     let step = BudgetStage
-        .process(
-            ctx,
-            BudgetInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, BudgetInput { state })
         .await
         .expect("budget stage");
 
@@ -415,13 +478,7 @@ async fn explanation_prompt_bundle_error_degrades_to_original_failed_exit() {
     state.terminal_warning_state.clear_active();
 
     let step = BudgetStage
-        .process(
-            ctx,
-            BudgetInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, BudgetInput { state })
         .await
         .expect("budget stage");
 
@@ -476,13 +533,7 @@ async fn prompt_stage_compacts_candidate_emits_redaction_once_then_rebuilds_fina
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -494,7 +545,7 @@ async fn prompt_stage_compacts_candidate_emits_redaction_once_then_rebuilds_fina
         | PromptStep::ResumeExternalTool(_) => {
             panic!("unexpected resume step")
         }
-        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
+        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
     };
     assert_eq!(host.prompt_requests().len(), 2);
     assert_eq!(
@@ -624,13 +675,7 @@ async fn prompt_stage_circuit_breaker_disables_compaction_after_repeated_ineffec
 
     for completed_compactions in 1..=CompactionStrategyState::INEFFECTIVE_COMPACTION_TRIP_LIMIT {
         let step = PromptStage
-            .process(
-                ctx,
-                PromptInput {
-                    state,
-                    pending_input_ack: PendingInputAck::default(),
-                },
-            )
+            .process(ctx, PromptInput { state })
             .await
             .expect("prompt stage");
         let output = match step {
@@ -660,13 +705,7 @@ async fn prompt_stage_circuit_breaker_disables_compaction_after_repeated_ineffec
     // Drive the prompt stage again with the breaker open and the prompt still
     // over threshold: threshold-triggered compaction must NOT run again.
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage after breaker opened");
     let output = match step {
@@ -732,13 +771,7 @@ async fn prompt_stage_forced_compaction_bypasses_open_circuit_breaker() {
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
     let output = match step {
@@ -803,13 +836,7 @@ async fn prompt_stage_deferred_compaction_returns_to_normal_prompt_path() {
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -821,7 +848,7 @@ async fn prompt_stage_deferred_compaction_returns_to_normal_prompt_path() {
         | PromptStep::ResumeExternalTool(_) => {
             panic!("unexpected resume step")
         }
-        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
+        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
     };
     assert_eq!(host.prompt_requests().len(), 1);
     assert_eq!(
@@ -891,13 +918,7 @@ async fn prompt_stage_successful_compaction_clears_deferred_watermark() {
     });
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -909,7 +930,7 @@ async fn prompt_stage_successful_compaction_clears_deferred_watermark() {
         | PromptStep::ResumeExternalTool(_) => {
             panic!("unexpected resume step")
         }
-        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
+        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
     };
     assert_eq!(
         output.state.compaction_state.last_compacted_through_seq,
@@ -949,13 +970,7 @@ async fn prompt_stage_cancellation_after_deferred_compaction_returns_cancelled_e
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -987,13 +1002,7 @@ async fn prompt_stage_compaction_index_maps_system_summary_and_other_kinds() {
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1005,7 +1014,7 @@ async fn prompt_stage_compaction_index_maps_system_summary_and_other_kinds() {
         | PromptStep::ResumeExternalTool(_) => {
             panic!("unexpected resume step")
         }
-        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
+        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
     };
     assert_eq!(
         output.state.compaction_prompt.message_index,
@@ -1041,13 +1050,7 @@ async fn prompt_stage_cancellation_after_prompt_bundle_returns_cancelled_exit() 
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1062,7 +1065,7 @@ async fn prompt_stage_cancellation_after_prompt_bundle_returns_cancelled_exit() 
             panic!("unexpected resume step")
         }
         PromptStep::Exit(exit) => panic!("expected cancelled exit, got {exit:?}"),
-        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
+        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
     }
     assert_eq!(host.prompt_requests().len(), 1);
     assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
@@ -1099,13 +1102,7 @@ async fn prompt_stage_compaction_inference_timeout_returns_to_normal_prompt_path
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1117,7 +1114,7 @@ async fn prompt_stage_compaction_inference_timeout_returns_to_normal_prompt_path
         | PromptStep::ResumeExternalTool(_) => {
             panic!("unexpected resume step")
         }
-        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
+        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
     };
     assert_eq!(
         output.state.compaction_state.last_deferred,
@@ -1167,13 +1164,7 @@ async fn prompt_stage_compaction_security_rejection_returns_to_normal_prompt_pat
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1185,7 +1176,7 @@ async fn prompt_stage_compaction_security_rejection_returns_to_normal_prompt_pat
             panic!("unexpected resume step")
         }
         PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
-        PromptStep::SkipModel(_, _) => panic!("unexpected SkipModel"),
+        PromptStep::SkipModel(_) => panic!("unexpected SkipModel"),
     };
     assert_eq!(
         output.state.compaction_state.last_deferred,
@@ -1240,13 +1231,7 @@ async fn compaction_failure_cancellation_skips_explanation_and_returns_cancelled
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1262,7 +1247,7 @@ async fn compaction_failure_cancellation_skips_explanation_and_returns_cancelled
         | PromptStep::ResumeApproval(_)
         | PromptStep::ResumeAuth(_)
         | PromptStep::ResumeExternalTool(_)
-        | PromptStep::SkipModel(_, _) => panic!("unexpected prompt step"),
+        | PromptStep::SkipModel(_) => panic!("unexpected prompt step"),
     }
     assert_eq!(
         host.prompt_requests().len(),
@@ -1308,13 +1293,7 @@ async fn prompt_stage_compaction_cancelled_returns_cancelled_exit() {
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1358,13 +1337,7 @@ async fn prompt_stage_cancellation_during_compaction_aborts_prompt_planning() {
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1400,13 +1373,7 @@ async fn prompt_stage_compaction_aborts_immediately_when_cancellation_already_se
 
     let step = tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        PromptStage.process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        ),
+        PromptStage.process(ctx, PromptInput { state }),
     )
     .await
     .expect("already-requested cancellation should not wait for compaction")
@@ -1441,13 +1408,7 @@ async fn prompt_stage_cancellation_after_compaction_success_skips_final_bundle_r
     state.compaction_state.force_compact_on_next_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
@@ -1703,7 +1664,7 @@ async fn model_shrink_context_call_scope_returns_planner_contract() {
 }
 
 #[tokio::test]
-async fn input_stage_steering_drain_carries_pending_ack() {
+async fn input_stage_steering_drain_acks_eagerly_after_cursor_checkpoint() {
     let host = MockHost::new(Vec::new());
     let run_context = host.run_context().clone();
     let host = host.with_input_batches(vec![LoopInputBatch {
@@ -1729,7 +1690,6 @@ async fn input_stage_steering_drain_carries_pending_ack() {
             ctx,
             DrainInput {
                 state,
-                pending_input_ack: PendingInputAck::default(),
                 mode: UserFacingInputDrainMode::Steering,
             },
         )
@@ -1737,21 +1697,26 @@ async fn input_stage_steering_drain_carries_pending_ack() {
         .expect("input stage");
 
     match step {
-        InputStep::Continue {
-            state,
-            mut pending_input_ack,
-            drained,
-        } => {
+        InputStep::Continue { state, drained } => {
             assert!(drained);
             assert_eq!(
                 state.input_cursor,
                 input_cursor(&run_context, "input-cursor:after-user")
             );
-            assert!(host.acked_input_tokens().is_empty());
-            pending_input_ack.ack(&host).await.expect("ack inputs");
+            // The drain stage acks the consumed input itself — after writing a
+            // durable checkpoint of the advanced cursor — so the queued
+            // transcript row is model-visible before this iteration's prompt
+            // is built. The ack lifecycle never leaves this stage.
             assert_eq!(
                 host.acked_input_tokens(),
                 vec![LoopInputAckToken::new("input-ack:after-user").expect("valid")]
+            );
+            assert_eq!(
+                host.events(),
+                vec![
+                    "checkpoint:before_model".to_string(),
+                    "ack_inputs".to_string(),
+                ]
             );
         }
         InputStep::Exit(exit) => panic!("expected continue, got {exit:?}"),
@@ -1785,7 +1750,6 @@ async fn input_stage_steering_input_is_drained_like_user_message() {
             ctx,
             DrainInput {
                 state,
-                pending_input_ack: PendingInputAck::default(),
                 mode: UserFacingInputDrainMode::Steering,
             },
         )
@@ -2162,15 +2126,7 @@ async fn prompt_stage_host_unavailable_on_visible_capabilities_propagates_error(
     };
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    let result = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
-        .await;
+    let result = PromptStage.process(ctx, PromptInput { state }).await;
     let error = match result {
         Ok(_) => panic!("visible capabilities failure should propagate"),
         Err(error) => error,
@@ -2194,15 +2150,7 @@ async fn prompt_stage_host_unavailable_on_build_prompt_bundle_propagates_error()
     };
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    let result = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
-        .await;
+    let result = PromptStage.process(ctx, PromptInput { state }).await;
     let error = match result {
         Ok(_) => panic!("prompt bundle failure should propagate"),
         Err(error) => error,
@@ -2229,15 +2177,7 @@ async fn prompt_stage_preserves_policy_denied_kind_from_prompt_bundle() {
     };
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    let result = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
-        .await;
+    let result = PromptStage.process(ctx, PromptInput { state }).await;
     let error = match result {
         Ok(_) => panic!("policy denial must stop prompt construction"),
         Err(error) => error,
@@ -2264,15 +2204,7 @@ async fn prompt_stage_maps_cancelled_prompt_bundle_error_to_cancelled() {
     };
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    let result = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
-        .await;
+    let result = PromptStage.process(ctx, PromptInput { state }).await;
 
     assert!(matches!(result, Err(AgentLoopExecutorError::Cancelled)));
 }
@@ -2291,15 +2223,7 @@ async fn prompt_stage_redacts_rejected_prompt_error_summary() {
     };
     let state = LoopExecutionState::initial_for_run(host.run_context());
 
-    let result = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
-        .await;
+    let result = PromptStage.process(ctx, PromptInput { state }).await;
     let error = match result {
         Ok(_) => panic!("rejected prompt error summary should propagate safely"),
         Err(error) => error,
@@ -2614,13 +2538,7 @@ async fn budget_iteration_limit_schedules_normal_warning_turn() {
     state.iteration = family.planner().budget().iteration_limit(&state);
 
     let step = BudgetStage
-        .process(
-            ctx,
-            BudgetInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, BudgetInput { state })
         .await
         .expect("budget stage");
 
@@ -2782,13 +2700,7 @@ async fn consumed_iteration_warning_falls_back_to_failed_exit() {
     state.terminal_warning_state.clear_active();
 
     let step = BudgetStage
-        .process(
-            ctx,
-            BudgetInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, BudgetInput { state })
         .await
         .expect("budget stage should finalize the exhausted warning path");
 
@@ -2887,62 +2799,6 @@ async fn stopped_on_suspension_completed_outcome_still_appends_result() {
     let appended = host.appended_result_refs();
     assert_eq!(appended.len(), 1);
     assert_eq!(appended[0].result_ref, result_ref);
-}
-
-#[tokio::test]
-async fn stop_stage_preserves_ack_and_returns_stop_kind() {
-    let host = MockHost::new(Vec::new());
-    let family = crate::families::default();
-    let ctx = StageContext {
-        planner: family.planner(),
-        host: &host,
-    };
-    let state = LoopExecutionState::initial_for_run(host.run_context());
-    let mut pending_input_ack = PendingInputAck::default();
-    pending_input_ack
-        .replace(vec![
-            LoopInputAckToken::new("input-ack:pending").expect("valid"),
-        ])
-        .expect("store pending ack");
-
-    let step = StopStage
-        .process(
-            ctx,
-            StopInput {
-                state,
-                summary: TurnSummary::after_capability_batch(
-                    vec![LoopResultRef::new("result:done").expect("valid")],
-                    CapabilityBatchTurnSummary {
-                        invocation_count: 1,
-                        terminate_hint_count: 1,
-                        no_progress_count: 0,
-                        observed_signatures: Vec::new(),
-                        made_progress_signatures: Vec::new(),
-                        no_change_signatures: Vec::new(),
-                    },
-                ),
-                pending_input_ack,
-            },
-        )
-        .await
-        .expect("stop stage");
-
-    match step {
-        StopStep::Stop {
-            mut pending_input_ack,
-            kind,
-            ..
-        } => {
-            assert_eq!(kind, StopKind::GracefulStop);
-            assert!(host.acked_input_tokens().is_empty());
-            pending_input_ack.ack(&host).await.expect("ack inputs");
-            assert_eq!(
-                host.acked_input_tokens(),
-                vec![LoopInputAckToken::new("input-ack:pending").expect("valid")]
-            );
-        }
-        StopStep::Continue { .. } | StopStep::Exit(_) => panic!("expected graceful stop"),
-    }
 }
 
 #[tokio::test]
@@ -5862,18 +5718,12 @@ async fn prompt_stage_returns_skip_model_when_flag_set() {
     state.post_capability_state.skip_model_this_iteration = true;
 
     let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack: PendingInputAck::default(),
-            },
-        )
+        .process(ctx, PromptInput { state })
         .await
         .expect("prompt stage");
 
     let returned_state = match step {
-        PromptStep::SkipModel(state, _ack) => *state,
+        PromptStep::SkipModel(state) => *state,
         PromptStep::Prepared(_) => panic!("expected SkipModel, got Prepared"),
         PromptStep::ResumeApproval(_)
         | PromptStep::ResumeAuth(_)
@@ -5896,69 +5746,6 @@ async fn prompt_stage_returns_skip_model_when_flag_set() {
         host.prompt_requests().len(),
         0,
         "no prompt bundle should be requested when skipping the model"
-    );
-}
-
-/// D1 regression: PromptStep::SkipModel must carry the pending_input_ack so
-/// canonical.rs can deliver it. Before the fix, SkipModel(Box<LoopExecutionState>)
-/// had no second field, so the ack was silently dropped when
-/// PromptCompactionStep::run returned Skipped (empty message_index path).
-#[tokio::test]
-async fn prompt_stage_skip_model_carries_pending_input_ack() {
-    let host = MockHost::new(Vec::new());
-    let family = crate::families::default();
-    let ctx = StageContext {
-        planner: family.planner(),
-        host: &host,
-    };
-    let mut state = LoopExecutionState::initial_for_run(host.run_context());
-    state.post_capability_state.skip_model_this_iteration = true;
-
-    // Seed a pending ack token into the PendingInputAck that will be handed
-    // to PromptStage — this simulates an inbound user input that was drained
-    // but not yet acked.
-    let mut pending_input_ack = PendingInputAck::default();
-    pending_input_ack
-        .replace(vec![
-            LoopInputAckToken::new("input-ack:skip-model").expect("valid"),
-        ])
-        .expect("store pending ack");
-
-    let step = PromptStage
-        .process(
-            ctx,
-            PromptInput {
-                state,
-                pending_input_ack,
-            },
-        )
-        .await
-        .expect("prompt stage");
-
-    // The step must be SkipModel, and the second field must carry the ack.
-    let mut carried_ack = match step {
-        PromptStep::SkipModel(_state, ack) => ack,
-        PromptStep::Prepared(_) => panic!("expected SkipModel, got Prepared"),
-        PromptStep::ResumeApproval(_)
-        | PromptStep::ResumeAuth(_)
-        | PromptStep::ResumeExternalTool(_) => {
-            panic!("expected SkipModel, got resume step")
-        }
-        PromptStep::Exit(exit) => panic!("expected SkipModel, got Exit({exit:?})"),
-    };
-
-    // Nothing should have been acked yet — the ack must be carried, not fired.
-    assert!(
-        host.acked_input_tokens().is_empty(),
-        "ack must not have been delivered inside PromptStage on the Skipped path"
-    );
-
-    // Delivering the carried ack must forward the token to the host.
-    carried_ack.ack(&host).await.expect("ack inputs");
-    assert_eq!(
-        host.acked_input_tokens(),
-        vec![LoopInputAckToken::new("input-ack:skip-model").expect("valid")],
-        "carried ack must deliver the original token to the host"
     );
 }
 

@@ -82,6 +82,9 @@ type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub(crate) const HARNESS_ACTOR_ID: &str = "host-user";
 /// Model profile the planned runtime requests; the gateway policy permits it.
 pub(crate) const INTERACTIVE_MODEL_PROFILE: &str = "interactive_model";
+/// Coverage-instrumented real-runtime paths (notably bundled WASM startup) can
+/// take more than 30 seconds when several tests run concurrently in CI.
+const RUN_STATE_SETTLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Selects the durable storage backend mounted into the integration harness's
 /// `CompositeRootFilesystem`. Both modes ride **one** composite at the
@@ -1537,6 +1540,20 @@ impl RebornIntegrationHarness {
             .collect()
     }
 
+    /// Every User-role message across the captured model requests, in call
+    /// order. Same per-thread `scripted_llm` source (and the same no-baseline
+    /// rationale) as `captured_system_prompts`. Read by
+    /// `assert_model_saw_user_message` in `assertions.rs`.
+    pub(super) fn captured_model_user_messages(&self) -> Vec<String> {
+        self.scripted_llm
+            .captured_requests()
+            .into_iter()
+            .flatten()
+            .filter(|message| matches!(message.role, Role::User))
+            .map(|message| message.content)
+            .collect()
+    }
+
     pub(super) fn captured_system_prompts(&self) -> Vec<String> {
         self.scripted_llm
             .captured_requests()
@@ -1730,7 +1747,7 @@ impl RebornIntegrationHarness {
         mut decide: impl FnMut(&TurnRunState) -> ControlFlow<HarnessResult<TurnRunState>>,
         timeout_context: &str,
     ) -> HarnessResult<TurnRunState> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let deadline = tokio::time::Instant::now() + RUN_STATE_SETTLE_TIMEOUT;
         loop {
             let state = self
                 .turn_runtime
