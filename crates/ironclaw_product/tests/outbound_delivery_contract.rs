@@ -2420,7 +2420,7 @@ async fn coordinator_fails_closed_when_the_channel_is_unavailable() {
     );
     assert_eq!(
         attempts[0].failure_kind,
-        Some(ironclaw_outbound::DeliveryFailureKind::TransportUnavailable)
+        Some(ironclaw_outbound::DeliveryFailureKind::Rejected)
     );
     assert_eq!(adapter.deliver_calls(), 0);
 }

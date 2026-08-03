@@ -1851,12 +1851,16 @@ async fn prepared_failure_is_permanent_scoped_and_source_guarded(
         transient,
         Err(OutboundError::InvalidRequest { .. })
     ));
+    let attempts = store
+        .list_delivery_attempts(scope.clone())
+        .await
+        .expect("load attempt after rejected transient settlement");
+    let attempt = attempts
+        .iter()
+        .find(|attempt| attempt.delivery_id == delivery_id)
+        .expect("prepared preflight attempt persists");
     assert_eq!(
-        store
-            .list_delivery_attempts(scope.clone())
-            .await
-            .expect("load attempt after rejected transient settlement")[0]
-            .status,
+        attempt.status,
         OutboundDeliveryStatus::Prepared,
         "a transient preflight failure must remain retryable"
     );
