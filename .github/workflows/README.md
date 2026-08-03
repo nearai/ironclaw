@@ -75,8 +75,10 @@ sharing dependency compilation across packages in the same job.
 contracts. Code Style owns WebUI lint, Vitest, and the production build on all
 code events. Pull-request Clippy covers production libraries and binaries for
 directly changed workspace packages with all features. Test-only and CI-only
-PRs do not compile an unchanged workspace solely for linting. Merge queue and
-main lint the full workspace, add test and example targets, and run the
+PRs do not compile an unchanged workspace solely for linting. Root
+`Cargo.toml` and `Cargo.lock` changes lint every workspace package because
+their dependency and feature impact is workspace-wide. Merge queue and main
+lint the full workspace, add test and example targets, and run the
 default-feature matrix. Code Style's CLI Rust smoke and Reborn E2E's
 four Rust groups run on merge queue and main, where they validate the
 exhaustive merged state, but do not repeat those contracts on PR runners. The release-binary

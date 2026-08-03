@@ -62,14 +62,22 @@ class ChangedWorkspacePackagesTests(unittest.TestCase):
             [],
         )
 
-    def test_crate_manifest_selects_package_but_workspace_inputs_do_not(self) -> None:
+    def test_crate_manifest_selects_its_package(self) -> None:
         self.assertEqual(
             selector.changed_production_packages(
-                ["Cargo.toml", "Cargo.lock", "crates/alpha/Cargo.toml"],
+                ["crates/alpha/Cargo.toml"],
                 metadata(),
             ),
             ["alpha"],
         )
+
+    def test_workspace_manifest_or_lockfile_selects_the_full_workspace(self) -> None:
+        for path in ("Cargo.toml", "Cargo.lock"):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    selector.changed_production_packages([path], metadata()),
+                    ["alpha", "nested", "root"],
+                )
 
 
 if __name__ == "__main__":

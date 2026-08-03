@@ -25,9 +25,14 @@ def changed_production_packages(
         if package["id"] in members
     )
     selected: set[str] = set()
-    for raw_path in changed_paths:
-        path = raw_path.strip().replace("\\", "/")
-        if not path or path in {"Cargo.toml", "Cargo.lock"}:
+    normalized_paths = {
+        path.strip().replace("\\", "/") for path in changed_paths if path.strip()
+    }
+    if normalized_paths & {"Cargo.toml", "Cargo.lock"}:
+        return sorted(package for _directory, package in packages)
+
+    for path in normalized_paths:
+        if not path:
             continue
         for directory, package in sorted(
             packages, key=lambda item: len(item[0].parts), reverse=True
