@@ -1013,7 +1013,7 @@ fn build_claim_loss_observer_harness(
         list_calls: AtomicUsize::new(0),
     });
     let coordinator = Arc::new(DeliveryCoordinator::new(
-        claim_loss_store as Arc<dyn OutboundStateStorePort>,
+        Arc::clone(&claim_loss_store) as Arc<dyn OutboundStateStorePort>,
         Arc::new(StaticResolver {
             adapter: Arc::clone(&adapter),
         }),
@@ -1030,7 +1030,7 @@ fn build_claim_loss_observer_harness(
         }),
         thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
         turn_coordinator: Arc::clone(&turns) as Arc<dyn TurnCoordinator>,
-        outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
+        outbound_store: claim_loss_store as Arc<dyn OutboundStateStorePort>,
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
         project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
@@ -2671,16 +2671,17 @@ fn build_claim_loss_triggered_harness(
     let threads = Arc::new(InMemorySessionThreadService::default());
     let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
     let claim_calls = Arc::new(AtomicUsize::new(0));
+    let claim_loss_store = Arc::new(ClaimLossStore {
+        inner: Arc::clone(&store),
+        observed_status,
+        failure_kind,
+        claim_calls: Arc::clone(&claim_calls),
+        claim_loss_on: 1,
+        authoritative_attempts: Mutex::new(HashMap::new()),
+        list_calls: AtomicUsize::new(0),
+    });
     let coordinator = Arc::new(DeliveryCoordinator::new(
-        Arc::new(ClaimLossStore {
-            inner: Arc::clone(&store),
-            observed_status,
-            failure_kind,
-            claim_calls: Arc::clone(&claim_calls),
-            claim_loss_on: 1,
-            authoritative_attempts: Mutex::new(HashMap::new()),
-            list_calls: AtomicUsize::new(0),
-        }) as Arc<dyn OutboundStateStorePort>,
+        Arc::clone(&claim_loss_store) as Arc<dyn OutboundStateStorePort>,
         Arc::new(StaticResolver {
             adapter: Arc::clone(&adapter),
         }),
@@ -2697,7 +2698,7 @@ fn build_claim_loss_triggered_harness(
         }),
         thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
         turn_coordinator: Arc::clone(&turns) as Arc<dyn TurnCoordinator>,
-        outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
+        outbound_store: claim_loss_store as Arc<dyn OutboundStateStorePort>,
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
         project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
