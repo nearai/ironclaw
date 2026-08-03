@@ -55,6 +55,22 @@ fn prepared_delivery_attempt(
     scope: TurnScope,
     marker: &str,
 ) -> OutboundDeliveryAttempt {
+    delivery_attempt_with_status(
+        delivery_id,
+        scope,
+        marker,
+        OutboundDeliveryStatus::Prepared,
+        None,
+    )
+}
+
+fn delivery_attempt_with_status(
+    delivery_id: OutboundDeliveryId,
+    scope: TurnScope,
+    marker: &str,
+    status: OutboundDeliveryStatus,
+    failure_kind: Option<DeliveryFailureKind>,
+) -> OutboundDeliveryAttempt {
     OutboundDeliveryAttempt {
         delivery_id,
         candidate: OutboundPushCandidate {
@@ -70,9 +86,9 @@ fn prepared_delivery_attempt(
             requires_reply_target_revalidation: true,
         },
         scope,
-        status: OutboundDeliveryStatus::Prepared,
+        status,
         attempted_at: now(),
-        failure_kind: None,
+        failure_kind,
     }
 }
 
@@ -414,6 +430,7 @@ async fn outbound_state_store_satisfies_outbound_contract_on_in_memory_backend()
     subscription_cursor_rejects_backward_advancement(&store).await;
     delivery_status_rejects_inconsistent_failure_kind(&store).await;
     coordinator_delivery_lifecycle_round_trips(&store).await;
+    delivery_prepared_transition_outcomes_preserve_authoritative_state(&store).await;
     prepared_failure_is_permanent_scoped_and_source_guarded(&store).await;
     recovery_transition_never_clobbers_delivered(&store).await;
     notification_policy_rejects_excessive_targets(&store).await;
@@ -458,12 +475,25 @@ async fn delivery_send_claim_is_atomic_across_store_instances() {
         first.claim_delivery_attempt_for_send(first_request),
         second.claim_delivery_attempt_for_send(second_request),
     );
-    let claims = [first_claim.unwrap(), second_claim.unwrap()];
-    assert_eq!(claims.into_iter().filter(|claimed| *claimed).count(), 1);
-
-    let attempts = first.list_delivery_attempts(scope).await.unwrap();
-    assert_eq!(attempts.len(), 1);
-    assert_eq!(attempts[0].status, OutboundDeliveryStatus::Sending);
+    let outcomes = [first_claim.unwrap(), second_claim.unwrap()];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, ClaimDeliveryAttemptForSendOutcome::Claimed))
+            .count(),
+        1
+    );
+    let existing = outcomes
+        .iter()
+        .find_map(|outcome| match outcome {
+            ClaimDeliveryAttemptForSendOutcome::Existing(attempt) => Some(attempt),
+            ClaimDeliveryAttemptForSendOutcome::Claimed => None,
+        })
+        .expect("the losing claimant receives the winner's authoritative state");
+    assert_eq!(existing.delivery_id, delivery_id);
+    assert_eq!(existing.scope, scope);
+    assert_eq!(existing.status, OutboundDeliveryStatus::Sending);
+    assert_eq!(existing.failure_kind, None);
 }
 
 #[tokio::test]
@@ -494,32 +524,32 @@ async fn prepared_failure_and_send_claim_are_one_atomic_decision_across_store_in
             failure_kind: DeliveryFailureKind::Rejected,
         }),
     );
-    let transitions = [
+    match (
         claimed.expect("claim result"),
         failed.expect("failure result"),
-    ];
-    assert_eq!(
-        transitions
-            .into_iter()
-            .filter(|transitioned| *transitioned)
-            .count(),
-        1,
-        "only one writer may consume Prepared"
-    );
-
-    let attempts = first
-        .list_delivery_attempts(scope)
-        .await
-        .expect("load settled attempt");
-    assert!(matches!(
-        attempts[0].status,
-        OutboundDeliveryStatus::Sending | OutboundDeliveryStatus::Failed
-    ));
-    assert_eq!(
-        attempts[0].failure_kind,
-        (attempts[0].status == OutboundDeliveryStatus::Failed)
-            .then_some(DeliveryFailureKind::Rejected)
-    );
+    ) {
+        (
+            ClaimDeliveryAttemptForSendOutcome::Claimed,
+            FailPreparedDeliveryAttemptOutcome::Existing(existing),
+        ) => {
+            assert_eq!(existing.delivery_id, delivery_id);
+            assert_eq!(existing.scope, scope);
+            assert_eq!(existing.status, OutboundDeliveryStatus::Sending);
+            assert_eq!(existing.failure_kind, None);
+        }
+        (
+            ClaimDeliveryAttemptForSendOutcome::Existing(existing),
+            FailPreparedDeliveryAttemptOutcome::Settled,
+        ) => {
+            assert_eq!(existing.delivery_id, delivery_id);
+            assert_eq!(existing.scope, scope);
+            assert_eq!(existing.status, OutboundDeliveryStatus::Failed);
+            assert_eq!(existing.failure_kind, Some(DeliveryFailureKind::Rejected));
+        }
+        (claim, failure) => panic!(
+            "one Prepared consumer must win and the loser must observe it: claim={claim:?}, failure={failure:?}"
+        ),
+    }
 }
 
 // Legacy LibSqlOutboundStateStore / PostgresOutboundStateStore have been
@@ -1823,6 +1853,176 @@ async fn coordinator_delivery_lifecycle_round_trips(store: &impl OutboundStateSt
         .find(|attempt| attempt.delivery_id == delivery_id)
         .expect("attempt persisted");
     assert_eq!(attempt.status, OutboundDeliveryStatus::Unknown);
+}
+
+/// Both guarded `Prepared` consumers return the authoritative attempt from
+/// the store read that rejected the transition. Callers must not collapse a
+/// live/terminal/legacy row into a status-blind duplicate or issue a separate
+/// read that can race another writer.
+async fn delivery_prepared_transition_outcomes_preserve_authoritative_state(
+    store: &impl OutboundStateStorePort,
+) {
+    let scope = turn_scope();
+
+    let claimed_id = OutboundDeliveryId::new();
+    store
+        .record_delivery_attempt(prepared_delivery_attempt(
+            claimed_id,
+            scope.clone(),
+            "reply-typed-claim-success",
+        ))
+        .await
+        .expect("seed prepared send claim");
+    assert_eq!(
+        store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id: claimed_id,
+                scope: scope.clone(),
+            })
+            .await
+            .expect("claim prepared attempt"),
+        ClaimDeliveryAttemptForSendOutcome::Claimed
+    );
+
+    let settled_id = OutboundDeliveryId::new();
+    store
+        .record_delivery_attempt(prepared_delivery_attempt(
+            settled_id,
+            scope.clone(),
+            "reply-typed-settlement-success",
+        ))
+        .await
+        .expect("seed prepared failure settlement");
+    assert_eq!(
+        store
+            .fail_prepared_delivery_attempt(FailPreparedDeliveryAttemptRequest {
+                delivery_id: settled_id,
+                scope: scope.clone(),
+                updated_at: now(),
+                failure_kind: DeliveryFailureKind::AuthorizationRevoked,
+            })
+            .await
+            .expect("settle prepared failure"),
+        FailPreparedDeliveryAttemptOutcome::Settled
+    );
+
+    let existing_states = [
+        (OutboundDeliveryStatus::Sending, None),
+        (OutboundDeliveryStatus::Delivered, None),
+        (
+            OutboundDeliveryStatus::Failed,
+            Some(DeliveryFailureKind::TransientValidatorError),
+        ),
+        (OutboundDeliveryStatus::Unknown, None),
+        (OutboundDeliveryStatus::Pending, None),
+        (
+            OutboundDeliveryStatus::DeadLettered,
+            Some(DeliveryFailureKind::RateLimited),
+        ),
+    ];
+    for (index, (status, failure_kind)) in existing_states.into_iter().enumerate() {
+        let claim_id = OutboundDeliveryId::new();
+        let expected_claim = delivery_attempt_with_status(
+            claim_id,
+            scope.clone(),
+            &format!("reply-typed-claim-existing-{index}"),
+            status,
+            failure_kind,
+        );
+        store
+            .record_delivery_attempt(expected_claim.clone())
+            .await
+            .expect("seed existing send-claim state");
+        assert_eq!(
+            store
+                .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                    delivery_id: claim_id,
+                    scope: scope.clone(),
+                })
+                .await
+                .expect("load existing send-claim state"),
+            ClaimDeliveryAttemptForSendOutcome::Existing(expected_claim),
+            "send claim must preserve authoritative {status:?} status and failure kind"
+        );
+
+        let settlement_id = OutboundDeliveryId::new();
+        let expected_settlement = delivery_attempt_with_status(
+            settlement_id,
+            scope.clone(),
+            &format!("reply-typed-settlement-existing-{index}"),
+            status,
+            failure_kind,
+        );
+        store
+            .record_delivery_attempt(expected_settlement.clone())
+            .await
+            .expect("seed existing prepared-failure state");
+        assert_eq!(
+            store
+                .fail_prepared_delivery_attempt(FailPreparedDeliveryAttemptRequest {
+                    delivery_id: settlement_id,
+                    scope: scope.clone(),
+                    updated_at: now(),
+                    failure_kind: DeliveryFailureKind::Rejected,
+                })
+                .await
+                .expect("load existing prepared-failure state"),
+            FailPreparedDeliveryAttemptOutcome::Existing(expected_settlement),
+            "prepared-failure settlement must preserve authoritative {status:?} status and failure kind"
+        );
+    }
+
+    let missing_id = OutboundDeliveryId::new();
+    assert!(matches!(
+        store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id: missing_id,
+                scope: scope.clone(),
+            })
+            .await,
+        Err(OutboundError::DeliveryNotFound)
+    ));
+    assert!(matches!(
+        store
+            .fail_prepared_delivery_attempt(FailPreparedDeliveryAttemptRequest {
+                delivery_id: missing_id,
+                scope: scope.clone(),
+                updated_at: now(),
+                failure_kind: DeliveryFailureKind::Rejected,
+            })
+            .await,
+        Err(OutboundError::DeliveryNotFound)
+    ));
+
+    let scoped_id = OutboundDeliveryId::new();
+    store
+        .record_delivery_attempt(prepared_delivery_attempt(
+            scoped_id,
+            scope,
+            "reply-typed-wrong-scope",
+        ))
+        .await
+        .expect("seed scoped prepared attempt");
+    assert!(matches!(
+        store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id: scoped_id,
+                scope: sibling_turn_scope(),
+            })
+            .await,
+        Err(OutboundError::DeliveryNotFound | OutboundError::SubscriptionScopeMismatch)
+    ));
+    assert!(matches!(
+        store
+            .fail_prepared_delivery_attempt(FailPreparedDeliveryAttemptRequest {
+                delivery_id: scoped_id,
+                scope: sibling_turn_scope(),
+                updated_at: now(),
+                failure_kind: DeliveryFailureKind::Rejected,
+            })
+            .await,
+        Err(OutboundError::DeliveryNotFound | OutboundError::SubscriptionScopeMismatch)
+    ));
 }
 
 async fn prepared_failure_is_permanent_scoped_and_source_guarded(
