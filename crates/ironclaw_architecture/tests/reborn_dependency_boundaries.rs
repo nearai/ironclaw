@@ -1197,7 +1197,12 @@ fn reborn_turns_public_surface_keeps_runner_api_explicit() {
 fn reborn_runner_llm_wiring_is_isolated() {
     let root = workspace_root();
 
-    let reborn_gateway = root.join("crates/ironclaw_runner/src/model_gateway.rs");
+    // WS3 runner sheds: the gateway is a host-port adapter, so it lives with the
+    // other host-port adapters (PROPOSAL §6.7.2 "gains: runner's model-gateway
+    // adapter"). The pin moved with it, and gained its other half: the adapter
+    // must be at the new home AND absent from the old one, so a half-finished
+    // move fails here instead of leaving two gateways.
+    let reborn_gateway = root.join("crates/ironclaw_loop_host/src/model_gateway.rs");
     assert!(
         reborn_gateway.exists(),
         "expected Reborn LLM gateway wiring at {}",
@@ -1207,7 +1212,15 @@ fn reborn_runner_llm_wiring_is_isolated() {
         .expect("Reborn model gateway source must be readable");
     assert!(
         reborn_gateway_source.contains("LlmProviderModelGateway"),
-        "Reborn LLM gateway wiring should expose LlmProviderModelGateway from crates/ironclaw_runner"
+        "Reborn LLM gateway wiring should expose LlmProviderModelGateway from \
+         crates/ironclaw_loop_host"
+    );
+    assert!(
+        !root
+            .join("crates/ironclaw_runner/src/model_gateway.rs")
+            .exists(),
+        "the model gateway moved to ironclaw_loop_host (WS3 runner sheds); a file back at \
+         crates/ironclaw_runner/src/model_gateway.rs is a re-import, not a fix"
     );
 
     // Reborn crates may reuse the extracted LLM crate, but never on its default
@@ -1216,7 +1229,10 @@ fn reborn_runner_llm_wiring_is_isolated() {
     // edge is the durable invariant, keeping the Reborn stack's dependency
     // footprint minimal and explicit.
     for manifest_path in [
-        "crates/ironclaw_runner/Cargo.toml",
+        // `ironclaw_runner` left this list with WS3: shedding the model gateway
+        // took its whole `ironclaw_llm` edge, and the rule below asserts a
+        // manifest line that is no longer there.
+        "crates/ironclaw_loop_host/Cargo.toml",
         "crates/ironclaw_reborn_composition/Cargo.toml",
     ] {
         let manifest = std::fs::read_to_string(root.join(manifest_path))
@@ -1262,14 +1278,14 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         "crates/ironclaw_loop_host/src/subagent_spawn_port.rs",
         // The model gateway is the LLM wire boundary. Executor helpers may
         // rebuild provider calls only from stored replay metadata.
-        "crates/ironclaw_runner/src/model_gateway.rs",
+        "crates/ironclaw_loop_host/src/model_gateway.rs",
         "crates/ironclaw_agent_loop/src/executor/capability_helpers.rs",
         // Progressive tool disclosure is itself a model-protocol boundary: the
         // catalog/selector and the bridging decorator map provider tool names
         // (advertised, deferred, and synthetic bridge names) to/from capability
         // ids and rebuild provider calls for the resolved target.
-        "crates/ironclaw_runner/src/tool_disclosure.rs",
-        "crates/ironclaw_runner/src/tool_disclosure_port.rs",
+        "crates/ironclaw_loop_host/src/tool_disclosure.rs",
+        "crates/ironclaw_loop_host/src/tool_disclosure_port.rs",
         // Composition-local protocol surfaces that reconstruct provider-shaped
         // output or synthetic provider tools.
         "crates/ironclaw_reborn_composition/src/llm_admin/openai_compat_serve.rs",
@@ -1325,8 +1341,6 @@ fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
         "pub use ironclaw_loop_host::",
         "pub use loop_driver_host::",
         "pub use milestone_events::",
-        "pub use model_gateway::",
-        "pub use model_routes::",
         "pub use planned_driver::",
         "pub use planned_driver_factory::",
         "pub use text_loop_driver::",
@@ -4138,7 +4152,7 @@ struct LayerMatrixException {
 /// live tree it is turn *admission* (a `TurnCoordinator` handle and
 /// `submit_turn` call), not vocabulary, so `loop_contracts` cannot dissolve it
 /// — its entry now records that and points at WS5.
-const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 13;
+const WS0_LAYER_MATRIX_EXCEPTION_BASELINE: usize = 10;
 
 const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
     LayerMatrixException {
@@ -4184,13 +4198,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         reason: "re-verified during WS1.2: this is NOT turn-DTO naming and loop_contracts does not dissolve it. InboundTurnService holds Arc<dyn TurnCoordinator> and calls submit_turn(SubmitTurnRequest), and trusted_trigger classifies TurnError/AdmissionRejectionReason - turn ADMISSION authority, not vocabulary. It clears when the inbound submit orchestration moves to the product tier (PROPOSAL 6.4.2 lists conversations deps as filesystem/host_api/safety/triggers with turn vocabulary via host_api)",
     },
     LayerMatrixException {
-        crate_name: "ironclaw_hooks",
-        dependency_name: "ironclaw_wasm_limiter",
-        introduced: "2026-07-09",
-        removes_in: "W6",
-        reason: "hooks still reuse the WASM limiter crate before the directory re-layout verifies runtime/substrate placement",
-    },
-    LayerMatrixException {
         crate_name: "ironclaw_mcp",
         dependency_name: "ironclaw_extensions",
         introduced: "2026-07-09",
@@ -4217,20 +4224,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         introduced: "2026-07-09",
         removes_in: "W7",
         reason: "script runtime support still depends on resource contracts currently classed with kernel behavior",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_runner",
-        dependency_name: "ironclaw_agent_loop",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "the runner intentionally bridges loop-userland contracts until kernel consolidation introduces a neutral dispatch boundary",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_runner",
-        dependency_name: "ironclaw_loop_host",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "the runner intentionally composes loop-host adapters until kernel consolidation introduces a neutral dispatch boundary",
     },
 ];
 

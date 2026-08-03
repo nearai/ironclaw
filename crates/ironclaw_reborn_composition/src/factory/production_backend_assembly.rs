@@ -1132,8 +1132,7 @@ pub(super) async fn build_backend_production(
             })
             .map(|descriptor| descriptor.id.clone())
             .collect();
-        reserved_capability_ids
-            .extend(ironclaw_runner::tool_disclosure_bridge::bridge_capability_ids());
+        reserved_capability_ids.extend(ironclaw_loop_host::bridge_capability_ids());
         let generic_installation_store = extension_management.installation_store_handle();
         let backend_extension_host =
             build_backend_extension_host(BackendExtensionHostAssemblyInput {

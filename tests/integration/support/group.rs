@@ -63,11 +63,13 @@ use ironclaw_loop_contracts::{
     CommunicationContextProvider, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
     ModelProfileId,
 };
+use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilitySurfaceProfileResolver, HostManagedModelGateway,
     HostUserProfileSource, JsonSpawnSubagentInputCodec, ModelCostTable, SubagentSpawnLimits,
     ZeroCostTable,
 };
+use ironclaw_loop_host::{LlmModelProfilePolicy, LlmProviderModelGateway};
 use ironclaw_product::ProductTriggerReason;
 use ironclaw_product::{
     ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
@@ -84,10 +86,9 @@ use ironclaw_resources::{
 };
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_runner::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
-use ironclaw_runner::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
 use ironclaw_runner::runtime::{
     DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, ProcessRuntimeSystem,
-    ToolDisclosureMode, build_default_planned_runtime,
+    build_default_planned_runtime,
 };
 use ironclaw_runner::subagent::{
     await_edge::{

@@ -1,36 +1,43 @@
 use std::sync::Arc;
 
+use crate::{
+    HostIdentityContextSource, HostManagedModelGateway, HostManagedModelStreamSink,
+    HostSkillContextSource, LoopAttachmentReadPort, ThreadBackedLoopModelPort,
+    ThreadContextWindowCache,
+};
 use async_trait::async_trait;
 use ironclaw_loop_contracts::{
     InstructionMaterializationStore, LoopCapabilityPort, LoopModelGateway, LoopModelGatewayError,
     LoopModelGatewayRequest, LoopModelPort, LoopModelProgressSink, LoopModelResponse,
     LoopPromptBundleAuthority,
 };
-use ironclaw_loop_host::{
-    HostIdentityContextSource, HostManagedModelGateway, HostManagedModelStreamSink,
-    HostSkillContextSource, LoopAttachmentReadPort, ThreadBackedLoopModelPort,
-    ThreadContextWindowCache,
-};
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
 use crate::model_gateway_error_mapping::host_error_to_model_gateway_error;
 
-pub(super) struct ThreadResolvingLoopModelGateway<S, G>
+/// Resolves a thread's transcript into a host-managed model request.
+///
+/// The fields are `pub` because the driver host that fills them lives in
+/// `ironclaw_runner`: this is a data carrier assembled at exactly one site
+/// (`loop_driver_host.rs`), and it was a `pub(super)`-fielded struct literal in
+/// that same crate before the WS3 shed moved the port implementation here. A
+/// constructor would be an eleven-argument function wrapping the same literal.
+pub struct ThreadResolvingLoopModelGateway<S, G>
 where
     S: SessionThreadService + ?Sized,
     G: HostManagedModelGateway + ?Sized,
 {
-    pub(super) thread_service: Arc<S>,
-    pub(super) thread_scope: ThreadScope,
-    pub(super) host_gateway: Arc<G>,
-    pub(super) max_messages: usize,
-    pub(super) skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
-    pub(super) identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
-    pub(super) instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
-    pub(super) capabilities: Option<Arc<dyn LoopCapabilityPort>>,
-    pub(super) prompt_authority: LoopPromptBundleAuthority,
-    pub(super) context_window_cache: Option<Arc<ThreadContextWindowCache>>,
-    pub(super) attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
+    pub thread_service: Arc<S>,
+    pub thread_scope: ThreadScope,
+    pub host_gateway: Arc<G>,
+    pub max_messages: usize,
+    pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    pub identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
+    pub instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
+    pub capabilities: Option<Arc<dyn LoopCapabilityPort>>,
+    pub prompt_authority: LoopPromptBundleAuthority,
+    pub context_window_cache: Option<Arc<ThreadContextWindowCache>>,
+    pub attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
 }
 
 #[async_trait]

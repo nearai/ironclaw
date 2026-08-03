@@ -26,7 +26,9 @@ mod capability_info;
 mod capability_port;
 mod capability_surface_filter;
 mod compaction_task;
+mod context_shadow;
 mod context_window_cache;
+mod driver_host_port_adapters;
 mod external_tool_capability;
 mod filesystem_skill_bundle_source;
 pub mod identity_context;
@@ -34,6 +36,9 @@ mod input_port;
 mod input_queue;
 mod memory_context;
 mod model_capability_view;
+mod model_gateway;
+mod model_gateway_error_mapping;
+mod model_routes;
 mod model_visible_scrub;
 mod prompt_context_budget;
 mod result_read;
@@ -45,8 +50,12 @@ mod subagent_spawn_port;
 mod surface_disclosure;
 mod synthetic_capability;
 mod system_inference;
+mod thread_resolving_model_gateway;
 mod thread_scope;
 mod token_estimator;
+mod tool_disclosure;
+mod tool_disclosure_mode;
+mod tool_disclosure_port;
 pub mod user_profile_context;
 
 pub use await_edge_port::{
@@ -82,6 +91,10 @@ pub use compaction_task::{
     default_host_managed_loop_compaction_port, host_managed_loop_compaction_port_with_prompt_id,
 };
 pub use context_window_cache::ThreadContextWindowCache;
+pub use driver_host_port_adapters::{
+    HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, NoExtraLoopInputPort,
+    turn_error_to_host_error,
+};
 pub use external_tool_capability::wrap_external_tools;
 pub use filesystem_skill_bundle_source::{FilesystemSkillBundleRoot, FilesystemSkillBundleSource};
 pub use identity_context::{
@@ -94,6 +107,16 @@ pub use identity_context::{
 pub use input_port::HostQueueLoopInputPort;
 pub use input_queue::{HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError};
 pub use ironclaw_loop_contracts::PromptContextTokenBudget;
+pub use model_gateway::{
+    LlmModelProfilePolicy, LlmProviderModelGateway, ModelRouteProviderPool,
+    REBORN_COLLAPSE_REPEATED_FAILURES_ENV, RoutedLlmProviderModelGateway,
+    StaticModelRouteProviderPool, ThreadBackedLoopModelGateway,
+};
+pub use model_routes::{
+    ActiveModelRouteSettings, ModelRoute, ModelRouteError, ModelRouteErrorKind, ModelRoutePolicy,
+    ModelRouteProviderKey, ModelRouteResolver, ModelRouteSource, ModelSelectionMode, ModelSlot,
+    ResolvedModelRouteSnapshot, StaticModelRouteResolver,
+};
 pub use model_visible_scrub::scrub_model_visible_detail;
 pub use result_read::{RESULT_READ_CAPABILITY_ID, result_read_capability};
 #[cfg(feature = "test-support")]
@@ -128,7 +151,11 @@ pub use synthetic_capability::{
     SyntheticCapabilityInvocation, wrap_synthetic_capabilities,
 };
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
+pub use thread_resolving_model_gateway::ThreadResolvingLoopModelGateway;
 pub use thread_scope::ThreadScopeResolver;
+pub use tool_disclosure::bridge_capability_ids;
+pub use tool_disclosure_mode::{REBORN_TOOL_DISCLOSURE_ENV, ToolDisclosureMode};
+pub use tool_disclosure_port::ToolDisclosureCapabilityDecorator;
 pub use user_profile_context::{EmptyUserProfileSource, HostUserProfileSource};
 pub const COMPACTION_SYSTEM_PROMPT: &str =
     include_str!("../prompts/compaction_summarizer_fresh.md");

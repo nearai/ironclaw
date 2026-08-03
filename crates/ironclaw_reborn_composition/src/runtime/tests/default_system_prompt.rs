@@ -222,7 +222,7 @@ fn runtime_input(
     .with_model_gateway_override(gateway)
     // Pin bridged explicitly so the disclosure-protocol assertions do not depend
     // on the production default.
-    .with_tool_disclosure(ironclaw_runner::runtime::ToolDisclosureMode::Bridged)
+    .with_tool_disclosure(ironclaw_loop_host::ToolDisclosureMode::Bridged)
 }
 
 fn recorded_requests(

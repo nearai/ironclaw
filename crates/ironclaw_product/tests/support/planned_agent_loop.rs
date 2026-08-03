@@ -37,6 +37,9 @@ use ironclaw_loop_host::{
     LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
     RunCancellationFactory, RunCancellationHandle,
 };
+use ironclaw_loop_host::{
+    ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
+};
 use ironclaw_product::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, ParsedProductInbound, ProductAdapterId, ProductInboundEnvelope,
@@ -55,9 +58,6 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_runner::{
     loop_exit_applier::ThreadCheckpointLoopExitEvidencePort,
-    model_routes::{
-        ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
-    },
     runtime::{
         DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, ProcessRuntimeSystem,
         RebornRuntimeLoopComposition, build_product_live_planned_runtime,

@@ -68,15 +68,44 @@ captured_from = "dd9b9d961dc302fc50ac4b08b137997c092eefb7"
 
 [[crate]]
 name = "ironclaw_runner"
-# LLVM 21 reports 14658 / 17133 = 85.55%; calibrate the absolute floor to
-# the same observed artifact rather than mixing source mappings.
+# WS3 runner sheds moved the model-gateway cluster (model_gateway,
+# model_routes, the driver-host port adapters) and the whole progressive
+# tool-disclosure cluster to `ironclaw_loop_host` — ~10.5k source lines out of
+# a 33.2k crate, plus the two integration test targets that covered them
+# (`llm_gateway`, `model_routes`). The `floor_covered_lines = 14658` numerator
+# captured at 17,133 instrumented lines therefore no longer describes this
+# crate: it is structurally unreachable, not a regression. Applying the same
+# resolution WS1.2 used for the `ironclaw_turns` split below, this entry drops
+# to a percentage floor for one release. `floor_percent` is retained unchanged
+# rather than weakened — the moved half is adapter code with roughly the
+# crate's own coverage profile, so the ratio is the invariant that survives a
+# split and the absolute numerator is the one that cannot.
+#
+# OWED IN THE SAME LANE, from this PR's own merged coverage artifact (the
+# same-PR floor-raise workflow at the top of this file, applied to a split
+# rather than to growth): recapture `floor_covered_lines` +
+# `captured_total_lines` here, and give the `ironclaw_loop_host` entry added
+# just below its own captured numbers so the moved lines regain the ratchet
+# they had under this entry. Both must come from the artifact, never an
+# estimate.
 floor_percent = 85.55
-floor_covered_lines = 14658
 tolerance_percent = 0.5
-tolerance_lines = 20
-captured_total_lines = 17133
-captured_date = "2026-07-30"
-rationale = "Protects generated lifecycle, restart, and double-submit runner orchestration while reconciling LLVM 21 source mapping."
+captured_date = "2026-08-03"
+rationale = "Protects generated lifecycle, restart, and double-submit runner orchestration. Covered-line numerator pending recapture after the WS3 model-gateway/tool-disclosure sheds."
+issue = "https://github.com/nearai/ironclaw/issues/6524"
+
+[[crate]]
+name = "ironclaw_loop_host"
+# Added by the WS3 runner sheds so the ~10.5k lines that left
+# `ironclaw_runner` (above) keep a ratchet instead of falling out of per-crate
+# enforcement entirely — the gap the WS1.2 `ironclaw_turns` split left open for
+# `ironclaw_loop_contracts`, not repeated here. The percentage floor is
+# inherited from the crate the code came from; the covered-line numerator is
+# owed from this PR's own merged artifact in the same lane, never estimated.
+floor_percent = 85.55
+tolerance_percent = 0.5
+captured_date = "2026-08-03"
+rationale = "Protects the model-gateway adapter, model-route policy, driver-host port adapters, and the progressive tool-disclosure decorator this crate absorbed in WS3."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]

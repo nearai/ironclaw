@@ -1175,21 +1175,21 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "slack",
     ),
     ("crates/ironclaw_runner/src/loop_driver_host.rs", "slack"),
-    ("crates/ironclaw_runner/src/tool_disclosure.rs", "google"),
+    ("crates/ironclaw_loop_host/src/tool_disclosure.rs", "google"),
     (
-        "crates/ironclaw_runner/src/tool_disclosure.rs",
+        "crates/ironclaw_loop_host/src/tool_disclosure.rs",
         "google-calendar",
     ),
     (
-        "crates/ironclaw_runner/src/tool_disclosure.rs",
+        "crates/ironclaw_loop_host/src/tool_disclosure.rs",
         "web-access",
     ),
     (
-        "crates/ironclaw_runner/src/tool_disclosure_port.rs",
+        "crates/ironclaw_loop_host/src/tool_disclosure_port.rs",
         "google",
     ),
     (
-        "crates/ironclaw_runner/src/tool_disclosure_port.rs",
+        "crates/ironclaw_loop_host/src/tool_disclosure_port.rs",
         "google-calendar",
     ),
     (

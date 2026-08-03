@@ -44,6 +44,8 @@ use ironclaw_llm::{
 };
 use ironclaw_loop_contracts::ModelProfileId;
 use ironclaw_loop_host::HostManagedModelGateway;
+use ironclaw_loop_host::ToolDisclosureMode;
+use ironclaw_loop_host::{LlmModelProfilePolicy, LlmProviderModelGateway};
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
     PolicyNetworkHttpEgress, ReqwestNetworkTransport,
@@ -55,8 +57,6 @@ use ironclaw_reborn_composition::{
     build_reborn_runtime, build_runtime, local_runtime_build_input_with_options,
 };
 use ironclaw_reborn_config::{RebornConfigFile, RebornHome};
-use ironclaw_runner::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
-use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_triggers::TriggerPollerWorkerConfig;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnStatus};
 use secrecy::{ExposeSecret, SecretString};

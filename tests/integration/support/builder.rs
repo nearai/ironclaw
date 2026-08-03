@@ -43,6 +43,7 @@ use ironclaw_llm::Role;
 use ironclaw_loop_contracts::{
     CommunicationContextProvider, InstructionSafetyContext, LoopHostMilestone,
 };
+use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product::{
     ConversationBindingService, DefaultProductSurface, ProductConversationRouteKind,
@@ -50,7 +51,6 @@ use ironclaw_product::{
 };
 use ironclaw_product::{ProductInboundAck, ProductTriggerReason};
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
-use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{
     AgentTurnRuntimePort, CancelRunRequest, CancelRunResponse, GateResumeDisposition,
@@ -2435,7 +2435,7 @@ pub(crate) fn apply_hermetic_env() {
             // No integration test should inherit the ambient tool-disclosure
             // knob. Builders pin Off and disclosure tests opt into Bridged;
             // scrubbing is defense in depth for the retained env fallback.
-            std::env::remove_var(ironclaw_runner::runtime::REBORN_TOOL_DISCLOSURE_ENV);
+            std::env::remove_var(ironclaw_loop_host::REBORN_TOOL_DISCLOSURE_ENV);
         }
     });
 }

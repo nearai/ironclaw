@@ -31,11 +31,12 @@ use ironclaw_host_api::{
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_loop_host::HostManagedModelGateway;
 use ironclaw_loop_host::HostSkillContextSource;
+use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_reborn_config::RebornBootConfig;
 use ironclaw_runner::runtime::{
     DEFAULT_MAX_CONCURRENT_RUNS_PER_USER, DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS,
-    DEFAULT_TURN_RUNNER_WORKER_COUNT, ToolDisclosureMode,
+    DEFAULT_TURN_RUNNER_WORKER_COUNT,
 };
 use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig};
 
