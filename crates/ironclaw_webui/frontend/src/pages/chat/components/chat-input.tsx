@@ -571,8 +571,11 @@ export function ChatInput({
   const isSubmitDisabled = disabled || sendDisabled;
   // While a run is active the composer shows a cancel button, but as soon as
   // the user types a new message we swap it for send so the follow-up can be
-  // queued behind the running turn instead of forcing a cancel first.
-  const showCancelOnly = canCancel && !hasPayload;
+  // queued behind the running turn instead of forcing a cancel first. Only
+  // swap when send is actually usable: with a draft and a disabled send
+  // (cooldown) the user would otherwise have to erase the draft to reach
+  // cancel.
+  const showCancelOnly = canCancel && (!hasPayload || isSubmitDisabled);
   const placeholder = isHero
     ? t("chat.heroPlaceholder")
     : t("chat.followUpPlaceholder");
