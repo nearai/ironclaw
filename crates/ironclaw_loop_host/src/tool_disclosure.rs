@@ -43,9 +43,10 @@ pub(crate) const CORE_TOOL_NAMES: &[&str] = &[
     "http",
     "web_search",
     // onboarding entry points — the full extension lifecycle is core so a weak
-    // model can run search -> install -> remove directly, without
+    // model can run search -> register custom MCP -> install -> remove directly, without
     // routing the install/remove steps through tool_search.
     "extension_search",
+    "extension_register_hosted_mcp",
     "extension_install",
     "extension_remove",
     // routine / scheduled-trigger lifecycle — core so the model can list and
@@ -1012,6 +1013,10 @@ mod tests {
             ("shell", ironclaw_host_runtime::SHELL_CAPABILITY_ID),
             ("http", ironclaw_host_runtime::HTTP_CAPABILITY_ID),
             ("extension_search", "builtin.extension_search"),
+            (
+                "extension_register_hosted_mcp",
+                "builtin.extension_register_hosted_mcp",
+            ),
             ("extension_install", "builtin.extension_install"),
             ("extension_remove", "builtin.extension_remove"),
             ("trigger_list", "builtin.trigger_list"),

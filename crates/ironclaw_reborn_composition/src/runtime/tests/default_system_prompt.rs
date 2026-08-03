@@ -85,6 +85,9 @@ async fn standalone_runtime_injects_default_system_prompt_into_model_request() {
                 && message
                     .content
                     .contains("When `extension_search` and `extension_install` are present")
+                && message
+                    .content
+                    .contains("`extension_register_hosted_mcp` is also visible")
         }),
         "bridged disclosure should inject a visibility-conditional discovery protocol"
     );

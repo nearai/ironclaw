@@ -129,7 +129,9 @@ pub enum LifecycleProductAction {
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleCommandKind {
     /// Kept only so `LifecycleProductAction::command_kind()` stays total; deliberately absent from `ALL`.
-    /// Not reachable as a chat command — registration is WebUI-only via `EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY`.
+    /// Not reachable as a slash command. Product/API callers use
+    /// `EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY`; the model-facing lifecycle
+    /// tool adapts explicit non-auto auth input into the same host registration pipeline.
     ExtensionRegisterHostedMcp,
     ExtensionSearch,
     ExtensionList,
