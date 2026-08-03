@@ -553,11 +553,7 @@ impl OutboundStateStorePort for RecoveryTestStore {
                     .forget();
             }
         } else {
-            assert_eq!(
-                self.list_calls.fetch_add(1, Ordering::SeqCst),
-                0,
-                "preflight settlement must consume Existing(attempt) without a post-settlement reread"
-            );
+            self.list_calls.fetch_add(1, Ordering::SeqCst);
         }
         Ok(attempts)
     }
@@ -1442,6 +1438,11 @@ async fn target_resolution_preflight_loser_preserves_authoritative_sending_as_no
         }
     ));
     assert_eq!(adapter.deliver_calls(), 0);
+    assert_eq!(
+        decorated.list_calls.load(Ordering::SeqCst),
+        1,
+        "preflight settlement must consume Existing(attempt) without a post-settlement reread"
+    );
 }
 
 #[tokio::test]
@@ -1495,6 +1496,11 @@ async fn workspace_preflight_loser_preserves_authoritative_failed_as_non_success
         }
     ));
     assert_eq!(adapter.deliver_calls(), 0);
+    assert_eq!(
+        decorated.list_calls.load(Ordering::SeqCst),
+        1,
+        "preflight settlement must consume Existing(attempt) without a post-settlement reread"
+    );
 }
 
 #[tokio::test]
@@ -1539,6 +1545,11 @@ async fn missing_channel_preflight_loser_preserves_authoritative_unknown_as_non_
         }
     ));
     assert_eq!(adapter.deliver_calls(), 0);
+    assert_eq!(
+        decorated.list_calls.load(Ordering::SeqCst),
+        1,
+        "preflight settlement must consume Existing(attempt) without a post-settlement reread"
+    );
 }
 
 fn assert_combined_settlement_error(
@@ -1648,6 +1659,11 @@ async fn target_resolution_keeps_original_error_when_permanent_settlement_fails(
             ));
         });
         assert_eq!(adapter.deliver_calls(), 0);
+        assert_eq!(
+            decorated.list_calls.load(Ordering::SeqCst),
+            1,
+            "preflight settlement must not perform a post-settlement reread"
+        );
         assert_ambiguous_settlement_state(store.as_ref(), scope, timing).await;
     }
 }
@@ -1702,6 +1718,11 @@ async fn workspace_materialization_keeps_original_error_when_permanent_settlemen
             ));
         });
         assert_eq!(adapter.deliver_calls(), 0);
+        assert_eq!(
+            decorated.list_calls.load(Ordering::SeqCst),
+            1,
+            "preflight settlement must not perform a post-settlement reread"
+        );
         assert_ambiguous_settlement_state(store.as_ref(), scope, timing).await;
     }
 }
@@ -1748,6 +1769,11 @@ async fn missing_channel_keeps_original_error_when_permanent_settlement_fails() 
             ));
         });
         assert_eq!(adapter.deliver_calls(), 0);
+        assert_eq!(
+            decorated.list_calls.load(Ordering::SeqCst),
+            1,
+            "preflight settlement must not perform a post-settlement reread"
+        );
         assert_ambiguous_settlement_state(store.as_ref(), scope, timing).await;
     }
 }
