@@ -36,12 +36,18 @@ repo_root="${IRONCLAW_REPO_ROOT:-$(cd "${script_dir}/../.." && pwd)}"
 min_crate_directories=20
 
 # Newline-delimited inventory of directories under `crates/` that own a
-# Cargo.toml, at any depth. Nested manifests (ironclaw_safety/fuzz, the
-# assets/*/wasm-src guests) are kept in the list but never win a lookup:
-# resolution walks path segments outward-in and stops at the first hit, so the
-# *outermost* crate always owns the path — exactly what `crates/<crate>/*`
-# globs did before.
+# Cargo.toml, at any depth. Nested manifests (ironclaw_safety/fuzz) are kept in
+# the list but never win a lookup: resolution walks path segments outward-in
+# and stops at the first hit, so the *outermost* crate always owns the path —
+# exactly what `crates/<crate>/*` globs did before.
+#
+# Manifests that declare their own `[workspace]` table are skipped entirely:
+# they root a *separate* workspace (the `wasm-src/` guest components,
+# `ironclaw_silk_decoder`), so this workspace never builds them and no test run
+# can cover them. `scripts/ci/lib/crate_tree.py` applies the same rule and
+# `test-classify-test-scope.sh` pins the two inventories equal.
 crate_dirs=""
+workspace_root_dirs=""
 discover_crate_dirs() {
   local crates_root="${repo_root}/crates"
   if [ ! -d "${crates_root}" ]; then
@@ -53,6 +59,13 @@ discover_crate_dirs() {
   local manifest dir count
   while IFS= read -r manifest; do
     dir="${manifest%/Cargo.toml}"
+    # `grep -q '^\[workspace\]$'` — line-anchored so `[workspace.dependencies]`
+    # in a member manifest is not mistaken for a workspace root.
+    if grep -qx '\[workspace\]' "${manifest}" 2>/dev/null; then
+      workspace_root_dirs="${workspace_root_dirs}${dir#"${repo_root}/"}
+"
+      continue
+    fi
     crate_dirs="${crate_dirs}${dir#"${repo_root}/"}
 "
   done < <(
@@ -97,6 +110,40 @@ owning_crate_dir() {
   return 1
 }
 
+# True when "$1" is package data under `extensions/packages/`. Anchored on the
+# support crate rather than a literal path, so a family move keeps it working:
+# `packages/` is that crate's sibling.
+package_asset_dir() {
+  local path="$1" support_dir
+  while IFS= read -r support_dir; do
+    [ -n "${support_dir}" ] || continue
+    case "${support_dir}" in
+      */ironclaw_extension_support)
+        case "${path}" in
+          "${support_dir%/*}"/packages/*) return 0 ;;
+        esac
+        ;;
+    esac
+  done <<EOF
+${crate_dirs}
+EOF
+  return 1
+}
+
+# True when "$1" lies inside a directory that roots a separate cargo workspace.
+nested_workspace_dir() {
+  local path="$1" root
+  while IFS= read -r root; do
+    [ -n "${root}" ] || continue
+    case "${path}" in
+      "${root}"/*) return 0 ;;
+    esac
+  done <<EOF
+${workspace_root_dirs}
+EOF
+  return 1
+}
+
 # Sets NORMALIZED_PATH: `crates/<...>/<crate>/<rest>` becomes `crates/<crate>/<rest>`,
 # everything else passes through. On today's flat tree every crate directory
 # already is `crates/<crate>`, so this is a no-op for every path in the
@@ -121,7 +168,32 @@ normalize_crate_path() {
   esac
 
   if owning_crate_dir "${path}"; then
+    # The crate DIRECTORY basename is the key, not the cargo package name.
+    # Usually they are identical; two documented exceptions make the package
+    # name the wrong choice here (PROPOSAL §5.1's directory rule):
+    # `crates/ironclaw_reborn_cli` declares `name = "ironclaw"`, and package
+    # directories under `extensions/packages/` are named by extension identity
+    # (`packages/slack/` holds `ironclaw_slack_extension`). The arms below are
+    # therefore keyed on directory names, and every package directory needs its
+    # own arm — a missing one is the silent mis-bucketing this classifier
+    # exists to prevent, so `test-classify-test-scope.sh` probes each of them.
     NORMALIZED_PATH="crates/${OWNING_CRATE_DIR##*/}/${path#"${OWNING_CRATE_DIR}/"}"
+    return 0
+  fi
+
+  # Two shapes under `crates/` own no crate BY DESIGN, and refusing on them
+  # would be wrong — they are attributable, just not to a crate:
+  #
+  #   * a separate cargo workspace (the `wasm-src/` guest components,
+  #     `ironclaw_silk_decoder`);
+  #   * a data-only package directory under `extensions/packages/`, which is
+  #     manifest + prompts + schemas + committed wasm and deliberately carries
+  #     no `Cargo.toml` (PROPOSAL §5). Its data is embedded by
+  #     `ironclaw_extension_support`, which is where it used to live, so it
+  #     lights the same lane that crate does.
+  #
+  # Pass both through unchanged and let the arms below decide.
+  if nested_workspace_dir "${path}" || package_asset_dir "${path}"; then
     return 0
   fi
 
@@ -200,7 +272,8 @@ is_shared_test_path() {
     crates/ironclaw_auth/*|crates/ironclaw_trust/*|crates/ironclaw_turns/*|crates/ironclaw_agent_loop/*|crates/ironclaw_threads/*)
       return 0
       ;;
-    crates/ironclaw_prompt_envelope/*|crates/ironclaw_hooks/*|crates/ironclaw_first_party_extensions/*|crates/ironclaw_llm/*)
+    crates/ironclaw_prompt_envelope/*|crates/ironclaw_hooks/*|crates/ironclaw_extension_support/*|crates/ironclaw_llm/*|\
+    crates/extensions/packages/*)
       return 0
       ;;
     crates/ironclaw_safety/*|crates/ironclaw_skills/*|crates/ironclaw_oauth/*)
@@ -224,7 +297,8 @@ is_reborn_test_path() {
     crates/ironclaw_runner/*|crates/ironclaw_reborn_*/*)
       return 0
       ;;
-    crates/ironclaw_product_*/*|crates/ironclaw_slack_extension/*|crates/ironclaw_telegram_extension/*|crates/ironclaw_telegram_v2_adapter/*)
+    crates/ironclaw_product_*/*|\
+    crates/slack/*|crates/telegram/*|crates/memory-native/*|crates/mem0/*)
       return 0
       ;;
     crates/ironclaw_webui/*)

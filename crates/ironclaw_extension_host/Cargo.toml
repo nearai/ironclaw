@@ -17,7 +17,7 @@ layer = "products"
 # Lightweight in-crate test fakes (fixtures, scripted adapters) reused by
 # downstream integration tests. Zero-byte in production.
 test-support = [
-    "dep:ironclaw_first_party_extensions",
+    "dep:ironclaw_extension_support",
     "ironclaw_auth/test-support",
     "ironclaw_filesystem/test-support",
     "ironclaw_processes/test-support",
@@ -48,7 +48,7 @@ ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version =
 ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_host_ingress = { path = "../ironclaw_host_ingress" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
-ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions", optional = true }
+ironclaw_extension_support = { path = "../extensions/ironclaw_extension_support", optional = true }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_llm = { path = "../ironclaw_llm", default-features = false }
 ironclaw_loop_host = { path = "../ironclaw_loop_host" }
@@ -95,14 +95,14 @@ proptest = "1"
 ironclaw_auth = { path = "../ironclaw_auth", features = ["test-support"] }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }
-ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
+ironclaw_extension_support = { path = "../extensions/ironclaw_extension_support" }
 ironclaw_host_api = { path = "../ironclaw_host_api", features = ["test-support"] }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime", features = ["test-support"] }
 ironclaw_outbound = { path = "../ironclaw_outbound", features = ["test-support"] }
 ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
 ironclaw_product = { path = "../ironclaw_product", features = ["test-support"] }
 ironclaw_resources = { path = "../ironclaw_resources", features = ["test-support"] }
-ironclaw_slack_extension = { path = "../ironclaw_slack_extension" }
+ironclaw_slack_extension = { path = "../extensions/packages/slack" }
 http-body-util = "0.1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }

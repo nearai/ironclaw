@@ -320,10 +320,8 @@ async fn verified_tool_and_skill_install_through_real_managers() {
     let tool_url = "https://hub.ironclaw.com/tests/native-install/tool.wasm";
     let capabilities_url = "https://hub.ironclaw.com/tests/native-install/capabilities.json";
     let skill_url = "https://hub.ironclaw.com/tests/native-install/SKILL.md";
-    let tool_bytes = include_bytes!(
-        "../../../ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm"
-    )
-    .to_vec();
+    let tool_bytes =
+        include_bytes!("../../../extensions/packages/github/wasm/github_tool.wasm").to_vec();
     let capabilities_bytes = br#"{"capabilities":[]}"#.to_vec();
     let skill_bytes =
         b"---\nname: installed-skill\ndescription: Installed by IronHub\n---\n# Installed\n"
@@ -733,10 +731,8 @@ async fn fail_forced_tool_replacement(
     let services =
         crate::lifecycle_test_support::build_lifecycle_test_services(&owner, None, false).await;
     let scope = crate::lifecycle_test_support::webui_gate_resource_scope_for_owner(&owner);
-    let tool_bytes = include_bytes!(
-        "../../../ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm"
-    )
-    .to_vec();
+    let tool_bytes =
+        include_bytes!("../../../extensions/packages/github/wasm/github_tool.wasm").to_vec();
     let capabilities_bytes = br#"{"capabilities":[]}"#.to_vec();
     let old_manifest_url = format!("https://hub.ironclaw.com/tests/{fixture}/old-manifest.json");
     let old_tool_url = format!("https://hub.ironclaw.com/tests/{fixture}/old-tool.wasm");

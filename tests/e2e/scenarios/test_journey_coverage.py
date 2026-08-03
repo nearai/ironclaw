@@ -1444,7 +1444,7 @@ def test_provider_write_derivation_still_finds_the_tools_it_replaced():
     assert not missing, (
         f"the derivation stopped recognising known provider writes: {missing}. "
         "It reads the `external_write` effect from "
-        "crates/ironclaw_first_party_extensions/assets/*/manifest.toml -- check "
+        "crates/extensions/packages/*/manifest.toml -- check "
         "whether that key or the tool ids were renamed. Until this is fixed no "
         "journey resets its provider world."
     )

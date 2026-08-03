@@ -1562,8 +1562,7 @@ async fn webui_v2_gmail_oauth_setup_complete_allows_activation() {
         .credential_account_service()
         .create_account(NewCredentialAccount {
             scope: webui_extension_setup_scope("gmail"),
-            provider: ironclaw_first_party_extensions::google_provider_id()
-                .expect("google provider id"),
+            provider: ironclaw_extension_support::google_provider_id().expect("google provider id"),
             label: CredentialAccountLabel::new("work google").expect("label"),
             status: CredentialAccountStatus::Configured,
             ownership: CredentialOwnership::UserReusable,

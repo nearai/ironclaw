@@ -28,7 +28,7 @@ use ironclaw_auth::{
     CredentialAccountSelectionRequest, CredentialAccountStatus, CredentialOwnership,
     GOOGLE_GMAIL_READONLY_SCOPE, NewCredentialAccount, ProviderScope,
 };
-use ironclaw_first_party_extensions::GoogleCredentialResolver;
+use ironclaw_extension_support::GoogleCredentialResolver;
 use ironclaw_host_api::{
     ids::{AgentId, ExtensionId, InvocationId, SecretHandle, TenantId, UserId},
     resource::ResourceScope,

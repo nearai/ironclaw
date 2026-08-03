@@ -708,16 +708,14 @@ fn register_bundled_first_party_handlers_for_lifecycle_tests(
 ) -> Result<(), ironclaw_host_api::error::HostApiError> {
     let handler = Arc::new(NoopFirstPartyHandler);
     registry.insert_handler(
-        CapabilityId::new(ironclaw_first_party_extensions::FIRST_PARTY_WEB_SEARCH_CAPABILITY_ID)?,
+        CapabilityId::new(ironclaw_extension_support::FIRST_PARTY_WEB_SEARCH_CAPABILITY_ID)?,
         handler.clone(),
     );
     registry.insert_handler(
-        CapabilityId::new(
-            ironclaw_first_party_extensions::FIRST_PARTY_WEB_GET_CONTENT_CAPABILITY_ID,
-        )?,
+        CapabilityId::new(ironclaw_extension_support::FIRST_PARTY_WEB_GET_CONTENT_CAPABILITY_ID)?,
         handler.clone(),
     );
-    for package in ironclaw_first_party_extensions::gsuite_package_specs() {
+    for package in ironclaw_extension_support::gsuite_package_specs() {
         for capability in package.capabilities {
             registry.insert_handler(CapabilityId::new(capability.id)?, handler.clone());
         }

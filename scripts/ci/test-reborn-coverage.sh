@@ -322,13 +322,13 @@ assert_contains "M6: merge names the missing crate tree" "${CAP_ERR}" \
 # separate records. This is the shape consumed by the crate-bucket workflow;
 # raw concatenation would corrupt the boundary as `end_of_recordSF:...`.
 printf '%s' \
-  'SF:/work/ironclaw/crates/ironclaw_slack_extension/src/attachment_transfer.rs
+  'SF:/work/ironclaw/crates/extensions/packages/slack/src/attachment_transfer.rs
 DA:100,7
 LF:1
 LH:1
 end_of_record' > "${fixtures_dir}/m4_slack.lcov"
 printf '%s' \
-  'SF:/work/ironclaw/crates/ironclaw_telegram_extension/src/attachment_transfer.rs
+  'SF:/work/ironclaw/crates/extensions/packages/telegram/src/attachment_transfer.rs
 DA:100,5
 LF:1
 LH:1
@@ -339,9 +339,9 @@ capture "${merge_sh}" "${tmp_root}/m4_merged.lcov" \
 assert_exit_code "M4: merge accepts reports without trailing newlines" 0 "${CAP_RC}"
 m4_merged_body="$(cat "${tmp_root}/m4_merged.lcov")"
 assert_contains "M4: merge keeps the first package report" \
-  "${m4_merged_body}" "ironclaw_slack_extension/src/attachment_transfer.rs"
+  "${m4_merged_body}" "extensions/packages/slack/src/attachment_transfer.rs"
 assert_contains "M4: merge keeps the next package report" \
-  "${m4_merged_body}" "ironclaw_telegram_extension/src/attachment_transfer.rs"
+  "${m4_merged_body}" "extensions/packages/telegram/src/attachment_transfer.rs"
 
 # ---------------------------------------------------------------------------
 # A. reborn-coverage-summary.sh (default report mode)
