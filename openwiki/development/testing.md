@@ -1,3 +1,9 @@
+---
+type: "Reference"
+title: "Testing Guide"
+openwiki_generated: true
+---
+
 # Testing Guide
 
 This guide covers IronClaw's testing strategy, test tiers, patterns, and how to write tests for different parts of the system.

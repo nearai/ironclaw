@@ -1,3 +1,9 @@
+---
+type: "Reference"
+title: "Development Workflows"
+openwiki_generated: true
+---
+
 # Development Workflows
 
 This page covers common development tasks: fixing bugs, adding features, code review, and deployment.

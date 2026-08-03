@@ -1,3 +1,9 @@
+---
+type: "Reference"
+title: "Crate Reference"
+openwiki_generated: true
+---
+
 # Crate Reference
 
 This page documents all 68+ crates in the IronClaw repository, organized by functional group. Use this as a reference when exploring code or deciding where to add new features.
