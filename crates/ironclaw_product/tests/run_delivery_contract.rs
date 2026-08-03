@@ -77,6 +77,9 @@ use ironclaw_turns::{
 
 // ── Scripted fakes ─────────────────────────────────────────────────────────
 
+const DELIVERY_ERROR_FEEDBACK_TEXT: &str =
+    "Something went wrong delivering the result here. Check the WebUI.";
+
 #[derive(Clone)]
 struct ScriptedRunState {
     status: TurnStatus,
@@ -356,8 +359,9 @@ struct ClaimLossStore {
     inner: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     observed_status: OutboundDeliveryStatus,
     failure_kind: Option<DeliveryFailureKind>,
-    claim_calls: Arc<AtomicUsize>,
-    claim_loss_on: usize,
+    run_notification_claim_calls: Arc<AtomicUsize>,
+    claim_loss_projection_prefix: &'static str,
+    targeted_claim_calls: AtomicUsize,
     authoritative_attempts: Mutex<HashMap<OutboundDeliveryId, OutboundDeliveryAttempt>>,
     list_calls: AtomicUsize,
 }
@@ -503,8 +507,26 @@ impl OutboundStateStorePort for ClaimLossStore {
         &self,
         request: ClaimDeliveryAttemptForSendRequest,
     ) -> Result<ClaimDeliveryAttemptForSendOutcome, OutboundError> {
-        let claim_call = self.claim_calls.fetch_add(1, Ordering::SeqCst) + 1;
-        if claim_call != self.claim_loss_on {
+        let projection_ref = self
+            .authoritative_attempts
+            .lock()
+            .expect("authoritative attempts")
+            .get(&request.delivery_id)
+            .expect("claim-loss attempt was recorded first")
+            .candidate
+            .projection_ref
+            .as_str()
+            .to_string();
+        // Failure feedback is a separate system-notice delivery. Count and intercept only the
+        // policy/run-notification family selected by the fixture, so feedback still exercises
+        // the real Prepared -> Sending -> Delivered path.
+        if projection_ref.starts_with("run-notification:") {
+            self.run_notification_claim_calls
+                .fetch_add(1, Ordering::SeqCst);
+        }
+        if !projection_ref.starts_with(self.claim_loss_projection_prefix)
+            || self.targeted_claim_calls.fetch_add(1, Ordering::SeqCst) != 0
+        {
             return self.inner.claim_delivery_attempt_for_send(request).await;
         }
         let authoritative = {
@@ -992,7 +1014,7 @@ fn build_claim_loss_observer_harness(
     states: Vec<ScriptedRunState>,
     observed_status: OutboundDeliveryStatus,
     failure_kind: Option<DeliveryFailureKind>,
-    claim_loss_on: usize,
+    claim_loss_projection_prefix: &'static str,
     auth_url: Option<&str>,
 ) -> (Harness, Arc<AtomicUsize>) {
     let adapter = Arc::new(RecordingChannelAdapter::new());
@@ -1002,13 +1024,14 @@ fn build_claim_loss_observer_harness(
     let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     let threads = Arc::new(InMemorySessionThreadService::default());
     let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
-    let claim_calls = Arc::new(AtomicUsize::new(0));
+    let run_notification_claim_calls = Arc::new(AtomicUsize::new(0));
     let claim_loss_store = Arc::new(ClaimLossStore {
         inner: Arc::clone(&store),
         observed_status,
         failure_kind,
-        claim_calls: Arc::clone(&claim_calls),
-        claim_loss_on,
+        run_notification_claim_calls: Arc::clone(&run_notification_claim_calls),
+        claim_loss_projection_prefix,
+        targeted_claim_calls: AtomicUsize::new(0),
         authoritative_attempts: Mutex::new(HashMap::new()),
         list_calls: AtomicUsize::new(0),
     });
@@ -1066,7 +1089,7 @@ fn build_claim_loss_observer_harness(
         threads,
         project_files,
     };
-    (harness, claim_calls)
+    (harness, run_notification_claim_calls)
 }
 
 async fn seed_final_message(threads: &InMemorySessionThreadService, run_id: TurnRunId, text: &str) {
@@ -1749,7 +1772,7 @@ async fn observer_claim_loser_never_publishes_a_gate_route_without_confirmed_del
             vec![scripted_state(TurnStatus::BlockedApproval, Some(GATE_REF))],
             status,
             failure_kind,
-            1,
+            "run-notification:approval:",
             None,
         );
         let run_id = TurnRunId::new();
@@ -1765,9 +1788,23 @@ async fn observer_claim_loser_never_publishes_a_gate_route_without_confirmed_del
             )
             .await;
 
+        let texts = harness.adapter.texts();
+        assert_eq!(
+            texts.len(),
+            1,
+            "only delivery-error feedback may reach the adapter after an unconfirmed gate"
+        );
+        assert_eq!(
+            texts
+                .iter()
+                .filter(|text| text.as_str() == DELIVERY_ERROR_FEEDBACK_TEXT)
+                .count(),
+            1,
+            "a {status:?} approval claim loser posts exactly one delivery-error feedback"
+        );
         assert!(
-            harness.adapter.envelopes().is_empty(),
-            "a {status:?} claim loser must not call the adapter"
+            !texts.iter().any(|text| text.contains("Approval needed")),
+            "a {status:?} claim loser must not publish the unconfirmed approval prompt"
         );
         assert!(
             harness
@@ -1788,7 +1825,7 @@ async fn observer_only_a_durable_delivered_claim_loss_may_publish_the_gate_route
         vec![scripted_state(TurnStatus::BlockedApproval, Some(GATE_REF))],
         OutboundDeliveryStatus::Delivered,
         None,
-        1,
+        "run-notification:approval:",
         None,
     );
 
@@ -1814,11 +1851,11 @@ async fn observer_only_a_durable_delivered_claim_loss_may_publish_the_gate_route
 
 #[tokio::test]
 async fn observer_unconfirmed_terminal_claim_loss_does_not_poison_the_delivered_run_ledger() {
-    let (harness, claim_calls) = build_claim_loss_observer_harness(
+    let (harness, run_notification_claim_calls) = build_claim_loss_observer_harness(
         vec![scripted_state(TurnStatus::Completed, None)],
         OutboundDeliveryStatus::Unknown,
         None,
-        1,
+        "run-notification:final:",
         None,
     );
     let run_id = TurnRunId::new();
@@ -1835,17 +1872,34 @@ async fn observer_unconfirmed_terminal_claim_loss_does_not_poison_the_delivered_
     }
 
     assert_eq!(
-        claim_calls.load(Ordering::SeqCst),
+        run_notification_claim_calls.load(Ordering::SeqCst),
         2,
         "an Unknown claim loser must not record the run as delivered and suppress a later replay"
     );
-    assert!(harness.adapter.envelopes().is_empty());
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts.len(),
+        2,
+        "two failed final-reply attempts produce only their two feedback messages"
+    );
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| text.as_str() == DELIVERY_ERROR_FEEDBACK_TEXT)
+            .count(),
+        2,
+        "each unconfirmed final-reply attempt posts one delivery-error feedback"
+    );
+    assert!(
+        !texts.iter().any(|text| text == "truthful final reply"),
+        "neither unconfirmed attempt may publish the truthful final reply"
+    );
 }
 
 #[tokio::test]
 async fn observer_unconfirmed_terminal_claim_loss_does_not_clean_up_a_truthfully_delivered_prompt()
 {
-    let (harness, claim_calls) = build_claim_loss_observer_harness(
+    let (harness, run_notification_claim_calls) = build_claim_loss_observer_harness(
         vec![
             scripted_state(TurnStatus::Running, None),
             scripted_state(TurnStatus::BlockedAuth, Some("gate:auth-before-claim-loss")),
@@ -1853,7 +1907,7 @@ async fn observer_unconfirmed_terminal_claim_loss_does_not_clean_up_a_truthfully
         ],
         OutboundDeliveryStatus::Unknown,
         None,
-        2,
+        "run-notification:final:",
         Some("https://provider.example/oauth"),
     );
     let run_id = TurnRunId::new();
@@ -1867,11 +1921,38 @@ async fn observer_unconfirmed_terminal_claim_loss_does_not_clean_up_a_truthfully
         )
         .await;
 
-    assert_eq!(claim_calls.load(Ordering::SeqCst), 2);
     assert_eq!(
-        harness.adapter.envelopes().len(),
+        run_notification_claim_calls.load(Ordering::SeqCst),
+        2,
+        "the selected policy path claims the auth prompt and then the final reply"
+    );
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts.len(),
+        2,
+        "only the confirmed auth prompt and delivery-error feedback reach the adapter"
+    );
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| text.contains("Authentication required"))
+            .count(),
         1,
         "the delivered auth prompt remains actionable until a terminal notification is confirmed"
+    );
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| text.as_str() == DELIVERY_ERROR_FEEDBACK_TEXT)
+            .count(),
+        1,
+        "the unconfirmed final reply posts one delivery-error feedback"
+    );
+    assert!(
+        !texts
+            .iter()
+            .any(|text| text == "final reply is still unconfirmed"),
+        "the unconfirmed final reply must not reach the adapter"
     );
     assert!(
         harness.adapter.retracted_refs().is_empty(),
@@ -2670,13 +2751,14 @@ fn build_claim_loss_triggered_harness(
     let turns = Arc::new(ScriptedTurnCoordinator::with_states(vec![state]));
     let threads = Arc::new(InMemorySessionThreadService::default());
     let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
-    let claim_calls = Arc::new(AtomicUsize::new(0));
+    let run_notification_claim_calls = Arc::new(AtomicUsize::new(0));
     let claim_loss_store = Arc::new(ClaimLossStore {
         inner: Arc::clone(&store),
         observed_status,
         failure_kind,
-        claim_calls: Arc::clone(&claim_calls),
-        claim_loss_on: 1,
+        run_notification_claim_calls: Arc::clone(&run_notification_claim_calls),
+        claim_loss_projection_prefix: "run-notification:approval:",
+        targeted_claim_calls: AtomicUsize::new(0),
         authoritative_attempts: Mutex::new(HashMap::new()),
         list_calls: AtomicUsize::new(0),
     });
@@ -2736,7 +2818,7 @@ fn build_claim_loss_triggered_harness(
             threads,
             project_files,
         },
-        claim_calls,
+        run_notification_claim_calls,
     )
 }
 
@@ -2978,7 +3060,7 @@ async fn triggered_claim_loser_records_no_delivered_outcome_marker_or_gate_route
     ];
 
     for (status, failure_kind) in unconfirmed_states {
-        let (harness, claim_calls) = build_claim_loss_triggered_harness(
+        let (harness, run_notification_claim_calls) = build_claim_loss_triggered_harness(
             scripted_state(TurnStatus::BlockedApproval, Some(GATE_REF)),
             status,
             failure_kind,
@@ -2996,7 +3078,7 @@ async fn triggered_claim_loser_records_no_delivered_outcome_marker_or_gate_route
             TriggeredRunDeliveryOutcomeKind::Failed,
             "a {status:?} existing row must remain non-success"
         );
-        assert_eq!(claim_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(run_notification_claim_calls.load(Ordering::SeqCst), 1);
         assert!(
             harness.adapter.envelopes().is_empty(),
             "the losing worker must never drive vendor egress"
