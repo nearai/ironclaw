@@ -165,6 +165,14 @@ jobs:
           scripts/ci/test-reborn-coverage.sh
           scripts/ci/test-check-reborn-branch-coverage-flags.sh
 
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            scripts/ci/test-critical-mutation-gate.sh
+            python3 scripts/ci/critical_mutation_gate.py \
+              --manifest tests/integration/critical-mutation-functions.toml \
+              --changed-files "${RUNNER_TEMP}/reborn-changed-files.txt" \
+              --selection-only
+          fi
+
   crate-tests:
     name: Test Reborn crate bucket (${{ matrix.bucket.name }})
     needs: changes
@@ -841,10 +849,9 @@ jobs:
           if-no-files-found: warn
 
   critical-mutation:
-    name: Critical mutation scope and merged-state gate
+    name: Critical named-function mutation gate
     needs: changes
-    if: >-
-      (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    if: github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -1088,11 +1095,7 @@ jobs:
             "${{ needs.qa-recorded-fixtures.result }}" \
             "${{ needs.changes.outputs.run_qa_replay }}"
 
-          mutation_expected=false
-          if [[ "${{ github.event_name }}" == "pull_request" || \
-                "${{ github.event_name }}" == "merge_group" ]]; then
-            mutation_expected=true
-          fi
+          mutation_expected=${{ github.event_name == 'merge_group' }}
           check_planned_job "critical-mutation" \
             "${{ needs.critical-mutation.result }}" \
             "${mutation_expected}"

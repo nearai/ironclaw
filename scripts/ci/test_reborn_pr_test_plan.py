@@ -396,6 +396,12 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "steps.scope.outputs.should_run == 'true'",
             workflow,
         )
+        self.assertIn("scripts/ci/test-critical-mutation-gate.sh", workflow)
+        self.assertIn("if: github.event_name == 'merge_group'", workflow)
+        self.assertIn(
+            "mutation_expected=${{ github.event_name == 'merge_group' }}",
+            workflow,
+        )
 
         code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
             encoding="utf-8"
