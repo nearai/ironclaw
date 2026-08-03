@@ -21,6 +21,10 @@ MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
 IGNORED_PREFIXES = ("docs/", ".github/ISSUE_TEMPLATE/")
 DEDICATED_WORKFLOW_PREFIXES = ("tools/ironclaw_stress/",)
+QA_HARNESS_PREFIXES = (
+    "scripts/live-canary/",
+    "scripts/reborn_webui_v2_live_qa/",
+)
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
 PR_STATIC_CONTROL_PATHS = {
     "Cargo.toml",
@@ -334,6 +338,10 @@ def build_plan(
             continue
         if path.startswith(DEDICATED_WORKFLOW_PREFIXES):
             reasons.append(f"dedicated stress workflow owns: {path}")
+            continue
+        if path.startswith(QA_HARNESS_PREFIXES):
+            qa_evidence_changed = True
+            reasons.append(f"live QA harness changed: {path}")
             continue
         if path == CHANGED_COVERAGE_MANIFEST:
             reasons.append("changed-coverage policy is statically validated")

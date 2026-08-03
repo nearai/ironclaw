@@ -191,6 +191,20 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["crate_buckets"], [])
 
+    def test_live_qa_harness_changes_run_only_qa_replay(self) -> None:
+        for path in (
+            "scripts/live-canary/README.md",
+            "scripts/live-canary/notify_slack.py",
+            "scripts/reborn_webui_v2_live_qa/run_live_qa.py",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "selected")
+                self.assertTrue(plan["run_qa_replay"])
+                self.assertEqual(plan["crate_buckets"], [])
+                self.assertEqual(plan["root_partitions"], [])
+                self.assertEqual(plan["integration_lanes"], [])
+
     def test_unrelated_workflow_change_runs_only_baseline_qa_replay(self) -> None:
         plan = self.plan("pull_request", [".github/workflows/code_style.yml"])
         self.assertEqual(plan["mode"], "none")
