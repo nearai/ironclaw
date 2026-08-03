@@ -1,3 +1,7 @@
+use ironclaw_outbound::{
+    ClaimDeliveryAttemptForSendOutcome, FailPreparedDeliveryAttemptOutcome,
+};
+
 struct TestManager {
     inner: EventStreamManager,
     update_source: Arc<InMemoryProjectionUpdateSource>,
@@ -842,14 +846,14 @@ impl OutboundStateStorePort for FailingOutboundStore {
     async fn claim_delivery_attempt_for_send(
         &self,
         _request: ironclaw_outbound::ClaimDeliveryAttemptForSendRequest,
-    ) -> Result<bool, OutboundError> {
+    ) -> Result<ClaimDeliveryAttemptForSendOutcome, OutboundError> {
         Err(self.error())
     }
 
     async fn fail_prepared_delivery_attempt(
         &self,
         _request: ironclaw_outbound::FailPreparedDeliveryAttemptRequest,
-    ) -> Result<bool, OutboundError> {
+    ) -> Result<FailPreparedDeliveryAttemptOutcome, OutboundError> {
         Err(self.error())
     }
 
