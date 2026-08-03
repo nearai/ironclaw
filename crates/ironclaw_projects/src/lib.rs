@@ -311,6 +311,32 @@ impl ProjectMemberRecord {
     }
 }
 
+/// A bounded project page plus lifecycle counts over the caller's complete
+/// accessible project set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectList {
+    pub projects: Vec<ProjectRecord>,
+    pub total_projects: usize,
+    pub active_projects: usize,
+    pub archived_projects: usize,
+}
+
+impl ProjectList {
+    pub fn new(
+        projects: Vec<ProjectRecord>,
+        total_projects: usize,
+        active_projects: usize,
+        archived_projects: usize,
+    ) -> Self {
+        Self {
+            projects,
+            total_projects,
+            active_projects,
+            archived_projects,
+        }
+    }
+}
+
 /// Persistence contract for projects and their membership grants.
 ///
 /// The sole implementation ([`FilesystemProjectRepository`]) persists over the
@@ -343,13 +369,14 @@ pub trait ProjectRepository: Send + Sync {
     ) -> Result<Option<ProjectRecord>, ProjectError>;
 
     /// List projects the user can access (owner or active member), most
-    /// recently created first, capped at `limit`.
+    /// recently created first, capped at `limit`, while retaining lifecycle
+    /// counts over the complete accessible set.
     async fn list_projects_for_user(
         &self,
         tenant_id: &TenantId,
         user_id: &UserId,
         limit: usize,
-    ) -> Result<Vec<ProjectRecord>, ProjectError>;
+    ) -> Result<ProjectList, ProjectError>;
 
     /// List all membership grants for a project (any status).
     async fn list_members(

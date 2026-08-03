@@ -13,18 +13,20 @@
 // no bearer); object URLs created for previews are revoked when the modal closes.
 
 import React from "react";
+import { useNavigate } from "react-router";
 import { Modal, ModalBody, ModalFooter, ModalHeader } from "../../../design-system/modal";
 import { Icon } from "../../../design-system/icons";
 import { useT } from "../../../lib/i18n";
 import { fetchAttachmentBlob, blobToDataUrl } from "../../../lib/api";
 import { saveBlob } from "../../../lib/download";
+import { workspaceViewerRouteFromFilePath } from "../../../lib/workspace-file-links";
 import { attachmentPreviewMode } from "../lib/attachments";
 
 // Cap inline text rendering so a large (but within the byte limit) text file
 // can't jank the modal. The full file is still one Download away.
 const MAX_TEXT_PREVIEW_CHARS = 100_000;
 
-export function AttachmentPreviewModal({ attachment, onClose }) {
+export function AttachmentPreviewModal({ attachment, onClose, threadId }) {
   const t = useT();
   const open = Boolean(attachment);
   // `view` holds the resolved representation: { dataUrl?, frameUrl?, text?,
@@ -33,6 +35,13 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
   const [view, setView] = React.useState({});
 
   const mode = attachment ? attachmentPreviewMode(attachment.mime_type) : "download";
+  // This is a navigation target, not an authorization decision. The workspace
+  // viewer fetches through caller-scoped server APIs that re-authorize access;
+  // this client-side helper only rejects malformed path syntax.
+  const workspaceRoute = workspaceViewerRouteFromFilePath({
+    path: attachment?.workspace_path,
+    threadId,
+  });
 
   React.useEffect(() => {
     if (!attachment) return undefined;
@@ -42,7 +51,11 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
     // Optimistic (just-sent) image: the local data URL is already renderable
     // and there is nothing landed to fetch yet.
     if (!attachment.fetch_url && attachment.preview_url) {
-      setView({ dataUrl: attachment.preview_url, downloadUrl: attachment.preview_url });
+      setView({
+        dataUrl: attachment.preview_url,
+        downloadUrl: attachment.preview_url,
+        mode,
+      });
       setStatus("ready");
       return undefined;
     }
@@ -55,15 +68,29 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
     let objectUrl = null;
     fetchAttachmentBlob(attachment.fetch_url)
       .then(async (blob) => {
+        // Once bytes have landed, the authenticated response's Content-Type is
+        // authoritative. Never let stale or forged descriptor metadata choose
+        // an executable renderer (for example, a text/html Blob in a PDF
+        // iframe). A missing/unknown response type safely falls back to the
+        // download-only mode.
+        const resolvedMode = attachmentPreviewMode(blob.type);
         // Keep the Blob for downloads so `saveBlob` can force the logical
         // filename even when Chromium's PDF viewer owns the preview object URL.
         objectUrl = URL.createObjectURL(blob);
-        const next = { downloadUrl: objectUrl, downloadBlob: blob };
-        if (mode === "image" || mode === "audio" || mode === "video") {
+        const next = {
+          downloadUrl: objectUrl,
+          downloadBlob: blob,
+          mode: resolvedMode,
+        };
+        if (
+          resolvedMode === "image" ||
+          resolvedMode === "audio" ||
+          resolvedMode === "video"
+        ) {
           next.dataUrl = await blobToDataUrl(blob);
-        } else if (mode === "pdf") {
+        } else if (resolvedMode === "pdf") {
           next.frameUrl = objectUrl;
-        } else if (mode === "text") {
+        } else if (resolvedMode === "text") {
           const text = await blob.text();
           next.truncated = text.length > MAX_TEXT_PREVIEW_CHARS;
           next.text = next.truncated ? text.slice(0, MAX_TEXT_PREVIEW_CHARS) : text;
@@ -100,9 +127,15 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
         {status === "error" &&
         (<div className="text-sm text-iron-400">{t("chat.attachmentLoadFailed")}</div>)}
         {status === "ready" &&
-        (<PreviewBody mode={mode} view={view} filename={filename} t={t} />)}
+        (<PreviewBody mode={view.mode} view={view} filename={filename} t={t} />)}
       </ModalBody>
       <ModalFooter>
+        {status === "ready" && workspaceRoute &&
+        (<OpenInWorkspaceButton
+          route={workspaceRoute}
+          onClose={onClose}
+          label={t("projects.openWorkspace")}
+        />)}
         {view.downloadUrl &&
         (<a
           href={view.downloadUrl}
@@ -127,6 +160,24 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
       </ModalFooter>
     </Modal>
   );
+}
+
+function OpenInWorkspaceButton({ route, onClose, label }) {
+  const navigate = useNavigate();
+  const openWorkspace = React.useCallback(() => {
+    onClose();
+    navigate(route);
+  }, [navigate, onClose, route]);
+
+  return (<button
+    type="button"
+    onClick={openWorkspace}
+    data-testid="attachment-open-workspace"
+    className="v2-button inline-flex items-center gap-1.5 rounded-md border border-white/10 px-3 py-1.5 text-xs text-iron-200 hover:border-signal/35 hover:text-white"
+  >
+    <Icon name="folder" className="h-3.5 w-3.5" />
+    <span>{label}</span>
+  </button>);
 }
 
 function PreviewBody({ mode, view, filename, t }) {

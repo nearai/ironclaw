@@ -1288,6 +1288,9 @@ impl StubServices {
             id if id == PROJECTS_VIEW.id => Ok(RebornViewPage {
                 payload: serde_json::to_value(RebornListProjectsResponse {
                     projects: vec![sample_project_info("project-alpha")],
+                    total_projects: 1,
+                    active_projects: 1,
+                    archived_projects: 0,
                 })
                 .expect("projects payload"),
                 next_cursor: None,
@@ -8219,6 +8222,9 @@ async fn list_projects_queries_product_surface_view() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
     assert_eq!(body["projects"][0]["project_id"], "project-alpha");
+    assert_eq!(body["total_projects"], 1);
+    assert_eq!(body["active_projects"], 1);
+    assert_eq!(body["archived_projects"], 0);
     let queries = services.view_queries.lock().expect("lock");
     assert_eq!(queries.len(), 1);
     assert_eq!(queries[0].view_id.as_str(), PROJECTS_VIEW.id);
