@@ -531,10 +531,10 @@ async def test_reborn_v2_first_run_onboarding_configures_llm_and_survives_restar
             page.get_by_role("heading", name="Welcome to IronClaw")
         ).to_be_visible(timeout=15000)
 
-        openai_row = page.get_by_text("OpenAI API", exact=True).locator(
-            "xpath=ancestor::div[.//button[normalize-space()='Set up']][1]"
+        openai_row = page.locator(
+            SEL_V2["onboarding_provider_card_for"].format(provider_id="openai")
         )
-        await openai_row.get_by_role("button", name="Set up").click()
+        await openai_row.locator(SEL_V2["onboarding_provider_setup"]).click()
 
         dialog = page.get_by_role("dialog")
         await expect(
@@ -662,6 +662,7 @@ async def test_reborn_v2_first_run_onboarding_configures_llm_and_survives_restar
             if path.exists()
         )
         assert captured_logs, "first-run server logs were not captured"
+        assert "Using OpenAI-compatible provider" in captured_logs
         assert api_key not in captured_logs
     finally:
         await context.close()

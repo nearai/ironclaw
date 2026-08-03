@@ -771,6 +771,13 @@ async def reborn_v2_first_run_server(
 ):
     """Restartable server whose config deliberately has no active LLM."""
     home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-first-run-home")
+    provider_log_filter = (
+        "warn,"
+        "ironclaw_webui=debug,"
+        "ironclaw_reborn_composition=debug,"
+        "ironclaw_operator=debug,"
+        "ironclaw_llm=debug"
+    )
     state = {
         "proc": None,
         "base_url": None,
@@ -790,6 +797,12 @@ async def reborn_v2_first_run_server(
             seed_default_llm=False,
             preserve_existing_config=True,
             log_paths=state["log_paths"],
+            extra_env={
+                # Reborn uses its own stderr filter; keep RUST_LOG aligned for
+                # subprocesses that use tracing's conventional environment.
+                "IRONCLAW_REBORN_LOG": provider_log_filter,
+                "RUST_LOG": provider_log_filter,
+            },
         )
         state["proc"] = proc
         state["base_url"] = base_url
