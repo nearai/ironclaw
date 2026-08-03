@@ -617,7 +617,7 @@ impl RootFilesystem for PostgresRootFilesystem {
         };
         let sort_position = prefix_values.len();
         let tie_position = sort_position.saturating_add(1);
-        if tie_position >= 8 {
+        if tie_position >= crate::index::MAX_ORDERED_INDEX_KEYS {
             return Err(FilesystemError::Unsupported {
                 path: path.clone(),
                 operation: FilesystemOperation::Query,
@@ -2240,7 +2240,7 @@ async fn ensure_postgres_static_ordered_projection(
            SELECT NEW.path \
            UNION ALL \
            SELECT CASE \
-             WHEN strpos(reverse(prefix), '/') <= 1 THEN '/' \
+             WHEN length(prefix) - strpos(reverse(prefix), '/') <= 0 THEN '/' \
              ELSE left(prefix, length(prefix) - strpos(reverse(prefix), '/')) \
            END \
            FROM rfs_ancestors WHERE prefix <> '/' \

@@ -881,7 +881,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
         };
         let sort_position = prefix_values.len();
         let tie_position = sort_position.saturating_add(1);
-        if tie_position >= 8 {
+        if tie_position >= crate::index::MAX_ORDERED_INDEX_KEYS {
             return Err(FilesystemError::Unsupported {
                 path: path.clone(),
                 operation: FilesystemOperation::Query,

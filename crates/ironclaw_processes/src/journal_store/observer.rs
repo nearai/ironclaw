@@ -235,6 +235,17 @@ where
         // delivery path from its very first batch.
         delivery.acknowledged = Some(after.unwrap_or(ProcessJournalCursor(0)));
         delivery.version = version;
+        // Bound on losing the cursor CAS, not on pages: a page that makes
+        // progress resets it. Two instances sharing an observer id can each
+        // hold a valid version and win in turn, and if the re-read cursor does
+        // not advance past the page just delivered, `after` is unchanged and
+        // the same page is re-read, re-delivered, and conflicts again. Every
+        // iteration costs a journal read plus a full observer callback, so
+        // unbounded retries live-lock while redelivering. Giving up returns an
+        // error, which hands the retry to `spawn_observer_replay` and its
+        // backoff instead of spinning here.
+        const MAX_CURSOR_CONFLICT_RETRIES: u32 = 8;
+        let mut cursor_conflicts = 0_u32;
         loop {
             // A concurrent replay may already have delivered past this target
             // while this call waited for the delivery lock.
@@ -275,9 +286,20 @@ where
                     .acknowledge_observer_cursor(observer, &mut delivery, cursor)
                     .await
                 {
-                    Ok(()) => {}
+                    // A page that lands is progress, so a long healthy replay is
+                    // never killed by conflicts accumulated across pages.
+                    Ok(()) => cursor_conflicts = 0,
                     Err(AcknowledgeError::Backend(error)) => return Err(error),
                     Err(AcknowledgeError::Conflict) => {
+                        cursor_conflicts += 1;
+                        if cursor_conflicts > MAX_CURSOR_CONFLICT_RETRIES {
+                            return Err(format!(
+                                "process journal observer {} lost the cursor CAS \
+                                 {MAX_CURSOR_CONFLICT_RETRIES} times without \
+                                 advancing; deferring to backoff",
+                                observer.id
+                            ));
+                        }
                         // Another instance advanced this observer while the
                         // page was in flight. Re-read the durable row and
                         // resume from wherever it now stands; its cursor is

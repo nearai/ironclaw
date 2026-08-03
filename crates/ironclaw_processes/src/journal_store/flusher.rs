@@ -318,8 +318,18 @@ async fn flush_batch<F>(
 /// so the batch failure is re-expressed per command with its cause preserved
 /// in the message.
 fn clone_transaction_error(error: &ProcessJournalStoreError) -> ProcessJournalStoreError {
+    // The batch's own error text is not safe to hand back. A `FilesystemError`
+    // Displays the resolved `VirtualPath` it failed on, and this value reaches
+    // callers as a product-facing `TurnError::Unavailable`, so the raw string
+    // would carry a backend path across a public surface. Keep the cause on the
+    // server and return a stable category; the classification callers act on is
+    // "transient, re-issue", which needs no detail.
+    //
+    // `debug!` rather than `warn!`: this runs on a background task, and higher
+    // levels corrupt the REPL/TUI display (see CLAUDE.md logging guidance).
+    tracing::debug!(cause = %error, "process journal group commit rolled back");
     ProcessJournalStoreError::GroupCommitFailed {
-        reason: error.to_string(),
+        reason: "group commit rolled back".to_string(),
     }
 }
 

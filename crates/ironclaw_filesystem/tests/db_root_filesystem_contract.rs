@@ -2236,19 +2236,25 @@ mod postgres_tests {
             .get_or_init(|| async {
                 // A unique prefix that is an ancestor of nothing any test
                 // writes, so the declaration projects no rows for them.
-                let Ok(path) = VirtualPath::new(format!(
+                //
+                // Every step panics rather than returning: reaching here means
+                // a database was resolved, so a failure is a broken setup, not
+                // an unconfigured one. Completing the `OnceCell` quietly with no
+                // triggers installed would let the whole PostgreSQL projection
+                // suite pass while testing nothing -- and the changed-coverage
+                // exemptions for those residual lines are justified by these
+                // tests running.
+                let path = VirtualPath::new(format!(
                     "/secrets/leases/pgwarmup_{}",
                     uuid::Uuid::new_v4().simple()
-                )) else {
-                    return;
-                };
-                let (Ok(name), Ok(key)) = (IndexName::new("warmup_probe"), IndexKey::new("rank"))
-                else {
-                    return;
-                };
-                let _ = filesystem
+                ))
+                .expect("warm-up prefix is a valid virtual path");
+                let name = IndexName::new("warmup_probe").expect("warm-up index name");
+                let key = IndexKey::new("rank").expect("warm-up index key");
+                filesystem
                     .ensure_index(&path, &IndexSpec::new(name, vec![key], IndexKind::Exact))
-                    .await;
+                    .await
+                    .expect("warm-up declaration installs the static projection triggers");
             })
             .await;
     }
@@ -2306,11 +2312,21 @@ mod postgres_tests {
         if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
             return None;
         }
+        // Past the skip flag and a resolvable URL, every failure below is a
+        // broken environment rather than an unconfigured one, so it panics.
+        // Returning `None` instead would make the legacy-trigger sweep -- the
+        // only coverage for that path, and the basis for waiving its residual
+        // lines in the changed-coverage exemptions -- report success while
+        // never running. A role that cannot CREATE DATABASE would silence the
+        // test and the gate together.
         let config = postgres_url()
             .await?
             .parse::<tokio_postgres::Config>()
-            .ok()?;
-        let (admin, connection) = config.connect(tokio_postgres::NoTls).await.ok()?;
+            .expect("resolved postgres url parses as a connection config");
+        let (admin, connection) = config
+            .connect(tokio_postgres::NoTls)
+            .await
+            .expect("connect to the resolved postgres server");
         tokio::spawn(async move {
             let _ = connection.await;
         });
@@ -2340,7 +2356,7 @@ mod postgres_tests {
         admin
             .execute(&format!("CREATE DATABASE {name}"), &[])
             .await
-            .ok()?;
+            .expect("create the isolated database (the role needs CREATEDB)");
 
         let mut isolated = config.clone();
         isolated.dbname(&name);
@@ -2348,10 +2364,16 @@ mod postgres_tests {
         let pool = deadpool_postgres::Pool::builder(manager)
             .max_size(4)
             .build()
-            .ok()?;
+            .expect("build a pool against the isolated database");
         let filesystem = PostgresRootFilesystem::new(pool);
-        filesystem.run_migrations().await.ok()?;
-        let (client, connection) = isolated.connect(tokio_postgres::NoTls).await.ok()?;
+        filesystem
+            .run_migrations()
+            .await
+            .expect("migrate the isolated database");
+        let (client, connection) = isolated
+            .connect(tokio_postgres::NoTls)
+            .await
+            .expect("connect to the isolated database");
         tokio::spawn(async move {
             let _ = connection.await;
         });

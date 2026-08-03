@@ -545,6 +545,13 @@ where
             .filter(|entry| entry.file_type == FileType::Directory)
             .map(|entry| ThreadId::new(entry.name).map_err(invalid_path))
             .collect::<Result<Vec<_>, _>>()?;
+        // The title backfill below reads the transcript lookup projection, and
+        // on a scope upgraded from before that projection existed the rows are
+        // not there yet. Migrating first is what makes the backfill see legacy
+        // messages: skip it and every untitled thread derives `None`, the
+        // completion marker still lands, and each later sidebar request pays
+        // the per-thread transcript probe this migration exists to retire.
+        self.ensure_transcript_indexes_migrated(scope).await?;
         for thread_id in &thread_ids {
             if let Some((stored, _)) = self.read_thread_versioned(scope, thread_id).await? {
                 let mut index = Self::thread_index_record(&stored);
@@ -553,11 +560,12 @@ where
                 // listing projection must stay read-only (threads guardrail —
                 // projection backfill is explicit migration work).
                 if index.record.title.is_none() {
+                    // Propagate rather than `.ok()`: this migration writes a
+                    // completion marker, so swallowing a read failure records a
+                    // backfill that never happened and no later pass retries it.
                     index.derived_title = self
                         .first_user_message_for_title(scope, thread_id, stored.next_sequence)
-                        .await
-                        .ok()
-                        .flatten()
+                        .await?
                         .and_then(|message| message.content.as_deref().map(str::to_string))
                         .and_then(|content| crate::title::derive_title_from_message(&content));
                 }
