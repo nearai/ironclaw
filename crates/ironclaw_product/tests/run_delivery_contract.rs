@@ -51,9 +51,8 @@ use ironclaw_product::{
     VerifiedInbound,
 };
 use ironclaw_product::{
-    CoordinatedDeliveryOutcome, DeliveryCoordinator, DeliveryRetryPolicy, RunDeliveryObserver,
-    RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
-    TriggeredRunDeliveryRequest,
+    DeliveryCoordinator, DeliveryRetryPolicy, RunDeliveryObserver, RunDeliveryServices,
+    RunDeliverySettings, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
 };
 use ironclaw_product::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsStat,
@@ -371,9 +370,7 @@ struct ClaimLossStore {
     claim_loss_projection_prefix: &'static str,
     targeted_claim_calls: AtomicUsize,
     authoritative_attempts: Mutex<HashMap<OutboundDeliveryId, OutboundDeliveryAttempt>>,
-    list_calls: AtomicUsize,
-    fail_first_prepared_with_backend: bool,
-    fail_prepared_calls: AtomicUsize,
+    list_calls: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -534,6 +531,7 @@ impl OutboundStateStorePort for ClaimLossStore {
             self.run_notification_claim_calls
                 .fetch_add(1, Ordering::SeqCst);
         }
+        // Keep the targeted counter after this short-circuit so other families do not increment it.
         if !projection_ref.starts_with(self.claim_loss_projection_prefix)
             || self.targeted_claim_calls.fetch_add(1, Ordering::SeqCst) != 0
         {
@@ -606,11 +604,7 @@ impl OutboundStateStorePort for ClaimLossStore {
         &self,
         scope: TurnScope,
     ) -> Result<Vec<OutboundDeliveryAttempt>, OutboundError> {
-        assert_eq!(
-            self.list_calls.fetch_add(1, Ordering::SeqCst),
-            0,
-            "the coordinator must consume the authoritative claim outcome without a post-claim reread"
-        );
+        self.list_calls.fetch_add(1, Ordering::SeqCst);
         self.inner.list_delivery_attempts(scope).await
     }
 }
@@ -1033,7 +1027,7 @@ fn build_claim_loss_observer_harness(
     failure_kind: Option<DeliveryFailureKind>,
     claim_loss_projection_prefix: &'static str,
     auth_url: Option<&str>,
-) -> (Harness, Arc<AtomicUsize>) {
+) -> (Harness, Arc<AtomicUsize>, Arc<AtomicUsize>) {
     let adapter = Arc::new(RecordingChannelAdapter::new());
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let route_store =
@@ -1042,6 +1036,7 @@ fn build_claim_loss_observer_harness(
     let threads = Arc::new(InMemorySessionThreadService::default());
     let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
     let run_notification_claim_calls = Arc::new(AtomicUsize::new(0));
+    let list_calls = Arc::new(AtomicUsize::new(0));
     let claim_loss_store = Arc::new(ClaimLossStore {
         inner: Arc::clone(&store),
         observed_status,
@@ -1050,9 +1045,7 @@ fn build_claim_loss_observer_harness(
         claim_loss_projection_prefix,
         targeted_claim_calls: AtomicUsize::new(0),
         authoritative_attempts: Mutex::new(HashMap::new()),
-        list_calls: AtomicUsize::new(0),
-        fail_first_prepared_with_backend: false,
-        fail_prepared_calls: AtomicUsize::new(0),
+        list_calls: Arc::clone(&list_calls),
     });
     let coordinator = Arc::new(DeliveryCoordinator::new(
         Arc::clone(&claim_loss_store) as Arc<dyn OutboundStateStorePort>,
@@ -1108,7 +1101,7 @@ fn build_claim_loss_observer_harness(
         threads,
         project_files,
     };
-    (harness, run_notification_claim_calls)
+    (harness, run_notification_claim_calls, list_calls)
 }
 
 async fn seed_final_message(threads: &InMemorySessionThreadService, run_id: TurnRunId, text: &str) {
@@ -1150,48 +1143,6 @@ async fn seed_final_message_with_attachments(
 }
 
 // ── Observer rows ──────────────────────────────────────────────────────────
-
-#[test]
-fn coordinator_claim_loss_outcome_preserves_the_observed_non_success_state() {
-    let cases = [
-        (OutboundDeliveryStatus::Sending, None),
-        (OutboundDeliveryStatus::Unknown, None),
-        (OutboundDeliveryStatus::Pending, None),
-        (
-            OutboundDeliveryStatus::Failed,
-            Some(DeliveryFailureKind::Rejected),
-        ),
-        (
-            OutboundDeliveryStatus::DeadLettered,
-            Some(DeliveryFailureKind::TransportUnavailable),
-        ),
-    ];
-
-    for (status, failure_kind) in cases {
-        let outcome = CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
-            status,
-            failure_kind,
-        };
-        match outcome {
-            CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
-                status: observed_status,
-                failure_kind: observed_failure_kind,
-            } => {
-                assert_eq!(observed_status, status);
-                assert_eq!(observed_failure_kind, failure_kind);
-            }
-            CoordinatedDeliveryOutcome::DuplicateSuppressed { .. }
-            | CoordinatedDeliveryOutcome::Delivered { .. } => {
-                panic!("{status:?} must never be represented as delivered success")
-            }
-            CoordinatedDeliveryOutcome::Failed { .. }
-            | CoordinatedDeliveryOutcome::NoDelivery
-            | CoordinatedDeliveryOutcome::Rejected { .. } => {
-                panic!("claim loss must preserve the observed durable row")
-            }
-        }
-    }
-}
 
 #[tokio::test]
 async fn observer_delivers_final_reply_through_the_coordinator() {
@@ -1787,7 +1738,7 @@ async fn observer_claim_loser_never_publishes_a_gate_route_without_confirmed_del
     ];
 
     for (index, (status, failure_kind)) in unconfirmed_states.into_iter().enumerate() {
-        let (harness, _) = build_claim_loss_observer_harness(
+        let (harness, _, list_calls) = build_claim_loss_observer_harness(
             vec![scripted_state(TurnStatus::BlockedApproval, Some(GATE_REF))],
             status,
             failure_kind,
@@ -1807,6 +1758,11 @@ async fn observer_claim_loser_never_publishes_a_gate_route_without_confirmed_del
             )
             .await;
 
+        assert_eq!(
+            list_calls.load(Ordering::SeqCst),
+            1,
+            "the coordinator must recover the scope once and consume the authoritative claim outcome"
+        );
         let texts = harness.adapter.texts();
         assert_eq!(
             texts,
@@ -1852,7 +1808,7 @@ async fn observer_claim_loser_never_publishes_a_gate_route_without_confirmed_del
 #[tokio::test]
 async fn observer_only_a_durable_delivered_claim_loss_may_publish_the_gate_route() {
     const GATE_REF: &str = "gate:confirmed-duplicate-approval";
-    let (harness, _) = build_claim_loss_observer_harness(
+    let (harness, _, list_calls) = build_claim_loss_observer_harness(
         vec![scripted_state(TurnStatus::BlockedApproval, Some(GATE_REF))],
         OutboundDeliveryStatus::Delivered,
         None,
@@ -1868,6 +1824,11 @@ async fn observer_only_a_durable_delivered_claim_loss_may_publish_the_gate_route
         )
         .await;
 
+    assert_eq!(
+        list_calls.load(Ordering::SeqCst),
+        1,
+        "the coordinator must recover the scope once and consume the authoritative claim outcome"
+    );
     assert!(harness.adapter.envelopes().is_empty());
     assert!(
         harness
@@ -1882,7 +1843,7 @@ async fn observer_only_a_durable_delivered_claim_loss_may_publish_the_gate_route
 
 #[tokio::test]
 async fn observer_unconfirmed_terminal_claim_loss_does_not_poison_the_delivered_run_ledger() {
-    let (harness, run_notification_claim_calls) = build_claim_loss_observer_harness(
+    let (harness, run_notification_claim_calls, list_calls) = build_claim_loss_observer_harness(
         vec![scripted_state(TurnStatus::Completed, None)],
         OutboundDeliveryStatus::Unknown,
         None,
@@ -1902,6 +1863,11 @@ async fn observer_unconfirmed_terminal_claim_loss_does_not_poison_the_delivered_
             .await;
     }
 
+    assert_eq!(
+        list_calls.load(Ordering::SeqCst),
+        1,
+        "the coordinator must recover the scope once and consume each authoritative claim outcome"
+    );
     assert_eq!(
         run_notification_claim_calls.load(Ordering::SeqCst),
         2,
@@ -1943,7 +1909,7 @@ async fn observer_unconfirmed_terminal_claim_loss_does_not_poison_the_delivered_
 #[tokio::test]
 async fn observer_unconfirmed_terminal_claim_loss_does_not_clean_up_a_truthfully_delivered_prompt()
 {
-    let (harness, run_notification_claim_calls) = build_claim_loss_observer_harness(
+    let (harness, run_notification_claim_calls, list_calls) = build_claim_loss_observer_harness(
         vec![
             scripted_state(TurnStatus::Running, None),
             scripted_state(TurnStatus::BlockedAuth, Some("gate:auth-before-claim-loss")),
@@ -1965,6 +1931,11 @@ async fn observer_unconfirmed_terminal_claim_loss_does_not_clean_up_a_truthfully
         )
         .await;
 
+    assert_eq!(
+        list_calls.load(Ordering::SeqCst),
+        1,
+        "the coordinator must recover the scope once and consume the authoritative claim outcome"
+    );
     assert_eq!(
         run_notification_claim_calls.load(Ordering::SeqCst),
         2,
@@ -2900,7 +2871,7 @@ fn build_claim_loss_triggered_harness(
     state: ScriptedRunState,
     observed_status: OutboundDeliveryStatus,
     failure_kind: Option<DeliveryFailureKind>,
-) -> (TriggeredHarness, Arc<AtomicUsize>) {
+) -> (TriggeredHarness, Arc<AtomicUsize>, Arc<AtomicUsize>) {
     let adapter = Arc::new(RecordingChannelAdapter::new());
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let route_store =
@@ -2911,6 +2882,7 @@ fn build_claim_loss_triggered_harness(
     let threads = Arc::new(InMemorySessionThreadService::default());
     let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
     let run_notification_claim_calls = Arc::new(AtomicUsize::new(0));
+    let list_calls = Arc::new(AtomicUsize::new(0));
     let claim_loss_store = Arc::new(ClaimLossStore {
         inner: Arc::clone(&store),
         observed_status,
@@ -2919,9 +2891,7 @@ fn build_claim_loss_triggered_harness(
         claim_loss_projection_prefix: "run-notification:approval:",
         targeted_claim_calls: AtomicUsize::new(0),
         authoritative_attempts: Mutex::new(HashMap::new()),
-        list_calls: AtomicUsize::new(0),
-        fail_first_prepared_with_backend: false,
-        fail_prepared_calls: AtomicUsize::new(0),
+        list_calls: Arc::clone(&list_calls),
     });
     let coordinator = Arc::new(DeliveryCoordinator::new(
         Arc::clone(&claim_loss_store) as Arc<dyn OutboundStateStorePort>,
@@ -2980,6 +2950,7 @@ fn build_claim_loss_triggered_harness(
             project_files,
         },
         run_notification_claim_calls,
+        list_calls,
     )
 }
 
@@ -3314,11 +3285,12 @@ async fn triggered_claim_loser_records_no_delivered_outcome_marker_or_gate_route
     ];
 
     for (status, failure_kind) in unconfirmed_states {
-        let (harness, run_notification_claim_calls) = build_claim_loss_triggered_harness(
-            scripted_state(TurnStatus::BlockedApproval, Some(GATE_REF)),
-            status,
-            failure_kind,
-        );
+        let (harness, run_notification_claim_calls, list_calls) =
+            build_claim_loss_triggered_harness(
+                scripted_state(TurnStatus::BlockedApproval, Some(GATE_REF)),
+                status,
+                failure_kind,
+            );
         seed_preference(&harness.store).await;
         let run_id = TurnRunId::new();
 
@@ -3331,6 +3303,11 @@ async fn triggered_claim_loser_records_no_delivered_outcome_marker_or_gate_route
             wait_for_outcome(&harness.delivery_store, run_id).await,
             TriggeredRunDeliveryOutcomeKind::Failed,
             "a {status:?} existing row must remain non-success"
+        );
+        assert_eq!(
+            list_calls.load(Ordering::SeqCst),
+            1,
+            "the coordinator must recover the scope once and consume the authoritative claim outcome"
         );
         assert_eq!(run_notification_claim_calls.load(Ordering::SeqCst), 1);
         assert!(
@@ -3352,7 +3329,7 @@ async fn triggered_claim_loser_records_no_delivered_outcome_marker_or_gate_route
 #[tokio::test]
 async fn triggered_observed_delivered_duplicate_is_the_only_confirmed_claim_loss() {
     const GATE_REF: &str = "gate:triggered-confirmed-duplicate";
-    let (harness, _) = build_claim_loss_triggered_harness(
+    let (harness, _, list_calls) = build_claim_loss_triggered_harness(
         scripted_state(TurnStatus::BlockedApproval, Some(GATE_REF)),
         OutboundDeliveryStatus::Delivered,
         None,
@@ -3368,6 +3345,11 @@ async fn triggered_observed_delivered_duplicate_is_the_only_confirmed_claim_loss
     assert_eq!(
         wait_for_outcome(&harness.delivery_store, run_id).await,
         TriggeredRunDeliveryOutcomeKind::Delivered
+    );
+    assert_eq!(
+        list_calls.load(Ordering::SeqCst),
+        1,
+        "the coordinator must recover the scope once and consume the authoritative claim outcome"
     );
     assert!(harness.adapter.envelopes().is_empty());
     assert!(
