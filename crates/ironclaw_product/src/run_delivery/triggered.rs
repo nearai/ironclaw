@@ -792,6 +792,12 @@ async fn deliver_triggered_notification(
         CoordinatedDeliveryOutcome::Failed { failure_kind, .. } => Err(
             TriggeredNotificationFailure::Other(format!("delivery failed: {failure_kind:?}")),
         ),
+        CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
+            status,
+            failure_kind,
+        } => Err(TriggeredNotificationFailure::Other(format!(
+            "existing delivery is not confirmed: status={status:?}, failure_kind={failure_kind:?}"
+        ))),
         outcome => Ok(delivered_messages_from_outcome(&outcome)),
     }
 }

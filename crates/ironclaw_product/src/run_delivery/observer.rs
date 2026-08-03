@@ -861,6 +861,13 @@ impl RunDeliveryObserver {
             CoordinatedDeliveryOutcome::Failed { failure_kind, .. } => {
                 Err(RunDeliveryError::DeliveryFailed { failure_kind })
             }
+            CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
+                status,
+                failure_kind,
+            } => Err(RunDeliveryError::DeliveryUnconfirmed {
+                status,
+                failure_kind,
+            }),
             outcome => Ok(delivered_messages_from_outcome(&outcome)),
         }
     }

@@ -181,6 +181,11 @@ pub enum RunDeliveryError {
     DeliveryFailed {
         failure_kind: ironclaw_outbound::DeliveryFailureKind,
     },
+    #[error("existing delivery is not confirmed: status={status:?}, failure_kind={failure_kind:?}")]
+    DeliveryUnconfirmed {
+        status: ironclaw_outbound::OutboundDeliveryStatus,
+        failure_kind: Option<ironclaw_outbound::DeliveryFailureKind>,
+    },
     #[error("run {run_id} did not finish before the delivery timeout")]
     RunWaitTimedOut { run_id: TurnRunId },
     /// Timeout after at least one blocked-state notification (approval/auth
