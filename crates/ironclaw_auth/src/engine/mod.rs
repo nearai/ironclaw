@@ -508,16 +508,30 @@ impl AuthProviderClient for AuthEngine {
             )
             .await
             .map_err(|_| AuthProductError::TokenExchangeFailed)?;
-        // An extension-scoped flow persists the shared-vendor ceiling as it
-        // stood at PREPARE time. A sibling extension uninstalled while the user
-        // was on the vendor's consent screen shrinks that ceiling, and
-        // rejecting here would fail this flow's callback over an unrelated
-        // extension's removal (lifecycle cleanup deliberately does not cancel
-        // shared-provider flows). Clamp to the CURRENT ceiling instead: the
-        // stored grant still can never exceed what is authorized right now —
-        // including on the `fallback_to_requested` path, where the exchange
-        // echoes these scopes without clamping them itself.
-        let request = clamp_callback_scopes_to_ceiling(&recipe, request);
+        let request = match &requester_extension {
+            Some(_) => {
+                // An extension-scoped flow persists the shared-vendor ceiling as
+                // it stood at PREPARE time. A sibling extension uninstalled
+                // while the user was on the vendor's consent screen shrinks
+                // that ceiling, and rejecting here would fail this flow's
+                // callback over an unrelated extension's removal (lifecycle
+                // cleanup deliberately does not cancel shared-provider flows).
+                // Clamp to the CURRENT ceiling instead: the stored grant still
+                // can never exceed what is authorized right now — including on
+                // the `fallback_to_requested` path, where the exchange echoes
+                // these scopes without clamping them itself.
+                clamp_callback_scopes_to_ceiling(&recipe, request)
+            }
+            None => {
+                // A HOST flow has no sibling extension whose uninstall could
+                // legitimately shrink the ceiling mid-flow, so silently
+                // dropping out-of-ceiling scopes here would only weaken the
+                // exchange-time defense-in-depth check and hide
+                // misconfiguration. Reject instead, matching `exchange_callback`.
+                validate_scopes_within_ceiling(&recipe, &request.scopes)?;
+                request
+            }
+        };
         self.execute_oauth_exchange(context, request, recipe, resource)
             .await
     }
@@ -620,11 +634,15 @@ fn effective_requested_scopes(
 
 /// Drop callback scopes the vendor recipe no longer declares.
 ///
-/// Used only on the requester-scoped exchange, where the persisted request is
-/// the prepare-time shared-vendor ceiling and may name a scope a sibling
-/// extension has since taken away. The result is always a subset of the
-/// current ceiling, so it is never wider than the host path's
-/// [`validate_scopes_within_ceiling`] would have permitted.
+/// Used only on the EXTENSION-scoped arm of the requester-scoped exchange
+/// (`requester_extension.is_some()`), where the persisted request is the
+/// prepare-time shared-vendor ceiling and may name a scope a sibling
+/// extension has since taken away. The HOST arm (`requester_extension`
+/// is `None`) does not call this — it validates instead, since there is no
+/// sibling extension whose uninstall could legitimately shrink the ceiling.
+/// The result is always a subset of the current ceiling, so it is never
+/// wider than the host path's [`validate_scopes_within_ceiling`] would have
+/// permitted.
 fn clamp_callback_scopes_to_ceiling(
     recipe: &OAuth2CodeRecipe,
     mut request: OAuthProviderCallbackRequest,

@@ -392,17 +392,21 @@ async fn one_users_consent_never_carries_another_users_installed_scopes() {
         .find(|(key, _)| key == "scope")
         .map(|(_, value)| value.to_string())
         .expect("authorize URL carries a scope param");
+    // Token, not substring, membership: these scopes are genuine prefixes of
+    // one another (e.g. `.../auth/drive` inside `.../auth/drive.readonly`),
+    // so a raw `.contains` on the joined string can match the wrong scope.
+    let tokens: Vec<&str> = consented.split(' ').collect();
 
     for own in &gmail_scopes {
         assert!(
-            consented.contains(own.as_str()),
+            tokens.iter().any(|token| *token == own.as_str()),
             "alice must still consent to the extension she installed; {} missing from {consented}",
             own.as_str()
         );
     }
     for other in &drive_scopes {
         assert!(
-            !consented.contains(other.as_str()),
+            !tokens.iter().any(|token| *token == other.as_str()),
             "google-drive is BOB's install — its scopes must never reach alice's \
              consent screen; {} appeared in {consented}",
             other.as_str()
@@ -556,10 +560,14 @@ async fn google_consent_is_bounded_by_installed_extensions() {
         .find(|(key, _)| key == "scope")
         .map(|(_, value)| value.to_string())
         .expect("authorize URL carries a scope param");
+    // Token, not substring, membership — see the note in
+    // `one_users_consent_never_carries_another_users_installed_scopes`.
+    let tokens: Vec<&str> = consented.split(' ').collect();
     for uninstalled in &drive_scopes {
         assert!(
-            !consented.contains(uninstalled.as_str()),
-            "an extension the user never installed must not widen the consent screen;              {} appeared in {consented}",
+            !tokens.iter().any(|token| *token == uninstalled.as_str()),
+            "an extension the user never installed must not widen the consent \
+             screen; {} appeared in {consented}",
             uninstalled.as_str()
         );
     }

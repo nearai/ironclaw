@@ -1,9 +1,8 @@
 //! Auth-recipe resolution over resolved extension manifests.
 //!
 //! Implements the `ironclaw_auth::AuthRecipeResolver` port (overview §4.3):
-//! recipe DATA per vendor id, resolved from the active snapshot with a
-//! fallback catalog (bundled manifests) — never a string-keyed provider
-//! implementation lookup.
+//! recipe DATA per vendor id, resolved from the durable installation store —
+//! never a string-keyed provider implementation lookup.
 //!
 //! Shared vendors (overview §3.2): every extension using a vendor embeds the
 //! recipe; recipes for one vendor must be identical except scope and
@@ -18,8 +17,6 @@ use ironclaw_auth::{AuthRecipeResolver, ResolvedVendorAuthRecipe};
 use ironclaw_extension_contracts::recipe::VendorAuthRecipe;
 use ironclaw_extensions::{ExtensionInstallationStorePort, ResolvedExtensionManifest};
 use ironclaw_host_api::ids::{ExtensionId, UserId};
-
-use crate::SnapshotWatch;
 
 /// Two active extensions declared incompatible recipes for one vendor.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -191,76 +188,6 @@ impl AuthRecipeResolver for InstalledManifestAuthRecipeResolver {
                 None
             }
         }
-    }
-}
-
-/// [`AuthRecipeResolver`] over the live active snapshot, with a fallback
-/// resolver (typically the bundled-manifest catalog) for vendors whose
-/// extension is installed but not yet active — connect flows run before
-/// activation completes.
-#[derive(Clone)]
-pub struct SnapshotAuthRecipeResolver {
-    watch: SnapshotWatch,
-    fallback: Arc<dyn AuthRecipeResolver>,
-}
-
-impl std::fmt::Debug for SnapshotAuthRecipeResolver {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("SnapshotAuthRecipeResolver")
-            .field("fallback", &self.fallback)
-            .finish()
-    }
-}
-
-impl SnapshotAuthRecipeResolver {
-    pub fn new(watch: SnapshotWatch, fallback: Arc<dyn AuthRecipeResolver>) -> Self {
-        Self { watch, fallback }
-    }
-}
-
-#[async_trait]
-impl AuthRecipeResolver for SnapshotAuthRecipeResolver {
-    async fn resolve(
-        &self,
-        requester_extension: Option<&ExtensionId>,
-        caller: Option<&UserId>,
-        vendor: &str,
-    ) -> Option<ResolvedVendorAuthRecipe> {
-        // The scope ceiling for a vendor is the UNION across every installed
-        // extension that uses it — not just the requesting extension's own
-        // declaration.
-        //
-        // Several extensions can share one credential account for a vendor,
-        // and that account stores a single scope set which each exchange
-        // *replaces* rather than merges. Resolving a narrower, per-extension
-        // ceiling therefore clamps the granted scopes to the requester's own
-        // and overwrites every sibling's — so completing setup for one
-        // extension silently strips the scopes of the ones already connected,
-        // and they fall back to reporting that setup is still needed.
-        let snapshot = self.watch.current();
-        let manifests: Vec<Arc<ResolvedExtensionManifest>> = snapshot
-            .extension_ids()
-            .into_iter()
-            .filter_map(|id| snapshot.extension(&id))
-            .map(|extension| Arc::clone(&extension.resolved))
-            .collect();
-        match unified_vendor_recipes(manifests.iter().map(Arc::as_ref)) {
-            Ok(recipes) => {
-                if let Some(recipe) = recipes.into_iter().find(|recipe| recipe.vendor == vendor) {
-                    return Some(recipe);
-                }
-            }
-            Err(conflict) => {
-                // Activation-time conflict checks should have prevented this;
-                // fail closed for the conflicting vendor, still allow the
-                // fallback catalog to answer.
-                tracing::warn!(%conflict, "active snapshot carries conflicting vendor recipes");
-            }
-        }
-        self.fallback
-            .resolve(requester_extension, caller, vendor)
-            .await
     }
 }
 

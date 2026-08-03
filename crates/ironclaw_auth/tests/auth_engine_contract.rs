@@ -890,6 +890,82 @@ async fn exchange_clamps_echoed_scopes_to_recipe_ceiling() {
     );
 }
 
+/// `exchange_callback_for_requester`'s HOST arm (`requester_extension: None`)
+/// must behave like `exchange_callback` — an out-of-ceiling scope in the
+/// callback request is rejected, not silently clamped away. There is no
+/// sibling extension whose uninstall could legitimately shrink the ceiling
+/// for a host-scoped flow, so clamping here would only hide misconfiguration.
+#[tokio::test]
+async fn exchange_callback_for_requester_host_scoped_rejects_out_of_ceiling_scope() {
+    let harness = Harness::new(vec![synthetic_recipe("acme", &acme_recipe_toml(""))]);
+    let scope = test_scope();
+    let error = harness
+        .engine
+        .exchange_callback_for_requester(
+            None,
+            exchange_context(&scope),
+            callback_request("acme", vec![ProviderScope::new("admin").unwrap()]),
+        )
+        .await
+        .expect_err("host-scoped exchange with an out-of-ceiling scope must be rejected");
+    assert_eq!(error.code(), ironclaw_auth::AuthErrorCode::InvalidRequest);
+    assert_eq!(
+        harness.server.request_count(),
+        0,
+        "rejection happens before any vendor call"
+    );
+}
+
+/// `exchange_callback_for_requester`'s EXTENSION arm (`requester_extension:
+/// Some(..)`) clamps instead of rejecting: the persisted request is the
+/// prepare-time shared-vendor ceiling, and a sibling extension uninstalled
+/// while the user was on the vendor's consent screen can shrink the CURRENT
+/// ceiling out from under it. The flow must still succeed, granting only
+/// what remains inside the current ceiling.
+#[tokio::test]
+async fn exchange_callback_for_requester_extension_scoped_clamps_to_current_ceiling() {
+    // The current (post-uninstall) ceiling is narrower than what the
+    // persisted callback request still names, and the response carries no
+    // `scope` field — so the surviving `msg:read` scope must come from the
+    // fallback-to-requested clamped set, not an echoed grant.
+    let toml_text = acme_recipe_toml("").replace(
+        r#"scopes = ["msg:read", "msg:write"]"#,
+        r#"scopes = ["msg:read"]"#,
+    ) + "scope = { path = \"/scope\", missing = \"fallback_to_requested\" }\n";
+    let row = synthetic_recipe("acme", &toml_text);
+    let harness = Harness::new(vec![row]);
+    let scope = test_scope();
+    harness.server.script(
+        "https://auth.acme.example/token",
+        200,
+        serde_json::json!({
+            "access_token": "acme-clamped-access",
+            "expires_in": 3600
+        }),
+    );
+    let exchange = harness
+        .engine
+        .exchange_callback_for_requester(
+            Some(ironclaw_host_api::ids::ExtensionId::new("acme-ext").unwrap()),
+            exchange_context(&scope),
+            callback_request(
+                "acme",
+                vec![
+                    ProviderScope::new("msg:read").unwrap(),
+                    ProviderScope::new("msg:write").unwrap(),
+                ],
+            ),
+        )
+        .await
+        .expect("extension-scoped exchange clamps instead of rejecting");
+    assert_eq!(
+        exchange.scopes,
+        vec![ProviderScope::new("msg:read").unwrap()],
+        "msg:write is outside the current ceiling and must be dropped, not \
+         rejected"
+    );
+}
+
 /// The shared-vendor cumulative-grant regression (gmail → google-docs
 /// sign-out): several extensions share one vendor account, each connect
 /// requests only its own extension's scopes, and a cumulative-grant vendor

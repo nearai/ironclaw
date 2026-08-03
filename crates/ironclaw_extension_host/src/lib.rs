@@ -233,8 +233,7 @@ pub use provider_instance_readiness::{
     ProviderInstanceReadinessInput, provider_instance_readiness_map,
 };
 pub use recipes::{
-    InstalledManifestAuthRecipeResolver, SnapshotAuthRecipeResolver, VendorRecipeConflict,
-    unified_vendor_recipes,
+    InstalledManifestAuthRecipeResolver, VendorRecipeConflict, unified_vendor_recipes,
 };
 pub use removal_cleanup::{
     ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapter, ExtensionRemovalCleanupAdapterId,
