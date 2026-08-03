@@ -391,16 +391,23 @@ signed vendor POST → verified → normalized → turn admitted.
   AuthPrompt | FailureNotice | ConnectRequired | Working | Cleanup |
   TriggeredDelivery` — every current Slack observer/notice call site maps to
   exactly one intent, none bypasses.
-- Coordinator: resolve target (source-route reply default, preference targets,
-  fail-closed on unauthorized/unavailable), persist attempt
-  (`Prepared`→`Sending`→terminal) **before** vendor egress, call
-  `channel.deliver(envelope, egress)`, persist the structured report, own
-  retry/backoff/dedupe/single-flight/shutdown-drain. Crash after possible
-  vendor success → `Unknown`, never blind resend. Sole delivery-state writer —
-  adapters get no store. Production construction rejects a no-op sink.
+- Coordinator: persist the attempt as `Prepared`, then acquire the durable
+  store-backed atomic claim (`Prepared`→`Sending`) **before** target resolution,
+  attachment materialization, or vendor egress. The store is the authority
+  across coordinator processes; a lost claim returns duplicate suppression
+  without resolving, materializing, or sending. After claiming, resolve the
+  target (source-route reply default, preference targets, fail-closed on
+  unauthorized/unavailable), call `channel.deliver(envelope, egress)`, persist
+  the structured report, and own retry/backoff/dedupe/shutdown-drain. Crash
+  after possible vendor success → `Unknown`, never blind resend. Sole
+  delivery-state writer — adapters get no store. Production construction
+  rejects a no-op sink. This is not a provider exactly-once guarantee: notice
+  attempts retain fresh random delivery ids, and their existing dedupe contract
+  is not redesigned by the per-attempt claim.
 - For final and triggered replies, the coordinator materializes recognized
   `/workspace/...` references through the turn-scoped project filesystem after
-  target/channel resolution and before `Sending`. It enforces shared
+  the durable claim and target/channel resolution, but before vendor egress. It
+  enforces shared
   count/per-file/total budgets, rejects caller-supplied file parts, and passes
   only transient `OutboundPart::File` values to the adapter.
 - `CommunicationPresentationPolicy` derived from `[channel.presentation]`

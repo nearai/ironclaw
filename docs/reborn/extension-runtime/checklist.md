@@ -710,16 +710,20 @@ Rules — kept short on purpose:
   no no-op-sink constructor (`delivery_coordinator.rs` doc), so the guarantee
   is structural rather than a dedicated test.
 - [x] OUT-5 Retry/backoff and run-notice dedupe are generic; the coordinator
-  owns its per-delivery single-flight guard. There is no external coordinator
-  shutdown/drain surface. —
+  acquires a durable, store-backed atomic claim (`Prepared`→`Sending`) before
+  target resolution, attachment materialization, or vendor egress. The store,
+  not process-local state, is the authority across coordinator instances.
+  There is no external coordinator shutdown/drain surface. —
   `coordinator_retries_fully_retryable_reports_then_delivers` (bounded
   retry, zero-backoff policy injection),
   busy-hint FIFO dedupe rows in `run_delivery_contract.rs`; the
-  per-delivery-id single-flight guard (`in_flight` set, both paths) is
-  structural — every
-  prepared attempt mints a fresh delivery id, so double-entry is
-  unreachable through the public API; the guard defends future
-  resume/re-drive paths.
+  `concurrent_coordinators_claim_one_durable_delivery_before_egress` row in
+  `outbound_delivery_contract.rs` drives two coordinators with separate store
+  handles over one backend and proves one `Delivered`, one
+  `DuplicateSuppressed`, and one adapter call for the same durable delivery
+  fact. The claim does not provide provider exactly-once delivery: notice
+  attempts still mint fresh random delivery ids, and run-notice dedupe remains
+  the existing separate contract.
 - [x] OUT-6 Crash after possible vendor success records `Unknown`; no blind
   resend without a vendor idempotency key. —
   `coordinator_recovery_marks_interrupted_sending_attempts_unknown` and
