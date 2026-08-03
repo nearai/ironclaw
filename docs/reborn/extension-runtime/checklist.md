@@ -732,9 +732,13 @@ Rules — kept short on purpose:
   busy-hint FIFO dedupe rows in `run_delivery_contract.rs`; the
   `concurrent_coordinators_claim_one_durable_delivery_before_egress` row in
   `outbound_delivery_contract.rs` drives two coordinators with separate store
-  handles over one backend and proves one `Delivered`, one
-  `DuplicateSuppressed`, and one adapter call for the same durable delivery
-  fact. The claim does not provide provider exactly-once delivery: notice
+  handles over one backend and deterministically proves that the claim loser
+  observes the owner's authoritative `Sending` state as
+  `ExistingDeliveryUnconfirmed`, while only the owner calls the adapter and
+  reaches `Delivered`. Only an authoritative durable `Delivered` permits
+  `DuplicateSuppressed`; other existing states preserve their status and
+  failure kind and fail closed without delivery-success side effects. The claim
+  does not provide provider exactly-once delivery: notice
   attempts still mint fresh random delivery ids, and run-notice dedupe remains
   the existing separate contract.
 - [x] OUT-6 `Sending` means durable egress ownership at the adapter/vendor

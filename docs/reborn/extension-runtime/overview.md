@@ -736,9 +736,13 @@ user is on. One delivery, end to end:
 5. Once all preflight work succeeds, the coordinator atomically claims the
    durable attempt (`Prepared` → `Sending`) immediately before
    `adapter.deliver(envelope, egress)`. The store is authoritative across
-   coordinator processes; a claim loser returns duplicate suppression and
-   performs no vendor egress. The adapter renders and sends, and the host
-   injects credentials.
+   coordinator processes. Only an authoritative durable `Delivered` permits a
+   claim loser to return `DuplicateSuppressed` as confirmed success. An existing
+   `Sending`, `Failed`, `Unknown`, `Pending`, or `DeadLettered` attempt returns
+   `ExistingDeliveryUnconfirmed` with the authoritative status and failure kind
+   preserved; consumers fail closed without vendor egress or delivery-success
+   side effects. The adapter renders and sends, and the host injects
+   credentials.
 6. The adapter returns a structured per-part report (sent + vendor message
    ref / retryable / permanent). It has no store access and cannot mark
    anything delivered.

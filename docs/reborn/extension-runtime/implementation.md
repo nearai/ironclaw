@@ -397,8 +397,12 @@ signed vendor POST → verified → normalized → turn admitted.
   attachments while the attempt remains `Prepared`; then acquire the durable
   store-backed atomic claim (`Prepared`→`Sending`) immediately before
   `channel.deliver(envelope, egress)`. The store is the authority across
-  coordinator processes; a lost claim returns duplicate suppression without
-  vendor egress. Transient target `ProductSurfaceFailure` and project-filesystem
+  coordinator processes. Only an authoritative durable `Delivered` permits a
+  claim loser to return `DuplicateSuppressed` as confirmed success. An existing
+  `Sending`, `Failed`, `Unknown`, `Pending`, or `DeadLettered` attempt returns
+  `ExistingDeliveryUnconfirmed` with its status and failure kind preserved;
+  consumers fail closed without vendor egress or delivery-success side effects.
+  Transient target `ProductSurfaceFailure` and project-filesystem
   `Unavailable` return to the caller while leaving `Prepared` retryable.
   Permanent preflight failure uses guarded `Prepared`→`Failed`; missing or
   uninstalled channel resolution returns caller `ChannelUnavailable` and
