@@ -591,7 +591,7 @@ If a future vendor genuinely defeats the descriptor, add a narrow quirk hook
 | Tool discovery | manifest (static) / MCP loader (discovered) | — |
 | Tool invocation | authz, approvals, obligations, resources, audit, credential injection | `invoke` behavior |
 | Ingress | route table, body/rate/deadline limits, signature recipes, replay, durable admission, ack | payload parsing → normalized outcome |
-| Outbound | intent envelope, target policy, attempt persistence, retry/dedupe, drain | rendering, vendor API calls, part outcomes |
+| Outbound | intent envelope, target policy, attempt persistence, retry/dedupe | rendering, vendor API calls, part outcomes |
 | Auth | everything (engine + recipes) | recipe data in manifest |
 | Admin setup | manifest form, tenant-scoped storage, completeness | opaque handles only |
 | User readiness | membership, personal auth/pairing, derived public state | idempotent internal publish/cleanup hooks |
@@ -701,8 +701,8 @@ small constant); hints are unnecessary at current scale.
 Sending a message decomposes into two halves, and the split is the design:
 
 - **Semantics and reliability** — which target, is it allowed, was it already
-  sent, persist the attempt, retry with backoff, crash recovery, drain on
-  shutdown. Identical for every channel → the **delivery coordinator**, one
+  sent, persist the attempt, retry with backoff, crash recovery. Identical for
+  every channel → the **delivery coordinator**, one
   host component in product-surface orchestration.
 - **Vendor mechanics** — Block Kit vs plain text, message splitting, which API
   method, threading syntax, DM provisioning, vendor error mapping. Different
@@ -746,8 +746,7 @@ user is on. One delivery, end to end:
 6. The adapter returns a structured per-part report (sent + vendor message
    ref / retryable / permanent). It has no store access and cannot mark
    anything delivered.
-7. The coordinator records the outcome, schedules retries, dedupes, and
-   drains on shutdown.
+7. The coordinator records the outcome, schedules retries, and dedupes.
 
 The **sole-writer rule** is what makes the crash story tractable, but
 `Sending` records ownership at the adapter/vendor ambiguity boundary rather

@@ -409,8 +409,7 @@ signed vendor POST → verified → normalized → turn admitted.
   records terminal `Failed` with durable `Rejected` failure kind pending typed
   resolver taxonomy. Neither path can overwrite a concurrent claim or terminal
   settlement, so the lifecycle has no status ABA. Persist the structured
-  adapter report and own
-  retry/backoff/dedupe/shutdown-drain. `Sending` records durable egress
+  adapter report and own retry/backoff/dedupe. `Sending` records durable egress
   ownership at the adapter/vendor ambiguity boundary, not vendor contact: a
   crash may occur immediately before adapter contact or after possible vendor
   success. Recovery cannot distinguish those cases, so the guarded recovery
@@ -457,7 +456,7 @@ once any part sends, a later retryable part failure is terminal unless the
 adapter supplied a vendor idempotency key; crash after a durable claim
 (immediately before adapter contact or after possible success) → guarded
 `Unknown`; distinct same-kind gate projection ids with stable same-gate replay;
-drain; both DBs). Egress security tests: undeclared host,
+both DBs). Egress security tests: undeclared host,
 adapter-supplied auth header, redirect/private-IP escape, oversized response —
 rejected before network. Slack/Telegram rendering is fixture-unit-tested in
 their crates; one outbound integration proof each through the real coordinator.
