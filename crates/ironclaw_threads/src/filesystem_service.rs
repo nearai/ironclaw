@@ -333,9 +333,10 @@ where
     /// backend keeps its own cache on the same resolved path — which is why
     /// this deliberately takes no lock.
     ///
-    /// `fail_soft_unsupported` lets a caller that only needs the projection for
-    /// an optional listing tolerate a mount without ordered-index support;
-    /// callers that require it propagate. The mount is memoized as declared
+    /// `IndexDeclarationPolicy::Optional` lets a caller that only needs the
+    /// projection for an optional listing tolerate a mount without
+    /// ordered-index support; `Required` propagates. The mount is memoized as
+    /// declared
     /// only on full success, so a fail-soft skip does not suppress a later
     /// required declaration.
     pub(super) async fn declare_root_indexes(

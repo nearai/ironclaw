@@ -290,9 +290,31 @@ pub(crate) fn apply_case(base_args: &Args, case: &SuiteCase, case_args: &mut Arg
     // previous cases' still-running background pollers, drowning later cases
     // (tool-*) in cross-runtime write-lock waits that no production deployment
     // shape has — one libSQL file is owned by one process runtime.
+    //
+    // Only when the caller did not name a path. Overwriting an explicit
+    // `--libsql-path` would silently run the suite against temporary files
+    // instead of the database the operator selected; derive a per-case sibling
+    // of their path instead, which keeps the one-file-per-runtime property
+    // without discarding the choice.
     if matches!(case_args.backend, crate::Backend::Libsql) && !case_args.scenario.is_api_capacity()
     {
-        case_args.libsql_path = Some(crate::default_libsql_path());
+        case_args.libsql_path = Some(match &base_args.libsql_path {
+            Some(explicit) => {
+                let mut per_case = explicit.clone();
+                let stem = explicit
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "ironclaw-stress".to_string());
+                let extension = explicit
+                    .extension()
+                    .map(|extension| format!(".{}", extension.to_string_lossy()))
+                    .unwrap_or_default();
+                per_case
+                    .set_file_name(format!("{stem}-{}{extension}", case_args.scenario.as_str()));
+                per_case
+            }
+            None => crate::default_libsql_path(),
+        });
     }
     case_args.prefill_threads = 0;
     case_args.prefill_turns_per_thread = 0;

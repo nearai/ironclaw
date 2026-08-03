@@ -2248,10 +2248,7 @@ async fn group_committed_submissions_deliver_every_entry_once_before_returning()
         .iter()
         .map(|commit| commit.state.process_id)
         .collect::<Vec<_>>();
-    for process_id in process_ids
-        .iter()
-        .chain(std::iter::once(&warmup.process_id))
-    {
+    for process_id in process_ids.iter() {
         assert_eq!(
             delivered
                 .iter()
@@ -2261,6 +2258,20 @@ async fn group_committed_submissions_deliver_every_entry_once_before_returning()
             "{process_id} must be delivered exactly once"
         );
     }
+    // The warm-up is held to at-least-once, not exactly-once. Registration
+    // primes the cursor from a spawned task, so if this entry commits before
+    // that task runs, `deliver_committed_batch` sees no acknowledged cursor,
+    // takes the non-contiguous fallback, and the registration replay can then
+    // deliver the same entry again. That redelivery is permitted -- the fast
+    // path documents that entries above a gap "may be delivered twice, which
+    // every replay path already permits" -- so asserting a count of one here
+    // would pin scheduling rather than the contract. The 32 submissions above
+    // are strict: by then the cursor is primed and they arrive through the
+    // funnel in order.
+    assert!(
+        delivered.contains(&warmup.process_id),
+        "the warm-up commit must reach the observer at least once"
+    );
 }
 
 #[tokio::test]

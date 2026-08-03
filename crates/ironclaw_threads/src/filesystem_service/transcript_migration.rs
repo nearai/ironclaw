@@ -216,10 +216,21 @@ where
                         Err(error) => return Err(error.into()),
                     }
                 }
-                Self::message_entry(&record)?
+                // Refresh the projection, keep the stored body. Rebuilding the
+                // entry from `record` would round-trip the row through the
+                // current struct, so any field a newer binary wrote and this
+                // one does not know is dropped permanently -- a one-way rewrite
+                // of durable transcript data. It also rewrites every body in
+                // the scope, which is the write amplification this change is
+                // trying to remove. The rebuild is only needed for `indexed`.
+                let mut entry = row.entry.clone();
+                entry.indexed = Self::message_entry(&record)?.indexed;
+                entry
             } else {
                 let record = deserialize::<SummaryArtifact>(&row.entry.body)?;
-                Self::summary_entry(&record)?
+                let mut entry = row.entry.clone();
+                entry.indexed = Self::summary_entry(&record)?.indexed;
+                entry
             };
             match txn
                 .put(&row.path, entry, CasExpectation::Version(row.version))
