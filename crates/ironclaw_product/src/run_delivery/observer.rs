@@ -42,8 +42,8 @@ use super::prompts;
 use super::{
     BlockedActionableMarker, DeliveredChannelMessage, HINT_SEEN_CAP, HintSeenSet, RunDeliveryError,
     RunDeliveryServices, RunDeliverySettings, blocked_actionable_marker, cancel_auth_blocked_run,
-    delivered_messages_from_outcome, gate_routes::record_gate_route_if_needed,
-    thread_scope_from_binding, turn_scope_from_thread_scope,
+    gate_routes::record_gate_route_if_needed, thread_scope_from_binding,
+    turn_scope_from_thread_scope,
 };
 use crate::delivery_coordinator::{
     CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest, DeliveryIntent,
@@ -330,12 +330,7 @@ impl RunDeliveryObserver {
             // Best-effort feedback so the user is not left in silence. Skip it after a
             // blocked-state notification and for an unconfirmed loser, which must not
             // trigger another vendor egress.
-            let feedback = match &error {
-                RunDeliveryError::RunWaitTimedOut { .. } => Some(prompts::DELIVERY_TIMEOUT_MESSAGE),
-                RunDeliveryError::RunWaitTimedOutAfterNotification { .. } => None,
-                RunDeliveryError::DeliveryUnconfirmed { .. } => None,
-                _ => Some(prompts::DELIVERY_ERROR_MESSAGE),
-            };
+            let feedback = delivery_failure_feedback(&error);
             if let Some(feedback) = feedback {
                 let scope = self.notice_scope(&envelope).await;
                 self.services
@@ -859,19 +854,7 @@ impl RunDeliveryObserver {
                 },
             )
             .await?;
-        match outcome {
-            CoordinatedDeliveryOutcome::Failed { failure_kind, .. } => {
-                Err(RunDeliveryError::DeliveryFailed { failure_kind })
-            }
-            CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
-                status,
-                failure_kind,
-            } => Err(RunDeliveryError::DeliveryUnconfirmed {
-                status,
-                failure_kind,
-            }),
-            outcome => Ok(delivered_messages_from_outcome(&outcome)),
-        }
+        classify_observed_delivery_outcome(outcome)
     }
 
     async fn read_latest_assistant_message(
@@ -1317,6 +1300,54 @@ impl ThreadProjectionAccessPolicy for AllowNoProjectionAccess {
     }
 }
 
+/// Exhaustively classify the coordinator's closed outcome vocabulary before
+/// the live observer performs route publication or terminal cleanup.
+fn classify_observed_delivery_outcome(
+    outcome: CoordinatedDeliveryOutcome,
+) -> Result<Vec<DeliveredChannelMessage>, RunDeliveryError> {
+    match outcome {
+        CoordinatedDeliveryOutcome::NoDelivery => Err(RunDeliveryError::NoDelivery),
+        CoordinatedDeliveryOutcome::Rejected { attempt } => {
+            Err(RunDeliveryError::DeliveryRejected {
+                failure_kind: attempt.failure_kind,
+            })
+        }
+        CoordinatedDeliveryOutcome::DuplicateSuppressed { .. } => Ok(Vec::new()),
+        CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
+            status,
+            failure_kind,
+        } => Err(RunDeliveryError::DeliveryUnconfirmed {
+            status,
+            failure_kind,
+        }),
+        CoordinatedDeliveryOutcome::Delivered {
+            conversation,
+            vendor_message_refs,
+            ..
+        } => Ok(vendor_message_refs
+            .into_iter()
+            .map(|vendor_message_ref| DeliveredChannelMessage {
+                conversation: conversation.clone(),
+                vendor_message_ref,
+            })
+            .collect()),
+        CoordinatedDeliveryOutcome::Failed { failure_kind, .. } => {
+            Err(RunDeliveryError::DeliveryFailed { failure_kind })
+        }
+    }
+}
+
+fn delivery_failure_feedback(error: &RunDeliveryError) -> Option<&'static str> {
+    match error {
+        RunDeliveryError::RunWaitTimedOut { .. } => Some(prompts::DELIVERY_TIMEOUT_MESSAGE),
+        RunDeliveryError::RunWaitTimedOutAfterNotification { .. }
+        | RunDeliveryError::NoDelivery
+        | RunDeliveryError::DeliveryRejected { .. }
+        | RunDeliveryError::DeliveryUnconfirmed { .. } => None,
+        _ => Some(prompts::DELIVERY_ERROR_MESSAGE),
+    }
+}
+
 pub(crate) fn submitted_run_id(ack: &ProductInboundAck) -> Option<TurnRunId> {
     match ack {
         ProductInboundAck::Accepted {
@@ -1508,5 +1539,133 @@ mod delivery_claim_tests {
 
         ledger.record_delivered(run_id);
         assert_eq!(ledger.try_claim(run_id), DeliveryClaim::AlreadyDelivered);
+    }
+}
+
+#[cfg(test)]
+mod outcome_classification_tests {
+    use super::{classify_observed_delivery_outcome, delivery_failure_feedback};
+    use crate::delivery_coordinator::CoordinatedDeliveryOutcome;
+    use crate::{ExternalConversationRef, RunDeliveryError};
+    use chrono::Utc;
+    use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId};
+    use ironclaw_outbound::{
+        DeliveryFailureKind, OutboundDeliveryAttempt, OutboundDeliveryId, OutboundDeliveryStatus,
+        OutboundPushCandidate, OutboundPushKind, ProjectionUpdateRef,
+    };
+    use ironclaw_turns::{ReplyTargetBindingRef, TurnScope};
+
+    fn attempt(failure_kind: Option<DeliveryFailureKind>) -> OutboundDeliveryAttempt {
+        let tenant_id = TenantId::new("tenant-outcome-test").expect("tenant id");
+        let agent_id = AgentId::new("agent-outcome-test").expect("agent id");
+        let thread_id = ThreadId::new("thread-outcome-test").expect("thread id");
+        let scope = TurnScope::new(
+            tenant_id.clone(),
+            Some(agent_id.clone()),
+            None,
+            thread_id.clone(),
+        );
+        OutboundDeliveryAttempt {
+            delivery_id: OutboundDeliveryId::new(),
+            scope,
+            candidate: OutboundPushCandidate {
+                tenant_id,
+                agent_id: Some(agent_id),
+                project_id: None,
+                thread_id,
+                turn_run_id: None,
+                target: ReplyTargetBindingRef::new("reply:outcome-test").expect("target"),
+                kind: OutboundPushKind::FinalReply,
+                projection_ref: ProjectionUpdateRef::new("projection:outcome-test")
+                    .expect("projection ref"),
+                requires_reply_target_revalidation: true,
+            },
+            status: OutboundDeliveryStatus::Failed,
+            attempted_at: Utc::now(),
+            failure_kind,
+        }
+    }
+
+    fn conversation() -> ExternalConversationRef {
+        ExternalConversationRef::new(None, "conversation-outcome-test", None, None)
+            .expect("conversation")
+    }
+
+    #[test]
+    fn observer_classifier_is_exhaustive_and_only_accepts_confirmed_delivery() {
+        let no_delivery =
+            classify_observed_delivery_outcome(CoordinatedDeliveryOutcome::NoDelivery)
+                .expect_err("no delivery is not success");
+        assert!(matches!(&no_delivery, RunDeliveryError::NoDelivery));
+        assert_eq!(delivery_failure_feedback(&no_delivery), None);
+
+        for failure_kind in [
+            Some(DeliveryFailureKind::AuthorizationRevoked),
+            Some(DeliveryFailureKind::TransientValidatorError),
+            None,
+        ] {
+            let rejected =
+                classify_observed_delivery_outcome(CoordinatedDeliveryOutcome::Rejected {
+                    attempt: attempt(failure_kind),
+                })
+                .expect_err("rejection is not success");
+            assert!(matches!(
+                &rejected,
+                RunDeliveryError::DeliveryRejected {
+                    failure_kind: actual
+                } if actual == &failure_kind
+            ));
+            assert_eq!(delivery_failure_feedback(&rejected), None);
+        }
+
+        let duplicate =
+            classify_observed_delivery_outcome(CoordinatedDeliveryOutcome::DuplicateSuppressed {
+                delivery_id: OutboundDeliveryId::new(),
+                conversation: Some(conversation()),
+            })
+            .expect("authoritative delivered duplicate is success");
+        assert!(duplicate.is_empty());
+
+        let unconfirmed = classify_observed_delivery_outcome(
+            CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
+                status: OutboundDeliveryStatus::Unknown,
+                failure_kind: Some(DeliveryFailureKind::Unknown),
+            },
+        )
+        .expect_err("ambiguous existing delivery is not success");
+        assert!(matches!(
+            &unconfirmed,
+            RunDeliveryError::DeliveryUnconfirmed {
+                status: OutboundDeliveryStatus::Unknown,
+                failure_kind: Some(DeliveryFailureKind::Unknown)
+            }
+        ));
+        assert_eq!(delivery_failure_feedback(&unconfirmed), None);
+
+        let delivered_conversation = conversation();
+        let delivered = classify_observed_delivery_outcome(CoordinatedDeliveryOutcome::Delivered {
+            attempt: attempt(None),
+            conversation: delivered_conversation.clone(),
+            vendor_message_refs: vec!["vendor-1".to_string(), "vendor-2".to_string()],
+        })
+        .expect("delivered is success");
+        assert_eq!(delivered.len(), 2);
+        assert!(delivered.iter().all(|message| {
+            message.conversation == delivered_conversation
+                && ["vendor-1", "vendor-2"].contains(&message.vendor_message_ref.as_str())
+        }));
+
+        let failed = classify_observed_delivery_outcome(CoordinatedDeliveryOutcome::Failed {
+            attempt: attempt(Some(DeliveryFailureKind::TransportUnavailable)),
+            failure_kind: DeliveryFailureKind::TransportUnavailable,
+        })
+        .expect_err("terminal delivery failure is not success");
+        assert!(matches!(
+            &failed,
+            RunDeliveryError::DeliveryFailed {
+                failure_kind: DeliveryFailureKind::TransportUnavailable
+            }
+        ));
+        assert!(delivery_failure_feedback(&failed).is_some());
     }
 }

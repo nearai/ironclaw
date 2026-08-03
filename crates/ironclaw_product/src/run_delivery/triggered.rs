@@ -27,8 +27,8 @@ use super::prompts;
 use super::{
     BlockedActionableMarker, DeliveredChannelMessage, RunDeliveryError, RunDeliveryServices,
     RunDeliverySettings, blocked_actionable_marker, cancel_auth_blocked_run,
-    delivered_messages_from_outcome, gate_routes::record_gate_route_if_needed,
-    triggered_run_delivery_settings, wait_for_actionable_state,
+    gate_routes::record_gate_route_if_needed, triggered_run_delivery_settings,
+    wait_for_actionable_state,
 };
 use crate::delivery_coordinator::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest,
@@ -91,6 +91,8 @@ struct TriggeredNotificationContext<'a> {
 /// Typed failure classification for a single triggered-run notification
 /// delivery attempt.
 enum TriggeredNotificationFailure {
+    /// Outbound policy selected no delivery candidate.
+    NoDelivery,
     /// The creator has no personal delivery target configured.
     NoDefaultConfigured,
     /// The resolved target is inaccessible or rejected the delivery.
@@ -105,6 +107,11 @@ enum TriggeredNotificationFailure {
         status: ironclaw_outbound::OutboundDeliveryStatus,
         failure_kind: Option<ironclaw_outbound::DeliveryFailureKind>,
     },
+    /// Policy rejected the selected candidate for a reason other than an
+    /// authorization revocation.
+    Rejected {
+        failure_kind: Option<ironclaw_outbound::DeliveryFailureKind>,
+    },
     /// Any other delivery or transport failure.
     Other(String),
 }
@@ -112,6 +119,7 @@ enum TriggeredNotificationFailure {
 impl std::fmt::Display for TriggeredNotificationFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::NoDelivery => write!(f, "outbound policy selected no delivery target"),
             Self::NoDefaultConfigured => write!(f, "no default delivery target configured"),
             Self::Denied => write!(f, "delivery target access denied"),
             Self::OAuthTargetNotDm => write!(
@@ -125,11 +133,15 @@ impl std::fmt::Display for TriggeredNotificationFailure {
                 f,
                 "existing delivery is not confirmed: status={status:?}, failure_kind={failure_kind:?}"
             ),
+            Self::Rejected { failure_kind } => {
+                write!(f, "delivery rejected: failure_kind={failure_kind:?}")
+            }
             Self::Other(reason) => write!(f, "{reason}"),
         }
     }
 }
 
+#[derive(Debug)]
 struct ConfirmedTriggeredDelivery {
     delivered_messages: Vec<DeliveredChannelMessage>,
     /// Present only for an authoritative pre-existing `Delivered` row whose
@@ -533,17 +545,7 @@ async fn deliver_triggered_run(
                 }
                 let outcome = match replacement {
                     Ok(_) => TriggeredRunDeliveryOutcomeKind::Delivered,
-                    Err(TriggeredNotificationFailure::NoDefaultConfigured) => {
-                        TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
-                    }
-                    Err(TriggeredNotificationFailure::Denied) => {
-                        TriggeredRunDeliveryOutcomeKind::Denied
-                    }
-                    Err(TriggeredNotificationFailure::OAuthTargetNotDm)
-                    | Err(TriggeredNotificationFailure::DeliveryUnconfirmed { .. })
-                    | Err(TriggeredNotificationFailure::Other(_)) => {
-                        TriggeredRunDeliveryOutcomeKind::Failed
-                    }
+                    Err(failure) => triggered_outcome_for_failure(&failure),
                 };
                 // Only after a successful cancel and the replacement notice:
                 // remove the now-stale OAuth prompts.
@@ -562,19 +564,7 @@ async fn deliver_triggered_run(
                     reason = %failure,
                     "triggered run delivery failed"
                 );
-                let outcome = match failure {
-                    TriggeredNotificationFailure::NoDefaultConfigured => {
-                        TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
-                    }
-                    TriggeredNotificationFailure::Denied => TriggeredRunDeliveryOutcomeKind::Denied,
-                    TriggeredNotificationFailure::OAuthTargetNotDm => {
-                        unreachable!("OAuthTargetNotDm is handled by the dedicated arm above")
-                    }
-                    TriggeredNotificationFailure::DeliveryUnconfirmed { .. }
-                    | TriggeredNotificationFailure::Other(_) => {
-                        TriggeredRunDeliveryOutcomeKind::Failed
-                    }
-                };
+                let outcome = triggered_outcome_for_failure(&failure);
                 record_triggered_run_outcome(delivery_store, run_id, outcome).await;
                 return outcome;
             }
@@ -821,7 +811,27 @@ async fn deliver_triggered_notification(
         )
         .await
         .map_err(classify_delivery_error)?;
+    classify_triggered_delivery_outcome(outcome)
+}
+
+/// Exhaustively classify the coordinator outcome before the triggered driver
+/// records success-side state such as gate routes or terminal delivery.
+fn classify_triggered_delivery_outcome(
+    outcome: CoordinatedDeliveryOutcome,
+) -> Result<ConfirmedTriggeredDelivery, TriggeredNotificationFailure> {
     match outcome {
+        CoordinatedDeliveryOutcome::NoDelivery => Err(TriggeredNotificationFailure::NoDelivery),
+        CoordinatedDeliveryOutcome::Rejected { attempt }
+            if attempt.failure_kind
+                == Some(ironclaw_outbound::DeliveryFailureKind::AuthorizationRevoked) =>
+        {
+            Err(TriggeredNotificationFailure::Denied)
+        }
+        CoordinatedDeliveryOutcome::Rejected { attempt } => {
+            Err(TriggeredNotificationFailure::Rejected {
+                failure_kind: attempt.failure_kind,
+            })
+        }
         CoordinatedDeliveryOutcome::Failed { failure_kind, .. } => Err(
             TriggeredNotificationFailure::Other(format!("delivery failed: {failure_kind:?}")),
         ),
@@ -838,10 +848,36 @@ async fn deliver_triggered_notification(
                 existing_delivered_conversation: conversation,
             })
         }
-        outcome => Ok(ConfirmedTriggeredDelivery {
-            delivered_messages: delivered_messages_from_outcome(&outcome),
+        CoordinatedDeliveryOutcome::Delivered {
+            conversation,
+            vendor_message_refs,
+            ..
+        } => Ok(ConfirmedTriggeredDelivery {
+            delivered_messages: vendor_message_refs
+                .into_iter()
+                .map(|vendor_message_ref| DeliveredChannelMessage {
+                    conversation: conversation.clone(),
+                    vendor_message_ref,
+                })
+                .collect(),
             existing_delivered_conversation: None,
         }),
+    }
+}
+
+fn triggered_outcome_for_failure(
+    failure: &TriggeredNotificationFailure,
+) -> TriggeredRunDeliveryOutcomeKind {
+    match failure {
+        TriggeredNotificationFailure::NoDefaultConfigured => {
+            TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+        }
+        TriggeredNotificationFailure::Denied => TriggeredRunDeliveryOutcomeKind::Denied,
+        TriggeredNotificationFailure::NoDelivery
+        | TriggeredNotificationFailure::OAuthTargetNotDm
+        | TriggeredNotificationFailure::DeliveryUnconfirmed { .. }
+        | TriggeredNotificationFailure::Rejected { .. }
+        | TriggeredNotificationFailure::Other(_) => TriggeredRunDeliveryOutcomeKind::Failed,
     }
 }
 
@@ -943,5 +979,168 @@ impl ProductOutboundTargetResolver for TriggeredReplyTargetAuthority<'_> {
             external_conversation_ref,
             external_actor_ref: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod outcome_classification_tests {
+    use super::{
+        TriggeredNotificationFailure, classify_triggered_delivery_outcome,
+        triggered_outcome_for_failure,
+    };
+    use crate::ExternalConversationRef;
+    use crate::delivery_coordinator::CoordinatedDeliveryOutcome;
+    use chrono::Utc;
+    use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId};
+    use ironclaw_outbound::{
+        DeliveryFailureKind, OutboundDeliveryAttempt, OutboundDeliveryId, OutboundDeliveryStatus,
+        OutboundPushCandidate, OutboundPushKind, ProjectionUpdateRef,
+        TriggeredRunDeliveryOutcomeKind,
+    };
+    use ironclaw_turns::{ReplyTargetBindingRef, TurnScope};
+
+    fn attempt(failure_kind: Option<DeliveryFailureKind>) -> OutboundDeliveryAttempt {
+        let tenant_id = TenantId::new("tenant-triggered-outcome").expect("tenant id");
+        let agent_id = AgentId::new("agent-triggered-outcome").expect("agent id");
+        let thread_id = ThreadId::new("thread-triggered-outcome").expect("thread id");
+        let scope = TurnScope::new(
+            tenant_id.clone(),
+            Some(agent_id.clone()),
+            None,
+            thread_id.clone(),
+        );
+        OutboundDeliveryAttempt {
+            delivery_id: OutboundDeliveryId::new(),
+            scope,
+            candidate: OutboundPushCandidate {
+                tenant_id,
+                agent_id: Some(agent_id),
+                project_id: None,
+                thread_id,
+                turn_run_id: None,
+                target: ReplyTargetBindingRef::new("reply:triggered-outcome").expect("target"),
+                kind: OutboundPushKind::FinalReply,
+                projection_ref: ProjectionUpdateRef::new("projection:triggered-outcome")
+                    .expect("projection ref"),
+                requires_reply_target_revalidation: true,
+            },
+            status: OutboundDeliveryStatus::Failed,
+            attempted_at: Utc::now(),
+            failure_kind,
+        }
+    }
+
+    fn conversation() -> ExternalConversationRef {
+        ExternalConversationRef::new(None, "triggered-conversation", None, None)
+            .expect("conversation")
+    }
+
+    #[test]
+    fn triggered_classifier_handles_every_coordinator_outcome_without_a_wildcard() {
+        let no_delivery =
+            classify_triggered_delivery_outcome(CoordinatedDeliveryOutcome::NoDelivery)
+                .expect_err("no delivery is not success");
+        assert!(matches!(
+            &no_delivery,
+            TriggeredNotificationFailure::NoDelivery
+        ));
+        assert_eq!(
+            triggered_outcome_for_failure(&no_delivery),
+            TriggeredRunDeliveryOutcomeKind::Failed
+        );
+
+        let denied = classify_triggered_delivery_outcome(CoordinatedDeliveryOutcome::Rejected {
+            attempt: attempt(Some(DeliveryFailureKind::AuthorizationRevoked)),
+        })
+        .expect_err("authorization rejection is not success");
+        assert!(matches!(&denied, TriggeredNotificationFailure::Denied));
+        assert_eq!(
+            triggered_outcome_for_failure(&denied),
+            TriggeredRunDeliveryOutcomeKind::Denied
+        );
+
+        for failure_kind in [
+            Some(DeliveryFailureKind::TransientValidatorError),
+            Some(DeliveryFailureKind::Rejected),
+            None,
+        ] {
+            let rejected =
+                classify_triggered_delivery_outcome(CoordinatedDeliveryOutcome::Rejected {
+                    attempt: attempt(failure_kind),
+                })
+                .expect_err("non-authorization rejection is not success");
+            assert!(matches!(
+                &rejected,
+                TriggeredNotificationFailure::Rejected {
+                    failure_kind: actual
+                } if actual == &failure_kind
+            ));
+            assert_eq!(
+                triggered_outcome_for_failure(&rejected),
+                TriggeredRunDeliveryOutcomeKind::Failed
+            );
+        }
+
+        let duplicate_conversation = conversation();
+        let duplicate =
+            classify_triggered_delivery_outcome(CoordinatedDeliveryOutcome::DuplicateSuppressed {
+                delivery_id: OutboundDeliveryId::new(),
+                conversation: Some(duplicate_conversation.clone()),
+            })
+            .expect("authoritative delivered duplicate is success");
+        assert!(duplicate.delivered_messages.is_empty());
+        assert_eq!(
+            duplicate.existing_delivered_conversation,
+            Some(duplicate_conversation)
+        );
+
+        let unconfirmed = classify_triggered_delivery_outcome(
+            CoordinatedDeliveryOutcome::ExistingDeliveryUnconfirmed {
+                status: OutboundDeliveryStatus::Sending,
+                failure_kind: None,
+            },
+        )
+        .expect_err("unconfirmed delivery is not success");
+        assert!(matches!(
+            &unconfirmed,
+            TriggeredNotificationFailure::DeliveryUnconfirmed {
+                status: OutboundDeliveryStatus::Sending,
+                failure_kind: None
+            }
+        ));
+        assert_eq!(
+            triggered_outcome_for_failure(&unconfirmed),
+            TriggeredRunDeliveryOutcomeKind::Failed
+        );
+
+        let delivered_conversation = conversation();
+        let delivered =
+            classify_triggered_delivery_outcome(CoordinatedDeliveryOutcome::Delivered {
+                attempt: attempt(None),
+                conversation: delivered_conversation.clone(),
+                vendor_message_refs: vec!["triggered-vendor-ref".to_string()],
+            })
+            .expect("delivered is success");
+        assert_eq!(delivered.existing_delivered_conversation, None);
+        assert_eq!(delivered.delivered_messages.len(), 1);
+        assert_eq!(
+            delivered.delivered_messages[0].conversation,
+            delivered_conversation
+        );
+        assert_eq!(
+            delivered.delivered_messages[0].vendor_message_ref,
+            "triggered-vendor-ref"
+        );
+
+        let failed = classify_triggered_delivery_outcome(CoordinatedDeliveryOutcome::Failed {
+            attempt: attempt(Some(DeliveryFailureKind::RateLimited)),
+            failure_kind: DeliveryFailureKind::RateLimited,
+        })
+        .expect_err("failed delivery is not success");
+        assert!(matches!(&failed, TriggeredNotificationFailure::Other(_)));
+        assert_eq!(
+            triggered_outcome_for_failure(&failed),
+            TriggeredRunDeliveryOutcomeKind::Failed
+        );
     }
 }

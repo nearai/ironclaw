@@ -181,6 +181,12 @@ pub enum RunDeliveryError {
     DeliveryFailed {
         failure_kind: ironclaw_outbound::DeliveryFailureKind,
     },
+    #[error("outbound policy selected no delivery target")]
+    NoDelivery,
+    #[error("outbound policy rejected delivery: failure_kind={failure_kind:?}")]
+    DeliveryRejected {
+        failure_kind: Option<ironclaw_outbound::DeliveryFailureKind>,
+    },
     #[error("existing delivery is not confirmed: status={status:?}, failure_kind={failure_kind:?}")]
     DeliveryUnconfirmed {
         status: ironclaw_outbound::OutboundDeliveryStatus,
