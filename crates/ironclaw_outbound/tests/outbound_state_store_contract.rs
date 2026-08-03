@@ -2662,7 +2662,7 @@ impl RootFilesystem for DeliveryTransitionRaceBackend {
                 body: serde_json::to_vec(&winner).expect("serialize deterministic race winner"),
                 ..entry
             };
-            let found = self.inner.put(path, winner_entry, cas.clone()).await?;
+            let found = self.inner.put(path, winner_entry, cas).await?;
             let expected = match cas {
                 CasExpectation::Version(version) => Some(version),
                 CasExpectation::Absent | CasExpectation::Any => None,
