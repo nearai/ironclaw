@@ -46,7 +46,7 @@ mod config;
 pub use config::{RebornLoopDriverHostError, RebornLoopDriverHostRequest, TextOnlyLoopHostConfig};
 use ironclaw_loop_host::{
     HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, NoExtraLoopInputPort,
-    ThreadResolvingLoopModelGateway,
+    ThreadResolvingLoopModelGateway, ThreadResolvingLoopModelGatewayParts,
 };
 
 // Legacy text-only driver key used by `is_text_only_driver_key`'s fail-closed
@@ -1890,37 +1890,41 @@ where
         let model_gateway_ports_started_at = ironclaw_observability::live_latency_started_at();
         let model_gateway: Arc<dyn LoopModelGateway> =
             if let Some(gw) = self.model_gateway.resolve_for_scope(&run_context.scope) {
-                Arc::new(ThreadResolvingLoopModelGateway {
-                    thread_service: Arc::clone(&self.thread_service),
-                    thread_scope: effective_scope.clone(),
-                    host_gateway: gw,
-                    max_messages,
-                    skill_context_source: self.skill_context_source.clone(),
-                    identity_context_source: self.identity_context_source.clone(),
-                    instruction_materialization_store: Some(Arc::clone(
-                        &instruction_materialization_store,
-                    )),
-                    capabilities: Some(Arc::clone(&capabilities)),
-                    prompt_authority,
-                    context_window_cache: Some(context_window_cache),
-                    attachment_read_port: self.attachment_read_port.clone(),
-                })
+                Arc::new(ThreadResolvingLoopModelGateway::new(
+                    ThreadResolvingLoopModelGatewayParts {
+                        thread_service: Arc::clone(&self.thread_service),
+                        thread_scope: effective_scope.clone(),
+                        host_gateway: gw,
+                        max_messages,
+                        skill_context_source: self.skill_context_source.clone(),
+                        identity_context_source: self.identity_context_source.clone(),
+                        instruction_materialization_store: Some(Arc::clone(
+                            &instruction_materialization_store,
+                        )),
+                        capabilities: Some(Arc::clone(&capabilities)),
+                        prompt_authority,
+                        context_window_cache: Some(context_window_cache),
+                        attachment_read_port: self.attachment_read_port.clone(),
+                    },
+                ))
             } else {
-                Arc::new(ThreadResolvingLoopModelGateway {
-                    thread_service: Arc::clone(&self.thread_service),
-                    thread_scope: effective_scope.clone(),
-                    host_gateway: Arc::clone(&self.model_gateway),
-                    max_messages,
-                    skill_context_source: self.skill_context_source.clone(),
-                    identity_context_source: self.identity_context_source.clone(),
-                    instruction_materialization_store: Some(Arc::clone(
-                        &instruction_materialization_store,
-                    )),
-                    capabilities: Some(Arc::clone(&capabilities)),
-                    prompt_authority,
-                    context_window_cache: Some(context_window_cache),
-                    attachment_read_port: self.attachment_read_port.clone(),
-                })
+                Arc::new(ThreadResolvingLoopModelGateway::new(
+                    ThreadResolvingLoopModelGatewayParts {
+                        thread_service: Arc::clone(&self.thread_service),
+                        thread_scope: effective_scope.clone(),
+                        host_gateway: Arc::clone(&self.model_gateway),
+                        max_messages,
+                        skill_context_source: self.skill_context_source.clone(),
+                        identity_context_source: self.identity_context_source.clone(),
+                        instruction_materialization_store: Some(Arc::clone(
+                            &instruction_materialization_store,
+                        )),
+                        capabilities: Some(Arc::clone(&capabilities)),
+                        prompt_authority,
+                        context_window_cache: Some(context_window_cache),
+                        attachment_read_port: self.attachment_read_port.clone(),
+                    },
+                ))
             };
         let mut model: Arc<dyn LoopModelPort> = Arc::new(HostManagedLoopModelPort::with_guards(
             run_context.clone(),

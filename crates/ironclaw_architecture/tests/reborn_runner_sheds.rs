@@ -51,10 +51,17 @@ const HOOKS: &str = "ironclaw_hooks";
 /// definition. Each must be defined exactly once in `LOOP_HOST` and never in
 /// `RUNNER`.
 ///
-/// The list is the *shed inventory*, not "everything in the moved files":
-/// module-private helpers are not named here because moving a private helper is
-/// not observable, and pinning them would turn every internal refactor of the
-/// gateway into a gate edit.
+/// The list is the *shed inventory*, not "everything in the moved files": free
+/// functions and one-off helpers are not named here, because pinning them would
+/// turn every internal refactor of the gateway into a gate edit.
+///
+/// It does include five `pub(crate)` types from the tool-disclosure cluster
+/// (`CapabilityCatalog`, `PromotedSet`, `DisclosureCaps`, `ActiveSet`,
+/// `ToolTier`). They are not module-private helpers: they are the cluster's
+/// load-bearing vocabulary, the cluster moved as a unit, and a half-move that
+/// left one of them behind in the runner would compile — which is exactly the
+/// failure this gate exists to catch. Visibility is not the criterion; being
+/// part of the moved unit's contract is.
 const MOVED_ITEMS: &[(&str, &str)] = &[
     // --- model gateway (PROPOSAL §6.7.2 "gains: runner's model-gateway adapter")
     ("struct ", "LlmProviderModelGateway"),
@@ -402,9 +409,14 @@ fn package<'a>(metadata: &'a serde_json::Value, name: &str) -> &'a serde_json::V
         })
 }
 
-/// Dependency names of `package` across **every** kind (normal, dev, build),
-/// resolved through `rename` where present: a renamed edge
-/// (`llm = {{ package = "ironclaw_llm" }}`) would otherwise read as absent.
+/// Dependency names of `package` across **every** kind (normal, dev, build).
+///
+/// Reads `dependencies[].name`, which under `cargo metadata --no-deps` is the
+/// *package identity*; the manifest alias, when there is one, is the separate
+/// `rename` field. So a renamed edge
+/// (`llm = { package = "ironclaw_llm" }`) still reports `ironclaw_llm` here and
+/// cannot hide from the assertions below — which is why this reads `name` and
+/// deliberately ignores `rename`.
 fn dependency_names(package: &serde_json::Value) -> BTreeSet<String> {
     package["dependencies"]
         .as_array()
@@ -467,6 +479,8 @@ fn reborn_runner_residue_of_the_shed_clusters_is_enumerated_and_shrink_only() {
     let root = workspace_root();
     let runner = production_sources(&root, RUNNER);
     let identifiers = moved_identifiers();
+    // Loop-invariant: resolving the crate directory walks all of `crates/`.
+    let crate_dir = crate_directory(&root, RUNNER);
 
     let mut found: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
     for (path, cleaned) in &runner {
@@ -480,7 +494,6 @@ fn reborn_runner_residue_of_the_shed_clusters_is_enumerated_and_shrink_only() {
             }
         }
         if !named.is_empty() {
-            let crate_dir = crate_directory(&root, RUNNER);
             found.insert(relative(path, &crate_dir), named);
         }
     }
@@ -567,7 +580,7 @@ fn reborn_runner_sheds_definition_scanner_reads_real_definition_shapes() {
         pub unsafe trait UnsafeRouteMarker { }
         pub struct ModelRouteErrorKind;
         impl LlmProviderModelGateway<()> { }
-        let s = ModelRoute::new();
+        impl ImplementedButNeverDefined for Thing { }
         pub struct ModelRouteProviderKeyBuilder;
     "##;
     let cleaned = strip_cfg_test_blocks(&strip_comments_and_strings(sample));
@@ -579,7 +592,17 @@ fn reborn_runner_sheds_definition_scanner_reads_real_definition_shapes() {
     assert!(defines(&cleaned, "trait ", "ModelRouteProviderPool"));
     assert!(defines(&cleaned, "trait ", "UnsafeRouteMarker"));
 
-    // Negative: an `impl` header is a reference, not a definition.
+    // Negative: an `impl` header is a reference, not a definition. The name is
+    // present in the fixture ONLY as an impl target, so a regression that
+    // accepted impl headers would flip this — which asserting on an absent name
+    // could never show.
+    assert!(
+        !defines(&cleaned, "struct ", "ImplementedButNeverDefined"),
+        "an `impl X for Y` header is a reference; treating it as a definition \
+         would let a deleted type read as present at its new home"
+    );
+    assert!(!defines(&cleaned, "trait ", "ImplementedButNeverDefined"));
+    // Negative: a name absent from the fixture entirely.
     assert!(!defines(&cleaned, "struct ", "SomethingNeverDefined"));
     // Negative: the keyword must match the item kind.
     assert!(!defines(&cleaned, "enum ", "LlmProviderModelGateway"));

@@ -151,7 +151,9 @@ pub use synthetic_capability::{
     SyntheticCapabilityInvocation, wrap_synthetic_capabilities,
 };
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
-pub use thread_resolving_model_gateway::ThreadResolvingLoopModelGateway;
+pub use thread_resolving_model_gateway::{
+    ThreadResolvingLoopModelGateway, ThreadResolvingLoopModelGatewayParts,
+};
 pub use thread_scope::ThreadScopeResolver;
 pub use tool_disclosure::bridge_capability_ids;
 pub use tool_disclosure_mode::{REBORN_TOOL_DISCLOSURE_ENV, ToolDisclosureMode};

@@ -482,6 +482,30 @@ mod turn_error_to_host_error_tests {
     use super::*;
     use ironclaw_turns::{TurnCapacityResource, TurnError, TurnRunId};
 
+    /// The security-relevant arm. It moved crates with the shed and became
+    /// `pub`, so a future edit could reclassify an authorization failure as a
+    /// generic one with nothing failing — raised in review on #7064.
+    #[test]
+    fn unauthorized_maps_to_unauthorized() {
+        let error = turn_error_to_host_error(TurnError::Unauthorized);
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Unauthorized);
+    }
+
+    /// Both request-shaped arms, so neither can drift into a retryable or
+    /// authorization kind unnoticed.
+    #[test]
+    fn request_shaped_errors_map_to_invalid_invocation() {
+        for turn_error in [
+            TurnError::InvalidRequest {
+                reason: "bad checkpoint request".to_string(),
+            },
+            TurnError::InvalidRunOriginAdapter,
+        ] {
+            let error = turn_error_to_host_error(turn_error);
+            assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        }
+    }
+
     #[test]
     fn capacity_exceeded_maps_to_unavailable() {
         let error = turn_error_to_host_error(TurnError::capacity_exceeded(

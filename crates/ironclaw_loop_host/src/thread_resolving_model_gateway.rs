@@ -15,14 +15,16 @@ use ironclaw_threads::{SessionThreadService, ThreadScope};
 
 use crate::model_gateway_error_mapping::host_error_to_model_gateway_error;
 
-/// Resolves a thread's transcript into a host-managed model request.
+/// Everything a [`ThreadResolvingLoopModelGateway`] needs, as one value.
 ///
-/// The fields are `pub` because the driver host that fills them lives in
-/// `ironclaw_runner`: this is a data carrier assembled at exactly one site
-/// (`loop_driver_host.rs`), and it was a `pub(super)`-fielded struct literal in
-/// that same crate before the WS3 shed moved the port implementation here. A
-/// constructor would be an eleven-argument function wrapping the same literal.
-pub struct ThreadResolvingLoopModelGateway<S, G>
+/// A params struct rather than an eleven-argument constructor, and public
+/// rather than the struct's own fields: the driver host in `ironclaw_runner`
+/// assembles the run-scoped inputs, and this crate owns what the gateway does
+/// with them. Adding a field is a compile error at the two call sites, which
+/// is the property the previous `pub`-fields shape also had — without letting
+/// a caller mutate the gateway after construction or build one field-by-field
+/// from a partially-initialized state.
+pub struct ThreadResolvingLoopModelGatewayParts<S, G>
 where
     S: SessionThreadService + ?Sized,
     G: HostManagedModelGateway + ?Sized,
@@ -38,6 +40,67 @@ where
     pub prompt_authority: LoopPromptBundleAuthority,
     pub context_window_cache: Option<Arc<ThreadContextWindowCache>>,
     pub attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
+}
+
+/// Resolves a thread's transcript into a host-managed model request.
+///
+/// Fields are private and the only way in is [`Self::new`]: the WS3 shed moved
+/// this port implementation out of `ironclaw_runner`, and turning its
+/// `pub(super)` fields into `pub` ones to keep the caller's struct literal
+/// working would have let any downstream crate assemble a gateway with no
+/// host-owned construction path (root `CLAUDE.md`: "module-specific
+/// initialization must live in the owning crate as a public factory").
+pub struct ThreadResolvingLoopModelGateway<S, G>
+where
+    S: SessionThreadService + ?Sized,
+    G: HostManagedModelGateway + ?Sized,
+{
+    thread_service: Arc<S>,
+    thread_scope: ThreadScope,
+    host_gateway: Arc<G>,
+    max_messages: usize,
+    skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
+    instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
+    capabilities: Option<Arc<dyn LoopCapabilityPort>>,
+    prompt_authority: LoopPromptBundleAuthority,
+    context_window_cache: Option<Arc<ThreadContextWindowCache>>,
+    attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
+}
+
+impl<S, G> ThreadResolvingLoopModelGateway<S, G>
+where
+    S: SessionThreadService + ?Sized,
+    G: HostManagedModelGateway + ?Sized,
+{
+    pub fn new(parts: ThreadResolvingLoopModelGatewayParts<S, G>) -> Self {
+        let ThreadResolvingLoopModelGatewayParts {
+            thread_service,
+            thread_scope,
+            host_gateway,
+            max_messages,
+            skill_context_source,
+            identity_context_source,
+            instruction_materialization_store,
+            capabilities,
+            prompt_authority,
+            context_window_cache,
+            attachment_read_port,
+        } = parts;
+        Self {
+            thread_service,
+            thread_scope,
+            host_gateway,
+            max_messages,
+            skill_context_source,
+            identity_context_source,
+            instruction_materialization_store,
+            capabilities,
+            prompt_authority,
+            context_window_cache,
+            attachment_read_port,
+        }
+    }
 }
 
 #[async_trait]
