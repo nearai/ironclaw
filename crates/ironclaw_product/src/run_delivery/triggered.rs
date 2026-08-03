@@ -90,6 +90,7 @@ struct TriggeredNotificationContext<'a> {
 
 /// Typed failure classification for a single triggered-run notification
 /// delivery attempt.
+#[derive(Debug)]
 enum TriggeredNotificationFailure {
     /// Outbound policy selected no delivery candidate.
     NoDelivery,
