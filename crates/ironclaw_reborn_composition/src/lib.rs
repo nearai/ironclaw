@@ -452,7 +452,7 @@ fn invocation_mount_view_for_segments(
     user_id: &str,
 ) -> Result<MountView, ironclaw_host_api::error::HostApiError> {
     let tenant_user_prefix = format!("/tenants/{tenant_id}/users/{user_id}");
-    let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 3);
+    let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 4);
     for alias in PER_USER_ALIASES {
         let target = format!("{tenant_user_prefix}{alias}");
         grants.push(MountGrant::new(
@@ -464,11 +464,17 @@ fn invocation_mount_view_for_segments(
     grants.push(MountGrant::new(
         MountAlias::new("/tenant-shared")?,
         VirtualPath::new(format!("/tenants/{tenant_id}/shared"))?,
-        // Broad tenant-shared storage gets read + write + list, but NOT delete:
-        // no tenant-shared consumer other than the identity store needs to
-        // remove records, so withholding delete here keeps the blast radius of
-        // a compromised writer from spanning every tenant-shared subtree.
+        // Broad tenant-shared storage gets read + write + list, but NOT delete.
+        // Consumers that own revocable records receive delete authority only
+        // through the narrow longest-prefix grants below.
         MountPermissions::read_write(),
+    ));
+    grants.push(MountGrant::new(
+        // Project deletion and membership revocation remove durable records.
+        // Keep that authority confined to the project repository subtree.
+        MountAlias::new("/tenant-shared/reborn-projects")?,
+        VirtualPath::new(format!("/tenants/{tenant_id}/shared/reborn-projects"))?,
+        MountPermissions::read_write_list_delete(),
     ));
     grants.push(MountGrant::new(
         // Delete authority is scoped to the identity subtree specifically: the
@@ -770,6 +776,39 @@ mod mount_view_tests {
         assert_eq!(
             resolved.as_str(),
             &format!("/tenants/{}/shared/foo", scope.tenant_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn invocation_mount_view_limits_tenant_shared_delete_to_owned_subtrees() {
+        let scope = sample_scope();
+        let view = invocation_mount_view(&scope).unwrap();
+        let (_, broad_grant) = view
+            .resolve_with_grant(&ScopedPath::new("/tenant-shared/other/state.json").unwrap())
+            .unwrap();
+        let project_scoped_path =
+            ScopedPath::new("/tenant-shared/reborn-projects/tenant-a/record.json").unwrap();
+        let (project_path, project_grant) = view.resolve_with_grant(&project_scoped_path).unwrap();
+
+        assert!(!broad_grant.permissions.delete);
+        assert!(project_grant.permissions.delete);
+        assert_eq!(
+            project_path.as_str(),
+            "/tenants/tenant-a/shared/reborn-projects/tenant-a/record.json"
+        );
+
+        let scoped = wrap_scoped(Arc::new(InMemoryBackend::new()));
+        scoped
+            .write_bytes(&scope, &project_scoped_path, b"project".to_vec())
+            .await
+            .unwrap();
+        scoped.delete(&scope, &project_scoped_path).await.unwrap();
+        assert!(
+            scoped
+                .get(&scope, &project_scoped_path)
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 
