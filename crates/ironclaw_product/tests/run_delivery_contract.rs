@@ -2192,6 +2192,133 @@ async fn triggered_final_reply_reaches_the_preference_target_with_footer() {
     );
 }
 
+/// The triggered driver is a separate production caller of the projection-id
+/// helper. Keep its gate reference wired into identity derivation too: a
+/// trigger can park repeatedly on distinct approval/auth gates before its final
+/// reply, while a replay of an already-delivered gate remains a no-op.
+#[tokio::test]
+async fn triggered_driver_delivers_distinct_same_kind_gates_once_each() {
+    const APPROVAL_A: &str = "gate:approval-00000000000000000000000000000001";
+    const APPROVAL_B: &str = "gate:approval-00000000000000000000000000000002";
+    const AUTH_A: &str = "gate:auth-vector";
+    const AUTH_B: &str = "gate:auth-vector-next";
+
+    let harness = build_triggered_harness(
+        vec![
+            scripted_state(TurnStatus::BlockedApproval, Some(APPROVAL_A)),
+            scripted_state(TurnStatus::BlockedApproval, Some(APPROVAL_B)),
+            scripted_state(TurnStatus::BlockedAuth, Some(AUTH_A)),
+            scripted_state(TurnStatus::BlockedAuth, Some(AUTH_B)),
+            scripted_state(TurnStatus::BlockedApproval, Some(APPROVAL_A)),
+            scripted_state(TurnStatus::BlockedAuth, Some(AUTH_A)),
+            scripted_state(TurnStatus::Completed, None),
+        ],
+        Some("https://provider.example/oauth"),
+        true,
+    );
+    seed_preference(&harness.store).await;
+    // Keep this contract focused on the five run notifications. A successful
+    // channel delivery may omit a vendor message ref; doing so prevents the
+    // driver's terminal auth-prompt cleanup from adding unrelated Cleanup
+    // rows to this projection-identity assertion.
+    for _ in 0..5 {
+        harness
+            .adapter
+            .reports
+            .lock()
+            .expect("reports lock")
+            .push_back(DeliveryReport {
+                parts: vec![PartDeliveryOutcome::Sent {
+                    vendor_message_ref: None,
+                }],
+            });
+    }
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "all triggered gates resolved").await;
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Delivered
+    );
+
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts.len(),
+        5,
+        "two distinct approvals, two distinct auth gates, and one final reply must reach the \
+         triggered target"
+    );
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| text.contains("Approval needed"))
+            .count(),
+        2,
+        "distinct triggered approval gates must not collide"
+    );
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| text.contains("Authentication required"))
+            .count(),
+        2,
+        "distinct triggered auth gates must not collide"
+    );
+    assert!(
+        harness.adapter.envelopes().iter().all(|envelope| envelope
+            .target
+            .conversation
+            .conversation_id()
+            == "dm-creator"),
+        "every prompt and final reply must use the decoded personal-DM preference target"
+    );
+
+    let attempts = harness
+        .store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("attempts");
+    assert_eq!(
+        attempts.len(),
+        5,
+        "replayed gates reuse their durable rows; distinct gates do not"
+    );
+    let mut projection_refs: Vec<String> = attempts
+        .iter()
+        .map(|attempt| attempt.candidate.projection_ref.as_str().to_string())
+        .collect();
+    projection_refs.sort();
+    let mut expected = vec![
+        format!(
+            "run-notification:approval:{run_id}:\
+             e3206a38703ea974fc4f5902051fcf48593081aa6c025dcb21db98bf886d8c25"
+        ),
+        format!(
+            "run-notification:approval:{run_id}:\
+             78c0c16afee88400ca2434de5c1a4d975cd21733915519104f04e3d580709356"
+        ),
+        format!(
+            "run-notification:auth:{run_id}:\
+             876c0617c31155ca02b78fb0934d45d0dde148fe65fa2a11baf58eac34c72084"
+        ),
+        format!(
+            "run-notification:auth:{run_id}:\
+             62ad57165b8c00856fded1220d7cb8f785b126c640afbcb137831ab819326116"
+        ),
+        format!("run-notification:final:{run_id}"),
+    ];
+    expected.sort();
+    assert_eq!(
+        projection_refs, expected,
+        "the triggered caller must pass each canonical gate_ref into the pinned digest contract \
+         while preserving the legacy final ID"
+    );
+}
+
 #[tokio::test]
 async fn triggered_final_reply_materializes_workspace_files_before_adapter_delivery() {
     let harness = build_triggered_harness(
