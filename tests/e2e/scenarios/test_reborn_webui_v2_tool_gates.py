@@ -635,7 +635,6 @@ class _ScriptedArtifactClient:
         return _MockArtifactResponse(status_code, payload, text)
 
 
-@pytest.mark.asyncio
 async def test_wait_for_run_artifact_status_preserves_transient_404_through_timeout() -> None:
     """A 404 followed by a non-terminal 200 must still surface the 404 on timeout.
 
