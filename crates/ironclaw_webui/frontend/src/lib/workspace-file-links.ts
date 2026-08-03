@@ -7,6 +7,7 @@ const WORKSPACE_PREFIX = "/workspace/";
 const MAX_RAW_WORKSPACE_HREF_LENGTH = 8_192;
 const MAX_DECODED_WORKSPACE_PATH_LENGTH = 4_096;
 const MAX_WORKSPACE_PATH_SEGMENTS = 64;
+const MAX_THREAD_ID_LENGTH = 512;
 const SANDBOX_SCHEME = /^sandbox:/i;
 const ENCODED_SEPARATOR = /%(?:2f|5c)/i;
 // After the one supported decode, no structural escape may remain for another
@@ -79,8 +80,19 @@ export function workspaceFileHrefFromPath(path: unknown): string | null {
 }
 
 export function workspaceViewerRouteFromFilePath(
-  path: unknown,
+  { path, threadId }: { path: unknown; threadId: unknown },
 ): string | null {
+  if (
+    typeof threadId !== "string" ||
+    !threadId ||
+    threadId.length > MAX_THREAD_ID_LENGTH ||
+    CONTROL_CHARACTER.test(threadId) ||
+    /[\\/?#]/.test(threadId)
+  ) {
+    return null;
+  }
   const fileHref = workspaceFileHrefFromPath(path);
-  return fileHref ? `/workspace${fileHref}` : null;
+  return fileHref
+    ? `/workspace/thread/${encodeURIComponent(threadId)}${fileHref}`
+    : null;
 }

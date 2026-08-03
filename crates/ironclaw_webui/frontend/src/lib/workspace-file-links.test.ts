@@ -93,13 +93,31 @@ test("workspaceFileHrefFromPath encodes each validated path segment", () => {
 
 test("workspaceViewerRouteFromFilePath builds a selected-file SPA route", () => {
   assert.equal(
-    workspaceViewerRouteFromFilePath(
-      "/workspace/attachments/报告 final.md",
-    ),
-    "/workspace/workspace/attachments/%E6%8A%A5%E5%91%8A%20final.md",
+    workspaceViewerRouteFromFilePath({
+      path: "/workspace/attachments/报告 final.md",
+      threadId: "thread-project-beta",
+    }),
+    "/workspace/thread/thread-project-beta/workspace/attachments/%E6%8A%A5%E5%91%8A%20final.md",
   );
   assert.equal(
-    workspaceViewerRouteFromFilePath("/workspace/../secret.txt"),
+    workspaceViewerRouteFromFilePath({
+      path: "/workspace/../secret.txt",
+      threadId: "thread-project-beta",
+    }),
+    null,
+  );
+  assert.equal(
+    workspaceViewerRouteFromFilePath({
+      path: "/workspace/report.md",
+      threadId: "",
+    }),
+    null,
+  );
+  assert.equal(
+    workspaceViewerRouteFromFilePath({
+      path: "/workspace/report.md",
+      threadId: "thread/other",
+    }),
     null,
   );
 });

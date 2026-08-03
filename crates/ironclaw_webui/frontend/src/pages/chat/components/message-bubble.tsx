@@ -374,6 +374,7 @@ function MessageBubbleImpl({
               <AttachmentPreviewModal
                 attachment={previewAttachment}
                 onClose={() => setPreviewAttachment(null)}
+                threadId={threadId}
               />
             </React.Suspense>
           )}

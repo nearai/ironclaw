@@ -71,6 +71,7 @@ export function ProjectFileChips({ threadId, content }) {
       <AttachmentPreviewModal
         attachment={previewAttachment}
         onClose={() => setPreviewAttachment(null)}
+        threadId={threadId}
       />
     </div>
   );

@@ -1,12 +1,12 @@
 import { useT } from "../../../lib/i18n";
-import { areaDisplayName, pathSegments, routeForWorkspacePath } from "../lib/workspace-presenters";
+import { areaDisplayName, pathSegments } from "../lib/workspace-presenters";
 
 // Path breadcrumb shared by the file viewer and the directory listing. The root
 // is shown as the localized "workspace" label (both areas live under it); the
 // first segment is a storage area, rendered by its display name ("home"/"memory")
-// while still navigating by its real id. Every crumb uses the same URL-as-state
-// path the tree uses, so breadcrumb clicks, tree clicks, and direct links stay
-// in sync.
+// while still navigating by its real id. Every crumb emits the same qualified
+// path the tree uses; the page then applies either its caller-default or
+// thread-scoped route prefix, so clicks and direct links stay in sync.
 export function WorkspaceBreadcrumb({ path, onNavigate }) {
   const t = useT();
   const parts = pathSegments(path);
@@ -19,7 +19,7 @@ export function WorkspaceBreadcrumb({ path, onNavigate }) {
     >
       <button
         type="button"
-        onClick={() => onNavigate("/workspace")}
+        onClick={() => onNavigate("")}
         className="text-signal hover:underline"
       >
         {t("workspace.breadcrumbRoot")}
@@ -34,7 +34,7 @@ export function WorkspaceBreadcrumb({ path, onNavigate }) {
           <button
             key={`${target}-button`}
             type="button"
-            onClick={() => onNavigate(routeForWorkspacePath(target))}
+            onClick={() => onNavigate(target)}
             className="max-w-[220px] truncate text-signal hover:underline"
           >
             {label}
