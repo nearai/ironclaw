@@ -37,7 +37,7 @@ use ironclaw_extension_manager::lifecycle_test_support::{
     lifecycle_product_context, rebuild_lifecycle_test_services_with_auth_provider,
     webui_gate_resource_scope_for_owner,
 };
-use ironclaw_extensions::ExtensionInstallationStorePort;
+use ironclaw_extensions::{ExtensionInstallationStorePort, ExtensionManifestRecord};
 use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
@@ -192,6 +192,97 @@ async fn install_fixture(
         )
         .await
         .expect("ordinary lifecycle install completes")
+}
+
+/// Install a normal no-auth empty-catalog package, then replace only its
+/// persisted manifest to emulate an installation written before registration
+/// resolved hosted-MCP authentication.
+async fn install_legacy_hosted_mcp_manifest(
+    services: &ironclaw_extension_manager::lifecycle_test_support::ExtensionLifecycleTestServices,
+    scope: ironclaw_host_api::resource::ResourceScope,
+    registration_auth: HostedMcpAuthSelection,
+) {
+    services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionRegisterHostedMcp {
+                request: automatic_request(),
+            },
+        )
+        .await
+        .expect("production registration admits the no-auth legacy fixture");
+    install_fixture(services, scope).await;
+
+    let extension_id = ExtensionId::new("mcp-fixture").expect("fixture extension id");
+    let installation_store = services.extension_management.installation_store_for_test();
+    let installation = installation_store
+        .list_installations()
+        .await
+        .expect("fixture installation list")
+        .into_iter()
+        .find(|installation| installation.extension_id() == &extension_id)
+        .expect("fixture installation persists");
+    let manifest = installation_store
+        .get_manifest(&extension_id)
+        .await
+        .expect("fixture manifest readback")
+        .expect("fixture installation has a manifest");
+    let mut resolved = manifest.resolved().clone();
+    resolved
+        .mcp
+        .as_mut()
+        .expect("hosted fixture has an MCP declaration")
+        .registration_auth = registration_auth;
+    let legacy_manifest = ExtensionManifestRecord::from_resolved(
+        manifest.raw_toml(),
+        manifest.manifest().source,
+        resolved,
+        manifest.manifest_hash().cloned(),
+    )
+    .expect("legacy hosted-MCP manifest remains valid")
+    .with_definition_retention(manifest.definition_retention());
+    installation_store
+        .upsert_manifest_only(
+            installation.installation_id(),
+            installation.incarnation_id(),
+            installation.manifest_ref(),
+            installation.updated_at(),
+            legacy_manifest,
+        )
+        .await
+        .expect("public store port replaces only the persisted legacy manifest");
+}
+
+async fn restored_legacy_hosted_mcp(
+    user_id: &str,
+    registration_auth: HostedMcpAuthSelection,
+    recovery_egress: Arc<dyn ironclaw_network::NetworkHttpEgress>,
+) -> (
+    ironclaw_extension_manager::lifecycle_test_support::ExtensionLifecycleTestServices,
+    ironclaw_host_api::resource::ResourceScope,
+) {
+    let bootstrap =
+        HostedMcpRegistrationServer::start(HostedMcpAuthPolicy::NoAuth, Vec::new()).await;
+    let services = build_lifecycle_test_services(
+        user_id,
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &bootstrap,
+        ))),
+        false,
+    )
+    .await;
+    let scope = webui_gate_resource_scope_for_owner(user_id);
+    install_legacy_hosted_mcp_manifest(&services, scope.clone(), registration_auth).await;
+    let restored = rebuild_lifecycle_test_services_with_auth_provider(
+        &services,
+        user_id,
+        Some(recovery_egress),
+        false,
+        Arc::new(ironclaw_auth::UnavailableAuthProviderClient),
+    )
+    .await;
+    (restored, scope)
 }
 
 fn credential_provider_from_response(
@@ -693,6 +784,213 @@ async fn automatic_no_auth_empty_catalog_registers_before_catalog_discovery() {
         )),
         "a successful no-auth discovery must not re-open auth selection: {projected:#?}"
     );
+}
+
+#[tokio::test]
+async fn legacy_auto_manifest_selects_bearer_through_lifecycle_and_checkpoints_setup() {
+    let bearer = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::ExactBearerWithoutChallenge {
+            token: "fixture-token".to_string(),
+        },
+        Vec::new(),
+    )
+    .await;
+    let (restored, scope) = restored_legacy_hosted_mcp(
+        "hosted-mcp-legacy-select-bearer",
+        HostedMcpAuthSelection::Auto,
+        Arc::new(HostedMcpRegistrationNetworkEgress::for_server(&bearer)),
+    )
+    .await;
+
+    let selected = restored
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope),
+            LifecycleProductAction::ExtensionSelectHostedMcpAuth {
+                package_ref: fixture_package_ref(),
+                auth_selection: HostedMcpAuthSelection::Bearer,
+            },
+        )
+        .await
+        .expect("lifecycle auth selection checkpoints bearer setup");
+    assert!(selected.blockers.iter().any(|blocker| matches!(
+        blocker,
+        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
+    )));
+    let manifest = restored
+        .extension_management
+        .installation_store_for_test()
+        .get_manifest(&ExtensionId::new("mcp-fixture").expect("fixture extension id"))
+        .await
+        .expect("checkpointed manifest readback")
+        .expect("fixture manifest persists");
+    assert!(matches!(
+        manifest
+            .resolved()
+            .mcp
+            .as_ref()
+            .map(|mcp| &mcp.registration_auth),
+        Some(HostedMcpAuthSelection::Bearer)
+    ));
+}
+
+#[tokio::test]
+async fn legacy_auto_manifest_challenged_by_oauth_checkpoints_oauth_requirements() {
+    let oauth = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::OAuth {
+            access_token: "oauth-token".to_string(),
+        },
+        Vec::new(),
+    )
+    .await;
+    let (restored, scope) = restored_legacy_hosted_mcp(
+        "hosted-mcp-legacy-auto-oauth",
+        HostedMcpAuthSelection::Auto,
+        Arc::new(HostedMcpRegistrationNetworkEgress::for_server(&oauth)),
+    )
+    .await;
+
+    let activated = restored
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope),
+            LifecycleProductAction::ExtensionActivate {
+                package_ref: fixture_package_ref(),
+            },
+        )
+        .await
+        .expect("legacy automatic auth prepares OAuth through lifecycle activation");
+    assert!(activated.blockers.iter().any(|blocker| matches!(
+        blocker,
+        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
+    )));
+    let manifest = restored
+        .extension_management
+        .installation_store_for_test()
+        .get_manifest(&ExtensionId::new("mcp-fixture").expect("fixture extension id"))
+        .await
+        .expect("checkpointed manifest readback")
+        .expect("fixture manifest persists");
+    assert!(matches!(
+        manifest
+            .resolved()
+            .mcp
+            .as_ref()
+            .map(|mcp| &mcp.registration_auth),
+        Some(HostedMcpAuthSelection::Auto)
+    ));
+    assert!(manifest.resolved().auth.iter().any(|auth| matches!(
+        &auth.setup,
+        ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth { .. }
+    )));
+}
+
+#[tokio::test]
+async fn legacy_explicit_oauth_with_unusable_metadata_resets_to_auth_selection() {
+    let oauth = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::OAuthWithoutChallenge {
+            access_token: "oauth-token".to_string(),
+        },
+        Vec::new(),
+    )
+    .await;
+    oauth.script_protected_resource_response(ScriptedMetadataResponse::new(
+        axum::http::StatusCode::NOT_FOUND,
+        Vec::new(),
+    ));
+    let (restored, scope) = restored_legacy_hosted_mcp(
+        "hosted-mcp-legacy-oauth-unusable",
+        HostedMcpAuthSelection::OAuth {
+            client_profile_id: None,
+        },
+        Arc::new(HostedMcpRegistrationNetworkEgress::for_server(&oauth)),
+    )
+    .await;
+
+    let activated = restored
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope),
+            LifecycleProductAction::ExtensionActivate {
+                package_ref: fixture_package_ref(),
+            },
+        )
+        .await
+        .expect("unusable OAuth metadata returns the setup checkpoint");
+    assert!(activated.blockers.iter().any(|blocker| matches!(
+        blocker,
+        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
+            ref_id: Some(ref_id),
+        } if ref_id.as_str()
+            == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
+    )));
+    let manifest = restored
+        .extension_management
+        .installation_store_for_test()
+        .get_manifest(&ExtensionId::new("mcp-fixture").expect("fixture extension id"))
+        .await
+        .expect("reset manifest readback")
+        .expect("fixture manifest persists");
+    assert!(matches!(
+        manifest
+            .resolved()
+            .mcp
+            .as_ref()
+            .map(|mcp| &mcp.registration_auth),
+        Some(HostedMcpAuthSelection::Auto)
+    ));
+    assert!(manifest.resolved().auth.is_empty());
+}
+
+#[tokio::test]
+async fn legacy_no_auth_manifest_rejected_by_server_resets_to_auth_selection() {
+    let bearer = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::ExactBearerWithoutChallenge {
+            token: "fixture-token".to_string(),
+        },
+        Vec::new(),
+    )
+    .await;
+    let (restored, scope) = restored_legacy_hosted_mcp(
+        "hosted-mcp-legacy-no-auth-rejected",
+        HostedMcpAuthSelection::NoAuth,
+        Arc::new(HostedMcpRegistrationNetworkEgress::for_server(&bearer)),
+    )
+    .await;
+
+    let activated = restored
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope),
+            LifecycleProductAction::ExtensionActivate {
+                package_ref: fixture_package_ref(),
+            },
+        )
+        .await
+        .expect("rejected no-auth manifest returns the setup checkpoint");
+    assert!(activated.blockers.iter().any(|blocker| matches!(
+        blocker,
+        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
+            ref_id: Some(ref_id),
+        } if ref_id.as_str()
+            == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
+    )));
+    let manifest = restored
+        .extension_management
+        .installation_store_for_test()
+        .get_manifest(&ExtensionId::new("mcp-fixture").expect("fixture extension id"))
+        .await
+        .expect("reset manifest readback")
+        .expect("fixture manifest persists");
+    assert!(matches!(
+        manifest
+            .resolved()
+            .mcp
+            .as_ref()
+            .map(|mcp| &mcp.registration_auth),
+        Some(HostedMcpAuthSelection::Auto)
+    ));
+    assert!(manifest.resolved().auth.is_empty());
 }
 
 #[tokio::test]

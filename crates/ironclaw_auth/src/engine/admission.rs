@@ -788,6 +788,133 @@ mod tests {
         );
     }
 
+    #[test]
+    fn host_api_validation_variants_map_to_sanitized_malformed_config() {
+        let rejected_input = "private.example.test/token=admission-secret";
+        let validation_reason = "fixed validation reason";
+        let cases = vec![
+            HostApiError::invalid_id("https_endpoint", rejected_input, validation_reason),
+            HostApiError::invalid_id("json_pointer", rejected_input, validation_reason),
+            HostApiError::InvalidPath {
+                value: rejected_input.to_string(),
+                reason: validation_reason.to_string(),
+            },
+            HostApiError::InvalidCapability {
+                value: rejected_input.to_string(),
+                reason: validation_reason.to_string(),
+            },
+            HostApiError::InvalidMount {
+                value: rejected_input.to_string(),
+                reason: validation_reason.to_string(),
+            },
+            HostApiError::InvalidNetworkTarget {
+                value: rejected_input.to_string(),
+                reason: validation_reason.to_string(),
+            },
+            HostApiError::InvalidRuntimeCredentialTarget {
+                value: rejected_input.to_string(),
+                reason: validation_reason.to_string(),
+            },
+            HostApiError::InvalidSafeSummary {
+                reason: validation_reason.to_string(),
+            },
+            HostApiError::InvalidModelDiagnostic {
+                reason: validation_reason.to_string(),
+            },
+            HostApiError::InvalidHostRemediation {
+                reason: validation_reason.to_string(),
+            },
+            HostApiError::InvariantViolation {
+                reason: validation_reason.to_string(),
+            },
+        ];
+
+        for source in cases {
+            let error = malformed_config_from_host_api_error("test", source);
+            assert_eq!(error, AuthProductError::MalformedConfig);
+            assert!(!error.to_string().contains(rejected_input));
+        }
+    }
+
+    #[test]
+    fn recipe_validation_variants_map_to_sanitized_malformed_config() {
+        let rejected_input = "token=admission-secret";
+        let cases = vec![
+            RecipeValidationError::EmptyDisplayName,
+            RecipeValidationError::EmptyScope,
+            RecipeValidationError::EmptyScopeParam,
+            RecipeValidationError::ReservedAuthorizeParam {
+                param: rejected_input.to_string(),
+            },
+            RecipeValidationError::ApiKeyWithoutFields,
+            RecipeValidationError::ProbeWithoutSuccessStatus,
+            RecipeValidationError::ProbeInjectsUndeclaredHandle {
+                handle: rejected_input.to_string(),
+            },
+            RecipeValidationError::KeepaliveIdleOutOfRange { seconds: 0 },
+            RecipeValidationError::EmptySignedPayload,
+            RecipeValidationError::SignedPayloadBodyFalse,
+            RecipeValidationError::IncompleteTimestampRule,
+        ];
+
+        for source in cases {
+            let error = malformed_config_from_recipe_validation_error(source);
+            assert_eq!(error, AuthProductError::MalformedConfig);
+            assert!(!error.to_string().contains(rejected_input));
+        }
+    }
+
+    #[test]
+    fn url_parse_errors_map_to_sanitized_malformed_config() {
+        let rejected_input = "https://private.example.test/token=admission-secret";
+        let cases = [
+            url::ParseError::EmptyHost,
+            url::ParseError::IdnaError,
+            url::ParseError::InvalidPort,
+            url::ParseError::InvalidIpv4Address,
+            url::ParseError::InvalidIpv6Address,
+            url::ParseError::InvalidDomainCharacter,
+            url::ParseError::RelativeUrlWithoutBase,
+            url::ParseError::RelativeUrlWithCannotBeABaseBase,
+            url::ParseError::SetHostOnCannotBeABaseUrl,
+            url::ParseError::Overflow,
+        ];
+
+        for source in cases {
+            let error = malformed_config_from_url_parse_error("test", source);
+            assert_eq!(error, AuthProductError::MalformedConfig);
+            assert!(!error.to_string().contains(rejected_input));
+        }
+    }
+
+    #[test]
+    fn malformed_metadata_location_parse_is_sanitized() {
+        let rejected_input = "https://[::1/token=admission-secret";
+        let challenge = McpAuthChallenge {
+            status: 401,
+            www_authenticate_metadata: vec![
+                McpAuthMetadataLocation::new(rejected_input).expect("bounded HTTP(S) location"),
+            ],
+            protected_resource_metadata: vec![],
+        };
+
+        let error = OAuthRecipeAdmission::<Profiles>::preflight_protected_resource(
+            "https://mcp.example.test/mcp",
+            &challenge,
+        )
+        .expect_err("malformed URL must not become a metadata fetch");
+        assert_eq!(error, AuthProductError::MalformedConfig);
+        assert!(!error.to_string().contains(rejected_input));
+    }
+
+    #[tokio::test]
+    async fn recipe_validation_failure_is_sanitized_at_admission() {
+        let mut invalid = request();
+        invalid.vendor = " \t ".to_string();
+
+        assert_eq!(admit(invalid).await, Err(AuthProductError::MalformedConfig));
+    }
+
     #[tokio::test]
     async fn standard_metadata_extensions_are_ignored() {
         let protected =

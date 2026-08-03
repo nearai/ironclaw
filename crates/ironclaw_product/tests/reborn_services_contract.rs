@@ -50,6 +50,7 @@ use ironclaw_host_api::{
     scope::Principal,
 };
 use ironclaw_loop_contracts::{LoopModelRouteSnapshot, LoopModelUsage};
+use ironclaw_product::EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID;
 use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_DELETE_SECRET_CAPABILITY_ID,
     ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
@@ -1109,6 +1110,22 @@ impl LifecycleProductService for RecordingLifecycleService {
                         visible_capability_ids: Vec::new(),
                         connection_required: None,
                     }),
+                })
+            }
+            LifecycleProductAction::ExtensionRegisterHostedMcp { .. } => {
+                Ok(LifecycleProductResponse {
+                    package_ref: None,
+                    phase: InstallationState::Installed,
+                    blockers: vec![LifecycleReadinessBlocker::Setup {
+                        ref_id: Some(
+                            ironclaw_extension_contracts::lifecycle_id::LifecycleBlockerRef::new(
+                                ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF,
+                            )
+                            .expect("valid hosted MCP auth-selection blocker ref"),
+                        ),
+                    }],
+                    message: Some("internal lifecycle diagnostic".to_string()),
+                    payload: None,
                 })
             }
             other => panic!("unexpected lifecycle action in setup test service: {other:?}"),
@@ -11623,6 +11640,66 @@ async fn extension_import_is_available_as_product_capability() {
         Resolution::Done(outcome) if outcome.verdict.is_success()
     ));
     assert_eq!(lifecycle_service.imported_bundles(), vec![bundle]);
+}
+
+#[tokio::test]
+async fn hosted_mcp_registration_auth_selection_blocker_is_sanitized_surface_validation_error() {
+    let lifecycle = Arc::new(RecordingLifecycleService::new());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_lifecycle_product_service(lifecycle.clone());
+
+    let error = ProductSurface::invoke(
+        &services,
+        caller(),
+        ProductSurfaceInvokeRequest {
+            operation_id: CapabilityId::new(EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID)
+                .expect("hosted MCP registration capability id"),
+            input: json!({
+                "desired_id": "calendar",
+                "desired_name": "Calendar",
+                "endpoint": "https://mcp.example.test"
+            }),
+            activity_id: ActivityId::new(),
+        },
+    )
+    .await
+    .expect_err("auth-selection blocker must reject hosted MCP registration");
+
+    assert!(matches!(
+        lifecycle.actions().as_slice(),
+        [LifecycleProductAction::ExtensionRegisterHostedMcp { request }]
+            if request.desired_id.as_str() == "calendar"
+    ));
+    assert_eq!(error.code, ProductSurfaceErrorCode::InvalidRequest);
+    assert_eq!(error.kind, ProductSurfaceErrorKind::Validation);
+    assert_eq!(error.status_code, 400);
+    assert!(!error.retryable);
+    assert_eq!(error.field.as_deref(), Some("auth_selection"));
+    assert_eq!(
+        error.validation_code,
+        Some(ProductSurfaceValidationCode::AuthSelectionRequired)
+    );
+    let rendered = serde_json::to_value(&error).expect("surface error serializes");
+    assert_eq!(
+        rendered,
+        json!({
+            "code": "invalid_request",
+            "kind": "validation",
+            "status_code": 400,
+            "retryable": false,
+            "field": "auth_selection",
+            "validation_code": "auth_selection_required"
+        })
+    );
+    assert!(
+        !rendered
+            .to_string()
+            .contains("internal lifecycle diagnostic"),
+        "the lifecycle response message must not cross the surface boundary"
+    );
 }
 
 #[tokio::test]
