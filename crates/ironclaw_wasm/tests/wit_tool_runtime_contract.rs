@@ -202,6 +202,46 @@ fn tool_component(wat_src: &str) -> Vec<u8> {
     encoder.encode().expect("component must encode")
 }
 
+fn metadata_trap_component(export_name: &str, module_name: &str, function_name: &str) -> Vec<u8> {
+    let original_function = format!("${export_name}");
+    let crafted_function = format!("${function_name}");
+    let function_start = format!("  (func {crafted_function} (result i32)\n");
+    let trapping_function_start = format!("{function_start}    unreachable\n");
+    let wat = COUNTER_TOOL_WAT
+        .replacen("(module", &format!("(module ${module_name}"), 1)
+        .replace(&original_function, &crafted_function)
+        .replacen(&function_start, &trapping_function_start, 1);
+
+    assert!(
+        wat.contains(&trapping_function_start),
+        "fixture must insert a real trap into the selected metadata export"
+    );
+    tool_component(&wat)
+}
+
+fn assert_metadata_trap_is_safe(export_name: &str, module_name: &str, function_name: &str) {
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
+    let error = runtime
+        .prepare(
+            "crafted-metadata-trap",
+            &metadata_trap_component(export_name, module_name, function_name),
+        )
+        .unwrap_err();
+
+    let display = error.to_string();
+    assert!(!display.contains(module_name));
+    assert!(!display.contains(function_name));
+    assert!(!display.contains("wasm backtrace"));
+    match error {
+        WasmError::ExecutionFailed { message, .. } => assert_eq!(
+            message,
+            wasmtime::Trap::UnreachableCodeReached.to_string(),
+            "metadata traps should retain only their typed, actionable cause"
+        ),
+        other => panic!("expected metadata execution failure, got {other:?}"),
+    }
+}
+
 #[test]
 fn prepares_metadata_from_wit_tool_component() {
     let runtime = WitToolRuntime::new(WitToolRuntimeConfig::for_testing()).unwrap();
@@ -225,6 +265,24 @@ fn malformed_component_bytes_are_rejected_as_compilation_failure() {
     assert!(
         matches!(error, WasmError::CompilationFailed(_)),
         "unexpected error: {error:?}"
+    );
+}
+
+#[test]
+fn description_trap_does_not_expose_guest_module_or_function_names() {
+    assert_metadata_trap_is_safe(
+        "description",
+        "guest-private-description-module-marker",
+        "guest-private-description-function-marker",
+    );
+}
+
+#[test]
+fn schema_trap_does_not_expose_guest_module_or_function_names() {
+    assert_metadata_trap_is_safe(
+        "schema",
+        "guest-private-schema-module-marker",
+        "guest-private-schema-function-marker",
     );
 }
 

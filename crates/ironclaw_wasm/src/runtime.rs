@@ -84,7 +84,7 @@ impl WitToolRuntime {
                 let message = if store.data().deadline_exceeded() {
                     "WASM execution deadline exceeded".to_string()
                 } else {
-                    safe_component_execution_message(&error)
+                    safe_component_call_message(&error)
                 };
                 return Err(execution_failed_with_usage(message, &store, started));
             }
@@ -123,10 +123,10 @@ impl WitToolRuntime {
         let tool = instance.near_agent_tool();
         let description = tool
             .call_description(&mut store)
-            .map_err(|error| WasmError::execution_failed(error.to_string()))?;
+            .map_err(|error| WasmError::execution_failed(safe_component_call_message(&error)))?;
         let schema_json = tool
             .call_schema(&mut store)
-            .map_err(|error| WasmError::execution_failed(error.to_string()))?;
+            .map_err(|error| WasmError::execution_failed(safe_component_call_message(&error)))?;
         let schema = serde_json::from_str::<serde_json::Value>(&schema_json)
             .map_err(|error| WasmError::InvalidSchema(error.to_string()))?;
         if !schema.is_object() {
@@ -180,7 +180,7 @@ fn elapsed_millis(started: Instant) -> u64 {
     started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
-fn safe_component_execution_message(error: &wasmtime::Error) -> String {
+fn safe_component_call_message(error: &wasmtime::Error) -> String {
     // Raw Wasmtime chains can include guest-controlled module/function names
     // from WASM backtraces. Never expose or trace the chain wholesale.
     error.downcast_ref::<wasmtime::Trap>().map_or_else(
@@ -238,16 +238,16 @@ fn classify_instantiation_error(message: String) -> WasmError {
 
 #[cfg(test)]
 mod tests {
-    use super::safe_component_execution_message;
+    use super::safe_component_call_message;
 
     #[test]
-    fn non_trap_execution_error_uses_fixed_public_message() {
+    fn non_trap_component_call_error_uses_fixed_public_message() {
         let private_marker = "guest-owned-private-error-marker";
         let error = wasmtime::Error::msg(format!("guest root cause: {private_marker}"))
             .context(format!("component call failed: {private_marker}"));
 
         assert!(error.downcast_ref::<wasmtime::Trap>().is_none());
-        let message = safe_component_execution_message(&error);
+        let message = safe_component_call_message(&error);
 
         assert_eq!(message, "WASM component execution failed");
         assert!(!message.contains(private_marker));
