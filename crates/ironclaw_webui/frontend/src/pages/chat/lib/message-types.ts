@@ -24,6 +24,7 @@ export type ChatAttachment = {
   size_label?: string;
   fetch_url?: string;
   preview_url?: string | null;
+  workspace_path?: string;
   [key: string]: unknown;
 };
 
