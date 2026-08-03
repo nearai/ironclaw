@@ -309,6 +309,7 @@ pub enum ProductSurfaceValidationCode {
     InvalidId,
     InvalidControlCharacter,
     InvalidValue,
+    AuthSelectionRequired,
     UnknownKey,
 }
 

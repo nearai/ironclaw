@@ -26,6 +26,7 @@ use ironclaw_auth::{
     AuthAccountLastError, AuthAccountState, CredentialAccountId, CredentialAccountProjection,
     CredentialAccountStatus,
 };
+use ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection;
 use ironclaw_extension_contracts::{
     state::{InstallationState, LifecyclePublicState},
     surface::CapabilitySurfaceKind,
@@ -49,6 +50,7 @@ use ironclaw_host_api::{
     scope::Principal,
 };
 use ironclaw_loop_contracts::{LoopModelRouteSnapshot, LoopModelUsage};
+use ironclaw_product::EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID;
 use ironclaw_product::{
     ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_DELETE_SECRET_CAPABILITY_ID,
     ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
@@ -1097,6 +1099,35 @@ impl LifecycleProductService for RecordingLifecycleService {
                         visible_capability_ids: Vec::new(),
                         connection_required: None,
                     }),
+                })
+            }
+            LifecycleProductAction::ExtensionSelectHostedMcpAuth { package_ref, .. } => {
+                Ok(LifecycleProductResponse {
+                    package_ref: Some(package_ref),
+                    phase: InstallationState::Installed,
+                    blockers: Vec::new(),
+                    message: Some("hosted MCP authentication selected".to_string()),
+                    payload: Some(LifecycleProductPayload::ExtensionActivate {
+                        activated: false,
+                        visible_capability_ids: Vec::new(),
+                        connection_required: None,
+                    }),
+                })
+            }
+            LifecycleProductAction::ExtensionRegisterHostedMcp { .. } => {
+                Ok(LifecycleProductResponse {
+                    package_ref: None,
+                    phase: InstallationState::Installed,
+                    blockers: vec![LifecycleReadinessBlocker::Setup {
+                        ref_id: Some(
+                            ironclaw_extension_contracts::lifecycle_id::LifecycleBlockerRef::new(
+                                ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF,
+                            )
+                            .expect("valid hosted MCP auth-selection blocker ref"),
+                        ),
+                    }],
+                    message: Some("internal lifecycle diagnostic".to_string()),
+                    payload: None,
                 })
             }
             other => panic!("unexpected lifecycle action in setup test service: {other:?}"),
@@ -10372,6 +10403,75 @@ async fn setup_extension_returns_post_setup_onboarding_payload() {
 }
 
 #[tokio::test]
+async fn setup_extension_dispatches_one_typed_hosted_mcp_auth_selection() {
+    let lifecycle = Arc::new(RecordingLifecycleService::with_credential_requirements(
+        vec![manual_credential_requirement(
+            "hosted_mcp_bearer_token",
+            true,
+        )],
+    ));
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_lifecycle_product_service(lifecycle.clone());
+
+    invoke_extension_setup_submit(
+        &services,
+        caller(),
+        "mcp-custom",
+        ProductSetupExtensionRequest {
+            client_action_id: None,
+            action: Some("select_auth".to_string()),
+            payload: Some(json!({
+                "auth_selection": { "kind": "bearer" }
+            })),
+        },
+    )
+    .await
+    .expect("typed hosted MCP auth selection dispatches");
+
+    assert_eq!(
+        lifecycle.actions(),
+        vec![LifecycleProductAction::ExtensionSelectHostedMcpAuth {
+            package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "mcp-custom",)
+                .expect("package ref"),
+            auth_selection: HostedMcpAuthSelection::Bearer,
+        }],
+        "the setup boundary dispatches selection exactly once and does not run a second activation",
+    );
+    assert_eq!(
+        lifecycle.package_refs(),
+        vec![
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "mcp-custom",)
+                .expect("package ref")
+        ],
+        "setup re-projects the package after applying the auth selection",
+    );
+}
+
+#[tokio::test]
+async fn setup_extension_rejects_auto_as_a_recovery_selection() {
+    let services = setup_services_with_requirements(Vec::new());
+    let err = invoke_extension_setup_submit(
+        &services,
+        caller(),
+        "mcp-custom",
+        ProductSetupExtensionRequest {
+            client_action_id: None,
+            action: Some("select_auth".to_string()),
+            payload: Some(json!({
+                "auth_selection": { "kind": "auto" }
+            })),
+        },
+    )
+    .await
+    .expect_err("automatic detection cannot be retried as an explicit recovery choice");
+
+    assert_setup_validation(err, "payload", ProductSurfaceValidationCode::InvalidValue);
+}
+
+#[tokio::test]
 async fn setup_extension_rejects_blank_required_manual_secret() {
     let credentials = Arc::new(RecordingExtensionCredentialSetupService::default());
     let services =
@@ -11636,6 +11736,66 @@ async fn webui_extension_import_reports_unavailable_when_no_service_is_wired() {
     // offending field, and this one has none.
     assert!(error.field.is_none());
     assert!(error.validation_code.is_none());
+}
+
+#[tokio::test]
+async fn hosted_mcp_registration_auth_selection_blocker_is_sanitized_surface_validation_error() {
+    let lifecycle = Arc::new(RecordingLifecycleService::new());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_lifecycle_product_service(lifecycle.clone());
+
+    let error = ProductSurface::invoke(
+        &services,
+        caller(),
+        ProductSurfaceInvokeRequest {
+            operation_id: CapabilityId::new(EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID)
+                .expect("hosted MCP registration capability id"),
+            input: json!({
+                "desired_id": "calendar",
+                "desired_name": "Calendar",
+                "endpoint": "https://mcp.example.test"
+            }),
+            activity_id: ActivityId::new(),
+        },
+    )
+    .await
+    .expect_err("auth-selection blocker must reject hosted MCP registration");
+
+    assert!(matches!(
+        lifecycle.actions().as_slice(),
+        [LifecycleProductAction::ExtensionRegisterHostedMcp { request }]
+            if request.desired_id.as_str() == "calendar"
+    ));
+    assert_eq!(error.code, ProductSurfaceErrorCode::InvalidRequest);
+    assert_eq!(error.kind, ProductSurfaceErrorKind::Validation);
+    assert_eq!(error.status_code, 400);
+    assert!(!error.retryable);
+    assert_eq!(error.field.as_deref(), Some("auth_selection"));
+    assert_eq!(
+        error.validation_code,
+        Some(ProductSurfaceValidationCode::AuthSelectionRequired)
+    );
+    let rendered = serde_json::to_value(&error).expect("surface error serializes");
+    assert_eq!(
+        rendered,
+        json!({
+            "code": "invalid_request",
+            "kind": "validation",
+            "status_code": 400,
+            "retryable": false,
+            "field": "auth_selection",
+            "validation_code": "auth_selection_required"
+        })
+    );
+    assert!(
+        !rendered
+            .to_string()
+            .contains("internal lifecycle diagnostic"),
+        "the lifecycle response message must not cross the surface boundary"
+    );
 }
 
 #[tokio::test]

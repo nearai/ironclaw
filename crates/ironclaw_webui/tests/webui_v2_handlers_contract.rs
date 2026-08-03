@@ -1930,6 +1930,7 @@ fn extension_setup_response(package_ref: LifecyclePackageRef) -> RebornSetupExte
         package_ref,
         phase: LifecyclePublicState::SetupNeeded,
         blockers: Vec::new(),
+        message: None,
         payload: None,
         secrets: Vec::new(),
         fields: Vec::new(),
@@ -5619,6 +5620,36 @@ async fn register_hosted_mcp_uses_closed_wire_without_extension_readback() {
         services.view_queries.lock().expect("lock").is_empty(),
         "registration is admission only and must not read an installation projection"
     );
+}
+
+#[tokio::test]
+async fn register_hosted_mcp_surfaces_ambiguous_auth_as_a_typed_registration_choice() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Err(ProductSurfaceError::validation(
+        "auth_selection",
+        ProductSurfaceValidationCode::AuthSelectionRequired,
+    )));
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/register-hosted-mcp")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"desired_id":"stripe","desired_name":"Stripe MCP","endpoint":"https://mcp.stripe.com","auth_selection":{"kind":"auto"}}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(body["field"], "auth_selection");
+    assert_eq!(body["validation_code"], "auth_selection_required");
 }
 
 #[tokio::test]

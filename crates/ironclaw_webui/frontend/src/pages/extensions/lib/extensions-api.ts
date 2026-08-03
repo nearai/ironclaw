@@ -7,6 +7,9 @@ import { apiFetch, clientActionId, setupExtension } from "../../../lib/api";
 
 const OAUTH_START_TTL_MS = 5 * 60 * 1000;
 type ExtensionMutationOptions = { clientActionId?: string };
+type HostedMcpAuthSelection = {
+  kind: "bearer" | "oauth" | "no_auth";
+};
 
 export function fetchExtensions() {
   return apiFetch("/api/webchat/v2/extensions");
@@ -58,6 +61,18 @@ export function submitExtensionSetup(
   return setupExtension(packageId(packageRef), {
     action: "submit",
     payload: { secrets },
+    clientActionId: clientId,
+  });
+}
+export function selectHostedMcpAuth(
+  packageRef,
+  authSelection: HostedMcpAuthSelection,
+  options: ExtensionMutationOptions = {},
+) {
+  const clientId = options?.clientActionId;
+  return setupExtension(packageId(packageRef), {
+    action: "select_auth",
+    payload: { auth_selection: authSelection },
     clientActionId: clientId,
   });
 }

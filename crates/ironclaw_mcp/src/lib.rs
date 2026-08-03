@@ -477,6 +477,29 @@ where
         self.state.next_id.fetch_add(1, Ordering::SeqCst)
     }
 
+    /// Perform only the MCP initialization handshake.
+    ///
+    /// Registration uses this to distinguish credential-free access from an
+    /// authentication challenge without fetching or admitting the tool
+    /// catalog. The temporary session is always discarded before returning.
+    pub async fn probe_auth(
+        &self,
+        request: McpClientRequest,
+    ) -> Result<ResourceUsage, McpClientError> {
+        if !requires_host_http_egress(&request.transport) {
+            return Err(McpClientError::client(request_denied(
+                McpRequestDeniedCause::UnsupportedTransport,
+            )));
+        }
+        let url = request.url.as_deref().ok_or_else(|| {
+            McpClientError::client(request_denied(McpRequestDeniedCause::MissingUrl))
+        })?;
+        let session_key = McpHostHttpSessionKey::new(&request.scope, &request.provider, url);
+        let _session_cleanup =
+            McpHostHttpSessionCleanup::new(Arc::clone(&self.state), session_key.clone());
+        self.initialize_session(&request, &session_key).await
+    }
+
     async fn send_json_rpc(
         &self,
         request: &McpClientRequest,

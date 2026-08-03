@@ -320,6 +320,7 @@ impl ironclaw_product_contracts::surface::ProductSurface for UnusedServices {
                                 package_ref,
                                 phase: LifecyclePublicState::SetupNeeded,
                                 blockers: Vec::new(),
+                                message: None,
                                 payload: None,
                                 secrets: vec![RebornExtensionSetupSecret {
                                     name: "google_oauth".to_string(),

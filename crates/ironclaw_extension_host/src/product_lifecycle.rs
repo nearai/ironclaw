@@ -285,8 +285,9 @@ impl ExtensionLifecycleManager {
     pub async fn register_hosted_mcp(
         &self,
         request: RegisterHostedMcpRequest,
+        scope: ResourceScope,
     ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
-        self.hosted_mcp_preparation.register(request).await
+        self.hosted_mcp_preparation.register(request, scope).await
     }
 
     /// Run the composed preparation strategy, if this installation's generic
@@ -300,6 +301,23 @@ impl ExtensionLifecycleManager {
     ) -> Result<Option<LifecycleProductResponse>, ProductOperationFailure> {
         self.hosted_mcp_preparation
             .prepare_if_pending(package_ref, scope, credential_gate, caller)
+            .await
+    }
+
+    /// Validates the caller and persists an explicit hosted-MCP authentication selection.
+    pub async fn select_hosted_mcp_auth(
+        &self,
+        package_ref: &LifecyclePackageRef,
+        auth_selection: ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection,
+        caller: &UserId,
+    ) -> Result<(), ProductOperationFailure> {
+        self.hosted_mcp_preparation
+            .select_auth(
+                package_ref,
+                auth_selection,
+                caller,
+                &self.tenant_operator_user_id,
+            )
             .await
     }
     pub fn new(dependencies: ExtensionLifecycleManagerDependencies) -> Self {
@@ -711,7 +729,17 @@ impl ExtensionLifecycleManager {
             .as_ref()
             .map(|installation| install_scope_for_owner(installation.owner()));
         let summary = available.summary();
-        Ok(response_with_payload(
+        let auth_selection_required = available.source
+            == ironclaw_extensions::ManifestSource::UserRegistered
+            && available.resolved_manifest.mcp.as_ref().is_some_and(|mcp| {
+                matches!(
+                    mcp.registration_auth,
+                    ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::Auto
+                )
+            })
+            && !has_activatable_surface
+            && package_runtime_credential_auth_requirements(&available.package).is_empty();
+        let mut response = response_with_payload(
             Some(package_ref),
             phase,
             LifecycleProductPayload::ExtensionList {
@@ -722,7 +750,15 @@ impl ExtensionLifecycleManager {
                 }],
                 count: 1,
             },
-        ))
+        );
+        if auth_selection_required {
+            response.blockers = vec![LifecycleReadinessBlocker::Setup {
+                ref_id: Some(LifecycleBlockerRef::new(
+                    ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF,
+                )?),
+            }];
+        }
+        Ok(response)
     }
 
     pub async fn active_model_visible_capabilities(
@@ -3198,7 +3234,7 @@ where
     Ok(owners)
 }
 
-fn ensure_caller_may_mutate_tenant_installation(
+pub(crate) fn ensure_caller_may_mutate_tenant_installation(
     installation: &ExtensionInstallation,
     caller: &UserId,
     tenant_operator: &UserId,
@@ -4128,14 +4164,20 @@ output_schema_ref = "schemas/run.output.json"
             )
             .expect("public fixture endpoint"),
             auth_selection: Some(
-                ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::Auto,
+                ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::NoAuth,
             ),
         };
+        let register_scope = ResourceScope::local_default(
+            UserId::new("lock-order-owner").expect("valid owner"),
+            ironclaw_host_api::ids::InvocationId::new(),
+        )
+        .expect("local registration scope");
         let register_manager = Arc::clone(&manager);
-        let register_task =
-            tokio::spawn(
-                async move { register_manager.register_hosted_mcp(register_request).await },
-            );
+        let register_task = tokio::spawn(async move {
+            register_manager
+                .register_hosted_mcp(register_request, register_scope)
+                .await
+        });
 
         holding.notified().await;
 

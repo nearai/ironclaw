@@ -1373,6 +1373,8 @@ pub struct RebornSetupExtensionResponse {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blockers: Vec<LifecycleReadinessBlocker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<LifecycleProductPayload>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<RebornExtensionSetupSecret>,

@@ -2946,7 +2946,7 @@ mod tests {
         ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::http::RuntimeHttpEgressError>
         {
             let body = match request.url.as_str() {
-                "https://mcp.vendorco.example/mcp/.well-known/oauth-protected-resource" => {
+                "https://mcp.vendorco.example/.well-known/oauth-protected-resource/mcp" => {
                     br#"{"resource":"https://mcp.vendorco.example/mcp","authorization_servers":["https://oauth.vendorco.example"]}"#.to_vec()
                 }
                 "https://oauth.vendorco.example/.well-known/oauth-authorization-server" => {

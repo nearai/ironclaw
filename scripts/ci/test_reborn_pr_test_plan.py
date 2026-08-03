@@ -461,6 +461,18 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(root_plan["root_partitions"], [0])
         self.assertEqual(integration_plan["integration_lanes"], [0])
 
+    def test_hosted_mcp_support_selects_its_owning_integration_lane(self) -> None:
+        owner = planner.INTEGRATION_SUPPORT_OWNERS[
+            "tests/support/hosted_mcp_registration_server.rs"
+        ]
+        expected_lane = planner._integration_test_lanes()[owner]
+
+        plan = self.plan(
+            "pull_request", ["tests/support/hosted_mcp_registration_server.rs"]
+        )
+
+        self.assertEqual(plan["integration_lanes"], [expected_lane])
+
     def test_workspace_topology_change_defers_exhaustive_matrix_to_queue(self) -> None:
         plan = self.plan("pull_request", ["Cargo.toml"])
         self.assertEqual(plan["mode"], "none")

@@ -12,7 +12,7 @@ use ironclaw_host_api::error::HostApiError;
 
 use ironclaw_extension_contracts::{
     channel::ChannelPresentation,
-    hosted_mcp::RegisterHostedMcpRequest,
+    hosted_mcp::{HostedMcpAuthSelection, RegisterHostedMcpRequest},
     lifecycle_id::{LifecycleBlockerRef, LifecyclePackageId},
     state::{InstallationState, LifecyclePublicState},
     surface::CapabilitySurfaceKind,
@@ -71,6 +71,8 @@ pub enum LifecycleReadinessBlocker {
     Runtime { ref_id: Option<LifecycleBlockerRef> },
 }
 
+pub const HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF: &str = "hosted_mcp_auth_selection_required";
+
 impl LifecycleReadinessBlocker {
     pub fn runtime(ref_id: impl Into<Option<String>>) -> Result<Self, HostApiError> {
         Ok(Self::Runtime {
@@ -97,6 +99,10 @@ pub enum LifecycleProductAction {
     },
     ExtensionActivate {
         package_ref: LifecyclePackageRef,
+    },
+    ExtensionSelectHostedMcpAuth {
+        package_ref: LifecyclePackageRef,
+        auth_selection: HostedMcpAuthSelection,
     },
     ExtensionConfigure {
         package_ref: LifecyclePackageRef,
@@ -186,6 +192,7 @@ impl LifecycleProductAction {
             Self::ExtensionInstall { .. } => LifecycleCommandKind::ExtensionInstall,
             Self::ExtensionAuth { .. } => LifecycleCommandKind::ExtensionAuth,
             Self::ExtensionActivate { .. } => LifecycleCommandKind::ExtensionActivate,
+            Self::ExtensionSelectHostedMcpAuth { .. } => LifecycleCommandKind::ExtensionConfigure,
             Self::ExtensionConfigure { .. } => LifecycleCommandKind::ExtensionConfigure,
             Self::ExtensionRemove { .. } => LifecycleCommandKind::ExtensionRemove,
             Self::SkillSearch { .. } => LifecycleCommandKind::SkillSearch,
@@ -205,6 +212,7 @@ impl LifecycleProductAction {
             Self::ExtensionInstall { package_ref }
             | Self::ExtensionAuth { package_ref }
             | Self::ExtensionActivate { package_ref }
+            | Self::ExtensionSelectHostedMcpAuth { package_ref, .. }
             | Self::ExtensionConfigure { package_ref, .. }
             | Self::ExtensionRemove { package_ref }
             | Self::SkillRemove { package_ref } => Some(package_ref),
