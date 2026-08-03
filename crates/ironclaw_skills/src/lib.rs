@@ -46,7 +46,7 @@ pub use management::{
 pub use parser::{ParsedSkill, SkillParseError, parse_skill_md, set_skill_auto_activate};
 pub use scoped_management::{
     ScopedSkillManagementBuildError, ScopedSkillManagementError,
-    ScopedSkillManagementMountResolver, ScopedSkillManagementPort,
+    ScopedSkillManagementMountResolver, ScopedSkillManagementPort, SkillReplacementSnapshot,
     build_existing_standalone_skill_management_port, build_scoped_skill_management_port,
 };
 pub use selector::{
@@ -58,3 +58,13 @@ pub use validation::{
     normalize_safe_relative_path, validate_credential_name, validate_credential_spec,
     validate_path_pattern, validate_skill_name,
 };
+#[cfg(test)]
+mod replacement_snapshot_public_surface_tests {
+    #[test]
+    fn replacement_snapshot_is_exported_at_the_crate_root() {
+        assert!(
+            std::any::type_name::<super::SkillReplacementSnapshot>()
+                .ends_with("::SkillReplacementSnapshot")
+        );
+    }
+}

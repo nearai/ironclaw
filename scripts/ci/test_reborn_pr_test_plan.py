@@ -355,6 +355,16 @@ class RebornPrTestPlanTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("reborn_(integration_|generated_)", lane_runner)
 
+    def test_selected_integration_lane_keeps_msrv_override(self) -> None:
+        lane_runner = (
+            ROOT / "scripts/ci/reborn-coverage-lane-run.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'cargo test -p ironclaw_reborn_integration_tests "${test_args[@]}" '
+            "\\\n      --ignore-rust-version -- --nocapture",
+            lane_runner,
+        )
+
     def test_unmapped_crate_path_fails_fast(self) -> None:
         with self.assertRaisesRegex(ValueError, "unmapped crate path"):
             self.plan("pull_request", ["crates/deleted/src/lib.rs"])

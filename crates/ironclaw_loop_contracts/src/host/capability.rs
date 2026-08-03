@@ -149,6 +149,13 @@ pub struct ProviderToolDefinition {
     pub name: ProviderToolName,
     /// Provider-safe tool description sent to the model.
     pub description: String,
+    /// Host-only provenance used when the description is projected back into prompts.
+    ///
+    /// Unknown and legacy sources fail closed to `Untrusted`. The field is
+    /// omitted from the provider wire representation; only host-owned
+    /// snapshots may set `VerifiedCatalog`.
+    #[serde(skip)]
+    pub description_trust: CapabilityDescriptionTrust,
     /// JSON object schema for provider tool arguments.
     pub parameters: serde_json::Value,
 }
@@ -182,6 +189,7 @@ impl ProviderToolDefinition {
             capability_id,
             name,
             description: description.into(),
+            description_trust: Default::default(),
             parameters,
         }
     }
@@ -652,6 +660,7 @@ mod tests {
                 capability_id: CapabilityId::new("demo.allowed").expect("valid capability id"),
                 name: ProviderToolName::new("demo__allowed").expect("provider tool name"),
                 description: "allowed".to_string(),
+                description_trust: Default::default(),
                 parameters: serde_json::json!({"type": "object"}),
             }],
         };
@@ -661,6 +670,54 @@ mod tests {
             .expect_err("unknown provider tool must fail closed");
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn provider_tool_wire_omits_host_description_provenance() {
+        let definition = ProviderToolDefinition {
+            capability_id: CapabilityId::new("demo.catalog").expect("valid capability id"),
+            name: ProviderToolName::new("demo__catalog").expect("provider tool name"),
+            description: "verified catalog entry".to_string(),
+            description_trust: CapabilityDescriptionTrust::VerifiedCatalog,
+            parameters: serde_json::json!({"type": "object"}),
+        };
+
+        let encoded = serde_json::to_value(definition).expect("serialize provider tool");
+
+        assert!(encoded.get("description_trust").is_none());
+    }
+
+    #[test]
+    fn provider_tool_constructor_defaults_description_provenance_to_untrusted() {
+        let definition = ProviderToolDefinition::from_parts(
+            CapabilityId::new("demo.constructed").expect("valid capability id"),
+            "demo__constructed",
+            "constructed through the provider boundary",
+            serde_json::json!({"type": "object"}),
+        )
+        .expect("valid provider tool definition");
+
+        assert_eq!(
+            definition.description_trust,
+            CapabilityDescriptionTrust::Untrusted
+        );
+    }
+
+    #[test]
+    fn provider_tool_wire_cannot_forge_host_description_provenance() {
+        let definition: ProviderToolDefinition = serde_json::from_value(serde_json::json!({
+            "capability_id": "demo.catalog",
+            "name": "demo__catalog",
+            "description": "untrusted provider description",
+            "description_trust": "verified_catalog",
+            "parameters": {"type": "object"}
+        }))
+        .expect("deserialize provider tool");
+
+        assert_eq!(
+            definition.description_trust,
+            CapabilityDescriptionTrust::Untrusted
+        );
     }
 
     #[test]

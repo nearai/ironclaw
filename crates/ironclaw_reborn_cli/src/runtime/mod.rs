@@ -598,9 +598,43 @@ pub(crate) fn build_runtime_input_with_options(
         }
     }
 
+    if caller == RuntimeInputCaller::Serve {
+        match std::env::var("IRONHUB_AGENT_SHARED_KEY") {
+            Ok(shared_key) => {
+                runtime_input = runtime_input.with_ironhub_agent_shared_key(
+                    ironclaw_reborn_composition::ironhub::IronhubSharedKey::new(shared_key.trim())
+                        .context("IRONHUB_AGENT_SHARED_KEY is invalid")?,
+                );
+            }
+            Err(std::env::VarError::NotPresent) => {}
+            Err(std::env::VarError::NotUnicode(_)) => {
+                anyhow::bail!("IRONHUB_AGENT_SHARED_KEY is invalid");
+            }
+        }
+    }
+    if let Some(manifest_url) = ironhub_manifest_url_from_env()? {
+        runtime_input = runtime_input.with_ironhub_manifest_url(manifest_url);
+    }
+
     Ok(BuiltRuntimeInput {
         inner: runtime_input,
     })
+}
+
+pub(crate) fn ironhub_manifest_url_from_env()
+-> anyhow::Result<Option<ironclaw_reborn_composition::ironhub::IronhubManifestUrl>> {
+    match std::env::var("IRONHUB_MANIFEST_URL") {
+        Ok(manifest_url) => {
+            let manifest_url =
+                ironclaw_reborn_composition::ironhub::validated_manifest_url(&manifest_url)
+                    .context("IRONHUB_MANIFEST_URL is invalid")?;
+            Ok(Some(manifest_url))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("IRONHUB_MANIFEST_URL is invalid");
+        }
+    }
 }
 
 pub(crate) fn with_binary_host_extension_bindings(
@@ -637,6 +671,7 @@ fn with_binary_host_extension_bindings_from_bundles(
 
 pub(crate) struct RuntimeServicesInput {
     pub(crate) services_input: RebornHostBindings,
+    pub(crate) profile: RebornProfile,
     config_file: Option<ironclaw_reborn_config::RebornConfigFile>,
 }
 
@@ -736,6 +771,7 @@ pub(crate) fn build_services_input_with_options(
 
     Ok(RuntimeServicesInput {
         services_input,
+        profile,
         config_file,
     })
 }
@@ -1154,6 +1190,27 @@ pub(crate) fn local_runtime_storage_root(
         .join(profile.local_runtime_storage_subdir())
 }
 
+pub(crate) async fn initialize_local_runtime_storage_root(
+    config: &RebornBootConfig,
+    profile: RebornProfile,
+) -> anyhow::Result<()> {
+    if matches!(
+        profile,
+        RebornProfile::Standalone
+            | RebornProfile::StandaloneUnrestricted
+            | RebornProfile::HostedSingleTenantVolume
+    ) {
+        let root = local_runtime_storage_root(config, profile);
+        tokio::fs::create_dir_all(&root).await.with_context(|| {
+            format!(
+                "failed to initialize Reborn runtime state at {}",
+                root.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
 fn composition_profile(profile: RebornProfile) -> RebornCompositionProfile {
     match profile {
         RebornProfile::Standalone => RebornCompositionProfile::Standalone,
@@ -1491,9 +1548,9 @@ mod tests {
     use super::{
         GoogleOAuthConfigState, GoogleOAuthEnvInputs, GoogleOAuthResolution, RuntimeInputCaller,
         RuntimeInputOptions, apply_credential_refresh_override, block_on_cli, build_runtime_input,
-        build_runtime_input_with_options, no_assistant_text_message, protect_reborn_log_filter,
-        resolve_google_oauth_config, resolve_google_oauth_config_state,
-        resolve_google_oauth_config_state_merged,
+        build_runtime_input_with_options, initialize_local_runtime_storage_root,
+        no_assistant_text_message, protect_reborn_log_filter, resolve_google_oauth_config,
+        resolve_google_oauth_config_state, resolve_google_oauth_config_state_merged,
         resolve_google_oauth_config_state_with_store_loader, runner_settings,
         with_binary_host_extension_bindings_from_bundles,
     };
@@ -1895,6 +1952,131 @@ mod tests {
     }
 
     #[test]
+    fn ironhub_register_gateway_is_disabled_without_an_explicit_shared_key() {
+        let _lock = lock_runtime_env();
+        let _shared_key = EnvGuard::clear("IRONHUB_AGENT_SHARED_KEY");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let input = build_runtime_input(&config, RuntimeInputCaller::Serve).expect("runtime input");
+
+        assert!(input.ironhub_agent_shared_key.is_none());
+    }
+
+    #[test]
+    fn serve_rejects_a_present_but_short_ironhub_shared_key() {
+        let _lock = lock_runtime_env();
+        let too_short = "x".repeat(31);
+        let _shared_key = EnvGuard::set("IRONHUB_AGENT_SHARED_KEY", &too_short);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let error = match build_runtime_input(&config, RuntimeInputCaller::Serve) {
+            Ok(_) => panic!("short shared key must fail closed"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("IRONHUB_AGENT_SHARED_KEY is invalid"),
+            "error must identify the invalid setting without exposing it: {error:#}"
+        );
+        assert!(
+            format!("{error:#}").contains("at least 32 bytes"),
+            "error chain must identify the shared-key length floor: {error:#}"
+        );
+    }
+
+    #[test]
+    fn serve_rejects_a_present_but_blank_ironhub_shared_key() {
+        let _lock = lock_runtime_env();
+        let _shared_key = EnvGuard::set("IRONHUB_AGENT_SHARED_KEY", " \t ");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let error = match build_runtime_input(&config, RuntimeInputCaller::Serve) {
+            Ok(_) => panic!("blank shared key must fail closed"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("IRONHUB_AGENT_SHARED_KEY is invalid"),
+            "error must identify the invalid setting without exposing it: {error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ironhub_environment_rejects_non_utf8_shared_keys_and_manifest_urls() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let _lock = lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let invalid = std::ffi::OsString::from_vec(vec![0xff, 0xfe]);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        {
+            let _existing = EnvGuard::set("IRONHUB_AGENT_SHARED_KEY", "previous-value");
+            let _shared_key = EnvGuard::set_os("IRONHUB_AGENT_SHARED_KEY", &invalid);
+            let error = match build_runtime_input(&config, RuntimeInputCaller::Serve) {
+                Ok(_) => panic!("non-UTF-8 shared key must fail closed"),
+                Err(error) => error,
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("IRONHUB_AGENT_SHARED_KEY is invalid")
+            );
+        }
+        {
+            let _manifest_url = EnvGuard::set_os("IRONHUB_MANIFEST_URL", &invalid);
+            let error = super::ironhub_manifest_url_from_env()
+                .expect_err("non-UTF-8 manifest URL must fail closed");
+            assert!(
+                error
+                    .to_string()
+                    .contains("IRONHUB_MANIFEST_URL is invalid")
+            );
+        }
+    }
+
+    #[test]
     fn serve_runtime_input_attaches_trace_recorder_from_environment() {
         let _lock = lock_runtime_env();
         let _guards = clear_runner_env();
@@ -2083,7 +2265,7 @@ api_key_env = "NEARAI_API_KEY"
 
     fn clear_trigger_poller_env() -> (EnvGuard, EnvGuard) {
         (
-            EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED"),
+            EnvGuard::clear_many(&["IRONCLAW_TRIGGER_POLLER_ENABLED", "IRONHUB_MANIFEST_URL"]),
             EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS"),
         )
     }
@@ -2312,6 +2494,83 @@ regex_activation_enabled = false
         )
         .expect("boot config");
         (temp, config)
+    }
+
+    #[tokio::test]
+    async fn local_profiles_initialize_their_runtime_storage_roots() {
+        for profile in [
+            ironclaw_reborn_config::RebornProfile::Standalone,
+            ironclaw_reborn_config::RebornProfile::StandaloneUnrestricted,
+            ironclaw_reborn_config::RebornProfile::HostedSingleTenantVolume,
+        ] {
+            let (_temp, config) = boot_config_with_config_toml("local-dev", "");
+            let root = local_runtime_storage_root(&config, profile);
+            assert!(!root.exists());
+            initialize_local_runtime_storage_root(&config, profile)
+                .await
+                .expect("initialize local runtime storage");
+            assert!(root.is_dir());
+        }
+
+        let (_temp, config) = boot_config_with_config_toml("local-dev", "");
+        let hosted = ironclaw_reborn_config::RebornProfile::HostedSingleTenant;
+        let root = local_runtime_storage_root(&config, hosted);
+        initialize_local_runtime_storage_root(&config, hosted)
+            .await
+            .expect("hosted profile is a no-op");
+        assert!(!root.exists());
+
+        let (_temp, config) = boot_config_with_config_toml("local-dev", "");
+        let blocked_root =
+            local_runtime_storage_root(&config, ironclaw_reborn_config::RebornProfile::Standalone);
+        std::fs::write(&blocked_root, "not a directory").expect("block runtime directory");
+        let error = initialize_local_runtime_storage_root(
+            &config,
+            ironclaw_reborn_config::RebornProfile::Standalone,
+        )
+        .await
+        .expect_err("a file at the storage root must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to initialize Reborn runtime state")
+        );
+    }
+
+    #[test]
+    fn build_runtime_input_accepts_valid_ironhub_manifest_url() {
+        let _lock = lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _manifest_url = EnvGuard::set(
+            "IRONHUB_MANIFEST_URL",
+            "https://hub.ironclaw.com/api/catalog/testing.json",
+        );
+        let (_temp, config) = boot_config_with_config_toml("local-dev", "");
+
+        let input = build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+
+        assert_eq!(
+            input.ironhub_manifest_url.as_str(),
+            "https://hub.ironclaw.com/api/catalog/testing.json"
+        );
+    }
+
+    #[test]
+    fn build_runtime_input_rejects_invalid_ironhub_manifest_url() {
+        let _lock = lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _manifest_url =
+            EnvGuard::set("IRONHUB_MANIFEST_URL", "http://127.0.0.1/private/catalog");
+        let (_temp, config) = boot_config_with_config_toml("local-dev", "");
+
+        let error = build_runtime_input(&config, RuntimeInputCaller::Run)
+            .err()
+            .expect("private manifest URL must fail at the CLI boundary");
+
+        assert!(
+            error.to_string().contains("IRONHUB_MANIFEST_URL"),
+            "error must identify the invalid boundary input: {error:#}"
+        );
     }
 
     #[test]

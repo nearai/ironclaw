@@ -46,6 +46,7 @@ use ironclaw_host_api::turn::{
 use ironclaw_host_api::{
     audit::{ActionResultSummary, ActionSummary, AuditEnvelope, AuditStage, DecisionSummary},
     capability::EffectKind,
+    http::RuntimeHttpEgress,
     ids::{
         AgentId, ApprovalRequestId, AuditEventId, CapabilityId, CorrelationId, ExtensionId,
         InvocationId, TenantId, ThreadId, UserId,
@@ -102,7 +103,7 @@ use ironclaw_turns::{
     TurnEventProjectionSource, TurnRunState, TurnRunWake,
 };
 
-use ironclaw_host_runtime::{HostRuntime, HostRuntimeHttpEgressPort};
+use ironclaw_host_runtime::HostRuntime;
 use ironclaw_outbound::CommunicationPreferenceRepository;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_outbound::OutboundDeliveryTargetRegistrationOutcome;
@@ -569,7 +570,15 @@ pub struct RebornRuntime {
     pub(crate) shared_extension_registry: Arc<SharedExtensionRegistry>,
     pub(crate) skill_auto_activate_learned: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) extension_management: Arc<RebornLocalExtensionManagementPort>,
-    pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
+    pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+    /// Durable nonce and signed-manifest replay state shared by CLI IronHub
+    /// installs and the optional deep-link gateway.
+    pub(crate) ironhub_link_state: Arc<ironclaw_extension_manager::ironhub::IronhubLinkStateStore>,
+    pub(crate) ironhub_manifest_url: ironclaw_extension_manager::ironhub::IronhubManifestUrl,
+    /// Single composed IronHub deep-link service. `None` is the default-off
+    /// registration gate; the same option controls facade and route wiring.
+    pub(crate) ironhub_link_service:
+        Option<Arc<dyn ironclaw_product_contracts::ironhub::IronhubLinkService>>,
     pub(crate) owner_user_id: UserId,
     pub(crate) extension_filesystem: Arc<CompositeRootFilesystem>,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
@@ -685,8 +694,18 @@ impl ironclaw_extension_manager::ironhub::RebornIronHubRuntime for RebornRuntime
         Arc::clone(&self.extension_management)
     }
 
-    fn ironhub_host_runtime_http_egress(&self) -> Option<HostRuntimeHttpEgressPort> {
-        self.host_runtime_http_egress.clone()
+    fn ironhub_runtime_http_egress(&self) -> Option<Arc<dyn RuntimeHttpEgress>> {
+        self.runtime_http_egress.clone()
+    }
+
+    fn ironhub_link_state(
+        &self,
+    ) -> Arc<ironclaw_extension_manager::ironhub::IronhubLinkStateStore> {
+        Arc::clone(&self.ironhub_link_state)
+    }
+
+    fn ironhub_manifest_url(&self) -> ironclaw_extension_manager::ironhub::IronhubManifestUrl {
+        self.ironhub_manifest_url.clone()
     }
 
     fn ironhub_surface_context(&self) -> LifecycleProductSurfaceContext {
@@ -819,6 +838,26 @@ impl RebornRuntime {
             channel_connection,
             Vec::new(),
         )
+    }
+
+    pub(crate) fn ironhub_link_service(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_contracts::ironhub::IronhubLinkService>> {
+        self.ironhub_link_service.as_ref().map(Arc::clone)
+    }
+
+    /// Build the public registration mount from the same optional service
+    /// attached to the product facade. `None` is the default-off gate.
+    pub fn ironhub_register_route_mount(
+        &self,
+    ) -> Result<Option<ironclaw_host_ingress::PublicRouteMount>, RebornBuildError> {
+        self.ironhub_link_service()
+            .map(|service| {
+                crate::ironhub_link_serve::ironhub_register_route_mount(
+                    crate::ironhub_link_serve::IronhubRegisterRouteState::new(service),
+                )
+            })
+            .transpose()
     }
 
     pub fn product_auth_services(&self) -> Arc<RebornProductAuthServices> {
@@ -2852,6 +2891,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
         services: services_input,
         llm,
         boot,
+        ironhub_agent_shared_key,
+        ironhub_manifest_url,
         runner,
         tool_disclosure,
         trigger_poller,
@@ -2942,6 +2983,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             .map(std::num::NonZeroU32::get),
         max_running_by_class,
     });
+    services_input = services_input.with_ironhub_manifest_url(ironhub_manifest_url.clone());
     let actor_user_id =
         UserId::new(owner_id.clone()).map_err(|reason| RebornRuntimeError::InvalidArgument {
             reason: format!("user id: {reason}"),
@@ -4019,6 +4061,35 @@ pub(crate) async fn build_runtime_with_resource_governor(
         }
     }
 
+    let ironhub_link_state = Arc::clone(&services.ironhub_link_state);
+    let ironhub_link_service = match ironhub_agent_shared_key {
+        Some(shared_key) => {
+            let egress = services.runtime_http_egress.clone().ok_or_else(|| {
+                RebornRuntimeError::MalformedConfig {
+                    reason:
+                        "IronHub gateway key was configured but mediated HTTP egress is unavailable"
+                            .to_string(),
+                }
+            })?;
+            let service = ironclaw_extension_manager::ironhub::RebornIronhubLinkService::new(
+                services.skill_management.clone(),
+                services.extension_management.clone(),
+                egress,
+                Arc::clone(&ironhub_link_state),
+                shared_key,
+            )
+            .map_err(|error| RebornRuntimeError::MalformedConfig {
+                reason: error.to_string(),
+            })?
+            .with_manifest_url(ironhub_manifest_url.clone());
+            Some(Arc::new(service)
+                as Arc<
+                    dyn ironclaw_product_contracts::ironhub::IronhubLinkService,
+                >)
+        }
+        None => None,
+    };
+
     let runtime = RebornRuntime {
         host_runtime: services.host_runtime.clone(),
         product_auth: services.product_auth.clone(),
@@ -4043,7 +4114,10 @@ pub(crate) async fn build_runtime_with_resource_governor(
         shared_extension_registry: services.shared_extension_registry.clone(),
         skill_auto_activate_learned: Arc::clone(&services.skill_auto_activate_learned),
         extension_management: services.extension_management.clone(),
-        host_runtime_http_egress: services.host_runtime_http_egress.clone(),
+        runtime_http_egress: services.runtime_http_egress.as_ref().map(Arc::clone),
+        ironhub_link_state,
+        ironhub_manifest_url,
+        ironhub_link_service,
         owner_user_id: services.owner_user_id.clone(),
         extension_filesystem: services.extension_filesystem.clone(),
         system_extensions_lifecycle_mounts: services.system_extensions_lifecycle_mounts.clone(),

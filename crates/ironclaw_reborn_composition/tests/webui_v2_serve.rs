@@ -36,10 +36,17 @@ use ironclaw_product::{
     RebornTraceCreditsResponse, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW,
     TRACE_CREDITS_VIEW,
 };
+use ironclaw_product_contracts::ironhub::{
+    IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult, IronhubLinkError,
+    IronhubLinkService, IronhubRegisterRequest,
+};
 use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
 };
 use ironclaw_product_contracts::views::RebornViewQuery;
+use ironclaw_reborn_composition::{
+    IRONHUB_REGISTER_PATH, IronhubRegisterRouteState, ironhub_register_route_mount,
+};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_turns::{EventCursor, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus};
 use ironclaw_webui::{
@@ -144,6 +151,27 @@ impl WebuiAuthenticator for MultiUserToken {
         } else {
             None
         }
+    }
+}
+
+#[derive(Default)]
+struct RecordingIronhubLink {
+    register_calls: Mutex<Vec<IronhubRegisterRequest>>,
+}
+
+#[async_trait]
+impl IronhubLinkService for RecordingIronhubLink {
+    async fn register(&self, request: IronhubRegisterRequest) -> Result<(), IronhubLinkError> {
+        self.register_calls.lock().expect("lock").push(request);
+        Ok(())
+    }
+
+    async fn deliver_install(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: IronhubInstallDeliveryRequest,
+    ) -> Result<IronhubInstallDeliveryResult, IronhubLinkError> {
+        Err(IronhubLinkError::Unavailable)
     }
 }
 
@@ -3022,6 +3050,65 @@ async fn js_client_resolve_gate_path_decodes_percent_encoded_gate_ref() {
 /// #4116: without the merge in `webui_v2_app`, the SPA's
 /// unauthenticated `GET /auth/providers` would 401 before the
 /// host's OAuth router ever ran.
+#[tokio::test]
+async fn ironhub_register_mount_is_public_and_reaches_the_link_service() {
+    let services = Arc::new(StubServices::default());
+    let link = Arc::new(RecordingIronhubLink::default());
+    let mount = ironhub_register_route_mount(IronhubRegisterRouteState::new(
+        link.clone() as Arc<dyn IronhubLinkService>
+    ))
+    .expect("valid register mount");
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Arc::new(OnlyValidToken),
+        vec![HeaderValue::from_static("http://localhost:1234")],
+    )
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+    .with_public_route_mount(mount);
+    let app = webui_v2_app(services, config).expect("webui v2 app");
+    let body = json!({
+        "uid": "signed-user-claim",
+        "aid": "signed-agent-claim",
+        "ts": 1_700_000_000_u64,
+        "nonce": "register-nonce",
+        "sig": "signature-checked-by-link-service"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(IRONHUB_REGISTER_PATH)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(link.register_calls.lock().expect("lock").len(), 1);
+}
+
+#[tokio::test]
+async fn ironhub_register_handler_is_absent_when_the_gate_is_disabled() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(IRONHUB_REGISTER_PATH)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
 #[tokio::test]
 async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_policy() {
     use axum::extract::ConnectInfo;

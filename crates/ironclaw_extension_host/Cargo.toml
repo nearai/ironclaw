@@ -20,6 +20,7 @@ test-support = [
     "dep:ironclaw_extension_support",
     "ironclaw_auth/test-support",
     "ironclaw_filesystem/test-support",
+    "ironclaw_host_api/test-support",
     "ironclaw_processes/test-support",
 ]
 # Dormant marker for the two moved test modules that still require composition

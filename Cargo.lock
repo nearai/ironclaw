@@ -3819,6 +3819,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "hex",
+ "hmac 0.13.0",
  "ironclaw_approvals",
  "ironclaw_auth",
  "ironclaw_authorization",

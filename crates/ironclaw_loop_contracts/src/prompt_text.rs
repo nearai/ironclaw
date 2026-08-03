@@ -408,6 +408,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn verified_catalog_description_bypasses_content_denylist() {
+        for sample in SENSITIVE_SAMPLES {
+            validate_prompt_text(
+                sample.to_string(),
+                "catalog description",
+                PromptTextSurface::VerifiedCatalogDescription,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "verified catalog descriptions must bypass content checks; got {error:?}: \
+                     {sample:?}"
+                )
+            });
+        }
+    }
+
     /// Untrusted surfaces keep the full content denylist — the trust gate is the
     /// only thing that relaxes it, so a non-skill surface still rejects the same
     /// samples a trusted skill is allowed to carry.
