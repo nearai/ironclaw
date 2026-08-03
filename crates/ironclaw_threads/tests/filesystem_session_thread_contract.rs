@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{
     BackendCapabilities, CasExpectation, DirEntry, DiskFilesystem, Entry, Fault, FaultInjecting,
-    FileStat, FilesystemError, FilesystemOperation, Filter, InMemoryBackend, IndexSpec,
+    FaultKind, FileStat, FilesystemError, FilesystemOperation, Filter, InMemoryBackend, IndexSpec,
     OrderedPage, Page, RecordVersion, RootFilesystem, ScopedFilesystem, SeqNo, StorageTxn,
     TxnCapability, VersionedEntry,
 };
@@ -2065,6 +2065,536 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
         .map(|record| record.thread_id.as_str())
         .collect();
     assert_eq!(ids_b, ["t-b-001"]);
+}
+
+/// PR #6696 declared the transcript and listing projections under each thread,
+/// so every thread create paid redundant index-declaration work and left a
+/// catalog row per thread behind forever — rows the SQL projection then has to
+/// consider on every entry write. (Under the per-declaration trigger design
+/// that PR shipped, each also added three triggers per spec to the shared
+/// entries table.) The specs are now declared once per mount at the `/threads`
+/// alias root, so only a mount's first thread create declares anything and
+/// listing still resolves the spec from a deeper path.
+#[tokio::test]
+async fn filesystem_thread_create_declares_indexes_once_per_mount() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-index-ddl", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("index-ddl");
+    let create = async |id: &str| {
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(ThreadId::new(id.to_string()).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    };
+
+    create("ddl-000").await;
+    let after_first = backend.count(FilesystemOperation::EnsureIndex);
+    assert_eq!(
+        after_first, 4,
+        "a mount's first thread declares exactly the four root specs \
+         (message sequence, message kind/status, summary, thread activity)"
+    );
+
+    for index in 1..5 {
+        create(&format!("ddl-{index:03}")).await;
+    }
+    assert_eq!(
+        backend.count(FilesystemOperation::EnsureIndex),
+        after_first,
+        "thread create must issue no index DDL after a mount's first thread"
+    );
+
+    // Every declaration lands on the mount root, never a per-thread path.
+    for path in backend.recorded_paths(FilesystemOperation::EnsureIndex) {
+        assert_eq!(
+            path.as_str(),
+            "/tenants/tenant-index-ddl/users/alice/threads",
+            "projections are declared at the mount root, above the per-thread paths"
+        );
+    }
+
+    // Listing resolves the root-declared spec from the deeper per-scope path,
+    // and needs no further declaration to do it.
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(listed.threads.len(), 5);
+    assert_eq!(
+        backend.count(FilesystemOperation::EnsureIndex),
+        after_first,
+        "listing resolves the ancestor-declared spec without redeclaring it"
+    );
+}
+
+/// Sidebar titles for untitled threads used to be derived on EVERY list
+/// request with per-thread transcript probes — an N+1 that dominates listing
+/// once a user has many threads. The label is now seeded into the index row
+/// at message-accept time, so listing reads no transcripts at all; rows that
+/// predate the seeding probe once and heal.
+#[tokio::test]
+async fn filesystem_list_threads_derives_titles_without_transcript_probes() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-title-seed", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("title-seed");
+    for i in 0..3 {
+        let thread_id = ThreadId::new(format!("thread-title-{i}")).unwrap();
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(thread_id.clone()),
+                created_by_actor_id: "actor-a".into(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope.clone(),
+                thread_id: thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: Some("binding-title-seed".into()),
+                reply_target_binding_id: None,
+                external_event_id: Some(format!("event-title-seed-{i}")),
+                content: MessageContent::text(format!("hello sidebar label {i}")),
+            })
+            .await
+            .unwrap();
+    }
+
+    // The first list for a scope also runs the one-time thread-index
+    // migration, which backfills labels for pre-seeding rows and does probe.
+    // Steady state is what write-time seeding is for, so measure the list
+    // after that migration has run.
+    service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let reads_before = backend
+        .recorded_paths(FilesystemOperation::ReadFile)
+        .into_iter()
+        .filter(|path| path.as_str().contains("/messages/"))
+        .count();
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(listed.threads.len(), 3);
+    for thread in &listed.threads {
+        let title = thread.title.as_deref().expect("derived title present");
+        assert!(
+            title.starts_with("hello sidebar label"),
+            "derived from the first user message: {title}"
+        );
+    }
+    let reads_after = backend
+        .recorded_paths(FilesystemOperation::ReadFile)
+        .into_iter()
+        .filter(|path| path.as_str().contains("/messages/"))
+        .count();
+    assert_eq!(
+        reads_after, reads_before,
+        "steady-state listing must not probe transcripts when titles are seeded \
+         at accept time"
+    );
+}
+
+/// The sidebar label is a copy of user message text, so redaction has to
+/// remove the copy too. Serving listings from the index row made this a real
+/// exposure: redaction clears the message body, but a cached label kept the
+/// redacted words visible in every thread list.
+#[tokio::test]
+async fn filesystem_redaction_clears_the_cached_sidebar_title() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-title-redact", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("title-redact");
+    let thread_id = ThreadId::new("thread-title-redact").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: Some("binding-title-redact".into()),
+            reply_target_binding_id: None,
+            external_event_id: Some("event-title-redact".into()),
+            content: MessageContent::text("my social security number is 000-00-0000"),
+        })
+        .await
+        .unwrap();
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        listed.threads[0]
+            .title
+            .as_deref()
+            .is_some_and(|title| title.contains("000-00-0000")),
+        "precondition: the label was seeded from the message text"
+    );
+
+    service
+        .redact_message(RedactMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            message_id: accepted.message_id,
+            redaction_ref: "redaction/audit/title".into(),
+        })
+        .await
+        .expect("redaction succeeds");
+
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let title = listed.threads[0].title.as_deref().unwrap_or_default();
+    assert!(
+        !title.contains("000-00-0000"),
+        "redacted text must not survive in the sidebar label, got {title:?}"
+    );
+}
+
+/// Rows written before write-time seeding existed carry no derived label, so
+/// listing derives one per request (read-only — repairing the projection from
+/// a list request is what the threads guardrail forbids). The durable backfill
+/// belongs to the explicit thread-index migration, after which listing is
+/// probe-free.
+#[tokio::test]
+async fn filesystem_migration_backfills_legacy_derived_titles() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-title-heal", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("title-heal");
+    let thread_id = ThreadId::new("thread-title-heal").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: Some("binding-title-heal".into()),
+            reply_target_binding_id: None,
+            external_event_id: Some("event-title-heal".into()),
+            content: MessageContent::text("legacy row message"),
+        })
+        .await
+        .unwrap();
+
+    // Simulate a row written before write-time seeding: strip the derived
+    // label out of the index row through the raw backend.
+    let index_path = backend
+        .recorded_paths(FilesystemOperation::WriteFile)
+        .into_iter()
+        .rev()
+        .find(|path| path.as_str().contains("/thread_index/"))
+        .expect("index row written during accept");
+    let versioned = backend.get(&index_path).await.unwrap().unwrap();
+    let mut row: serde_json::Value = serde_json::from_slice(&versioned.entry.body).unwrap();
+    assert!(
+        row.as_object_mut()
+            .unwrap()
+            .remove("derived_title")
+            .is_some(),
+        "accept seeded the derived title"
+    );
+    let mut entry = versioned.entry.clone();
+    entry.body = serde_json::to_vec(&row).unwrap();
+    backend
+        .put(&index_path, entry, CasExpectation::Any)
+        .await
+        .unwrap();
+
+    let probes = |backend: &FaultInjecting<InMemoryBackend>| {
+        backend
+            .recorded_paths(FilesystemOperation::ReadFile)
+            .into_iter()
+            .filter(|path| path.as_str().contains("/messages/"))
+            .count()
+    };
+    let before_first = probes(&backend);
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.threads[0].title.as_deref(),
+        Some("legacy row message"),
+        "legacy row derives via the one-time probe"
+    );
+    assert!(
+        probes(&backend) > before_first,
+        "the first list after the strip must probe the transcript"
+    );
+
+    // The explicit migration is what makes the label durable.
+    service
+        .migrate_thread_index_for_scope(&scope)
+        .await
+        .expect("thread index migration backfills derived titles");
+
+    let before_second = probes(&backend);
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.threads[0].title.as_deref(),
+        Some("legacy row message"),
+        "the backfilled label serves from the index row"
+    );
+    assert_eq!(
+        probes(&backend),
+        before_second,
+        "after the migration, listing must be probe-free"
+    );
+}
+
+/// Writer admission is where the observed QA failure happens: acquiring the
+/// sole libSQL writer can time out as `BackendBusy`, and the migration runs
+/// from the first transcript read. Classifying only the in-transaction calls
+/// left that arm escaping to the caller as the retryable timeline 503 the
+/// bounded retry exists to absorb.
+#[tokio::test]
+async fn filesystem_transcript_migration_retries_writer_admission_contention() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-migrate-admit", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("migrate-admit");
+    let thread_id = ThreadId::new("thread-migrate-admit").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            turn_run_id: "run-migrate-admit".into(),
+            content: MessageContent::text("assistant reply"),
+        })
+        .await
+        .unwrap();
+    let marker = backend
+        .recorded_paths(FilesystemOperation::WriteFile)
+        .into_iter()
+        .find(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .expect("seeding wrote the transcript migration marker");
+    backend.delete(&marker).await.unwrap();
+
+    // The migration's first attempt to take the writer times out.
+    backend.add_fault(
+        Fault::on(FilesystemOperation::BeginTxn)
+            .nth(1)
+            .returning(FaultKind::BackendBusy),
+    );
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+        })
+        .await
+        .expect("writer-admission contention must be retried, not surfaced as a 503");
+    assert_eq!(history.messages.len(), 1);
+}
+
+/// The one-time transcript-index migration runs on a scope's first transcript
+/// read and rewrites message rows under CAS expectations. When that first read
+/// overlaps a live turn's message writes, the migration can lose the race; the
+/// resulting `VersionMismatch` used to escape to WebUI timeline reads as a
+/// retryable 503 (`TimelineUnavailable`, observed under the api-user-capacity
+/// stress workload). The migration must re-read and retry the page instead.
+#[tokio::test]
+async fn filesystem_transcript_migration_retries_a_lost_cas_race() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-migrate-race", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("migrate-race");
+    let thread_id = ThreadId::new("thread-migrate-race").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            turn_run_id: "run-migrate-race".into(),
+            content: MessageContent::text("assistant reply"),
+        })
+        .await
+        .unwrap();
+
+    // Reset the one-time marker so the next transcript read re-runs the
+    // migration with a message row present.
+    let marker = backend
+        .recorded_paths(FilesystemOperation::WriteFile)
+        .into_iter()
+        .find(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .expect("seeding wrote the transcript migration marker");
+    backend.delete(&marker).await.unwrap();
+
+    // Lose the CAS race exactly once: the first migration-transaction write to
+    // a message row fails the way a concurrent turn write makes it fail.
+    backend.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .path("/messages/")
+            .nth(1)
+            .version_mismatch(),
+    );
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+        })
+        .await
+        .expect("a single lost CAS race must be retried, not surfaced");
+    assert_eq!(history.messages.len(), 1);
+    let marker_writes = backend
+        .recorded_paths(FilesystemOperation::WriteFile)
+        .into_iter()
+        .filter(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .count();
+    assert_eq!(
+        marker_writes, 2,
+        "the retried migration completes and re-writes the one-time marker"
+    );
+}
+
+/// Retry exhaustion must stay bounded and fail loud with the real cause —
+/// a writer that conflicts forever must not pin the migration in a loop.
+#[tokio::test]
+async fn filesystem_transcript_migration_conflict_retries_are_bounded() {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-migrate-bound", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("migrate-bound");
+    let thread_id = ThreadId::new("thread-migrate-bound").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            turn_run_id: "run-migrate-bound".into(),
+            content: MessageContent::text("assistant reply"),
+        })
+        .await
+        .unwrap();
+    let marker = backend
+        .recorded_paths(FilesystemOperation::WriteFile)
+        .into_iter()
+        .find(|path| path.as_str().contains("transcript-index-v1.complete"))
+        .expect("seeding wrote the transcript migration marker");
+    backend.delete(&marker).await.unwrap();
+
+    let writes_before = backend.count(FilesystemOperation::WriteFile);
+    backend.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .path("/messages/")
+            .version_mismatch(),
+    );
+
+    let error = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+        })
+        .await
+        .expect_err("a permanently conflicting migration must fail, not loop");
+    assert!(
+        matches!(error, SessionThreadError::Backend(_)),
+        "retry exhaustion surfaces the underlying conflict: {error:?}"
+    );
+    let message_row_attempts = backend
+        .recorded_paths(FilesystemOperation::WriteFile)
+        .into_iter()
+        .skip(writes_before)
+        .filter(|path| path.as_str().contains("/messages/"))
+        .count();
+    // Initial attempt + TRANSCRIPT_PAGE_CONFLICT_RETRIES (5) retries.
+    assert_eq!(
+        message_row_attempts, 6,
+        "conflict retries are bounded, not unbounded"
+    );
 }
 
 #[tokio::test]

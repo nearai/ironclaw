@@ -35,6 +35,7 @@
 mod message_lookup_index;
 mod message_read;
 mod thread_index;
+mod transcript_migration;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -52,7 +53,7 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{
     error::HostApiError,
-    ids::{InvocationId, ThreadId},
+    ids::{InvocationId, TenantId, ThreadId, UserId},
     path::ScopedPath,
     resource::ResourceScope,
 };
@@ -160,8 +161,26 @@ where
     filesystem: Arc<ScopedFilesystem<F>>,
     known_thread_index_rows: Mutex<HashSet<String>>,
     ready_thread_index_scopes: Mutex<HashSet<String>>,
+    /// Mounts whose `/threads`-root index specs are already declared, keyed by
+    /// `tenant:user` — the pair the alias resolves through. Keeps thread create
+    /// off the index-DDL path after a mount's first thread.
+    ready_index_mounts: Mutex<HashSet<(TenantId, UserId)>>,
     thread_index_declaration_lock: tokio::sync::Mutex<()>,
     one_shot_context_windows: Mutex<HashMap<String, ContextWindow>>,
+}
+
+/// Whether a mount that cannot serve ordered indexes is a hard failure.
+///
+/// A named mode rather than a boolean: one caller derives it from `!required`,
+/// and an inverted argument there would silently downgrade a required
+/// declaration to a skipped one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum IndexDeclarationPolicy {
+    /// Propagate `Unsupported` — the caller needs the projection.
+    Required,
+    /// Tolerate `Unsupported` — the caller only wants the projection if the
+    /// mount can serve it.
+    Optional,
 }
 
 impl<F> FilesystemSessionThreadService<F>
@@ -173,6 +192,7 @@ where
             filesystem,
             known_thread_index_rows: Mutex::new(HashSet::new()),
             ready_thread_index_scopes: Mutex::new(HashSet::new()),
+            ready_index_mounts: Mutex::new(HashSet::new()),
             thread_index_declaration_lock: tokio::sync::Mutex::new(()),
             one_shot_context_windows: Mutex::new(HashMap::new()),
         }
@@ -293,28 +313,73 @@ where
             ))
     }
 
-    async fn ensure_thread_record_indexes(
+    /// Declare every ordered-index spec this crate queries, once per mount.
+    ///
+    /// These are declared at the `/threads` alias root rather than under each
+    /// thread. A declaration is catalog work — a spec row, and on first use the
+    /// static projection trigger set — so declaring per thread paid that cost
+    /// on every thread create and left a catalog row per thread behind
+    /// forever, which the projection then has to consider on each write.
+    /// (Under the per-declaration trigger design this branch replaced, it also
+    /// accumulated three triggers per spec per thread.) Every spec leads with
+    /// its partition key
+    /// (`thread_id`, or `scope_key` for the listing projection), so a single
+    /// declaration above the per-thread paths serves every thread under this
+    /// mount; `query_ordered` resolves it by walking ancestor prefixes.
+    ///
+    /// The alias root resolves to a per-(tenant, user) backend path, so the
+    /// memo is keyed by that pair. Racing callers may each declare once more
+    /// than strictly needed — declarations are idempotent by contract, and the
+    /// backend keeps its own cache on the same resolved path — which is why
+    /// this deliberately takes no lock.
+    ///
+    /// `IndexDeclarationPolicy::Optional` lets a caller that only needs the
+    /// projection for an optional listing tolerate a mount without
+    /// ordered-index support; `Required` propagates. The mount is memoized as
+    /// declared
+    /// only on full success, so a fail-soft skip does not suppress a later
+    /// required declaration.
+    pub(super) async fn declare_root_indexes(
         &self,
         scope: &ThreadScope,
-        thread_id: &ThreadId,
+        policy: IndexDeclarationPolicy,
     ) -> Result<(), SessionThreadError> {
-        let messages = messages_root(scope, thread_id)?;
-        for index in [
-            message_sequence_index_spec()?,
-            message_kind_status_index_spec()?,
-        ] {
-            self.filesystem
-                .ensure_index(&scope.to_resource_scope(), &messages, &index)
-                .await?;
+        let resource_scope = scope.to_resource_scope();
+        // The `/threads` alias resolves through tenant and user, so the mount
+        // identity is that pair. Kept typed rather than flattened into a
+        // delimited string (typed-internals rule).
+        let mount_key = (
+            resource_scope.tenant_id.clone(),
+            resource_scope.user_id.clone(),
+        );
+        if self
+            .ready_index_mounts
+            .lock()
+            .map(|ready| ready.contains(&mount_key))
+            .unwrap_or(false)
+        {
+            return Ok(());
         }
-        let summaries = summaries_root(scope, thread_id)?;
-        self.filesystem
-            .ensure_index(
-                &scope.to_resource_scope(),
-                &summaries,
-                &summary_index_spec()?,
-            )
-            .await?;
+        let root = scoped_path(THREADS_PREFIX)?;
+        for index in root_index_specs()? {
+            match self
+                .filesystem
+                .ensure_index(&resource_scope, &root, &index)
+                .await
+            {
+                Ok(()) => {}
+                Err(FilesystemError::Unsupported { .. })
+                    if policy == IndexDeclarationPolicy::Optional =>
+                {
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if let Ok(mut ready) = self.ready_index_mounts.lock() {
+            ready.insert(mount_key.clone());
+            thread_index::evict_entry_over_limit(&mut ready, 512, &mount_key);
+        }
         Ok(())
     }
 
@@ -809,13 +874,15 @@ where
             .transpose()
     }
 
+    /// Caller must have run `ensure_transcript_indexes_migrated` for the
+    /// scope; hoisted out so a list page pays the marker check once, not once
+    /// per untitled thread.
     async fn first_user_message_for_title(
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
         _next_sequence: u64,
     ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
-        self.ensure_transcript_indexes_migrated(scope).await?;
         let Some(message_id) = MessageLookupIndexStore::new(self.filesystem.as_ref())
             .read_first_user(scope, thread_id)
             .await?
@@ -1328,7 +1395,7 @@ where
         .await
         .map_err(map_cas_error)?;
         if created {
-            self.ensure_thread_record_indexes(&record.scope, &record.thread_id)
+            self.declare_root_indexes(&record.scope, IndexDeclarationPolicy::Required)
                 .await?;
         }
         if created || !self.is_thread_index_known(&record.scope, &record.thread_id) {
@@ -1381,6 +1448,9 @@ where
 
         let message_id = ThreadMessageId::new();
         let (content_text, attachments) = content.into_parts();
+        // Derived before `content_text` moves into the message record; seeds
+        // the sidebar label in the post-accept activity touch below.
+        let derived_title_candidate = derive_title_from_message(&content_text);
         crate::contract::validate_attachment_refs(&attachments)?;
         // Sequence assignment happens only after payload validation. On
         // transactional backends the thread counter, message, sequence index,
@@ -1480,11 +1550,34 @@ where
         }
 
         // Inbound user message is thread activity — stamp recency so the
-        // sidebar surfaces this thread first. Best-effort: the message is
+        // sidebar surfaces this thread first, and seed the derived sidebar
+        // label from this message in the same index-row write (the label only
+        // lands when the thread has no title yet). Best-effort: the message is
         // already durable, so a touch failure must not fail (and retry) the
         // accept.
-        self.touch_thread_updated_at_best_effort_at(&scope, &thread_id, now)
-            .await;
+        // Only the first user message may seed the label. A pre-upgrade thread
+        // has messages but no cached label, and seeding from whatever arrives
+        // next would show the newest message where the sidebar contract
+        // promises the first — the probe-and-heal path derives those correctly.
+        let derived_title_candidate = (sequence == 1).then_some(derived_title_candidate).flatten();
+        if let Err(error) = self
+            .touch_thread_index_updated_at_with_derived_title(
+                &scope,
+                &thread_id,
+                now,
+                derived_title_candidate,
+            )
+            .await
+        {
+            // silent-ok: the message is already durable; the recency stamp and
+            // derived label are advisory, and failing the accept here could
+            // make an un-idempotent caller retry and duplicate the message.
+            tracing::debug!(
+                thread_id = %thread_id.as_str(),
+                ?error,
+                "skipping thread recency/title touch after inbound accept"
+            );
+        }
 
         Ok(AcceptedInboundMessage {
             thread_id,
@@ -2219,6 +2312,11 @@ where
                 },
             )
             .await?;
+        // The cached sidebar label may be a copy of the text just redacted.
+        // Propagating the removal is a redaction obligation, not best-effort:
+        // failing here is correct if the copy cannot be cleared.
+        self.clear_derived_title(&request.scope, &request.thread_id)
+            .await?;
         self.touch_thread_updated_at_best_effort_at(&request.scope, &request.thread_id, now)
             .await;
         Ok(updated)
@@ -2563,9 +2661,16 @@ where
         let mut needs_title: Vec<(usize, ThreadId, u64)> = Vec::new();
         for index in &listed {
             let idx = page.len();
-            let record = index.record.clone();
+            let mut record = index.record.clone();
             if record.title.is_none() {
-                needs_title.push((idx, record.thread_id.clone(), index.next_sequence));
+                match &index.derived_title {
+                    // The write path seeded the label into the index row; the
+                    // sidebar entry costs no extra reads.
+                    Some(derived) => record.title = Some(derived.clone()),
+                    // Row predates write-time derivation: probe for this
+                    // response; the migration backfills the label durably.
+                    None => needs_title.push((idx, record.thread_id.clone(), index.next_sequence)),
+                }
             }
             page.push(record);
         }
@@ -2577,6 +2682,8 @@ where
         // are silent-ok — the sidebar entry simply falls back to its
         // thread-id label, matching the WebUI fallback path.
         if !needs_title.is_empty() {
+            self.ensure_transcript_indexes_migrated(&request.scope)
+                .await?;
             let title_results: Vec<(
                 usize,
                 ThreadId,
@@ -2602,6 +2709,10 @@ where
                             .and_then(|message| message.content.as_deref())
                             .and_then(derive_title_from_message)
                         {
+                            // Read-only: the label serves this response but is
+                            // not persisted here. Backfilling it durably is the
+                            // thread-index migration's job (threads guardrail —
+                            // a list request must not repair the projection).
                             page[idx].title = Some(title);
                         }
                     }
@@ -2841,6 +2952,18 @@ fn fs_index_key(raw: &str) -> Result<IndexKey, SessionThreadError> {
 fn fs_index_name(raw: &str) -> Result<IndexName, SessionThreadError> {
     IndexName::new(raw)
         .map_err(|error| SessionThreadError::Backend(format!("invalid index name: {error}")))
+}
+
+/// Every ordered-index spec this crate queries, all declared together at the
+/// `/threads` alias root. Each leads with its partition key, so one
+/// declaration above the per-thread paths serves every thread on the mount.
+fn root_index_specs() -> Result<[IndexSpec; 4], SessionThreadError> {
+    Ok([
+        message_sequence_index_spec()?,
+        message_kind_status_index_spec()?,
+        summary_index_spec()?,
+        thread_index::thread_activity_index_spec()?,
+    ])
 }
 
 fn summary_index_spec() -> Result<IndexSpec, SessionThreadError> {
