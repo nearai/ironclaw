@@ -9,6 +9,11 @@ use ironclaw_mcp::{McpClient, McpClientRequest, McpHostHttpClient, McpRuntimeHtt
 
 use crate::mcp::{MCP_RESPONSE_BODY_LIMIT, RegistryMcpEgressPlanner};
 
+type HostedMcpClientAndRequest = (
+    McpHostHttpClient<McpRuntimeHttpAdapter<Arc<dyn RuntimeHttpEgress>>, RegistryMcpEgressPlanner>,
+    McpClientRequest,
+);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostedMcpDiscoveryError {
     Transient(String),
@@ -27,6 +32,21 @@ pub async fn probe_hosted_mcp_auth(
     scope: ResourceScope,
     runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
 ) -> Result<(), HostedMcpDiscoveryError> {
+    let (client, request) =
+        hosted_mcp_client_and_request(package, scope, runtime_http_egress, "auth probe")?;
+    client
+        .probe_auth(request)
+        .await
+        .map(|_| ())
+        .map_err(classify_mcp_client_error)
+}
+
+fn hosted_mcp_client_and_request(
+    package: &ExtensionPackage,
+    scope: ResourceScope,
+    runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+    purpose: &str,
+) -> Result<HostedMcpClientAndRequest, HostedMcpDiscoveryError> {
     let (transport, command, args, url) = match &package.manifest.runtime {
         ExtensionRuntime::Mcp {
             transport,
@@ -49,7 +69,7 @@ pub async fn probe_hosted_mcp_auth(
     let registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
     registry.upsert(package.clone()).map_err(|error| {
         HostedMcpDiscoveryError::Permanent(format!(
-            "failed to prepare hosted MCP auth probe: {error}"
+            "failed to prepare hosted MCP {purpose}: {error}"
         ))
     })?;
     let planning_capability_id = package
@@ -63,24 +83,23 @@ pub async fn probe_hosted_mcp_auth(
                 package.id
             ))
         })?;
-    McpHostHttpClient::new(
-        McpRuntimeHttpAdapter::new(runtime_http_egress),
-        RegistryMcpEgressPlanner::new(registry),
-    )
-    .probe_auth(McpClientRequest {
-        provider: package.id.clone(),
-        capability_id: planning_capability_id,
-        scope,
-        transport,
-        command,
-        args,
-        url,
-        input: serde_json::Value::Null,
-        max_output_bytes: MCP_RESPONSE_BODY_LIMIT,
-    })
-    .await
-    .map(|_| ())
-    .map_err(classify_mcp_client_error)
+    Ok((
+        McpHostHttpClient::new(
+            McpRuntimeHttpAdapter::new(runtime_http_egress),
+            RegistryMcpEgressPlanner::new(registry),
+        ),
+        McpClientRequest {
+            provider: package.id.clone(),
+            capability_id: planning_capability_id,
+            scope,
+            transport,
+            command,
+            args,
+            url,
+            input: serde_json::Value::Null,
+            max_output_bytes: MCP_RESPONSE_BODY_LIMIT,
+        },
+    ))
 }
 
 pub async fn discover_hosted_mcp_package(
@@ -100,61 +119,10 @@ pub async fn discover_hosted_mcp_package_with_policy(
     runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
     safety: Option<&crate::McpCatalogAdmissionPolicy>,
 ) -> Result<ExtensionPackage, HostedMcpDiscoveryError> {
-    let (transport, command, args, url) = match &package.manifest.runtime {
-        ExtensionRuntime::Mcp {
-            transport,
-            command,
-            args,
-            url,
-        } if is_hosted_http_mcp_package(package) => (
-            transport.clone(),
-            command.clone(),
-            args.clone(),
-            url.clone(),
-        ),
-        _ => {
-            return Err(HostedMcpDiscoveryError::Permanent(format!(
-                "extension {} is not a host-bundled hosted MCP provider",
-                package.id
-            )));
-        }
-    };
-    let registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
-    registry.upsert(package.clone()).map_err(|error| {
-        HostedMcpDiscoveryError::Permanent(format!(
-            "failed to prepare hosted MCP discovery: {error}"
-        ))
-    })?;
-    let planning_capability_id = package
-        .manifest
-        .capabilities
-        .first()
-        .map(|capability| capability.id.clone())
-        .ok_or_else(|| {
-            HostedMcpDiscoveryError::Permanent(format!(
-                "hosted MCP provider {} has no capability template",
-                package.id
-            ))
-        })?;
-    let client = McpHostHttpClient::new(
-        McpRuntimeHttpAdapter::new(runtime_http_egress),
-        RegistryMcpEgressPlanner::new(registry),
-    );
+    let (client, request) =
+        hosted_mcp_client_and_request(package, scope, runtime_http_egress, "discovery")?;
     let output = client
-        .discover_tools(
-            McpClientRequest {
-                provider: package.id.clone(),
-                capability_id: planning_capability_id,
-                scope,
-                transport,
-                command,
-                args,
-                url,
-                input: serde_json::Value::Null,
-                max_output_bytes: MCP_RESPONSE_BODY_LIMIT,
-            },
-            max_tools,
-        )
+        .discover_tools(request, max_tools)
         .await
         .map_err(classify_mcp_client_error)?;
     if output.tools.is_empty() {

@@ -311,28 +311,48 @@ async fn concrete_mcp_http_auth_probe_stops_after_the_initialization_handshake()
         planner.clone(),
     );
 
+    let request = McpClientRequest {
+        provider: ExtensionId::new("hosted-docs").unwrap(),
+        capability_id: CapabilityId::new("hosted-docs.connection").unwrap(),
+        scope: sample_scope(),
+        transport: "http".to_string(),
+        command: None,
+        args: vec![],
+        url: Some("https://mcp.example.test/mcp".to_string()),
+        input: json!({}),
+        max_output_bytes: 4096,
+    };
     client
-        .probe_auth(McpClientRequest {
-            provider: ExtensionId::new("hosted-docs").unwrap(),
-            capability_id: CapabilityId::new("hosted-docs.connection").unwrap(),
-            scope: sample_scope(),
-            transport: "http".to_string(),
-            command: None,
-            args: vec![],
-            url: Some("https://mcp.example.test/mcp".to_string()),
-            input: json!({}),
-            max_output_bytes: 4096,
-        })
+        .probe_auth(request.clone())
         .await
         .expect("credential-free initialization succeeds");
 
-    let methods = planner
-        .calls()
-        .into_iter()
-        .map(|call| call.json_rpc_method)
+    client
+        .call_tool(request)
+        .await
+        .expect("a later tool call starts its own session");
+
+    let requests = egress.requests();
+    let methods = requests
+        .iter()
+        .map(|request| json_rpc_method(&request.body))
         .collect::<Vec<_>>();
-    assert_eq!(methods, vec!["initialize", "notifications/initialized"]);
-    assert_eq!(egress.requests().len(), 2);
+    assert_eq!(
+        methods,
+        vec![
+            "initialize",
+            "notifications/initialized",
+            "initialize",
+            "notifications/initialized",
+            "tools/call",
+        ]
+    );
+    assert_eq!(
+        header_value(&requests[2].headers, "Mcp-Session-Id"),
+        None,
+        "the runtime initialize must not reuse the probe session",
+    );
+    assert_eq!(planner.calls().len(), 5);
 }
 
 #[tokio::test]
