@@ -342,6 +342,108 @@ async fn one_google_authorization_satisfies_every_installed_google_extension() {
     );
 }
 
+/// A sibling extension uninstalled while the user is on the vendor's consent
+/// screen must not fail the requesting extension's own callback.
+///
+/// An extension-scoped flow persists the shared-vendor ceiling as it stood at
+/// prepare time, and the callback re-resolves the recipe from the live
+/// installation store. Rejecting scopes that the shrunken ceiling no longer
+/// declares would fail gmail's authorization because google-drive happened to
+/// be removed mid-consent — lifecycle cleanup deliberately does not cancel
+/// shared-provider flows. The exchange clamps to the CURRENT ceiling instead,
+/// so the grant is never wider than what is authorized now.
+#[tokio::test]
+async fn sibling_uninstall_during_consent_does_not_fail_the_requesters_callback() {
+    let gmail_scopes = provider_scopes(&runtime_credential_requirements(&bundled_manifest_record(
+        "gmail",
+    )));
+    let drive_scopes = provider_scopes(&runtime_credential_requirements(&bundled_manifest_record(
+        "google-drive",
+    )));
+
+    // Prepare while BOTH are installed: the consent covers the shared ceiling.
+    let store = installed_store(&["gmail", "google-drive"]).await;
+    let resolver =
+        Arc::new(ironclaw_extension_host::InstalledManifestAuthRecipeResolver::new(store.clone()));
+    let granted = gmail_scopes
+        .iter()
+        .chain(drive_scopes.iter())
+        .map(|scope| scope.as_str().to_string())
+        .collect::<Vec<_>>();
+    let egress = Arc::new(ScriptedOAuthTokenEgress::with_json_body(
+        &serde_json::json!({
+            "access_token": "itest-google-access-token",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "scope": granted.join(" "),
+        }),
+    ));
+    let engine = engine_over_resolver(resolver, egress);
+    let scope = test_scope();
+    let gmail_extension = ExtensionId::new("gmail").expect("gmail extension id");
+    let prepared = engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "google".to_string(),
+            requester_extension: Some(gmail_extension.clone()),
+            scope: scope.clone(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("google").unwrap(),
+            requested_scopes: gmail_scopes.clone(),
+        })
+        .await
+        .expect("gmail connect flow prepares over both installed manifests");
+    let consented = url::Url::parse(prepared.authorization_url.as_str())
+        .unwrap()
+        .query_pairs()
+        .find(|(key, _)| key == "scope")
+        .map(|(_, value)| value.split(' ').map(str::to_string).collect::<Vec<_>>())
+        .expect("authorize URL carries a scope param");
+
+    // google-drive is uninstalled while the consent screen is open.
+    store
+        .delete_installation(
+            &ExtensionInstallationId::new("itest-google-drive".to_string())
+                .expect("installation id"),
+        )
+        .await
+        .expect("remove google-drive installation");
+    store
+        .delete_manifest(&ExtensionId::new("google-drive").expect("drive extension id"))
+        .await
+        .expect("uninstall google-drive");
+
+    // The callback still completes, carrying the prepare-time scope set.
+    let exchange = engine
+        .exchange_callback_for_requester(
+            Some(gmail_extension),
+            OAuthProviderExchangeContext {
+                scope: scope.clone(),
+                flow_id: AuthFlowId::new(),
+            },
+            google_callback_request(consented),
+        )
+        .await
+        .expect("an unrelated sibling uninstall must not fail this flow's callback");
+
+    for scope_needed in &gmail_scopes {
+        assert!(
+            exchange.scopes.contains(scope_needed),
+            "the requester's own scopes must survive the clamp; {} missing from {:?}",
+            scope_needed.as_str(),
+            exchange.scopes
+        );
+    }
+    for removed in &drive_scopes {
+        assert!(
+            !exchange.scopes.contains(removed),
+            "a scope whose extension is gone must be clamped out of the stored grant; \
+             {} survived in {:?}",
+            removed.as_str(),
+            exchange.scopes
+        );
+    }
+}
+
 /// The other half of the #7069 contract, and the control that proves the
 /// assertions above discriminate:
 ///

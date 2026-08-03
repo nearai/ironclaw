@@ -10,8 +10,11 @@
 //! - host-constructed authorize URLs (recipes can never supply or override
 //!   `state`, `redirect_uri`, PKCE, `client_id`, `response_type`, or the
 //!   scope parameter),
-//! - scope intersection against the recipe ceiling, rejected before any
-//!   vendor call,
+//! - scope requests validated against the recipe ceiling before any vendor
+//!   call: a host flow's explicit scopes are honored verbatim, an
+//!   extension-scoped flow's scopes are validated as a lower bound and the
+//!   full ceiling is requested instead (the vendor account is shared across
+//!   that vendor's installed extensions, #7069),
 //! - token exchange over `post_body` or `basic` client authentication,
 //! - bounded JSON-pointer extraction of token-response and identity fields,
 //! - on-demand refresh honoring `rotates_refresh_token` both ways,
@@ -473,7 +476,16 @@ impl AuthProviderClient for AuthEngine {
             .oauth2_recipe(requester_extension.as_ref(), request.provider.as_str())
             .await
             .map_err(|_| AuthProductError::TokenExchangeFailed)?;
-        validate_scopes_within_ceiling(&recipe, &request.scopes)?;
+        // An extension-scoped flow persists the shared-vendor ceiling as it
+        // stood at PREPARE time. A sibling extension uninstalled while the user
+        // was on the vendor's consent screen shrinks that ceiling, and
+        // rejecting here would fail this flow's callback over an unrelated
+        // extension's removal (lifecycle cleanup deliberately does not cancel
+        // shared-provider flows). Clamp to the CURRENT ceiling instead: the
+        // stored grant still can never exceed what is authorized right now —
+        // including on the `fallback_to_requested` path, where the exchange
+        // echoes these scopes without clamping them itself.
+        let request = clamp_callback_scopes_to_ceiling(&recipe, request);
         self.execute_oauth_exchange(context, request, recipe, resource)
             .await
     }
@@ -564,6 +576,26 @@ fn effective_requested_scopes(
         .iter()
         .map(|scope| ProviderScope::new(scope.clone()))
         .collect()
+}
+
+/// Drop callback scopes the vendor recipe no longer declares.
+///
+/// Used only on the requester-scoped exchange, where the persisted request is
+/// the prepare-time shared-vendor ceiling and may name a scope a sibling
+/// extension has since taken away. The result is always a subset of the
+/// current ceiling, so it is never wider than the host path's
+/// [`validate_scopes_within_ceiling`] would have permitted.
+fn clamp_callback_scopes_to_ceiling(
+    recipe: &OAuth2CodeRecipe,
+    mut request: OAuthProviderCallbackRequest,
+) -> OAuthProviderCallbackRequest {
+    request.scopes.retain(|scope| {
+        recipe
+            .scopes
+            .iter()
+            .any(|ceiling| ceiling == scope.as_str())
+    });
+    request
 }
 
 fn validate_scopes_within_ceiling(

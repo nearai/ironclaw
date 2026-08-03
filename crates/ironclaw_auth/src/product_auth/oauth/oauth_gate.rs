@@ -613,20 +613,18 @@ mod tests {
         else {
             panic!("expected OAuth URL challenge");
         };
-        let scopes = url
-            .as_str()
-            .split("scope=")
-            .nth(1)
-            .expect("authorize URL carries a scope param")
-            .split('&')
-            .next()
-            .expect("scope param is delimited");
+        let parsed = url::Url::parse(url.as_str()).expect("authorize URL is a valid URL");
+        let scopes = parsed
+            .query_pairs()
+            .find(|(name, _)| name == "scope")
+            .map(|(_, value)| value.into_owned())
+            .expect("authorize URL carries a scope param");
         assert!(
-            scopes.contains("msg%3Aread"),
+            scopes.contains("msg:read"),
             "the blocked capability's own scope must still be requested; got {scopes}"
         );
         assert!(
-            scopes.contains("msg%3Awrite"),
+            scopes.contains("msg:write"),
             "the sibling extension's scope must ride the same consent; got {scopes}"
         );
     }
