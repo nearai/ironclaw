@@ -550,7 +550,9 @@ impl OutboundStateStorePort for ClaimLossStore {
                 failure_kind: self.failure_kind,
             })
             .await?;
-        Ok(ClaimDeliveryAttemptForSendOutcome::Existing(authoritative))
+        Ok(ClaimDeliveryAttemptForSendOutcome::Existing(Box::new(
+            authoritative,
+        )))
     }
 
     async fn fail_prepared_delivery_attempt(

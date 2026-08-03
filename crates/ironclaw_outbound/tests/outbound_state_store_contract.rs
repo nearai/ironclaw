@@ -476,7 +476,7 @@ async fn delivery_send_claim_is_atomic_across_store_instances() {
         .expect("the losing claimant receives the winner's authoritative state");
     let mut expected = prepared;
     expected.status = OutboundDeliveryStatus::Sending;
-    assert_eq!(existing, &expected);
+    assert_eq!(existing.as_ref(), &expected);
 }
 
 #[tokio::test]
@@ -515,7 +515,7 @@ async fn prepared_failure_and_send_claim_are_one_atomic_decision_across_store_in
         ) => {
             let mut expected = prepared.clone();
             expected.status = OutboundDeliveryStatus::Sending;
-            assert_eq!(existing, expected);
+            assert_eq!(existing.as_ref(), &expected);
         }
         (
             ClaimDeliveryAttemptForSendOutcome::Existing(existing),
@@ -524,7 +524,7 @@ async fn prepared_failure_and_send_claim_are_one_atomic_decision_across_store_in
             let mut expected = prepared;
             expected.status = OutboundDeliveryStatus::Failed;
             expected.failure_kind = Some(DeliveryFailureKind::Rejected);
-            assert_eq!(existing, expected);
+            assert_eq!(existing.as_ref(), &expected);
         }
         (claim, failure) => panic!(
             "one Prepared consumer must win and the loser must observe it: claim={claim:?}, failure={failure:?}"
@@ -562,7 +562,7 @@ async fn send_claim_cas_loser_returns_exact_winner_snapshot_without_post_resolut
             })
             .await
             .expect("claim loser observes the racing settlement"),
-        ClaimDeliveryAttemptForSendOutcome::Existing(winner)
+        ClaimDeliveryAttemptForSendOutcome::Existing(Box::new(winner))
     );
     racing.assert_resolved_in_retry_read().await;
 }
@@ -598,7 +598,7 @@ async fn prepared_failure_cas_loser_returns_exact_winner_snapshot_without_post_r
             })
             .await
             .expect("settlement loser observes the racing send claim"),
-        FailPreparedDeliveryAttemptOutcome::Existing(winner)
+        FailPreparedDeliveryAttemptOutcome::Existing(Box::new(winner))
     );
     racing.assert_resolved_in_retry_read().await;
 }
@@ -1857,7 +1857,7 @@ async fn coordinator_delivery_lifecycle_round_trips(store: &impl OutboundStateSt
             })
             .await
             .unwrap(),
-        ClaimDeliveryAttemptForSendOutcome::Existing(sending),
+        ClaimDeliveryAttemptForSendOutcome::Existing(Box::new(sending)),
         "a replay cannot claim the same durable attempt"
     );
     let wrong_scope_claim = store
@@ -1997,7 +1997,7 @@ async fn delivery_prepared_transition_outcomes_preserve_authoritative_state(
                 })
                 .await
                 .expect("load existing send-claim state"),
-            ClaimDeliveryAttemptForSendOutcome::Existing(expected_claim),
+            ClaimDeliveryAttemptForSendOutcome::Existing(Box::new(expected_claim)),
             "send claim must preserve authoritative {status:?} status and failure kind"
         );
 
@@ -2023,7 +2023,7 @@ async fn delivery_prepared_transition_outcomes_preserve_authoritative_state(
                 })
                 .await
                 .expect("load existing prepared-failure state"),
-            FailPreparedDeliveryAttemptOutcome::Existing(expected_settlement),
+            FailPreparedDeliveryAttemptOutcome::Existing(Box::new(expected_settlement)),
             "prepared-failure settlement must preserve authoritative {status:?} status and failure kind"
         );
     }
@@ -2156,7 +2156,7 @@ async fn prepared_failure_is_permanent_scoped_and_source_guarded(
             })
             .await
             .expect("terminal replay is a no-op"),
-        FailPreparedDeliveryAttemptOutcome::Existing(failed.clone()),
+        FailPreparedDeliveryAttemptOutcome::Existing(Box::new(failed.clone())),
         "a terminal attempt cannot be failed again"
     );
     assert_eq!(
@@ -2167,7 +2167,7 @@ async fn prepared_failure_is_permanent_scoped_and_source_guarded(
             })
             .await
             .expect("terminal claim is a no-op"),
-        ClaimDeliveryAttemptForSendOutcome::Existing(failed),
+        ClaimDeliveryAttemptForSendOutcome::Existing(Box::new(failed)),
         "a permanently failed preflight cannot later reach vendor egress"
     );
 
@@ -2200,7 +2200,7 @@ async fn prepared_failure_is_permanent_scoped_and_source_guarded(
             })
             .await
             .expect("non-Prepared source is a no-op"),
-        FailPreparedDeliveryAttemptOutcome::Existing(expected_sending),
+        FailPreparedDeliveryAttemptOutcome::Existing(Box::new(expected_sending)),
         "preflight settlement must never rewrite an attempt that may have reached the adapter"
     );
     let attempts = store

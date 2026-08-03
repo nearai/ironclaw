@@ -1065,7 +1065,9 @@ where
                 return Err(OutboundError::SubscriptionScopeMismatch);
             }
             if attempt.status != OutboundDeliveryStatus::Prepared {
-                return Ok(ClaimDeliveryAttemptForSendOutcome::Existing(attempt));
+                return Ok(ClaimDeliveryAttemptForSendOutcome::Existing(Box::new(
+                    attempt,
+                )));
             }
             attempt.status = OutboundDeliveryStatus::Sending;
             attempt.failure_kind = None;
@@ -1111,7 +1113,9 @@ where
                 return Err(OutboundError::SubscriptionScopeMismatch);
             }
             if attempt.status != OutboundDeliveryStatus::Prepared {
-                return Ok(FailPreparedDeliveryAttemptOutcome::Existing(attempt));
+                return Ok(FailPreparedDeliveryAttemptOutcome::Existing(Box::new(
+                    attempt,
+                )));
             }
             attempt.status = OutboundDeliveryStatus::Failed;
             attempt.failure_kind = Some(request.failure_kind);

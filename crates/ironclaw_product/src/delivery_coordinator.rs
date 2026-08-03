@@ -542,7 +542,7 @@ impl DeliveryCoordinator {
                         Err(CoordinatedDeliveryError::Workflow(error))
                     }
                     FailPreparedDeliveryAttemptOutcome::Existing(existing) => {
-                        Ok(Self::outcome_for_existing_delivery(existing, None))
+                        Ok(Self::outcome_for_existing_delivery(*existing, None))
                     }
                 };
             }
@@ -573,7 +573,7 @@ impl DeliveryCoordinator {
                     FailPreparedDeliveryAttemptOutcome::Settled => Err(error),
                     FailPreparedDeliveryAttemptOutcome::Existing(existing) => {
                         Ok(Self::outcome_for_existing_delivery(
-                            existing,
+                            *existing,
                             Some(metadata.external_conversation_ref.clone()),
                         ))
                     }
@@ -647,7 +647,7 @@ impl DeliveryCoordinator {
                 }
                 FailPreparedDeliveryAttemptOutcome::Existing(existing) => {
                     Ok(ResolvedChannelContextOutcome::ExistingDelivery(
-                        Self::outcome_for_existing_delivery(existing, Some(conversation.clone())),
+                        Self::outcome_for_existing_delivery(*existing, Some(conversation.clone())),
                     ))
                 }
             };
@@ -701,7 +701,7 @@ impl DeliveryCoordinator {
             ClaimDeliveryAttemptForSendOutcome::Claimed => {}
             ClaimDeliveryAttemptForSendOutcome::Existing(existing) => {
                 return Ok(Self::outcome_for_existing_delivery(
-                    existing,
+                    *existing,
                     Some(conversation),
                 ));
             }

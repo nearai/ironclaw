@@ -349,7 +349,7 @@ pub enum ClaimDeliveryAttemptForSendOutcome {
     /// This caller persisted `Prepared -> Sending` and owns vendor egress.
     Claimed,
     /// The authoritative attempt no longer permits the transition.
-    Existing(OutboundDeliveryAttempt),
+    Existing(Box<OutboundDeliveryAttempt>),
 }
 
 /// Result of atomically settling a permanent failure while an attempt is
@@ -359,7 +359,7 @@ pub enum FailPreparedDeliveryAttemptOutcome {
     /// This caller persisted `Prepared -> Failed`.
     Settled,
     /// The authoritative attempt no longer permits the transition.
-    Existing(OutboundDeliveryAttempt),
+    Existing(Box<OutboundDeliveryAttempt>),
 }
 
 /// Atomic ownership claim for the sole vendor-egress writer of a prepared

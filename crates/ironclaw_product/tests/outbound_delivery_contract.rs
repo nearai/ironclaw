@@ -480,7 +480,9 @@ impl OutboundStateStorePort for RecoveryTestStore {
                 failure_kind,
             })
             .await?;
-        Ok(FailPreparedDeliveryAttemptOutcome::Existing(authoritative))
+        Ok(FailPreparedDeliveryAttemptOutcome::Existing(Box::new(
+            authoritative,
+        )))
     }
 
     async fn recover_interrupted_delivery_attempt(
