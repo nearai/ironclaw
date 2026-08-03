@@ -391,28 +391,44 @@ signed vendor POST → verified → normalized → turn admitted.
   AuthPrompt | FailureNotice | ConnectRequired | Working | Cleanup |
   TriggeredDelivery` — every current Slack observer/notice call site maps to
   exactly one intent, none bypasses.
-- Coordinator: persist the attempt as `Prepared`, then acquire the durable
-  store-backed atomic claim (`Prepared`→`Sending`) **before** target resolution,
-  attachment materialization, or vendor egress. The store is the authority
-  across coordinator processes; a lost claim returns duplicate suppression
-  without resolving, materializing, or sending. After claiming, resolve the
-  target (source-route reply default, preference targets, fail-closed on
-  unauthorized/unavailable), call `channel.deliver(envelope, egress)`, persist
-  the structured report, and own retry/backoff/dedupe/shutdown-drain. `Sending`
-  records durable egress ownership, not vendor contact: a crash may occur
-  during target/channel resolution or attachment materialization, or after
-  possible vendor success. Recovery cannot distinguish those cases, so it
-  records `Unknown` and never blindly resends. Sole delivery-state writer —
-  adapters get no store. Production construction rejects a no-op sink. This is
-  not a provider exactly-once guarantee: notice attempts retain fresh random
-  delivery ids, and their existing dedupe contract is not redesigned by the
-  per-attempt claim.
+- Coordinator: persist the attempt as `Prepared`; resolve the target
+  (source-route reply default, preference targets, fail-closed on
+  unauthorized/unavailable), generation-pinned channel, stored context, and
+  attachments while the attempt remains `Prepared`; then acquire the durable
+  store-backed atomic claim (`Prepared`→`Sending`) immediately before
+  `channel.deliver(envelope, egress)`. The store is the authority across
+  coordinator processes; a lost claim returns duplicate suppression without
+  vendor egress. Transient target `ProductSurfaceFailure` and project-filesystem
+  `Unavailable` return to the caller while leaving `Prepared` retryable.
+  Permanent preflight failure uses guarded `Prepared`→`Failed`; missing or
+  uninstalled channel resolution returns caller `ChannelUnavailable` and
+  records durable `Rejected` pending typed resolver taxonomy. Neither path can
+  overwrite a concurrent claim or terminal settlement, so the lifecycle has
+  no status ABA. Persist the structured adapter report and own
+  retry/backoff/dedupe/shutdown-drain. `Sending` records durable egress
+  ownership at the adapter/vendor ambiguity boundary, not vendor contact: a
+  crash may occur immediately before adapter contact or after possible vendor
+  success. Recovery cannot distinguish those cases, so the guarded recovery
+  transition required by the interrupted-delivery contract changes only
+  `Sending`→`Unknown` and never blindly resends or overwrites a concurrent
+  `Delivered`/`Failed` settlement. Sole delivery-state writer — adapters get
+  no store. Production construction rejects a no-op sink. This is not a provider
+  exactly-once guarantee: notice attempts retain fresh random delivery ids,
+  and their existing dedupe contract is not redesigned by the per-attempt
+  claim.
 - For final and triggered replies, the coordinator materializes recognized
   `/workspace/...` references through the turn-scoped project filesystem after
-  the durable claim and target/channel resolution, but before vendor egress. It
-  enforces shared
+  target/channel resolution, but while the attempt is still `Prepared` and
+  before the durable send claim. It enforces shared
   count/per-file/total budgets, rejects caller-supplied file parts, and passes
   only transient `OutboundPart::File` values to the adapter.
+- Run-notification gate projection ids bind the canonical approval/auth gate
+  ref with a domain-separated, length-framed, full lowercase SHA-256 suffix.
+  Same-gate replay is stable, distinct same-kind gates in one run remain
+  distinct, and non-gate projection ids are unchanged. This is a no-schema
+  compatibility change: one already in-flight gate can produce one duplicate
+  prompt across an upgrade because the legacy and hardened ids differ; replay
+  is stable after the hardened id is established.
 - `CommunicationPresentationPolicy` derived from `[channel.presentation]`
   flows into prompt construction; delete the concrete
   Discord/WhatsApp/Telegram/Slack branches in
@@ -429,11 +445,14 @@ signed vendor POST → verified → normalized → turn admitted.
   branches.
 
 **Tests first:** coordinator contract tests with a scripted channel adapter
-(every intent enters; attempt persisted before egress observed; retry/backoff/
-dedupe; partial multipart rule — once any part sends, a later retryable part
-failure is terminal unless the adapter supplied a vendor idempotency key;
-crash after a durable claim (before vendor contact or after possible success)
-→ `Unknown`; drain; both DBs). Egress security tests: undeclared host,
+(every intent enters; attempt stays `Prepared` through preflight and is
+`Sending` before egress is observed; transient preflight replay; guarded
+permanent-preflight settlement; retry/backoff/dedupe; partial multipart rule —
+once any part sends, a later retryable part failure is terminal unless the
+adapter supplied a vendor idempotency key; crash after a durable claim
+(immediately before adapter contact or after possible success) → guarded
+`Unknown`; distinct same-kind gate projection ids with stable same-gate replay;
+drain; both DBs). Egress security tests: undeclared host,
 adapter-supplied auth header, redirect/private-IP escape, oversized response —
 rejected before network. Slack/Telegram rendering is fixture-unit-tested in
 their crates; one outbound integration proof each through the real coordinator.

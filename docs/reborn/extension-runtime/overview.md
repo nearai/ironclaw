@@ -533,11 +533,12 @@ the idempotency attempt; permanent failures settle it.
 
 For final and triggered outbound replies, the coordinator recognizes confined
 `/workspace/...` file references, preflights and reads them through the
-turn-scoped project filesystem after acquiring the durable delivery claim and
-resolving the target/channel, then appends transient `OutboundPart::File`
-values before vendor egress. Callers cannot inject pre-materialized file parts.
-The adapter owns the vendor upload; raw bytes never enter attempts, events,
-projections, or transcripts.
+turn-scoped project filesystem while the durable attempt remains `Prepared`,
+after resolving the target and generation-pinned channel. It appends transient
+`OutboundPart::File` values, then claims the attempt immediately before vendor
+egress. Callers cannot inject pre-materialized file parts. The adapter owns the
+vendor upload; raw bytes never enter attempts, events, projections, or
+transcripts.
 
 ### 4.3 Auth — one host engine, recipes, no adapter
 
@@ -717,19 +718,27 @@ user is on. One delivery, end to end:
 2. The coordinator authorizes the candidate target binding and persists a
    `Prepared` delivery attempt. Notices persist their source-conversation
    attempt through the same lifecycle.
-3. It atomically claims the durable attempt (`Prepared` → `Sending`) **before**
-   any fallible target/channel resolution, attachment materialization, or
-   vendor egress. The store is authoritative across coordinator processes; a
-   claim loser returns duplicate suppression without performing any of that
-   downstream work.
-4. It resolves the trusted target metadata and bound channel adapter from the
-   active snapshot. Reply targets use stored `reply_context`; proactive sends
-   use a stored preference target. Unauthorized or unavailable targets fail
-   closed. The adapter is generation-pinned, so an in-flight delivery survives
-   an upgrade.
-5. Final and triggered replies materialize recognized workspace attachments,
-   then `adapter.deliver(envelope, egress)` renders and sends; the host injects
-   credentials.
+3. While the attempt remains `Prepared`, it resolves trusted target metadata,
+   the generation-pinned channel adapter, and stored reply context. Reply
+   targets use stored `reply_context`; proactive sends use a stored preference
+   target. Final and triggered replies then materialize recognized workspace
+   attachments. `ProductSurfaceFailure::Transient` during target resolution
+   and `ProjectFsError::Unavailable` during materialization leave the attempt
+   `Prepared`, so replay can retry the preflight without risking duplicate
+   vendor egress.
+4. A permanent preflight failure uses a guarded `Prepared` → `Failed`
+   transition. A missing or uninstalled channel returns
+   `ChannelUnavailable` to the caller and records terminal `Failed` with the
+   durable `Rejected` kind; that mapping remains conservative until channel
+   resolution exposes a typed transient/permanent taxonomy. The guarded
+   transition cannot overwrite an attempt another coordinator already advanced,
+   so there is no status ABA through `Sending` or a terminal state.
+5. Once all preflight work succeeds, the coordinator atomically claims the
+   durable attempt (`Prepared` → `Sending`) immediately before
+   `adapter.deliver(envelope, egress)`. The store is authoritative across
+   coordinator processes; a claim loser returns duplicate suppression and
+   performs no vendor egress. The adapter renders and sends, and the host
+   injects credentials.
 6. The adapter returns a structured per-part report (sent + vendor message
    ref / retryable / permanent). It has no store access and cannot mark
    anything delivered.
@@ -737,18 +746,29 @@ user is on. One delivery, end to end:
    drains on shutdown.
 
 The **sole-writer rule** is what makes the crash story tractable, but
-`Sending` records ownership rather than proof of vendor contact. Because the
-durable claim precedes all fallible pre-egress work, the process can die before
-target/channel resolution, attachment materialization, or any vendor contact;
-it can also die after the vendor accepted a message but before the result was
-recorded. Recovery cannot distinguish those cases, so an interrupted `Sending`
-attempt becomes `Unknown` and is never blindly resent (that is how users get
-duplicate messages) unless a vendor idempotency key makes a resend provably
-safe. The claim suppresses concurrent egress for one durable delivery fact; it
-does not provide provider exactly-once delivery. Notice attempts retain fresh
-random ids and their separate dedupe contract. This works only because exactly
-one component owns delivery truth, which is why "no direct product send path"
-is an architecture-gated rule.
+`Sending` records ownership at the adapter/vendor ambiguity boundary rather
+than proof of vendor contact. The process can die after the claim but before
+the adapter contacts the vendor, or after the vendor accepted a message but
+before the result was recorded. Recovery cannot distinguish those cases, so
+the guarded recovery transition required by the interrupted-delivery contract
+moves only a still-`Sending` attempt to `Unknown`; it cannot overwrite a
+concurrent `Delivered` or `Failed` settlement, and it never blindly resends
+(that is how users get duplicate messages) unless a vendor idempotency key
+makes a resend provably safe. The claim suppresses concurrent egress for one
+durable delivery fact; it does not provide provider exactly-once delivery.
+Notice attempts retain fresh random ids and their separate dedupe contract.
+This works only because exactly one component owns delivery truth, which is why
+"no direct product send path" is an architecture-gated rule.
+
+Run-notification projection identity is also part of dedupe. Approval and auth
+gate prompts bind the canonical gate reference into a domain-separated,
+length-framed, full lowercase SHA-256 suffix. Replaying the same gate therefore
+reuses its durable projection id, while distinct same-kind gates in one run do
+not suppress one another. Non-gate notification ids retain their existing
+per-`(run, kind)` shape. This needs no schema migration. During a rolling
+upgrade, one already in-flight gate can be prompted once under the old id and
+once under the hardened id because the two ids differ; same-gate replay is
+stable after the new id is in use.
 
 The coordinator is **not folded into `ChannelAdapter`** for the same reason
 the dispatcher is not folded into `ToolAdapter` and the ingress router is not

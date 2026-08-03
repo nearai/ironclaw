@@ -691,10 +691,15 @@ Rules — kept short on purpose:
   `coordinator_notice_fails_closed_when_the_channel_is_unavailable`
   (`outbound_delivery_contract.rs`); the triggered path resolves the
   creator's preference target (`run_delivery_contract.rs`).
-- [x] OUT-3 An attempt is persisted (`Prepared`→`Sending`) before vendor
-  egress. — `coordinator_persists_sending_before_the_adapter_delivers` (the
-  scripted adapter reads the durable attempt DURING deliver and sees
-  `Sending`) and `coordinator_notice_is_source_routed_and_persists_before_egress`
+- [x] OUT-3 An attempt is persisted as `Prepared`; target/channel/context
+  resolution and attachment materialization complete while it remains
+  `Prepared`; the atomic `Prepared`→`Sending` claim occurs immediately before
+  adapter/vendor egress. —
+  `coordinator_persists_sending_before_the_adapter_delivers` (the scripted
+  adapter reads the durable attempt DURING deliver and sees `Sending`),
+  `transient_target_preflight_stays_prepared_and_replay_delivers`,
+  `unavailable_workspace_preflight_stays_prepared_and_replay_delivers`, and
+  `coordinator_notice_is_source_routed_and_persists_before_egress`
   (`outbound_delivery_contract.rs`); `ironclaw_outbound::service` records the
   initial attempt as `Prepared`. Integration: `assert_delivered_attempt`
   (`tests/integration/extension_delivery.rs`) pins that no attempt is left
@@ -710,10 +715,17 @@ Rules — kept short on purpose:
   no no-op-sink constructor (`delivery_coordinator.rs` doc), so the guarantee
   is structural rather than a dedicated test.
 - [x] OUT-5 Retry/backoff and run-notice dedupe are generic; the coordinator
-  acquires a durable, store-backed atomic claim (`Prepared`→`Sending`) before
-  target resolution, attachment materialization, or vendor egress. The store,
-  not process-local state, is the authority across coordinator instances.
-  There is no external coordinator shutdown/drain surface. —
+  acquires a durable, store-backed atomic claim (`Prepared`→`Sending`)
+  immediately before adapter/vendor egress, after preflight succeeds. The
+  store, not process-local state, is the authority across coordinator
+  instances. A transient target `ProductSurfaceFailure` or project-filesystem
+  `Unavailable` leaves the attempt `Prepared` and retryable. Permanent
+  preflight failure uses a guarded `Prepared`→`Failed` transition; a missing
+  or uninstalled channel reports caller `ChannelUnavailable` and records
+  terminal `Rejected` pending a typed resolver taxonomy. Neither transition
+  can consume a claim or terminal settlement written by another coordinator,
+  so there is no status ABA. There is no external coordinator shutdown/drain
+  surface. —
   `coordinator_retries_fully_retryable_reports_then_delivers` (bounded
   retry, zero-backoff policy injection),
   busy-hint FIFO dedupe rows in `run_delivery_contract.rs`; the
@@ -724,17 +736,30 @@ Rules — kept short on purpose:
   fact. The claim does not provide provider exactly-once delivery: notice
   attempts still mint fresh random delivery ids, and run-notice dedupe remains
   the existing separate contract.
-- [x] OUT-6 `Sending` means durable egress ownership was claimed, not that the
-  vendor was contacted. A crash can occur during fallible target/channel
-  resolution or attachment materialization, or after possible vendor success;
-  recovery cannot distinguish those cases, records `Unknown`, and never
-  blindly resends without a vendor idempotency key. —
+- [x] OUT-6 `Sending` means durable egress ownership at the adapter/vendor
+  ambiguity boundary, not preflight ownership or proof that the vendor was
+  contacted. A crash can occur immediately before adapter contact or after
+  possible vendor success; recovery cannot distinguish those cases. The
+  guarded `Sending`→`Unknown` recovery transition cannot overwrite a
+  concurrent `Delivered`/`Failed` settlement and never blindly resends without
+  a vendor idempotency key. —
   `coordinator_recovery_marks_interrupted_sending_attempts_unknown` and
   `coordinator_lazily_recovers_interrupted_attempts_before_a_scopes_first_delivery`
   (`outbound_delivery_contract.rs`): interrupted `Sending` attempts from a
   prior lifetime settle `Unknown` (never re-driven) lazily before that
   scope's first delivery — the store enumerates per scope only, so recovery
   is per-scope on first touch (owner call, flagged in the PR body).
+- [x] OUT-6a Approval/auth gate projection ids bind the canonical gate ref via
+  a domain-separated, length-framed, full lowercase SHA-256 suffix. Distinct
+  same-kind gates in one run no longer collide, same-gate replay stays stable,
+  and non-gate ids remain byte-for-byte unchanged. No schema migration is
+  required. One in-flight gate can produce one duplicate prompt across an
+  upgrade because its old and hardened ids differ; replay is stable thereafter.
+  —
+  `observer_delivers_distinct_same_kind_gates_once_each_and_suppresses_replays`
+  and `triggered_driver_delivers_distinct_same_kind_gates_once_each`
+  (`run_delivery_contract.rs`), plus projection-id unit tests in
+  `run_delivery/prompts.rs`.
 - [x] OUT-7 Partial multipart: once any part sends, a later retryable failure
   is terminal unless an idempotency key proves safe retry. —
   `coordinator_partial_multipart_failure_is_terminal_without_retry`
