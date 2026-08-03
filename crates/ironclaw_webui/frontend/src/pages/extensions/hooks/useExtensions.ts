@@ -637,6 +637,15 @@ export function useHostedMcpAuthSelection(packageRef, onSuccess) {
         if (res.success === false) {
           throw new Error(res.message || t("extensions.setupFailed"));
         }
+        if (
+          res.blockers?.some(
+            (blocker) =>
+              blocker?.kind === "setup" &&
+              blocker?.ref_id === "hosted_mcp_auth_selection_required",
+          )
+        ) {
+          throw new Error(res.message || t("extensions.customMcpAuthHint"));
+        }
         return res;
       }),
     onSuccess: (res) => {

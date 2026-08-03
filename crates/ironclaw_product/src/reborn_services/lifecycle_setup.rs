@@ -307,6 +307,7 @@ async fn setup_extension_response(
         package_ref,
         phase: setup_public_phase(lifecycle.phase, credential_readiness),
         blockers: lifecycle.blockers,
+        message: lifecycle.message,
         onboarding,
         payload: lifecycle.payload,
         secrets,
@@ -453,6 +454,7 @@ mod tests {
 
         assert!(activated.load(Ordering::SeqCst));
         assert_eq!(response.phase, LifecyclePublicState::Active);
+        assert_eq!(response.message.as_deref(), Some("activation complete"));
         assert!(
             response
                 .secrets
@@ -479,7 +481,7 @@ mod tests {
                         package_ref: Some(package_ref),
                         phase: InstallationState::Active,
                         blockers: Vec::new(),
-                        message: None,
+                        message: Some("activation complete".to_string()),
                         payload: Some(LifecycleProductPayload::ExtensionActivate {
                             activated: true,
                             visible_capability_ids: vec!["github.get_workflow_runs".to_string()],

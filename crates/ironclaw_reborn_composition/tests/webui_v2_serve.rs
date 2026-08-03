@@ -219,6 +219,7 @@ fn extension_setup_response(package_ref: LifecyclePackageRef) -> RebornSetupExte
         package_ref,
         phase: LifecyclePublicState::SetupNeeded,
         blockers: Vec::new(),
+        message: None,
         payload: None,
         secrets: Vec::new(),
         fields: Vec::new(),

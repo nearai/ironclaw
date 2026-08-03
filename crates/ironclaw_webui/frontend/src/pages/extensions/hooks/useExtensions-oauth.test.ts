@@ -145,6 +145,7 @@ test("hosted MCP auth selection submits one selection and refreshes setup state"
   const selections = [];
   const mutationConfigs = [];
   const saved = [];
+  let selectionResponse = { success: true };
   const context = {
     Error,
     React: {
@@ -163,7 +164,7 @@ test("hosted MCP auth selection submits one selection and refreshes setup state"
     removeExtension: () => {},
     selectHostedMcpAuth: (packageRef, authSelection, options) => {
       selections.push({ packageRef, authSelection, options });
-      return Promise.resolve({ success: true });
+      return Promise.resolve(selectionResponse);
     },
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -205,6 +206,24 @@ test("hosted MCP auth selection submits one selection and refreshes setup state"
     ["extension-setup", "linear"],
   ]);
   assert.deepEqual(saved, [result]);
+
+  selectionResponse = {
+    success: true,
+    message: "Hosted MCP rejected unauthenticated access; choose OAuth or Bearer token.",
+    blockers: [
+      { kind: "setup", ref_id: "hosted_mcp_auth_selection_required" },
+    ],
+  };
+  await assert.rejects(
+    mutationConfigs[0].mutationFn({
+      authSelection: { kind: "no_auth" },
+      clientActionId: "select-no-auth-again",
+    }),
+    {
+      message: "Hosted MCP rejected unauthenticated access; choose OAuth or Bearer token.",
+    },
+    "a rejected no-auth choice remains in setup and surfaces the safe reason",
+  );
 });
 
 test("useOauthSetup exposes the popup-watcher phase as authorizing", () => {
