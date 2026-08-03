@@ -589,13 +589,20 @@ fn clamp_callback_scopes_to_ceiling(
     recipe: &OAuth2CodeRecipe,
     mut request: OAuthProviderCallbackRequest,
 ) -> OAuthProviderCallbackRequest {
-    request.scopes.retain(|scope| {
-        recipe
-            .scopes
-            .iter()
-            .any(|ceiling| ceiling == scope.as_str())
-    });
     request
+        .scopes
+        .retain(|scope| scope_in_ceiling(recipe, scope));
+    request
+}
+
+/// The one membership rule deciding whether a scope is inside a recipe's
+/// ceiling. Both the clamp above and [`validate_scopes_within_ceiling`] answer
+/// "may this caller keep this scope", so they must never diverge on it.
+fn scope_in_ceiling(recipe: &OAuth2CodeRecipe, scope: &ProviderScope) -> bool {
+    recipe
+        .scopes
+        .iter()
+        .any(|ceiling| ceiling == scope.as_str())
 }
 
 fn validate_scopes_within_ceiling(
@@ -603,11 +610,7 @@ fn validate_scopes_within_ceiling(
     requested: &[ProviderScope],
 ) -> Result<(), AuthProductError> {
     for scope in requested {
-        if !recipe
-            .scopes
-            .iter()
-            .any(|ceiling| ceiling == scope.as_str())
-        {
+        if !scope_in_ceiling(recipe, scope) {
             return Err(AuthProductError::invalid_request(
                 "requested scopes exceed the vendor recipe scope ceiling",
             ));
