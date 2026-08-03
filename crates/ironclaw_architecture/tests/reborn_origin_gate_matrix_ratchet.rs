@@ -34,9 +34,10 @@
 //!      per-descriptor self-consistency check, applied to the TOML source);
 //!    - any `ungated` `loop_run` has its id in the reviewed allowlist.
 //!
-//!    The scan covers both the first-party extension assets and the
-//!    host-bundled always-on package assets (`ironclaw_host_runtime/assets`,
-//!    the `ironclaw.memory` manifests). Today the only `ungated` TOML
+//!    The scan covers every shipped package manifest under
+//!    `crates/extensions/packages/` — the twelve extension packages and the
+//!    two host-bundled always-on `ironclaw.memory` providers, which WS2's
+//!    colocation brought under the same root. Today the only `ungated` TOML
 //!    capabilities are the allowlisted read-only memory tools
 //!    (`ironclaw.memory.read`/`search`/`tree`); every installable extension
 //!    capability remains gated.
@@ -115,16 +116,7 @@ const EXPECTED_UNGATED_SEED: &[&str] = &[
 ];
 
 fn first_party_assets_dir() -> PathBuf {
-    workspace_root().join("crates/ironclaw_first_party_extensions/assets")
-}
-
-/// Host-bundled always-on packages (the `ironclaw.memory` native/mem0
-/// manifests) are hand-authored TOML exactly like the first-party extension
-/// assets, so the same matrix scan applies. Missing coverage here let the
-/// memory manifests ship with no `origin_gate_matrix`, which the S4 fold
-/// fail-closes to Forbidden for every origin-stamped dispatch.
-fn host_runtime_assets_dir() -> PathBuf {
-    workspace_root().join("crates/ironclaw_host_runtime/assets")
+    workspace_root().join("crates/extensions/packages")
 }
 
 fn collect_manifest_tomls(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -217,24 +209,29 @@ fn ungated_loop_run_allowlist_is_pinned_to_reviewed_seed() {
 /// off-allowlist `ungated` loop_run. See the header.
 #[test]
 fn extension_toml_capabilities_declare_wellformed_origin_gate_matrix() {
+    // One scan root now: WS2's package colocation put every shipped package —
+    // the twelve extension packages and the two `ironclaw.memory` provider
+    // packages, which used to sit apart under `ironclaw_host_runtime/assets/`
+    // — under `crates/extensions/packages/`. The memory manifests are still
+    // named explicitly below, because "the directory has enough files in it"
+    // is not the same claim as "these two specific manifests are in the scan".
     let mut manifests = Vec::new();
     collect_manifest_tomls(&first_party_assets_dir(), &mut manifests);
     assert!(
-        manifests.len() >= 12,
-        "expected at least the 12 first-party extension manifest assets, found {} — did the \
-         assets directory move? ({})",
+        manifests.len() >= 14,
+        "expected at least the 14 shipped package manifests (12 extension packages + the two \
+         memory providers), found {} — did the packages directory move? ({})",
         manifests.len(),
         first_party_assets_dir().display()
     );
-    collect_manifest_tomls(&host_runtime_assets_dir(), &mut manifests);
-    for required in ["memory_native/manifest.toml", "memory_mem0/manifest.toml"] {
+    for required in ["memory-native/manifest.toml", "mem0/manifest.toml"] {
         assert!(
             manifests
                 .iter()
                 .any(|path| path.ends_with(Path::new(required))),
             "expected the host-bundled {required} under {} — a missing or moved memory manifest \
              would silently drop it from this origin-gate scan",
-            host_runtime_assets_dir().display()
+            first_party_assets_dir().display()
         );
     }
 

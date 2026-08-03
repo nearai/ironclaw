@@ -13,6 +13,7 @@ import {
   isBusyRejectedStatus,
   uiStatusFromRecordStatus,
 } from "./message-status";
+import { workspaceFilePathFromHref } from "../../../lib/workspace-file-links";
 
 // Project a stored `AttachmentRef` (snake_case wire shape) into the
 // render shape `MessageBubble` consumes. The timeline never carries bytes,
@@ -38,6 +39,8 @@ function attachmentsFromRecord(record, threadId) {
             attachmentId: ref.id,
           })
         : null;
+    const workspace_path =
+      workspaceFilePathFromHref(ref.storage_key) || undefined;
     return {
       id: ref.id,
       filename: ref.filename || "attachment",
@@ -46,6 +49,7 @@ function attachmentsFromRecord(record, threadId) {
       size_label: Number.isFinite(ref.size_bytes) ? formatBytes(ref.size_bytes) : "",
       preview_url: null,
       fetch_url,
+      ...(workspace_path && { workspace_path }),
     };
   });
 }

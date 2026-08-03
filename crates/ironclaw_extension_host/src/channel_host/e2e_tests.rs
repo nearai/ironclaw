@@ -180,7 +180,7 @@ const GATE_B: &str = "gate:approval-00000000-0000-0000-0000-000000000002";
 const AUTH_GATE: &str = "gate:auth-slack";
 
 fn slack_manifest_from_bundled_inventory() -> String {
-    ironclaw_first_party_extensions::packages::bundled_packages()
+    ironclaw_extension_support::packages::bundled_packages()
         .into_iter()
         .find(|bundle| bundle.id == "slack")
         .expect("Slack is in the bundled package inventory") // safety: Slack is a compile-time bundled test fixture.

@@ -8,18 +8,20 @@ import {
   formatMissionCadence,
   formatMissionStatus,
   formatProjectDate,
-  formatProjectHealth,
+  formatProjectRole,
   formatProjectRelativeTime,
+  formatProjectState,
   formatThreadState,
   formatThreadType,
+  projectStateTone,
   projectCount,
+  summarizeOverview,
   threadPresentation,
 } from "./projects-presenters";
 
 const t = (key, params = {}) => {
   const translations = {
     "projects.count.steps": "Steps: {count}",
-    "projects.health.green": "Localized healthy",
     "projects.metric.notSet": "Localized not set",
     "projects.missions.manual": "Localized manual",
     "projects.relative.hoursAgo": "{count} localized hours ago",
@@ -27,7 +29,10 @@ const t = (key, params = {}) => {
     "projects.relative.noActivity": "Localized no activity",
     "projects.date.notAvailable": "Localized date unavailable",
     "projects.role.assistant": "Localized assistant",
+    "projects.projectRole.owner": "Localized owner",
+    "projects.projectRole.unknown": "Localized unknown project role",
     "projects.status.active": "Localized active",
+    "projects.status.archived": "Localized archived project",
     "projects.thread.type.missionRun": "Localized mission run",
     "projects.threadState.done": "Localized done",
   };
@@ -57,14 +62,38 @@ test("formatMissionCadence falls back to localized manual label", () => {
   assert.equal(formatMissionCadence(null, t), "Localized manual");
 });
 
-test("project enum formatters localize known values and preserve unknowns", () => {
-  assert.equal(formatProjectHealth("green", t), "Localized healthy");
-  assert.equal(formatProjectHealth("blue", t), "blue");
+test("project enum formatters localize API-backed state and role values", () => {
+  assert.equal(formatProjectState("active", t), "Localized active");
+  assert.equal(formatProjectState("archived", t), "Localized archived project");
+  assert.equal(formatProjectState("unexpected", t), "unexpected");
+  assert.equal(formatProjectRole("owner", t), "Localized owner");
+  assert.equal(formatProjectRole(null, t), "Localized unknown project role");
+  assert.equal(formatProjectRole("unexpected", t), "unexpected");
+  assert.equal(projectStateTone("active"), "success");
+  assert.equal(projectStateTone("archived"), "muted");
   assert.equal(formatMissionStatus("Active", t), "Localized active");
   assert.equal(formatThreadState("Done", t), "Localized done");
   assert.equal(formatThreadType("mission_run", t), "Localized mission run");
   assert.equal(formatThreadType("ad_hoc", t), "ad hoc");
   assert.equal(formatMessageRole("assistant", t), "Localized assistant");
+});
+
+test("project summary uses authoritative API lifecycle counts beyond the loaded page", () => {
+  assert.deepEqual(
+    summarizeOverview({
+      projects: [{ state: "active" }],
+      lifecycleCounts: {
+        total: 501,
+        active: 450,
+        archived: 51,
+      },
+    }),
+    {
+      totalProjects: 501,
+      activeProjects: 450,
+      archivedProjects: 51,
+    },
+  );
 });
 
 test("threadPresentation interpolates fallback title without a translator", () => {

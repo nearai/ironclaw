@@ -32,25 +32,69 @@ they run the lane in the merge queue, before landing, without adding the full
 WASM build to ordinary PR feedback. Push and deep-CI runs remain exhaustive.
 
 `reborn-tests.yml` follows the same PR-versus-queue contract. Pull requests use
-`reborn_pr_test_plan.py` to run affected crate buckets and exact changed root,
-integration, and frontend suites without LLVM instrumentation. Recorded QA
+`reborn_pr_test_plan.py` to run affected crate buckets and exact changed root
+and integration suites without LLVM instrumentation. Recorded QA
 replay remains a baseline on every pull request because it detects ordering
 and cross-surface regressions that cannot be inferred from changed paths. The
 full transitive reverse workspace dependency closure is included in PR crate
-selection. Foundational-crate changes that span more than three canonical
-buckets coalesce every changed and dependent package into at most three PR
-jobs instead of omitting consumer tests. The merge queue and pushes to `main`
-still run every crate bucket, root
-partition, group suite, integration lane, frontend test, recorded replay, and
-coverage gate. Unknown paths, empty diffs, and recognized test-topology or
-workspace-topology changes fail closed to that same full plan on the pull
-request. A planner execution or schema failure also fails the required check
-loudly.
+selection for production-source changes. Package-owned tests, examples, and
+benches run only their owning package because they cannot alter a dependent
+package's production behavior. A changed top-level Cargo test, example, or
+bench target runs directly; nested support changes retain all owning-package
+targets. Foundational-crate changes that span more than
+three canonical buckets coalesce every changed and dependent package into at
+most three PR jobs instead of omitting consumer tests. The merge queue and
+pushes to `main` still run every crate bucket, root partition, group suite,
+integration lane, recorded replay, and coverage gate. Shared root or
+integration support changes run one
+representative PR partition or lane, with the exhaustive fan-out required in
+merge queue. CI workflow, CI script, coverage-policy, toolchain, and workspace
+topology changes use their owning static/compile gates on the PR and receive
+the exhaustive Reborn matrix in merge queue. Unknown paths and empty diffs
+fail quickly at planning instead of silently launching or skipping an
+unbounded matrix. A planner execution or schema failure also fails the
+required check loudly.
+`Cargo.lock` is scoped only when a structured base/head comparison proves that
+the lockfile changed solely in dependency lists for workspace manifests changed
+by the same PR. Package additions/removals, versions, checksums, unrelated
+workspace edges, and unreadable base state receive their full dependency
+breadth in merge queue; changed workspace manifests still select their
+production dependency closure on the PR. The stress tool
+is owned by `ironclaw-stress.yml`, and changed-line coverage exemptions are
+schema-checked in Code Style instead of launching unrelated integration lanes.
 The queue therefore preserves exhaustive deterministic evidence while
 ordinary PRs avoid consuming 20-plus runners for unrelated lanes. Pull-request
 parallelism is capped at three crate buckets, one root partition, and one
 integration lane; merge queue and main retain full matrix parallelism so this
 feedback optimization does not serialize the production gate.
+Full-coverage crate buckets run one multi-package `cargo llvm-cov` invocation
+per bucket, preserving every package test and the bucket LCOV artifact while
+sharing dependency compilation across packages in the same job.
+
+`Tests (Reborn)` owns Rust crate, root, architecture, runtime, and coverage
+contracts. Code Style owns WebUI lint, Vitest, and the production build on all
+code events. Pull-request Clippy covers production libraries and binaries for
+directly changed workspace packages with all features. Test-only and CI-only
+PRs do not compile an unchanged workspace solely for linting. Root
+`Cargo.toml` and `Cargo.lock` changes lint every workspace package because
+their dependency and feature impact is workspace-wide. Merge queue and main
+lint the full workspace, add test and example targets, and run the
+default-feature matrix. Code Style's CLI Rust smoke and Reborn E2E's
+four Rust groups run on merge queue and main, where they validate the
+exhaustive merged state, but do not repeat those contracts on PR runners. The release-binary
+smoke harness self-test remains in Code Style's fast deterministic job on every
+code PR. Reborn E2E continues to build the real product binary and run all
+browser/provider lanes on pull requests.
+Critical mutation manifests, selection logic, and changed-function resolution
+run on each PR. Actual `cargo-mutants` execution is a merge-queue gate, avoiding
+a long and low-frequency compile workload on the author feedback path without
+allowing selected mutations to reach `main` untested.
+The four provider-operation shards run as two concurrent pairs. Each shard
+keeps its own pytest process and hermetic runtime, while each pair shares one
+runner and one Emulate checkout/build cycle. This preserves shard isolation
+without restoring the two runner allocations removed by pairing.
+The fast Responses API and black-box contracts share the browser worker in
+separate hermetic pytest processes, capping the E2E fan-out at four workers.
 
 History: the slim-vs-full clippy matrix violated this — the queue linted only
 `--all-features` while push linted a broader matrix, so feature-gated dead code
@@ -98,18 +142,20 @@ Rules for a roll-up job that is (or may become) required:
 Code Style deliberately consolidates formatting, dependency policy, static
 guards, panic checks, and composition-budget checks into one
 `fast-checks` job. These checks complete in seconds to a few minutes and do not
-benefit from separate runners; keeping them together bounds a code-changing
-pull request to at most six active Code Style jobs while preserving every
-command. Clippy, WebUI checks, and CLI smoke remain separate because they are
-expensive or independently scope-gated.
+benefit from separate runners. Clippy and WebUI checks remain separate because
+they are expensive independent gates. The CLI Rust smoke remains a separate
+merged-state lane; its unique Python harness contract runs in `fast-checks` on
+pull requests.
 
 ## Reborn release and manual compile preflight
 
 `ironclaw-release.yml` is the tag-only cargo-dist publisher for the shipping Reborn
 `ironclaw` package and binary. Matching `ironclaw-v*` tags build the seven
 release targets, produce archives and checksums plus shell, PowerShell, and MSI
-installers, and create the tag's GitHub Release. cargo-dist derives the
-Release title and body from the release metadata and `CHANGELOG.md`.
+installers, and create the tag's GitHub Release. After that Release exists, the
+workflow publishes the regular `nearaidev/ironclaw` Docker image with version,
+`latest`, and source-SHA tags. cargo-dist derives the Release title and body
+from the release metadata and `CHANGELOG.md`.
 
 cargo-dist 0.31 generates workflow-wide `contents: write` and does not expose a
 setting for built-in job permissions. The checked-in workflow is therefore
@@ -210,12 +256,14 @@ the configuration:
   Windows/bench/docker deep coverage). Called workflows use the `deep` marker
   input instead: it defaults to true and only materializes under
   `workflow_call`.
-- **A called workflow that references `secrets.*` needs `secrets: inherit` at
-  the call site.** Otherwise the entire caller run dies at trigger time as a
-  `startup_failure` with zero jobs — including any in-run alert job. Nightly
-  Deep CI had zero successful runs from its creation (2026-05-06) through
-  2026-07-08 — 65 of its 74 retained runs are startup_failures — precisely
-  because this failure mode is invisible from inside the run.
+- **A called workflow that references `secrets.*` needs those secrets passed at
+  the call site**, either through an explicit mapping (preferred for a
+  narrowly privileged publish job) or `secrets: inherit` when it truly needs
+  the caller's full secret set. Otherwise the entire caller run dies at trigger
+  time as a `startup_failure` with zero jobs — including any in-run alert job.
+  Nightly Deep CI had zero successful runs from its creation (2026-05-06)
+  through 2026-07-08 — 65 of its 74 retained runs are startup_failures —
+  precisely because this failure mode is invisible from inside the run.
   `nightly-watchdog.yml` (08:00 UTC) exists for exactly that: it checks each
   nightly's latest scheduled run from outside and posts the failure to Slack
   even when the run itself never started.
@@ -264,16 +312,20 @@ pull requests.
 For #6160, `ironclaw-release.yml` uses cargo-dist to publish only the canonical Reborn
 `ironclaw` package. The active tag DAG consists of cargo-dist planning, the
 seven target builds, universal installer generation, and GitHub Release
-hosting. Legacy v1 artifacts, independently published WASM extensions, Docker
-images, and the old registry-checksum/announcement path are outside this DAG.
-The generated `announce` job remains as cargo-dist's final release step; it does
-not restore any of those retired products.
+hosting, followed by the regular Reborn Docker image. Legacy v1 artifacts,
+independently published WASM extensions, `ironclaw-worker`, and the old
+registry-checksum path remain outside this DAG. The generated `announce` job
+remains cargo-dist's final release step and does not restore those retired
+products.
 
-`docker.yml` keeps its independent manual and hourly entry points; a Reborn
-version tag does not invoke them. The manual `reborn-release-compile.yml`
-preflight is also independent from publishing. Restoring any retired release
-product requires adding it back explicitly instead of making it a dependency
-of the Reborn package by default.
+The `docker-image` job runs only after `host` creates the GitHub Release. If
+Docker publishing fails, the existing GitHub Release and its artifacts remain
+available while the overall workflow reports failure for retry/repair. Release
+builds publish only `nearaidev/ironclaw`; they do not dispatch
+`nearai/ironclaw-dind` because the caller explicitly sets `trigger_dind: false`.
+The reusable `docker.yml` keeps its independent manual and hourly staging entry
+points, including their existing optional DIND dispatch. The manual
+`reborn-release-compile.yml` preflight remains independent from publishing.
 
 ## Known accepted gaps (deliberate, revisit as needed)
 

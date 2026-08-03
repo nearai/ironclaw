@@ -770,7 +770,7 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
 "#;
 
     const NON_CHANNEL_ADMIN_FIXTURE_MANIFEST: &str =
-        include_str!("../../ironclaw_first_party_extensions/assets/gmail/manifest.toml");
+        include_str!("../../extensions/packages/gmail/manifest.toml");
 
     struct RecordingReactivation {
         calls: AtomicUsize,

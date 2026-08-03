@@ -13,11 +13,11 @@ following this document.
 The guide is grounded in the current GitHub, GSuite, and Notion implementations:
 
 - GitHub: bundled WASM capability provider under
-  `crates/ironclaw_first_party_extensions/assets/github/`.
+  `crates/extensions/packages/github/`.
 - GSuite: bundled WASM capability providers for Gmail, Calendar, Docs, Drive,
   Sheets, and Slides.
 - Notion: bundled hosted HTTP MCP capability provider under
-  `crates/ironclaw_first_party_extensions/assets/notion-mcp/`, with product
+  `crates/extensions/packages/notion-mcp/`, with product
   auth / OAuth DCR wiring in Reborn composition.
 
 ## Success criteria
@@ -73,7 +73,7 @@ Pick one lane first. Do not blend lanes to make a tool work.
 
 | Lane | Use when | Current examples | Main files |
 | --- | --- | --- | --- |
-| WASM capability provider | Provider logic can run in a sandboxed component and use host HTTP egress. This is the default for provider tools. | GitHub, Gmail, Google Calendar, Google Drive, Google Docs, Google Sheets, Google Slides | `crates/ironclaw_first_party_extensions/assets/<id>/manifest.toml`, `schemas/`, `prompts/`, optional `wasm-src/` |
+| WASM capability provider | Provider logic can run in a sandboxed component and use host HTTP egress. This is the default for provider tools. | GitHub, Gmail, Google Calendar, Google Drive, Google Docs, Google Sheets, Google Slides | `crates/extensions/packages/<id>/manifest.toml`, `schemas/`, `prompts/`, optional `wasm-src/` |
 | Hosted HTTP MCP | The provider already exposes an MCP server and the host should lock egress to that endpoint. | Notion hosted MCP | `assets/<id>-mcp/manifest.toml`, schemas/prompts, `crates/ironclaw_reborn_composition/src/mcp.rs` only if adding a new host-bundled MCP policy shape |
 | Product adapter | The extension receives external inbound events or product webhooks. This is not just a model-callable tool lane. | Slack/Telegram-style adapters, not the main focus of this guide | `crates/ironclaw_product_adapters`, `crates/ironclaw_product_adapter_registry`, `crates/ironclaw_wasm_product_adapters` |
 | Script | Sandboxed process/CLI capability. Use only when a process boundary is the product requirement. | Project tools / CLI-style tools | `crates/ironclaw_scripts` runtime path plus manifest runtime `script` |
@@ -89,9 +89,9 @@ Touch only the smallest set for your lane.
 
 Usually touch:
 
-- `crates/ironclaw_first_party_extensions/assets/<extension>/manifest.toml`
-- `crates/ironclaw_first_party_extensions/assets/<extension>/schemas/<extension>/*.json`
-- `crates/ironclaw_first_party_extensions/assets/<extension>/prompts/<extension>/*.md`
+- `crates/extensions/packages/<extension>/manifest.toml`
+- `crates/extensions/packages/<extension>/schemas/<extension>/*.json`
+- `crates/extensions/packages/<extension>/prompts/<extension>/*.md`
 - `crates/ironclaw_reborn_composition/src/available_extensions.rs` only when adding
   a host-bundled available extension to the built-in install catalog.
 
@@ -114,16 +114,16 @@ Do not touch for ordinary tools:
 
 Usually touch:
 
-- `crates/ironclaw_first_party_extensions/assets/<extension>/wasm-src/`
-- `crates/ironclaw_first_party_extensions/assets/<extension>/wasm/<tool>.wasm`
+- `crates/extensions/packages/<extension>/wasm-src/`
+- `crates/extensions/packages/<extension>/wasm/<tool>.wasm`
 - the extension manifest, schemas, and prompts.
 - `crates/ironclaw_reborn_composition/src/available_extensions.rs` to package
   the manifest, schemas, prompts, and WASM bytes if host-bundled.
 
 Use as references:
 
-- `crates/ironclaw_first_party_extensions/assets/github/wasm-src/src/lib.rs`
-- `crates/ironclaw_first_party_extensions/assets/github/wasm-src/src/request.rs`
+- `crates/extensions/packages/github/wasm-src/src/lib.rs`
+- `crates/extensions/packages/github/wasm-src/src/request.rs`
 - `crates/ironclaw_host_runtime/src/wasm_credentials.rs`
 
 Do not add a direct `reqwest`/HTTP client inside the WASM tool. Use the WIT host
@@ -134,7 +134,7 @@ inject staged credentials, and sanitize failures.
 
 Usually touch:
 
-- `crates/ironclaw_first_party_extensions/assets/<provider>-mcp/manifest.toml`
+- `crates/extensions/packages/<provider>-mcp/manifest.toml`
 - `schemas/<provider>/...`
 - `prompts/<provider>/...`
 - `crates/ironclaw_reborn_composition/src/available_extensions.rs` if
@@ -142,7 +142,7 @@ Usually touch:
 
 Use as references:
 
-- `crates/ironclaw_first_party_extensions/assets/notion-mcp/manifest.toml`
+- `crates/extensions/packages/notion-mcp/manifest.toml`
 - `crates/ironclaw_reborn_composition/src/mcp.rs`
 - `crates/ironclaw_auth/src/engine/`
 - composition provider wiring in `crates/ironclaw_reborn_composition/src/factory.rs`
@@ -160,7 +160,7 @@ Usually touch only when adding a new product-auth provider:
   must be shared and durable.
 - `crates/ironclaw_auth/src/engine/` for generic recipe-driven OAuth/API-key
   exchange behavior.
-- `crates/ironclaw_first_party_extensions/assets/<extension>/manifest.toml`
+- `crates/extensions/packages/<extension>/manifest.toml`
   for bundled first-party provider recipe data.
 - `crates/ironclaw_reborn_composition/src/factory.rs` for composition-time
   provider recipe wiring.
@@ -416,7 +416,7 @@ For a new OAuth provider:
 1. Add provider ID and shared scope vocabulary only if it must be shared across
    crates.
 2. Add bundled first-party provider recipe data in
-   `crates/ironclaw_first_party_extensions/assets/<extension>/manifest.toml`,
+   `crates/extensions/packages/<extension>/manifest.toml`,
    keep `ironclaw_auth/src/engine/` generic, and wire the recipe resolver through
    composition provider wiring.
 3. Wire OAuth start/callback through product-auth services, not an
@@ -533,7 +533,7 @@ That file:
 When adding a host-bundled package:
 
 1. Add manifest/assets under
-   `crates/ironclaw_first_party_extensions/assets/<extension>/`.
+   `crates/extensions/packages/<extension>/`.
 2. Add `include_str!` / `include_bytes!` entries in `available_extensions.rs`.
 3. Add a package constructor like `github_package()` or `notion_mcp_package()`.
 4. Add assets for every `input_schema_ref`, `output_schema_ref`, and
@@ -670,17 +670,17 @@ the semantics into the registry `[[host_api]]` / `[capability_provider.tools]`
 shape before extending it.
 
 - GitHub WASM operation dispatch:
-  `crates/ironclaw_first_party_extensions/assets/github/wasm-src/src/lib.rs`
+  `crates/extensions/packages/github/wasm-src/src/lib.rs`
 - GitHub host HTTP request wrapper:
-  `crates/ironclaw_first_party_extensions/assets/github/wasm-src/src/request.rs`
+  `crates/extensions/packages/github/wasm-src/src/request.rs`
 - GitHub manifest credential/effect semantics:
-  `crates/ironclaw_first_party_extensions/assets/github/manifest.toml`
+  `crates/extensions/packages/github/manifest.toml`
 - Google Drive WASM OAuth scopes by operation:
-  `crates/ironclaw_first_party_extensions/assets/google-drive/manifest.toml`
+  `crates/extensions/packages/google-drive/manifest.toml`
 - Gmail and Google Calendar follow the bundled WASM GSuite manifest and runtime
   shape.
 - Notion hosted MCP credential/effect semantics:
-  `crates/ironclaw_first_party_extensions/assets/notion-mcp/manifest.toml`
+  `crates/extensions/packages/notion-mcp/manifest.toml`
 - Hosted MCP egress planner:
   `crates/ironclaw_reborn_composition/src/mcp.rs`
 - Notion OAuth provider wiring:

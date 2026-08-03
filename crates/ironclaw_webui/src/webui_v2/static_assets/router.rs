@@ -3,7 +3,8 @@
 //! Two concerns: serve raw embedded asset bytes for known paths, and
 //! return the `index.html` shell (with a fresh per-request CSP
 //! nonce substituted into the `__IRONCLAW_CSP_NONCE__` placeholder)
-//! for the SPA root and any client-side route.
+//! for the SPA root and any client-side route, including file-bearing
+//! workspace deep links.
 //!
 //! Security headers, CORS, body/rate limits, and bearer auth are NOT
 //! the router's concern — host composition wraps this Router with
@@ -47,6 +48,15 @@ const DEFAULT_RESERVED_ROOT_NAMESPACES: &[&str] = &["api", "auth", "v1", "webhoo
 /// checked from the generated asset table separately so adding a new top-level
 /// asset cannot silently create a host route collision.
 const EXPLICIT_STATIC_ROOT_NAMESPACES: &[&str] = &["v2", "wallet"];
+
+/// Client-side route roots whose wildcard may legitimately end with a dotted
+/// filename. The workspace viewer deep-links directly to selected files (for
+/// example `/workspace/workspace/reports/result.txt`), so these paths must
+/// render the SPA shell rather than being mistaken for missing static assets.
+///
+/// Keep this list narrow: arbitrary dotted paths remain 404 so typos such as a
+/// missing `/assets/app.js` do not silently return HTML.
+const FILE_BEARING_SPA_ROOT_NAMESPACES: &[&str] = &["workspace"];
 
 /// Invalid root namespace supplied to [`StaticRouterConfig`].
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -275,10 +285,10 @@ pub async fn serve_root() -> Response {
     render_index_with_nonce()
 }
 
-/// Resolve the wildcard suffix (post-prefix path) against the asset
-/// table. Falls back to the SPA shell for client-side routes (any
-/// path that has no file extension), 404 for unknown asset paths
-/// that do look like asset requests.
+/// Resolve the wildcard suffix (post-prefix path) against the asset table.
+/// Falls back to the SPA shell for client-side routes (paths without a file
+/// extension, plus explicitly file-bearing SPA roots), and returns 404 for
+/// unknown paths that do look like asset requests.
 pub async fn serve_wildcard(AxumPath(path): AxumPath<String>) -> Response {
     serve_for_path(&path, DEFAULT_RESERVED_ROOT_NAMESPACES, None)
 }
@@ -340,6 +350,14 @@ where
 
     if let Some(asset) = assets::lookup(path) {
         return asset_response(path, asset, if_none_match);
+    }
+
+    if path
+        .split('/')
+        .next()
+        .is_some_and(|root| FILE_BEARING_SPA_ROOT_NAMESPACES.contains(&root))
+    {
+        return render_index_with_nonce();
     }
 
     // Unknown path that does not look like a real asset request
@@ -1279,6 +1297,50 @@ mod tests {
             let body = body_string(response).await;
             assert!(body.contains("v2-root"), "`{path}` did not render shell");
         }
+    }
+
+    #[tokio::test]
+    async fn standalone_workspace_file_deep_links_fall_back_to_spa_shell() {
+        let app = static_router();
+        for path in [
+            "/workspace/workspace/attachments/2026-07-30/message-1-test.txt",
+            "/workspace/workspace/generated/hello.html",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("oneshot");
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "workspace file route `{path}` should render the SPA shell",
+            );
+            let body = body_string(response).await;
+            assert!(body.contains("v2-root"), "`{path}` did not render shell");
+        }
+
+        let missing_asset = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/assets/missing.txt")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(
+            missing_asset.status(),
+            StatusCode::NOT_FOUND,
+            "unknown dotted paths outside a file-bearing SPA root must remain 404",
+        );
     }
 
     #[test]

@@ -307,7 +307,7 @@ const SYNTHETIC_CAPABILITY_SKIP_LIST: &[(&str, &str)] = &[
 /// real manifest-derived ids
 /// (`extension_surface::bundled_extension_manifest_capability_ids()`) — both
 /// parse the actual `manifest.toml` assets under
-/// `crates/ironclaw_first_party_extensions/assets/`, so they are themselves
+/// `crates/extensions/packages/`, so they are themselves
 /// production truth, not a second test-only source.
 ///
 /// **Deliberately NOT unioned**: `extension_surface::EXTENSION_LIFECYCLE_CAPABILITY_IDS`

@@ -2937,6 +2937,9 @@ impl ProjectService for RecordingProjectService {
         *self.listed.lock().expect("lock") += 1;
         Ok(RebornListProjectsResponse {
             projects: vec![sample_reborn_project("project-alpha")],
+            total_projects: 1,
+            active_projects: 1,
+            archived_projects: 0,
         })
     }
 
@@ -3173,6 +3176,9 @@ async fn project_and_filesystem_reads_are_available_as_product_views() {
     let projects: RebornListProjectsResponse =
         serde_json::from_value(projects.payload).expect("projects payload");
     assert_eq!(projects.projects[0].project_id, "project-alpha");
+    assert_eq!(projects.total_projects, 1);
+    assert_eq!(projects.active_projects, 1);
+    assert_eq!(projects.archived_projects, 0);
 
     let project = services
         .query(
