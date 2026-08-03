@@ -139,7 +139,11 @@ test("non-English locale packs localize exposed workflow copy", () => {
   for (const locale of LOCALES.filter((candidate) => candidate !== "en")) {
     const pack = loadLocalePack(locale);
     for (const key of exposedWorkflowKeys) {
-      assert.notEqual(pack[key], english[key], `${locale} must localize ${key}`);
+      assert.strictEqual(
+        pack[key] === english[key],
+        false,
+        `${locale} must localize ${key}`,
+      );
     }
   }
 });
