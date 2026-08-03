@@ -1677,7 +1677,7 @@ mod outcome_classification_tests {
         ));
         assert_eq!(
             delivery_failure_feedback(&failed),
-            Some(prompts::DELIVERY_ERROR_MESSAGE)
+            Some(crate::run_delivery::prompts::DELIVERY_ERROR_MESSAGE)
         );
     }
 }
