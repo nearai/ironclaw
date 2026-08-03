@@ -449,6 +449,13 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertIn('shard: "0/4 1/4"', workflow)
         self.assertIn('shard: "2/4 3/4"', workflow)
         self.assertIn('for provider_shard in "${provider_shards[@]}"', workflow)
+        self.assertIn(
+            'IRONCLAW_PROVIDER_OPERATION_SHARD="${provider_shard}"',
+            workflow,
+        )
+        self.assertIn('provider_pids+=("$!")', workflow)
+        self.assertIn('wait "${provider_pids[$index]}"', workflow)
+        self.assertIn('> "${provider_log}" 2>&1 &', workflow)
         self.assertIn("  webui-v2-test-lanes:", workflow)
         self.assertIn("lane: fast-contracts", workflow)
         self.assertIn("lane: provider-contracts", workflow)

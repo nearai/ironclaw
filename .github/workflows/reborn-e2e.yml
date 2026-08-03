@@ -531,14 +531,34 @@ jobs:
             provider-*)
               read -ra provider_shards <<< "${PROVIDER_SHARD}"
               ((${#provider_shards[@]} > 0))
+              provider_pids=()
+              provider_logs=()
               for provider_shard in "${provider_shards[@]}"; do
+                provider_log="${RUNNER_TEMP}/provider-operation-${provider_shard//\//-}.log"
+                (
+                  IRONCLAW_PROVIDER_OPERATION_SHARD="${provider_shard}" \
+                    scripts/ci/run-hermetic-deterministic-suite.sh command pytest \
+                      tests/e2e/scenarios/test_reborn_qa_trace_full_path.py::test_provider_operation_case_executes_with_provider_readback \
+                      -m "not shared_world" -p no:cacheprovider -v --timeout=120
+                ) > "${provider_log}" 2>&1 &
+                provider_pids+=("$!")
+                provider_logs+=("${provider_log}")
+              done
+
+              provider_status=0
+              for index in "${!provider_pids[@]}"; do
+                provider_shard="${provider_shards[$index]}"
                 echo "::group::provider operation shard ${provider_shard}"
-                IRONCLAW_PROVIDER_OPERATION_SHARD="${provider_shard}" \
-                  scripts/ci/run-hermetic-deterministic-suite.sh command pytest \
-                    tests/e2e/scenarios/test_reborn_qa_trace_full_path.py::test_provider_operation_case_executes_with_provider_readback \
-                    -m "not shared_world" -v --timeout=120
+                shard_status=0
+                wait "${provider_pids[$index]}" || shard_status=$?
+                cat "${provider_logs[$index]}"
+                if ((shard_status != 0)); then
+                  echo "provider operation shard ${provider_shard} failed with status ${shard_status}" >&2
+                  provider_status=1
+                fi
                 echo "::endgroup::"
               done
+              exit "${provider_status}"
               ;;
             *)
               echo "Unknown Reborn E2E lane: ${LANE}" >&2
