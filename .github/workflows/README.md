@@ -73,6 +73,8 @@ The four provider-operation shards run as two concurrent pairs. Each shard
 keeps its own pytest process and hermetic runtime, while each pair shares one
 runner and one Emulate checkout/build cycle. This preserves shard isolation
 without restoring the two runner allocations removed by pairing.
+The fast Responses API and black-box contracts share the browser worker in
+separate hermetic pytest processes, capping the E2E fan-out at four workers.
 
 History: the slim-vs-full clippy matrix violated this — the queue linted only
 `--all-features` while push linted a broader matrix, so feature-gated dead code

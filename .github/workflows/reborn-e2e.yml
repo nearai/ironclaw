@@ -372,14 +372,11 @@ jobs:
       IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE: "1"
     strategy:
       fail-fast: false
-      max-parallel: 5
+      max-parallel: 4
       matrix:
         include:
           - lane: browser
             kind: browser
-            shard: ""
-          - lane: fast-contracts
-            kind: fast-contracts
             shard: ""
           - lane: provider-contracts
             kind: provider
@@ -502,8 +499,6 @@ jobs:
                 tests/e2e/scenarios/test_reborn_webui_v2_sso.py \
                 tests/e2e/scenarios/test_reborn_webui_v2_custom_mcp.py \
                 -v --timeout=120
-              ;;
-            fast-contracts)
               mapfile -t responses_tests < <(
                 sed -e 's/#.*//' -e '/^[[:space:]]*$/d' \
                   tests/e2e/reborn_responses_e2e_tests.txt
