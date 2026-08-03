@@ -543,7 +543,7 @@ shipped manifests rather than a hand-maintained list:
 | read | A `ProviderOperationCase` with `outcome_class = "success"` **and** one with `outcome_class = "empty"`. |
 
 The read/write split comes from each tool's `effects` in
-`crates/ironclaw_first_party_extensions/assets/*/manifest.toml`
+`crates/extensions/packages/*/manifest.toml`
 (`external_write`), so shipping a new tool classifies it automatically.
 
 **A harvested tool-call name is not evidence for a write.** A recorded model

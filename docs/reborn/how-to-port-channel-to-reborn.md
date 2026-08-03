@@ -65,8 +65,8 @@ external payload
 
 Use the existing implementations as references:
 
-- `crates/ironclaw_slack_extension/src/channel.rs`
-- `crates/ironclaw_telegram_extension/src/channel.rs`
+- `crates/extensions/packages/slack/src/channel.rs`
+- `crates/extensions/packages/telegram/src/channel.rs`
 - `crates/ironclaw_extension_host/src/ingress/`
 - `crates/ironclaw_extension_contracts/src/channel_adapter.rs`
 

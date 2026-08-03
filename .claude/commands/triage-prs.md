@@ -34,8 +34,8 @@ For each open PR, determine the primary module it touches by examining the `file
 | **Reborn stack (most current work)** | `crates/ironclaw_runner/`, `crates/ironclaw_reborn_cli/`, `crates/ironclaw_reborn_composition/`, `crates/ironclaw_reborn_event_store/`, `crates/ironclaw_reborn_identity/`, `crates/ironclaw_reborn_openai_compat*/`, `crates/ironclaw_reborn_traces/`, `crates/ironclaw_webui/`, `crates/ironclaw_product/`, `crates/ironclaw_turns/`, `crates/ironclaw_threads/`, `crates/ironclaw_agent_loop/`, `crates/ironclaw_host_runtime/`, `crates/ironclaw_loop_host/`, `crates/ironclaw_capabilities/` |
 | **LLM & Inference** | `crates/ironclaw_llm/` |
 | **Agent Core** | `crates/ironclaw_skills/` |
-| **Tools & Extensions** | `crates/ironclaw_first_party_extensions/`, `crates/ironclaw_extension_host/`, `crates/ironclaw_extensions/` |
-| **Channels** | `crates/ironclaw_slack_extension/`, `crates/ironclaw_telegram_extension/`, `crates/ironclaw_telegram_v2_adapter/` |
+| **Tools & Extensions** | `crates/extensions/ironclaw_extension_support/`, `crates/ironclaw_extension_host/`, `crates/ironclaw_extensions/` |
+| **Channels** | `crates/extensions/packages/slack/`, `crates/extensions/packages/telegram/` |
 | **Storage & Memory** | `crates/ironclaw_filesystem/`, `crates/ironclaw_memory*/`, `crates/ironclaw_libsql_runtime/`, `migrations/` |
 | **Security** | `crates/ironclaw_safety/`, `crates/ironclaw_secrets/`, `crates/ironclaw_trust/`, `crates/ironclaw_authorization/`, `crates/ironclaw_approvals/` |
 | **Config & Setup** | `crates/ironclaw_reborn_config/` |

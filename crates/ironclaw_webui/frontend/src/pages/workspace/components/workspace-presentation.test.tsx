@@ -34,6 +34,8 @@ import { WorkspaceBreadcrumb } from "./workspace-breadcrumb";
 import { WorkspaceSidebar } from "./workspace-sidebar";
 import { WorkspaceViewer } from "./workspace-viewer";
 
+const listDirectory = async () => ({ entries: [] });
+
 afterEach(() => {
   queryState.value = { data: { entries: [] }, isLoading: false, isError: false };
 });
@@ -48,6 +50,8 @@ test("workspace tree renders localized area labels instead of backend ids", () =
       selectedPath=""
       expandedPaths={new Set()}
       filter=""
+      scopeKey="caller-default"
+      listDirectory={listDirectory}
       onToggleDirectory={() => {}}
       onSelectFile={() => {}}
       isLoading={false}
@@ -70,6 +74,8 @@ test("workspace tree exposes hierarchy, expansion, selection, and roving focus s
       selectedPath="memory"
       expandedPaths={new Set(["memory"])}
       filter=""
+      scopeKey="caller-default"
+      listDirectory={listDirectory}
       onToggleDirectory={() => {}}
       onSelectFile={() => {}}
       isLoading={false}
@@ -95,6 +101,8 @@ test("workspace filter and breadcrumb have accessible names and landmarks", () =
       selectedPath=""
       expandedPaths={new Set()}
       filter=""
+      scopeKey="caller-default"
+      listDirectory={listDirectory}
       onFilterChange={() => {}}
       isLoadingTree={false}
       onToggleDirectory={() => {}}
@@ -117,6 +125,8 @@ test("workspace tree directory failures are announced as alerts", () => {
       selectedPath="workspace"
       expandedPaths={new Set(["workspace"])}
       filter=""
+      scopeKey="caller-default"
+      listDirectory={listDirectory}
       onToggleDirectory={() => {}}
       onSelectFile={() => {}}
       isLoading={false}
@@ -135,6 +145,8 @@ test("workspace tree announces loading expanded directories", () => {
       selectedPath="workspace"
       expandedPaths={new Set(["workspace"])}
       filter=""
+      scopeKey="caller-default"
+      listDirectory={listDirectory}
       onToggleDirectory={() => {}}
       onSelectFile={() => {}}
       isLoading={false}

@@ -428,9 +428,8 @@ mod tests {
     /// Real first-party manifests, so the projected field set is the shipped
     /// one rather than a fixture that can drift from it.
     const TELEGRAM_MANIFEST: &str =
-        include_str!("../../ironclaw_first_party_extensions/assets/telegram/manifest.toml");
-    const SLACK_MANIFEST: &str =
-        include_str!("../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
+        include_str!("../../extensions/packages/telegram/manifest.toml");
+    const SLACK_MANIFEST: &str = include_str!("../../extensions/packages/slack/manifest.toml");
 
     async fn installed_store(manifests: &[(&str, &str)]) -> Arc<ExtensionInstallationStore> {
         let store = Arc::new(

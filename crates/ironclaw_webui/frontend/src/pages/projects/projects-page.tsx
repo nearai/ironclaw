@@ -9,7 +9,6 @@ import { useProjectWorkspace } from "./hooks/useProjectWorkspace";
 import { useProjectInspector } from "./hooks/useProjectInspector";
 import { FeedbackBanner } from "./components/feedback-banner";
 import { ProjectsSummaryStrip } from "./components/projects-summary-strip";
-import { ProjectsAttentionStrip } from "./components/projects-attention-strip";
 import { ProjectsGrid } from "./components/projects-grid";
 import { ProjectWorkspaceShell } from "./components/project-workspace-shell";
 
@@ -45,14 +44,6 @@ export function ProjectsPage() {
 
   const handleOpenProject = React.useCallback((nextProjectId) => {
     navigate(`/projects/${nextProjectId}`);
-  }, [navigate]);
-
-  const handleOpenAttention = React.useCallback((item) => {
-    if (item.thread_id) {
-      navigate(`/projects/${item.project_id}/threads/${item.thread_id}`);
-      return;
-    }
-    navigate(`/projects/${item.project_id}`);
   }, [navigate]);
 
   const handleCreateProject = React.useCallback(async () => {
@@ -174,10 +165,7 @@ export function ProjectsPage() {
           <FeedbackBanner result={inspectorState.actionResult} onDismiss={inspectorState.clearActionResult} />
           {!projectId &&
           (
-            <>
             <ProjectsSummaryStrip overview={overviewState.overview} />
-            <ProjectsAttentionStrip items={overviewState.overview.attention} onOpenItem={handleOpenAttention} />
-            </>
           )}
           {content}
         </div>

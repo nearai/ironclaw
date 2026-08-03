@@ -3,7 +3,7 @@
 //! The rule (PROPOSAL §11.2 item 7): a relative include path that escapes its
 //! own crate root is a compile-time reach into someone else's tree. It bypasses
 //! the dependency graph the boundary tests police — `extension_host` has no
-//! cargo edge to `ironclaw_first_party_extensions`, yet it compiles that
+//! cargo edge to `ironclaw_extension_support`, yet it compiles that
 //! crate's manifests into itself — and it silently breaks the moment either
 //! crate moves, which is precisely what CHECKLIST WS7's family `git mv` does to
 //! every path in the tree.
@@ -472,9 +472,11 @@ fn reborn_include_escape_classifier_self_test() {
     }
 
     // Positive fixtures: the two shapes §11.2.7 exists for.
+    // A reach across a crate boundary, written the way WS2's tree makes it look:
+    // out of this crate and into a family-nested sibling.
     let into_sibling_crate = resolve(
         &package_root.join("src"),
-        "../../ironclaw_first_party_extensions/assets/gmail/manifest.toml",
+        "../../extensions/ironclaw_extension_support/src/packages/gmail.rs",
     );
     assert!(
         !contains(package_root, &into_sibling_crate),
@@ -490,8 +492,8 @@ fn reborn_include_escape_classifier_self_test() {
     let packages = BTreeMap::from([
         ("ironclaw_example".to_string(), package_root.to_path_buf()),
         (
-            "ironclaw_first_party_extensions".to_string(),
-            PathBuf::from("/w/crates/ironclaw_first_party_extensions"),
+            "ironclaw_extension_support".to_string(),
+            PathBuf::from("/w/crates/extensions/ironclaw_extension_support"),
         ),
         // The workspace-root package contains every crate and must never win.
         ("workspace_root_package".to_string(), PathBuf::from("/w")),
@@ -499,7 +501,7 @@ fn reborn_include_escape_classifier_self_test() {
     let root = Path::new("/w");
     assert_eq!(
         owning_package(&packages, root, &into_sibling_crate),
-        Some("ironclaw_first_party_extensions")
+        Some("ironclaw_extension_support")
     );
     assert_eq!(
         owning_package(&packages, root, &into_repo_root),

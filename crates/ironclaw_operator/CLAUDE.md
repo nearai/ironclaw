@@ -25,14 +25,20 @@ Every product-facing port this crate satisfies is declared in
 
 | Port | Module | Implemented here by |
 | --- | --- | --- |
-| `LlmConfigService` | `llm_config` | `llm_admin::llm_config_service::RebornLlmConfigService` |
-| `ActiveModelReader` | `llm_config` | `llm_admin::active_model::ProviderActiveModelReader` |
+| `LlmConfigService` | `operator_llm` | `llm_admin::llm_config_service::RebornLlmConfigService` |
+| `ActiveModelReader` | `operator_llm` | `llm_admin::active_model::ProviderActiveModelReader` |
 | `OperatorLogsService` | `operator_service` | `operator_logs::OperatorLogBuffer` |
 | `OperatorServiceLifecycleService` | `operator_service` | `operator_service_lifecycle::OperatorServiceLifecycle` |
 
 A fifth, `OperatorStatusService`, is declared in the same `operator_service`
 module and implemented by `ironclaw_reborn_composition` — readiness is the one
 answer only the assembly root can compute.
+
+> Corrected 2026-08-02 (Wave 2 docs-truth audit): the first two rows read module
+> `llm_config`, which does not exist. #7004 created it; the #7018 consolidation
+> found `main` had already moved the same DTOs into the pre-existing
+> `operator_llm`, deleted the duplicate and repointed its import sites, so there
+> is one definition and one import path. Grep `operator_llm`.
 
 Two gates hold this:
 

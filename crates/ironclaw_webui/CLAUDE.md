@@ -36,8 +36,13 @@ apply: host auth stays host-owned in this crate, and behavior is reached through
 direct `ironclaw_product` dependency (see `Cargo.toml`), but as of the WS5
 transport inversion it is limited to **the frozen operation inventory** — the
 `*_VIEW` / `*_COMMAND` / `*_CAPABILITY` descriptor constants a handler names to
-call the surface, which PROPOSAL §6.1.3 keeps in product — plus eleven wire DTOs
-whose fields name a crate `ironclaw_product_contracts` may not depend on. Every
+call the surface, which PROPOSAL §6.1.3 keeps in product — plus **nine** wire
+DTOs whose fields name a crate `ironclaw_product_contracts` may not depend on.
+(Corrected 2026-08-02: this read "eleven". The WS5 `attachments widened` slice in
+the same PR moved `ProductAttachmentCapabilities`/`product_attachment_capabilities`
+into `ironclaw_attachments`, taking the residue baseline **102 → 100**. The
+authority is `WEBUI_PRODUCT_SYMBOL_BASELINE` in
+`reborn_transport_product_boundary.rs`, not this prose.) Every
 other DTO, request body, and descriptor *type* now comes from
 `ironclaw_product_contracts`. Never behavior.
 

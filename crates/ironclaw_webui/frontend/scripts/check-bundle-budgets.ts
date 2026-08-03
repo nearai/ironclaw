@@ -42,10 +42,16 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // returns (0.39 gzip bytes saved per raw byte cut, down to 0.17) and would
 // require gutting minimal labels like "OAuth" or "Server ID". The remaining
 // growth is ~44 new i18n keys of string content for hosted MCP registration,
-// not new eager code weight; the 215.0 KB budget above (already raised for the
+// not new eager code weight; the 215.0 KB budget below (already raised for the
 // React Router 8 / React 19.2 upgrade) still covers the measured total with
-// headroom to spare, so it is not raised further here.
-const CHAT_GZIP_BUDGET = 215_000;
+// headroom to spare, so it was not raised further there. Workspace-file link
+// previews then added strict path parsing plus delegated-click verification to
+// the eager Markdown renderer. That validation must be present before a link
+// can open in the in-app preview, including for cached messages rendered on the
+// initial route, and prevents model-authored `data-workspace-path` metadata
+// from becoming trusted. The measured /chat closure is 215.8 KB gzip; 217.0 KB
+// retains about 1.2 KB of explicit headroom without weakening the feature.
+const CHAT_GZIP_BUDGET = 217_000;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {
