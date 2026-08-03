@@ -10595,6 +10595,7 @@ mod tests {
     fn sample_trace() -> TraceFile {
         TraceFile {
             model_name: "test-model".to_string(),
+            usage: None,
             memory_snapshot: Vec::new(),
             http_exchanges: Vec::new(),
             steps: vec![
@@ -10788,6 +10789,7 @@ mod tests {
     async fn privacy_filter_sidecar_summary_is_integrated_without_raw_text() {
         let trace = TraceFile {
             model_name: "test-model".to_string(),
+            usage: None,
             memory_snapshot: Vec::new(),
             http_exchanges: Vec::new(),
             steps: vec![TraceStep {
@@ -10856,6 +10858,7 @@ mod tests {
     async fn privacy_filter_sidecar_failure_falls_back_without_raw_error_text() {
         let trace = TraceFile {
             model_name: "test-model".to_string(),
+            usage: None,
             memory_snapshot: Vec::new(),
             http_exchanges: Vec::new(),
             steps: vec![TraceStep {
