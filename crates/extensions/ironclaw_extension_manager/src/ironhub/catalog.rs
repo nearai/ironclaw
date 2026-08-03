@@ -5,6 +5,9 @@ use ironclaw_host_api::{
     action::{NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     approval::sha256_digest_token,
 };
+use ironclaw_skills::{
+    MAX_INSTALL_BUNDLE_FILE_BYTES, MAX_INSTALL_BUNDLE_FILES, MAX_INSTALL_BUNDLE_TOTAL_BYTES,
+};
 use sha2::{Digest, Sha256};
 
 use crate::ironhub::{
@@ -13,6 +16,7 @@ use crate::ironhub::{
         IronHubArtifact, IronHubCommandError, IronHubEntryKind, IronHubEntrySummary,
         IronHubInstallOptions, IronHubManifest, IronHubProvenance, IronHubSkillEntry,
         IronHubToolEntry, MANIFEST_VERIFY_KEYS, MAX_METADATA_BYTES, MAX_TOOL_PROMPT_ARTIFACTS,
+        IronHubSkillFile, IronHubToolEntry, MANIFEST_VERIFY_KEYS, MAX_METADATA_BYTES,
         MAX_TOOL_SCHEMA_ARTIFACTS, MAX_WASM_BYTES, SignedManifestEnvelope,
     },
 };
@@ -229,8 +233,29 @@ pub(crate) fn tool_artifact_digest(entry: &IronHubToolEntry) -> String {
     sha256_digest_token(digest_material.as_bytes())
 }
 
+pub(crate) fn skill_file_byte_cap() -> u64 {
+    u64::try_from(MAX_INSTALL_BUNDLE_FILE_BYTES).unwrap_or(u64::MAX)
+}
+
+fn skill_bundle_total_byte_cap() -> u64 {
+    u64::try_from(MAX_INSTALL_BUNDLE_TOTAL_BYTES).unwrap_or(u64::MAX)
+}
+
 fn skill_artifact_digest(entry: &IronHubSkillEntry) -> String {
-    sha256_digest_token(entry.skill_md.sha256.as_bytes())
+    if entry.files.is_empty() {
+        return sha256_digest_token(entry.skill_md.sha256.as_bytes());
+    }
+    let mut digest_material = format!("skill_md:{}\0", entry.skill_md.sha256);
+    let mut files: Vec<&IronHubSkillFile> = entry.files.iter().collect();
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    for file in files {
+        digest_material.push_str("file:");
+        digest_material.push_str(&file.path);
+        digest_material.push('\0');
+        digest_material.push_str(&file.artifact.sha256);
+        digest_material.push('\0');
+    }
+    sha256_digest_token(digest_material.as_bytes())
 }
 
 fn compact_description(description: &str) -> String {
@@ -320,6 +345,30 @@ fn validate_manifest_artifacts(
     for entry in &manifest.skills {
         validate_hub_name(&entry.name)?;
         validate_artifact_for_origin(&entry.skill_md, MAX_METADATA_BYTES, origin)?;
+        if entry.files.len() > MAX_INSTALL_BUNDLE_FILES {
+            return Err(catalog(format!(
+                "skill '{}' publishes more than {} bundled files",
+                entry.name, MAX_INSTALL_BUNDLE_FILES
+            )));
+        }
+        let mut bundle_bytes: u64 = 0;
+        for file in &entry.files {
+            ironclaw_skills::validate_install_bundle_relative_path(&file.path).map_err(|_| {
+                catalog(format!(
+                    "skill '{}' publishes an invalid bundled file path",
+                    entry.name
+                ))
+            })?;
+            validate_artifact_for_origin(&file.artifact, skill_file_byte_cap(), origin)?;
+            bundle_bytes = bundle_bytes.saturating_add(file.artifact.size_bytes);
+        }
+        if bundle_bytes > skill_bundle_total_byte_cap() {
+            return Err(catalog(format!(
+                "skill '{}' publishes more than {} bytes of bundled files",
+                entry.name,
+                skill_bundle_total_byte_cap()
+            )));
+        }
     }
     Ok(())
 }
