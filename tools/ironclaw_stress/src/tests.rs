@@ -340,6 +340,43 @@ fn explicit_libsql_path_is_preserved_and_still_isolates_each_case() {
     );
 }
 
+/// Teardown removes the database and both SQLite sidecars it created.
+///
+/// Drives the real side effect against real files rather than asserting on a
+/// derived string: the previous derivation used `Path::with_extension`, which
+/// only lined up for `.db`, and a string-shaped assertion would have agreed
+/// with it. The path here carries a non-`.db` extension for that reason, which
+/// is also the shape an explicit `--libsql-path` now produces.
+#[tokio::test]
+async fn cleanup_removes_the_database_and_its_sqlite_sidecars() {
+    let dir = std::env::temp_dir().join(format!("ironclaw-stress-cleanup-{}", std::process::id()));
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .expect("create temp dir");
+    let database = dir.join("bench-tool-heavy.sqlite");
+    let mut created = vec![database.clone()];
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = database.clone().into_os_string();
+        sidecar.push(suffix);
+        created.push(std::path::PathBuf::from(sidecar));
+    }
+    for path in &created {
+        tokio::fs::write(path, b"x").await.expect("seed file");
+    }
+
+    crate::cleanup_generated_libsql_path(&database).await;
+
+    for path in &created {
+        assert!(
+            !path.exists(),
+            "{} survived cleanup; SQLite appends -wal/-shm to the whole file \
+             name, so deriving them by extension misses any non-.db path",
+            path.display()
+        );
+    }
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+}
+
 #[test]
 fn postgres_pool_pressure_suite_includes_remote_pool_cases() {
     let cases = suite::build_cases(StressSuite::PostgresPoolPressure);
