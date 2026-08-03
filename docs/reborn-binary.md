@@ -337,7 +337,7 @@ accepted.
 
 `ironclaw serve` exposes the public `POST /api/ironhub/register` handshake only
 when `IRONHUB_AGENT_SHARED_KEY` is explicitly set to a non-empty value of at
-least 16 bytes. The bearer-authenticated install-delivery route stays
+least 32 bytes. The bearer-authenticated install-delivery route stays
 fail-closed as unavailable unless that same optional service is attached. The
 gateway is disabled by default. Signed install deliveries accept timestamps
 within a 300-second drift window and consume their nonces durably.

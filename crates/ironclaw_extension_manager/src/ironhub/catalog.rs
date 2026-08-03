@@ -7,12 +7,13 @@ use ironclaw_host_api::{
 };
 use sha2::{Digest, Sha256};
 
-use super::{
+use crate::ironhub::{
     artifact_hosts::is_allowed_artifact_host,
     model::{
         IronHubArtifact, IronHubCommandError, IronHubEntryKind, IronHubEntrySummary,
         IronHubInstallOptions, IronHubManifest, IronHubProvenance, IronHubSkillEntry,
-        IronHubToolEntry, SignedManifestEnvelope,
+        IronHubToolEntry, MANIFEST_VERIFY_KEYS, MAX_METADATA_BYTES, MAX_TOOL_SCHEMA_ARTIFACTS,
+        MAX_WASM_BYTES, SignedManifestEnvelope,
     },
 };
 
@@ -20,7 +21,7 @@ const MAX_SEARCH_DESCRIPTION_BYTES: usize = 120;
 const SEARCH_DESCRIPTION_ELLIPSIS: char = '…';
 
 pub(crate) fn verify_signed_manifest(envelope_bytes: &[u8]) -> Result<Vec<u8>, String> {
-    verify_signed_manifest_with_keys(envelope_bytes, super::model::MANIFEST_VERIFY_KEYS)
+    verify_signed_manifest_with_keys(envelope_bytes, MANIFEST_VERIFY_KEYS)
 }
 
 pub(crate) fn verify_signed_manifest_with_keys(
@@ -269,24 +270,15 @@ fn validate_manifest_artifacts(
     }
     for entry in &manifest.tools {
         validate_hub_name(&entry.name)?;
-        validate_artifact_for_origin(&entry.wasm, super::model::MAX_WASM_BYTES, origin)?;
-        validate_artifact_for_origin(
-            &entry.capabilities,
-            super::model::MAX_METADATA_BYTES,
-            origin,
-        )?;
+        validate_artifact_for_origin(&entry.wasm, MAX_WASM_BYTES, origin)?;
+        validate_artifact_for_origin(&entry.capabilities, MAX_METADATA_BYTES, origin)?;
         if let Some(extension_manifest) = &entry.manifest {
-            validate_artifact_for_origin(
-                extension_manifest,
-                super::model::MAX_METADATA_BYTES,
-                origin,
-            )?;
+            validate_artifact_for_origin(extension_manifest, MAX_METADATA_BYTES, origin)?;
         }
-        if entry.schemas.len() > super::model::MAX_TOOL_SCHEMA_ARTIFACTS {
+        if entry.schemas.len() > MAX_TOOL_SCHEMA_ARTIFACTS {
             return Err(catalog(format!(
                 "tool '{}' publishes more than {} schema artifacts",
-                entry.name,
-                super::model::MAX_TOOL_SCHEMA_ARTIFACTS
+                entry.name, MAX_TOOL_SCHEMA_ARTIFACTS
             )));
         }
         for (path, schema) in &entry.schemas {
@@ -296,12 +288,12 @@ fn validate_manifest_artifacts(
                     entry.name
                 ))
             })?;
-            validate_artifact_for_origin(schema, super::model::MAX_METADATA_BYTES, origin)?;
+            validate_artifact_for_origin(schema, MAX_METADATA_BYTES, origin)?;
         }
     }
     for entry in &manifest.skills {
         validate_hub_name(&entry.name)?;
-        validate_artifact_for_origin(&entry.skill_md, super::model::MAX_METADATA_BYTES, origin)?;
+        validate_artifact_for_origin(&entry.skill_md, MAX_METADATA_BYTES, origin)?;
     }
     Ok(())
 }

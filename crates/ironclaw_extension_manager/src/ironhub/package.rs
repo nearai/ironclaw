@@ -6,8 +6,8 @@ use ironclaw_extension_host::{
     AvailableExtensionPackage, parse_imported_manifest, registry_extension_package,
 };
 
-use super::catalog::validate_hub_name;
-use super::model::{IronHubCommandError, IronHubToolEntry};
+use crate::ironhub::catalog::validate_hub_name;
+use crate::ironhub::model::{IronHubCommandError, IronHubToolEntry};
 
 /// Assemble a registry tool package around the manifest the registry published.
 ///

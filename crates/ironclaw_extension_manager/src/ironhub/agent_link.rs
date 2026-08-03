@@ -3,7 +3,7 @@ use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
-const MIN_SHARED_KEY_LEN: usize = 16;
+const MIN_SHARED_KEY_LEN: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IronhubSharedKeyError {
@@ -135,9 +135,10 @@ mod tests {
     #[test]
     fn shared_key_rejects_short_values_and_redacts_debug() {
         assert!(matches!(
-            IronhubSharedKey::new("too-short"),
-            Err(IronhubSharedKeyError::TooShort { min: 16 })
+            IronhubSharedKey::new("x".repeat(MIN_SHARED_KEY_LEN - 1)),
+            Err(IronhubSharedKeyError::TooShort { min: 32 })
         ));
+        assert!(IronhubSharedKey::new("x".repeat(MIN_SHARED_KEY_LEN)).is_ok());
         assert_eq!(format!("{:?}", shared_key()), "IronhubSharedKey(redacted)");
     }
 
