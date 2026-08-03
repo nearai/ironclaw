@@ -376,6 +376,15 @@ def build_plan(
             qa_evidence_changed = True
             reasons.append("recorded QA evidence changed")
             continue
+        if path.startswith("tests/e2e/"):
+            # E2E scenarios and support live in the dedicated
+            # `reborn-e2e.yml` workflow, which runs its own changed-path
+            # filter and provider/shard matrix. They are not part of the
+            # crate-bucket / root-partition / integration-lane plan emitted
+            # here, so skip them instead of failing closed on an unmapped
+            # path.
+            reasons.append(f"Reborn E2E workflow owns: {path}")
+            continue
         if path.startswith("crates/"):
             package = next(
                 (

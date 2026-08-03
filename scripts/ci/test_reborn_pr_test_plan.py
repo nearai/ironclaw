@@ -191,6 +191,25 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertTrue(plan["run_qa_replay"])
         self.assertEqual(plan["crate_buckets"], [])
 
+    def test_reborn_e2e_scenario_change_is_owned_by_e2e_workflow(self) -> None:
+        plan = self.plan(
+            "pull_request",
+            ["tests/e2e/scenarios/test_reborn_webui_v2_legacy_extensions.py"],
+        )
+        # E2E scenarios live in the dedicated reborn-e2e.yml workflow, not
+        # the crate-bucket / root-partition / integration-lane plan emitted
+        # here. A scenario-only change must not fail closed as an unmapped
+        # path, and must not schedule crate buckets or integration lanes.
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["crate_buckets"], [])
+        self.assertEqual(plan["integration_lanes"], [])
+        self.assertEqual(plan["root_partitions"], [])
+        self.assertTrue(plan["run_qa_replay"])
+        self.assertTrue(
+            any("Reborn E2E workflow owns" in reason for reason in plan["reasons"]),
+            plan["reasons"],
+        )
+
     def test_unrelated_workflow_change_runs_only_baseline_qa_replay(self) -> None:
         plan = self.plan("pull_request", [".github/workflows/code_style.yml"])
         self.assertEqual(plan["mode"], "none")
