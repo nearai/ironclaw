@@ -643,6 +643,7 @@ __OUTCOME__)
             "error event stays debug-only"
         );
         assert!(field(&events[0], "wasm_log").contains(WASM_DIAGNOSTIC_REDACTION_MARKER));
+        assert!(field(&events[0], "wasm_log").contains("retained-log-context"));
         assert!(
             events
                 .iter()
