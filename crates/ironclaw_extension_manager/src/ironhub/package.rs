@@ -129,7 +129,7 @@ mod tests {
     fn component() -> Vec<u8> {
         std::fs::read(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm"),
+                .join("../extensions/packages/github/wasm/github_tool.wasm"),
         )
         .expect("github component fixture")
     }

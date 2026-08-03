@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical fixture-path update follows the extension-package colocation with no new test logic, plan #7037
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signer, SigningKey};
@@ -1552,10 +1553,8 @@ async fn execute_rejects_non_utf8_install_artifacts() {
     let tool_manifest_url = "https://hub.ironclaw.com/tests/non-utf8-tool/manifest.toml";
     let input_schema_url = "https://hub.ironclaw.com/tests/non-utf8-tool/invoke.input.v1.json";
     let output_schema_url = "https://hub.ironclaw.com/tests/non-utf8-tool/raw_output.v1.json";
-    let tool_bytes = include_bytes!(
-        "../../../ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm"
-    )
-    .to_vec();
+    let tool_bytes =
+        include_bytes!("../../../extensions/packages/github/wasm/github_tool.wasm").to_vec();
     let capabilities_bytes = br#"{"capabilities":[]}"#.to_vec();
     let invalid_tool_manifest = vec![0xff, 0xfe];
     let mut catalog: serde_json::Value =
