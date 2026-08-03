@@ -115,16 +115,19 @@ test("non-English locale packs cover the English key set and interpolation param
   }
 });
 
-test("non-English locale packs localize exposed extension workflow copy", () => {
+test("non-English locale packs localize exposed workflow copy", () => {
   const english = loadLocalePack("en");
   const technicalTerms = new Set([
     "extensions.customMcpIdGenerated",
     "extensions.customMcpAuth.oauth",
   ]);
-  const extensionWorkflowKeys = Object.keys(english).filter(
+  const exposedWorkflowKeys = Object.keys(english).filter(
     (key) =>
       !technicalTerms.has(key) &&
-      (key === "extensions.tools" ||
+      (key === "chat.downloadRunArtifact" ||
+        key === "chat.downloadThreadArtifact" ||
+        key.startsWith("pairing.web.") ||
+        key === "extensions.tools" ||
         key === "tools.installed" ||
         key === "tools.available" ||
         key === "extensions.addCustomMcp" ||
@@ -135,7 +138,7 @@ test("non-English locale packs localize exposed extension workflow copy", () => 
 
   for (const locale of LOCALES.filter((candidate) => candidate !== "en")) {
     const pack = loadLocalePack(locale);
-    for (const key of extensionWorkflowKeys) {
+    for (const key of exposedWorkflowKeys) {
       assert.notEqual(pack[key], english[key], `${locale} must localize ${key}`);
     }
   }
