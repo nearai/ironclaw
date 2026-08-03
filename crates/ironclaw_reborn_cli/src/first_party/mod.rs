@@ -1,7 +1,7 @@
 //! Binary-assembled first-party capability wiring (extension-runtime DEL-7).
 //!
 //! The CLI is the one generic-side crate allowed to link
-//! `ironclaw_first_party_extensions`; it converts the concrete package inventory
+//! `ironclaw_extension_support`; it converts the concrete package inventory
 //! into extension-host's neutral bundle set, supplies the concrete GSuite /
 //! web-access capability handler registrars, and injects the Google-account
 //! credential visibility policy. Composition receives all of this as input and

@@ -95,7 +95,7 @@ ironclaw_runner = { path = "../ironclaw_runner", features = ["test-support"] }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_product = { path = ".", features = ["test-support"] }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0", features = ["test-support"] }
-ironclaw_telegram_extension = { path = "../ironclaw_telegram_extension" }
+ironclaw_telegram_extension = { path = "../extensions/packages/telegram" }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "sync", "test-util", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }

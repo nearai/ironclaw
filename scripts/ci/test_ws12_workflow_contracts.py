@@ -335,7 +335,7 @@ class CrateScopeFilterSabotageTests(unittest.TestCase):
         rather than quietly pin the filter against an empty set."""
         moved = dataclasses.replace(
             next(f for f in CRATE_SCOPE_FILTERS if f.name == "has_direct_wasm_abi_risk"),
-            crate_globs=(("ironclaw_first_party_extensions", "assets/*/gone.toml"),),
+            crate_globs=(("ironclaw_extension_support", "assets/*/gone.toml"),),
         )
         with self.patched_filters((moved,)):
             errors = validate_crate_scope_filters(self.workflows, ROOT)

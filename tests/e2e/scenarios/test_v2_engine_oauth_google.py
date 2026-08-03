@@ -144,13 +144,7 @@ def _install_google_drive_wasm(wasm_dir: str):
     import shutil
 
     wasm_src = None
-    asset_root = (
-        ROOT
-        / "crates"
-        / "ironclaw_first_party_extensions"
-        / "assets"
-        / "google-drive"
-    )
+    asset_root = ROOT / "crates" / "extensions" / "packages" / "google-drive"
     candidates = [
         asset_root / "wasm" / "google_drive_tool.wasm",
         asset_root

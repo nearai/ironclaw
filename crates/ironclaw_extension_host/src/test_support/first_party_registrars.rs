@@ -5,7 +5,7 @@
 /// the concrete executors the `ironclaw_reborn_cli` binary assembles in
 /// production (`crates/ironclaw_reborn_cli/src/first_party/`).
 ///
-/// Composition names `ironclaw_first_party_extensions` in production nowhere
+/// Composition names `ironclaw_extension_support` in production nowhere
 /// (extension-runtime DEL-7); the binary supplies these registrars on the build
 /// input. Tests re-derive the same wiring here through the test-support
 /// feature so they can install/activate/dispatch the first-party extensions
@@ -17,7 +17,7 @@ use ironclaw_auth::{
     CredentialAccount, CredentialAccountSelectionRequest, RuntimeCredentialAccountVisibilityPolicy,
 };
 use ironclaw_extension_host::{FirstPartyHandlerRegistrar, FirstPartyRegistrarContext};
-use ironclaw_first_party_extensions::{
+use ironclaw_extension_support::{
     FIRST_PARTY_WEB_GET_CONTENT_CAPABILITY_ID, FIRST_PARTY_WEB_SEARCH_CAPABILITY_ID,
     FirstPartyWebDispatchError, FirstPartyWebDispatchRequest, FirstPartyWebExecutor,
     GOOGLE_PROVIDER_ID, GsuiteCapabilitySpec, GsuiteCredentialDispatchReason,

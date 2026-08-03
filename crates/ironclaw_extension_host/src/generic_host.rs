@@ -1160,7 +1160,7 @@ input_schema_ref = "schemas/echo.input.json"
 
     /// Nearai-shaped `HostBundled` fixture manifest: `[mcp]` connection plus a
     /// static `[[tools]]` template capability, matching
-    /// `crates/ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml`'s
+    /// `crates/extensions/packages/nearai-mcp/manifest.toml`'s
     /// shape (source, root binding, and discovered-schema path convention),
     /// without depending on the real nearai asset files.
     fn hosted_mcp_first_party_manifest_toml(id: &str) -> String {

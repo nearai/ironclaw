@@ -20,32 +20,18 @@ ROOT = Path(__file__).resolve().parents[2]
 MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
 IGNORED_PREFIXES = ("docs/", ".github/ISSUE_TEMPLATE/")
-FULL_PR_PATHS = {
+DEDICATED_WORKFLOW_PREFIXES = ("tools/ironclaw_stress/",)
+CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
+PR_STATIC_CONTROL_PATHS = {
     "Cargo.toml",
-    "Cargo.lock",
     "rust-toolchain",
     "rust-toolchain.toml",
     ".cargo/config",
     ".cargo/config.toml",
-    ".github/workflows/reborn-tests.yml",
-    ".github/workflows/coverage.yml",
-    ".github/workflows/nightly-deep-ci.yml",
-    ".github/workflows/reborn-e2e.yml",
-    ".github/workflows/reborn-playwright.yml",
-    ".github/workflows/reborn-release-compile.yml",
-    "scripts/ci/reborn_pr_test_plan.py",
-    "scripts/ci/test_reborn_pr_test_plan.py",
-    "scripts/ci/discover-reborn-package-crates.sh",
-    "scripts/ci/reborn-crate-test-buckets.sh",
-    "scripts/ci/package-feature-flags.sh",
-    "scripts/ci/run-hermetic-deterministic-suite.sh",
-    "scripts/ci/run-reborn-root-partition.sh",
-    "scripts/ci/run-reborn-group-tests.sh",
-    "scripts/ci/reborn-coverage-int-tier-tests.sh",
-    "scripts/ci/reborn-coverage-lane-run.sh",
     "tests/integration/coverage-exemptions.toml",
     "tests/integration/coverage-floor.toml",
 }
+PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/")
 BUCKET_WEIGHTS = {
     "reborn-core": 12,
     "auth-security": 9,
@@ -76,6 +62,86 @@ def _run(*argv: str) -> str:
 
 def _metadata() -> dict[str, Any]:
     return json.loads(_run("cargo", "metadata", "--format-version", "1"))
+
+
+def _lockfile_change_is_manifest_owned(
+    *,
+    current: dict[str, Any],
+    base: dict[str, Any],
+    changed_paths: set[str],
+    metadata: dict[str, Any],
+) -> bool:
+    """Return true only for lockfile edits confined to changed workspace manifests."""
+    if {key: value for key, value in current.items() if key != "package"} != {
+        key: value for key, value in base.items() if key != "package"
+    }:
+        return False
+
+    workspace_members = set(metadata["workspace_members"])
+    workspace_packages = {
+        package["name"]: str(
+            Path(package["manifest_path"]).resolve().relative_to(ROOT)
+        )
+        for package in metadata["packages"]
+        if package["id"] in workspace_members
+    }
+    changed_workspace_packages = {
+        name for name, manifest in workspace_packages.items() if manifest in changed_paths
+    }
+    if not changed_workspace_packages:
+        return False
+
+    def indexed(lockfile: dict[str, Any]) -> dict[tuple[str, str, str], dict[str, Any]]:
+        packages = lockfile.get("package", [])
+        if not isinstance(packages, list):
+            return {}
+        result = {
+            (
+                str(package.get("name", "")),
+                str(package.get("version", "")),
+                str(package.get("source", "")),
+            ): package
+            for package in packages
+            if isinstance(package, dict)
+        }
+        return result if len(result) == len(packages) else {}
+
+    current_packages = indexed(current)
+    base_packages = indexed(base)
+    if not current_packages or current_packages.keys() != base_packages.keys():
+        return False
+
+    for key, current_package in current_packages.items():
+        base_package = base_packages[key]
+        if current_package == base_package:
+            continue
+        name, _version, source = key
+        if source or name not in changed_workspace_packages:
+            return False
+        current_without_dependencies = {
+            field: value
+            for field, value in current_package.items()
+            if field != "dependencies"
+        }
+        base_without_dependencies = {
+            field: value for field, value in base_package.items() if field != "dependencies"
+        }
+        if current_without_dependencies != base_without_dependencies:
+            return False
+    return True
+
+
+def _manifest_owned_lockfile_change(
+    *, base_sha: str, changed_paths: set[str], metadata: dict[str, Any]
+) -> bool:
+    if not base_sha:
+        return False
+    return _lockfile_change_is_manifest_owned(
+        current=tomllib.loads((ROOT / "Cargo.lock").read_text(encoding="utf-8")),
+        base=tomllib.loads(_run("git", "show", f"{base_sha}:Cargo.lock")),
+        changed_paths=changed_paths,
+        metadata=metadata,
+    )
 
 
 def _canonical_packages() -> list[str]:
@@ -208,7 +274,6 @@ def _full_plan(
         "root_partitions": [0, 1, 2, 3],
         "integration_lanes": [0, 1, 2, 3, "groups"],
         "run_group_tests": True,
-        "run_frontend": True,
         "run_qa_replay": True,
         "coverage_mode": "full",
     }
@@ -220,8 +285,9 @@ def build_plan(
     changed_paths: list[str],
     metadata: dict[str, Any],
     canonical_packages: list[str],
+    lockfile_manifest_owned: bool = False,
 ) -> dict[str, Any]:
-    """Build a deterministic test plan, failing open on unknown Reborn inputs."""
+    """Build a deterministic test plan, rejecting unknown PR inputs."""
     if event in FULL_EVENTS:
         return _full_plan(f"{event} requires exhaustive coverage", canonical_packages)
     if event != "pull_request":
@@ -229,21 +295,18 @@ def build_plan(
 
     paths = {path.strip().replace("\\", "/") for path in changed_paths if path.strip()}
     if not paths:
-        return _full_plan(
-            "empty pull-request diff requires fail-closed exhaustive coverage",
-            canonical_packages,
-        )
-    if any(path in FULL_PR_PATHS for path in paths):
-        return _full_plan(
-            "Reborn test infrastructure or workspace topology changed",
-            canonical_packages,
+        raise ValueError(
+            "empty pull-request diff cannot be classified; refusing to launch "
+            "an unbounded PR matrix"
         )
 
     package_directories, reverse = _workspace_packages(metadata)
-    changed_packages: set[str] = set()
+    production_packages: set[str] = set()
+    direct_test_packages: set[str] = set()
+    exact_test_targets: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    packages_requiring_all_targets: set[str] = set()
     root_partitions: set[int] = set()
     integration_lanes: set[str | int] = set()
-    run_frontend = False
     # Recorded replay is a repository-wide ordering and integration sentinel,
     # not affected-area coverage. Keep it on for every pull request even when
     # no changed path maps to another Reborn lane.
@@ -254,15 +317,33 @@ def build_plan(
     integration_inventory = _integration_test_lanes()
 
     for path in sorted(paths):
+        if path == "Cargo.lock":
+            if lockfile_manifest_owned:
+                reasons.append(
+                    "Cargo.lock change is owned by a changed crate manifest"
+                )
+            else:
+                reasons.append(
+                    "workspace lockfile breadth is deferred to the exhaustive merge-queue gate"
+                )
+            continue
+        if path in PR_STATIC_CONTROL_PATHS or path.startswith(
+            PR_STATIC_CONTROL_PREFIXES
+        ):
+            reasons.append(f"static CI or workspace-policy checks own: {path}")
+            continue
+        if path.startswith(DEDICATED_WORKFLOW_PREFIXES):
+            reasons.append(f"dedicated stress workflow owns: {path}")
+            continue
+        if path == CHANGED_COVERAGE_MANIFEST:
+            reasons.append("changed-coverage policy is statically validated")
+            continue
         if path.startswith(IGNORED_PREFIXES) or (
             path.endswith(".md") and "/" not in path
         ):
             continue
-        if path.startswith(".github/workflows/"):
-            continue
         if path.startswith("crates/ironclaw_webui/frontend/"):
-            run_frontend = True
-            reasons.append("WebUI frontend changed")
+            reasons.append("Code Style owns WebUI lint, tests, and production build")
             continue
         if path in root_inventory:
             root_partitions.add(root_inventory[path])
@@ -272,16 +353,20 @@ def build_plan(
             path.startswith("tests/support/reborn_parity_qa/")
             or path == "tests/support_unit_tests.rs"
         ):
-            root_partitions.update(range(4))
-            reasons.append("shared root-test support changed")
+            root_partitions.add(0)
+            reasons.append(
+                "shared root-test support changed; PR runs a representative partition"
+            )
             continue
         if path in integration_inventory:
             integration_lanes.add(integration_inventory[path])
             reasons.append(f"integration test changed: {path}")
             continue
         if path.startswith("tests/integration/"):
-            integration_lanes.update([0, 1, 2, 3, "groups"])
-            reasons.append("shared integration support changed")
+            integration_lanes.add(0)
+            reasons.append(
+                "shared integration support changed; PR runs a representative lane"
+            )
             continue
         if path.startswith("tests/fixtures/llm_traces/reborn_qa/") or path in {
             "scripts/ci/check-reborn-qa-fixtures.sh",
@@ -301,38 +386,65 @@ def build_plan(
                 None,
             )
             if package is None:
-                return _full_plan(
-                    f"unmapped crate path {path} requires fail-closed coverage",
-                    canonical_packages,
-                )
-            changed_packages.add(package)
-            reasons.append(f"production package changed: {package}")
+                raise ValueError(f"unmapped crate path: {path}")
+            directory = next(
+                directory
+                for directory, name in package_directories.items()
+                if name == package
+            )
+            relative = path.removeprefix(f"{directory}/")
+            if relative.startswith(("tests/", "benches/", "examples/")):
+                direct_test_packages.add(package)
+                reasons.append(f"package-owned test surface changed: {package}")
+                parts = Path(relative).parts
+                target_kinds = {
+                    "tests": "test",
+                    "benches": "bench",
+                    "examples": "example",
+                }
+                if len(parts) == 2 and Path(parts[1]).suffix == ".rs":
+                    exact_test_targets[package].add(
+                        (target_kinds[parts[0]], Path(parts[1]).stem)
+                    )
+                else:
+                    packages_requiring_all_targets.add(package)
+            else:
+                production_packages.add(package)
+                reasons.append(f"production package changed: {package}")
             continue
         if path.startswith(("tests/reborn_", "tests/e2e/reborn_", "scripts/ci/reborn-")):
-            return _full_plan(
-                f"unmapped Reborn test path {path} requires fail-closed coverage",
-                canonical_packages,
-            )
+            raise ValueError(f"unmapped Reborn test path: {path}")
         if path.startswith(("scripts/", "tests/", ".github/actions/")):
-            return _full_plan(
-                f"unmapped test or CI path {path} requires fail-closed coverage",
-                canonical_packages,
-            )
-        return _full_plan(
-            f"unclassified pull-request path {path} requires fail-closed coverage",
-            canonical_packages,
-        )
+            raise ValueError(f"unmapped test or CI path: {path}")
+        raise ValueError(f"unclassified pull-request path: {path}")
 
     canonical_set = set(canonical_packages)
-    affected = _affected_packages(changed_packages, reverse) & canonical_set
+    changed_packages = production_packages | direct_test_packages
+    affected = (
+        _affected_packages(production_packages, reverse) | direct_test_packages
+    ) & canonical_set
     if changed_packages and not affected:
-        return _full_plan(
-            "changed packages are outside the canonical Reborn set; "
-            "fail-closed exhaustive coverage required",
-            canonical_packages,
+        raise ValueError(
+            "changed packages are outside the canonical Reborn package set: "
+            f"{', '.join(sorted(changed_packages))}"
         )
 
     buckets = _bucket_packages(sorted(affected)) if affected else []
+    full_target_packages = (
+        _affected_packages(production_packages, reverse)
+        | packages_requiring_all_targets
+    ) & canonical_set
+    for bucket in buckets:
+        bucket_packages = set(bucket["packages"])
+        if bucket_packages & full_target_packages:
+            continue
+        if not all(package in exact_test_targets for package in bucket_packages):
+            continue
+        bucket["exact_targets"] = [
+            {"package": package, "kind": kind, "name": name}
+            for package in sorted(bucket_packages)
+            for kind, name in sorted(exact_test_targets[package])
+        ]
     if len(buckets) > MAX_PR_CRATE_BUCKETS:
         original_bucket_count = len(buckets)
         buckets = _bound_pr_buckets(buckets)
@@ -344,7 +456,6 @@ def build_plan(
         buckets
         or root_partitions
         or integration_lanes
-        or run_frontend
         or qa_evidence_changed
     )
     return {
@@ -358,7 +469,6 @@ def build_plan(
             integration_lanes, key=lambda value: (isinstance(value, str), str(value))
         ),
         "run_group_tests": False,
-        "run_frontend": run_frontend,
         "run_qa_replay": run_qa_replay,
         "coverage_mode": "none",
     }
@@ -377,6 +487,10 @@ def main() -> int:
         type=Path,
         help="JSON package array produced by discover-reborn-package-crates.sh",
     )
+    parser.add_argument(
+        "--base-sha",
+        help="pull-request base commit used to verify manifest-owned lockfile edits",
+    )
     args = parser.parse_args()
     try:
         changed_paths = (
@@ -389,11 +503,25 @@ def main() -> int:
             if args.canonical_packages
             else _canonical_packages()
         )
+        normalized_paths = {
+            path.strip().replace("\\", "/") for path in changed_paths if path.strip()
+        }
+        metadata = _metadata()
+        lockfile_manifest_owned = (
+            _manifest_owned_lockfile_change(
+                base_sha=args.base_sha or "",
+                changed_paths=normalized_paths,
+                metadata=metadata,
+            )
+            if "Cargo.lock" in normalized_paths
+            else False
+        )
         plan = build_plan(
             event=args.event,
             changed_paths=changed_paths,
-            metadata=_metadata(),
+            metadata=metadata,
             canonical_packages=canonical_packages,
+            lockfile_manifest_owned=lockfile_manifest_owned,
         )
     except (OSError, KeyError, ValueError, subprocess.CalledProcessError) as error:
         print(f"Reborn PR test planner failed: {error}", file=sys.stderr)
