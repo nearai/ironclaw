@@ -1,4 +1,4 @@
-// @vitest-environment happy-dom
+// @vitest-environment jsdom
 // @ts-nocheck
 import assert from "node:assert/strict";
 import React, { act } from "react";
@@ -7,12 +7,7 @@ import { test, vi } from "vitest";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-const { renderMarkdownMock } = vi.hoisted(() => ({
-  renderMarkdownMock: vi.fn((content) => `<p>${content}</p>`),
-}));
-
 vi.mock("../../../lib/i18n", () => ({ useT: () => (key) => key }));
-vi.mock("../../../lib/markdown", () => ({ renderMarkdown: renderMarkdownMock }));
 vi.mock("streamdown", async () => {
   const { createElement } = await import("react");
   return {
@@ -29,9 +24,19 @@ vi.mock("streamdown", async () => {
   };
 });
 
+async function waitForMarkdownRender(predicate, message) {
+  const deadline = Date.now() + 2_000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      assert.fail(message);
+    }
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+  }
+}
+
 test("streaming Markdown updates immediately and finalizes through the sanitizer", async () => {
-  renderMarkdownMock.mockReset();
-  renderMarkdownMock.mockImplementation((content) => `<p>${content}</p>`);
   const { MarkdownRenderer } = await import("./markdown-renderer");
   const container = document.createElement("div");
   document.body.append(container);
@@ -44,9 +49,10 @@ test("streaming Markdown updates immediately and finalizes through the sanitizer
         streaming: true,
       }));
     });
-    await act(async () => {
-      await Promise.resolve();
-    });
+    await waitForMarkdownRender(
+      () => container.querySelector('[data-testid="streamdown"]') !== null,
+      "the streaming renderer should mount",
+    );
     assert.equal(container.textContent, "**first**");
     assert.equal(
       container.querySelector('[data-testid="streamdown"]')?.getAttribute(
@@ -60,7 +66,6 @@ test("streaming Markdown updates immediately and finalizes through the sanitizer
       ),
       "true",
     );
-    assert.equal(renderMarkdownMock.mock.calls.length, 0);
 
     act(() => {
       root.render(React.createElement(MarkdownRenderer, {
@@ -73,7 +78,6 @@ test("streaming Markdown updates immediately and finalizes through the sanitizer
       "**second**",
       "a committed stream snapshot should not wait for a fixed timer",
     );
-    assert.equal(renderMarkdownMock.mock.calls.length, 0);
 
     act(() => {
       root.render(React.createElement(MarkdownRenderer, {
@@ -89,15 +93,10 @@ test("streaming Markdown updates immediately and finalizes through the sanitizer
       "the already-mounted stream renderer should hold the final snapshot while sanitization loads",
     );
     assert.equal(container.textContent, "**final**");
-    await act(async () => {
-      await Promise.resolve();
-    });
-    assert.equal(renderMarkdownMock.mock.calls.length, 1);
-    assert.deepEqual(renderMarkdownMock.mock.calls[0], [
-      "**final**",
-      { workspaceFileLinks: false },
-    ]);
-    assert.equal(container.innerHTML.includes("<p>**final**</p>"), true);
+    await waitForMarkdownRender(
+      () => container.innerHTML.includes("<strong>final</strong>"),
+      "the final snapshot should render through the sanitizer",
+    );
   } finally {
     act(() => root.unmount());
     container.remove();
@@ -105,11 +104,6 @@ test("streaming Markdown updates immediately and finalizes through the sanitizer
 });
 
 test("workspace links delegate to the in-app file preview", async () => {
-  renderMarkdownMock.mockReset();
-  renderMarkdownMock.mockImplementation(
-    () =>
-      '<p><a href="/workspace/report.csv" data-workspace-path="/workspace/report.csv"><span>report.csv</span></a></p>',
-  );
   const onWorkspaceFileOpen = vi.fn();
   const { MarkdownRenderer } = await import("./markdown-renderer");
   const container = document.createElement("div");
@@ -123,12 +117,12 @@ test("workspace links delegate to the in-app file preview", async () => {
         onWorkspaceFileOpen,
       }));
     });
+    await waitForMarkdownRender(
+      () => container.querySelector("a") !== null,
+      "the workspace link should render",
+    );
 
-    assert.deepEqual(renderMarkdownMock.mock.calls[0], [
-      "[report.csv](/workspace/report.csv)",
-      { workspaceFileLinks: true },
-    ]);
-    const linkLabel = container.querySelector("a span");
+    const linkLabel = container.querySelector("a");
     assert.ok(linkLabel);
     const click = new MouseEvent("click", { bubbles: true, cancelable: true });
     linkLabel.dispatchEvent(click);
@@ -142,12 +136,6 @@ test("workspace links delegate to the in-app file preview", async () => {
 });
 
 test("workspace links re-render when preview capability becomes available", async () => {
-  renderMarkdownMock.mockReset();
-  renderMarkdownMock.mockImplementation((_, options) =>
-    options.workspaceFileLinks
-      ? '<p><a href="/workspace/report.csv" data-workspace-path="/workspace/report.csv">report.csv</a></p>'
-      : '<p><a href="/workspace/report.csv">report.csv</a></p>'
-  );
   const onWorkspaceFileOpen = vi.fn();
   const { MarkdownRenderer } = await import("./markdown-renderer");
   const container = document.createElement("div");
@@ -160,7 +148,10 @@ test("workspace links re-render when preview capability becomes available", asyn
         content="[report.csv](/workspace/report.csv)"
       />);
     });
-    assert.equal(renderMarkdownMock.mock.calls.length, 1);
+    await waitForMarkdownRender(
+      () => container.querySelector("a") !== null,
+      "the ordinary link should render",
+    );
     assert.equal(
       container.querySelector("a")?.hasAttribute("data-workspace-path"),
       false,
@@ -172,12 +163,11 @@ test("workspace links re-render when preview capability becomes available", asyn
         onWorkspaceFileOpen={onWorkspaceFileOpen}
       />);
     });
+    await waitForMarkdownRender(
+      () => container.querySelector("a[data-workspace-path]") !== null,
+      "the link should gain preview metadata",
+    );
 
-    assert.equal(renderMarkdownMock.mock.calls.length, 2);
-    assert.deepEqual(renderMarkdownMock.mock.calls[1], [
-      "[report.csv](/workspace/report.csv)",
-      { workspaceFileLinks: true },
-    ]);
     const link = container.querySelector("a[data-workspace-path]");
     assert.ok(link);
     link.dispatchEvent(new MouseEvent("click", {
@@ -192,11 +182,6 @@ test("workspace links re-render when preview capability becomes available", asyn
 });
 
 test("workspace links reject forged preview metadata", async () => {
-  renderMarkdownMock.mockReset();
-  renderMarkdownMock.mockImplementation(
-    () =>
-      '<p><a href="https://example.com" data-workspace-path="/workspace/secret.txt"><span>external</span></a></p>',
-  );
   const onWorkspaceFileOpen = vi.fn();
   const { MarkdownRenderer } = await import("./markdown-renderer");
   const container = document.createElement("div");
@@ -211,8 +196,12 @@ test("workspace links reject forged preview metadata", async () => {
         onWorkspaceFileOpen,
       }));
     });
+    await waitForMarkdownRender(
+      () => container.querySelector("a") !== null,
+      "the external link should render",
+    );
 
-    const linkLabel = container.querySelector("a span");
+    const linkLabel = container.querySelector("a");
     assert.ok(linkLabel);
     const click = new MouseEvent("click", { bubbles: true, cancelable: true });
     linkLabel.dispatchEvent(click);
@@ -226,11 +215,6 @@ test("workspace links reject forged preview metadata", async () => {
 });
 
 test("workspace links reject matching non-workspace href metadata", async () => {
-  renderMarkdownMock.mockReset();
-  renderMarkdownMock.mockImplementation(
-    () =>
-      '<p><a href="https://example.com" data-workspace-path="https://example.com">external</a></p>',
-  );
   const onWorkspaceFileOpen = vi.fn();
   const { MarkdownRenderer } = await import("./markdown-renderer");
   const container = document.createElement("div");
@@ -240,10 +224,14 @@ test("workspace links reject matching non-workspace href metadata", async () => 
   try {
     await act(async () => {
       root.render(<MarkdownRenderer
-        content="external"
+        content={'<a href="https://example.com" data-workspace-path="https://example.com">external</a>'}
         onWorkspaceFileOpen={onWorkspaceFileOpen}
       />);
     });
+    await waitForMarkdownRender(
+      () => container.querySelector("a") !== null,
+      "the external link should render",
+    );
 
     const link = container.querySelector("a");
     assert.ok(link);

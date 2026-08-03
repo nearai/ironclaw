@@ -1,13 +1,12 @@
-import DOMPurify from "dompurify";
+import DOMPurify, {
+  type DOMPurify as DOMPurifyInstance,
+  type WindowLike,
+} from "dompurify";
 import { marked } from "marked";
 import {
   workspaceFileHrefFromPath,
   workspaceFilePathFromHref,
 } from "./workspace-file-links";
-
-// Module-lifetime cache, strictly bounded to the two boolean capability modes.
-// Keeping each instance avoids reinstalling hooks on every message render.
-const sanitizers = new Map<boolean, ReturnType<typeof DOMPurify>>();
 
 // Normalize the product's scoped `sandbox:/workspace/...` references before
 // DOMPurify applies its URI allowlist. Only the strict workspace-file grammar is
@@ -16,12 +15,17 @@ const sanitizers = new Map<boolean, ReturnType<typeof DOMPurify>>();
 // After sanitization, mark workspace anchors for the chat renderer's delegated
 // click handler. Keep the existing external-link hardening attributes as a safe
 // fallback for renderer call sites that do not install that handler.
-function createSanitizer(workspaceFileLinks: boolean) {
-  // Each capability mode owns an isolated DOMPurify instance. Hook behavior is
-  // closure-captured and cannot be changed by another render.
-  const sanitizer = DOMPurify(window);
+function createSanitizer(currentWindow: WindowLike) {
+  const sanitizer = DOMPurify(currentWindow);
+  if (!sanitizer.isSupported) {
+    throw new Error("Markdown sanitization is unavailable in this browser");
+  }
   const validatedWorkspacePaths = new WeakMap<Element, string>();
-  sanitizer.addHook("uponSanitizeAttribute", (node, data) => {
+  sanitizer.addHook("uponSanitizeAttribute", (node, data, config) => {
+    const workspaceFileLinks = Boolean(
+      (config as { workspaceFileLinks?: boolean } | undefined)
+        ?.workspaceFileLinks,
+    );
     if (
       !workspaceFileLinks ||
       node.tagName !== "A" ||
@@ -36,7 +40,11 @@ function createSanitizer(workspaceFileLinks: boolean) {
       validatedWorkspacePaths.set(node, workspacePath);
     }
   });
-  sanitizer.addHook("afterSanitizeAttributes", (node) => {
+  sanitizer.addHook("afterSanitizeAttributes", (node, _data, config) => {
+    const workspaceFileLinks = Boolean(
+      (config as { workspaceFileLinks?: boolean } | undefined)
+        ?.workspaceFileLinks,
+    );
     if (node.tagName !== "A") return;
     // DOMPurify intentionally preserves data-* attributes, so remove any
     // assistant-authored preview metadata before deriving the trusted value.
@@ -59,11 +67,14 @@ function createSanitizer(workspaceFileLinks: boolean) {
   return sanitizer;
 }
 
-function sanitizerForWorkspaceFileLinks(workspaceFileLinks: boolean) {
-  const existing = sanitizers.get(workspaceFileLinks);
+const sanitizers = new WeakMap<object, DOMPurifyInstance>();
+
+function sanitizerForCurrentWindow(): DOMPurifyInstance {
+  const currentWindow = window;
+  const existing = sanitizers.get(currentWindow);
   if (existing) return existing;
-  const sanitizer = createSanitizer(workspaceFileLinks);
-  sanitizers.set(workspaceFileLinks, sanitizer);
+  const sanitizer = createSanitizer(currentWindow);
+  sanitizers.set(currentWindow, sanitizer);
   return sanitizer;
 }
 
@@ -81,5 +92,6 @@ export function renderMarkdown(
     gfm: true,
     breaks: true,
   }) as string;
-  return sanitizerForWorkspaceFileLinks(workspaceFileLinks).sanitize(raw);
+  const sanitizer = sanitizerForCurrentWindow();
+  return String(sanitizer.sanitize(raw, { workspaceFileLinks } as never));
 }
