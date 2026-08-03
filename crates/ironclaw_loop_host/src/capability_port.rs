@@ -3039,26 +3039,14 @@ fn is_process_sandbox_capability(capability_id: &CapabilityId) -> bool {
     capability_id.as_str() == ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID
 }
 
-fn provider_schema_is_usable(schema: &serde_json::Value) -> bool {
-    let Some(object) = schema.as_object() else {
-        return false;
-    };
-    if schema_contains_external_ref(schema, 0) {
-        return false;
-    }
-    if object
-        .get("$ref")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|reference| reference.starts_with('#'))
-    {
-        return true;
-    }
-    matches!(
-        object.get("type").and_then(serde_json::Value::as_str),
-        Some("object")
-    ) && object
-        .get("properties")
-        .is_none_or(serde_json::Value::is_object)
+fn provider_schema_is_resolved(schema: &serde_json::Value) -> bool {
+    // The hot capability catalog owns canonical JSON Schema validation and the
+    // selected LLM provider owns wire-format shaping (including top-level
+    // `oneOf` flattening). The loop must not maintain a second, narrower schema
+    // dialect: doing so silently delists valid, versioned extension schemas
+    // before they reach the provider adapter. It only enforces the boundary the
+    // provider cannot resolve safely on its own.
+    !schema_contains_external_ref(schema, 0)
 }
 
 fn provider_tool_name(
@@ -4758,17 +4746,17 @@ mod tests {
     }
 
     #[test]
-    fn provider_schema_accepts_zero_arg_object_tools() {
-        assert!(provider_schema_is_usable(
+    fn provider_schema_requires_resolved_refs_without_restricting_canonical_shape() {
+        assert!(provider_schema_is_resolved(
             &serde_json::json!({"type":"object"})
         ));
-        assert!(provider_schema_is_usable(
+        assert!(provider_schema_is_resolved(
             &serde_json::json!({"type":"object","properties":{}})
         ));
-        assert!(!provider_schema_is_usable(&serde_json::json!({
+        assert!(!provider_schema_is_resolved(&serde_json::json!({
             "$ref": "schemas/builtin/write-file.input.v1.json"
         })));
-        assert!(provider_schema_is_usable(&serde_json::json!({
+        assert!(provider_schema_is_resolved(&serde_json::json!({
             "$ref": "#/$defs/input",
             "$defs": {
                 "input": {
@@ -4779,7 +4767,7 @@ mod tests {
                 }
             }
         })));
-        assert!(!provider_schema_is_usable(&serde_json::json!({
+        assert!(!provider_schema_is_resolved(&serde_json::json!({
             "type": "object",
             "properties": {
                 "payload": {
@@ -4787,9 +4775,12 @@ mod tests {
                 }
             }
         })));
-        assert!(!provider_schema_is_usable(
-            &serde_json::json!({"type":"string"})
-        ));
+        assert!(provider_schema_is_resolved(&serde_json::json!({
+            "oneOf": [
+                {"type":"object","properties":{"action":{"const":"first"}}},
+                {"type":"object","properties":{"action":{"const":"second"}}}
+            ]
+        })));
     }
 
     #[test]
@@ -6390,6 +6381,100 @@ mod tests {
             runtime.take_requests().is_empty(),
             "capability_info must be served by the loop port without dispatching to the host runtime"
         );
+    }
+
+    #[tokio::test]
+    async fn versioned_union_schema_is_advertised_and_dispatches_through_runtime_port() {
+        let capability_id = CapabilityId::new("evm-rpc.invoke").expect("valid capability id");
+        let provider_id = ExtensionId::new("evm-rpc").expect("valid provider id");
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "EvmRpcAction",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "const": "eth_block_number" },
+                        "chain": { "type": ["string", "null"], "default": null }
+                    },
+                    "required": ["action"]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "const": "eth_get_balance" },
+                        "address": { "type": "string" },
+                        "chain": { "type": ["string", "null"], "default": null }
+                    },
+                    "required": ["action", "address"]
+                }
+            ]
+        });
+        let arguments = serde_json::json!({
+            "action": "eth_get_balance",
+            "address": "0x0000000000000000000000000000000000000000",
+            "chain": "ethereum"
+        });
+        let mut capability = visible_capability(capability_id.clone(), provider_id.clone());
+        capability.descriptor.parameters_schema = schema.clone();
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![capability]));
+        let mut context = execution_context("thread-versioned-union-schema");
+        let run_context = loop_run_context(&context).await;
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        context.grants.grants.push(dispatch_capability_grant(
+            &capability_id,
+            &loop_driver_extension,
+        ));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id,
+                dispatch_trust_decision(),
+            )])),
+            Arc::new(JsonInputResolver(arguments.clone())),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        let definition = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.capability_id == capability_id)
+            .expect("versioned union schema capability must be advertised");
+        assert_eq!(definition.name.as_str(), "evm-rpc__invoke");
+        assert_eq!(definition.parameters, schema);
+
+        let mut call = provider_tool_call();
+        call.name = definition.name;
+        call.arguments = arguments.clone();
+        let candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
+            .await
+            .expect("union-valid provider call should register");
+        assert_eq!(candidate.capability_id, capability_id);
+
+        let outcome = port
+            .invoke_capability(LoopRequest {
+                activity_id: candidate.activity_id,
+                surface_version: surface.version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+                approval_resume: None,
+                auth_resume: None,
+            })
+            .await
+            .expect("union-valid capability call should dispatch");
+        assert!(matches!(&outcome, Resolution::Done(done) if done.verdict.is_success()));
+        let requests = runtime.take_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].3, arguments);
     }
 
     #[tokio::test]
