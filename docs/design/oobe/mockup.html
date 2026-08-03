@@ -79,7 +79,7 @@ h1,h2,h3,p{margin:0}
 .masthead{display:flex;flex-wrap:wrap;gap:20px;align-items:flex-end;justify-content:space-between;margin-bottom:20px}
 .eyebrow{font-family:var(--font-mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--v2-accent-text);margin-bottom:10px}
 .title{font-family:var(--font-serif);font-weight:560;font-size:clamp(27px,4vw,42px);line-height:1.05;letter-spacing:-.01em;color:var(--v2-text-strong);text-wrap:balance;max-width:20ch}
-.lede{margin-top:12px;max-width:66ch;color:var(--v2-text-muted);font-size:15px;line-height:1.6}
+.lede{margin-top:12px;max-width:70ch;color:var(--v2-text-muted);font-size:15px;line-height:1.6}
 .lede code{font-family:var(--font-mono);font-size:13px}
 
 /* ---------- controls ---------- */
@@ -87,7 +87,10 @@ h1,h2,h3,p{margin:0}
 .seg{display:inline-flex;background:var(--v2-surface-soft);border:1px solid var(--v2-panel-border);border-radius:12px;padding:3px;gap:2px}
 .seg button{font:inherit;font-size:13px;font-weight:560;color:var(--v2-text-muted);background:transparent;border:0;padding:7px 14px;border-radius:9px;cursor:pointer}
 .seg button[aria-pressed="true"]{background:var(--v2-surface);color:var(--v2-text-strong);box-shadow:var(--v2-card-shadow)}
+.seg.primary button[aria-pressed="true"]{color:var(--v2-accent-text)}
 .seg .seglbl{font-family:var(--font-mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--v2-text-faint);align-self:center;padding:0 8px 0 4px}
+.frcontrols{display:flex;flex-wrap:wrap;align-items:center;gap:10px;flex:1 1 auto}
+.frcontrols.hide{display:none}
 .btn{font:inherit;font-size:13px;font-weight:560;display:inline-flex;align-items:center;gap:7px;padding:8px 14px;border-radius:11px;cursor:pointer;border:1px solid var(--v2-panel-border);background:var(--v2-surface);color:var(--v2-text-strong)}
 .btn:hover{border-color:var(--v2-accent)}
 .btn.primary{color:#fff;border:1px solid rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%)}
@@ -107,14 +110,14 @@ h1,h2,h3,p{margin:0}
 .tag.newevt{color:var(--v2-warning-text);background:var(--v2-warning-soft)}
 .tag.native{color:var(--v2-accent-text);background:var(--v2-accent-soft);border-color:color-mix(in srgb,var(--v2-accent) 40%,transparent)}
 
-/* per-beat caption above the device */
+/* per-scene caption above the device */
 .beatcap{display:flex;align-items:baseline;gap:10px;margin:2px 0 12px;min-height:22px}
 .beatcap .n{font-family:var(--font-mono);font-size:11px;color:var(--v2-text-faint);white-space:nowrap}
 .beatcap .c{font-size:13.5px;color:var(--v2-text-muted)}
 .beatcap .c b{color:var(--v2-text-strong);font-weight:600}
 
 /* ============================================================
-   Landing device (faithful to webui_v2 chat landing)
+   Landing device (faithful to webui_v2 chat)
    ============================================================ */
 .device{border:1px solid var(--v2-panel-border);border-radius:22px;background:var(--v2-canvas-strong);overflow:hidden;box-shadow:var(--v2-card-shadow);display:flex;flex-direction:column;min-height:0}
 .topbar{display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--v2-panel-border);background:var(--v2-surface)}
@@ -126,8 +129,12 @@ h1,h2,h3,p{margin:0}
 .topbar .who .av{width:26px;height:26px;border-radius:999px;background:var(--v2-accent-soft);color:var(--v2-accent-text);display:grid;place-items:center;font-size:11px;font-weight:700}
 .topbar .who .nm{font-size:12.5px;color:var(--v2-text-muted)}
 
-/* the landing canvas — hero centered, carousel above composer */
-.landing{background:var(--v2-canvas);padding:26px 22px 22px;display:flex;flex-direction:column;align-items:center;min-height:520px}
+/* scenes */
+.scene{display:none}
+.scene.on{display:flex;flex-direction:column}
+
+/* first-run landing canvas */
+.landing{background:var(--v2-canvas);padding:26px 22px 22px;align-items:center;min-height:520px}
 .stagearea{width:100%;max-width:720px;margin:auto;display:flex;flex-direction:column;align-items:center}
 .hero{text-align:center;margin-bottom:6px}
 .hero h2{font-family:var(--font-serif);font-weight:560;font-size:clamp(26px,3.4vw,36px);line-height:1.08;letter-spacing:-.01em;color:var(--v2-text-strong);text-wrap:balance;max-width:18ch;margin:0 auto}
@@ -175,6 +182,8 @@ h1,h2,h3,p{margin:0}
 .tcard .when{margin-left:auto;font-size:10px;color:var(--v2-text-faint);white-space:nowrap}
 .badge{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:999px;white-space:nowrap}
 .badge.success{color:var(--v2-positive-text);background:var(--v2-positive-soft)}
+.badge.accent{color:var(--v2-accent-text);background:var(--v2-accent-soft)}
+.badge.muted{color:var(--v2-text-muted);background:var(--v2-surface-muted)}
 .badge .bdot{width:5px;height:5px;border-radius:999px;background:currentColor}
 .tcard .ttl2{display:flex;align-items:center;justify-content:space-between;gap:6px}
 .tcard .ttl2 b{font-size:13px;font-weight:640;line-height:1.15;color:var(--v2-text-strong);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -210,7 +219,7 @@ h1,h2,h3,p{margin:0}
 @media (prefers-reduced-motion:reduce){.sk::after{animation:none}}
 
 /* NEAR live status line (verbatim behavior from agent-activity mockup) */
-.livestat{display:flex;align-items:center;gap:9px;padding:8px 2px;font-size:13px;color:var(--v2-text);width:100%;max-width:720px}
+.livestat{display:flex;align-items:center;gap:9px;padding:8px 2px;font-size:13px;color:var(--v2-text)}
 .livestat .near{width:18px;height:18px;overflow:visible;transform-box:fill-box;transform-origin:center;color:var(--near-blue);flex:none}
 .near .near-base{fill:currentColor;opacity:.22}
 .near .near-comet{fill:none;stroke:currentColor;stroke-width:7;stroke-linecap:round;stroke-linejoin:round;stroke-dashoffset:0;filter:drop-shadow(0 0 1.5px currentColor);display:none}
@@ -226,9 +235,11 @@ h1,h2,h3,p{margin:0}
 
 /* ---------- composer (composer-v2, faithful) ---------- */
 .composer{width:100%;margin-top:22px;display:flex;flex-direction:column;align-items:stretch;gap:11px;border:1px solid var(--v2-panel-border);border-radius:16px;background:var(--v2-surface);padding:12px 14px;box-shadow:var(--v2-card-shadow)}
+.composer.dock{margin-top:0}
 .composer .inputrow{display:flex;align-items:flex-start;gap:8px}
 .composer .field{flex:1;min-height:24px;color:var(--v2-text);font-size:14.5px;line-height:1.5;padding:3px 2px;background:transparent;border:0;outline:none;resize:none;font-family:inherit;width:100%}
 .composer .field::placeholder{color:var(--v2-text-faint)}
+.composer .field.ph{color:var(--v2-text-faint)}
 .composer .actions{display:flex;align-items:center}
 .composer .rightcluster{margin-left:auto;display:flex;align-items:center;gap:6px}
 .composer .iconbtn{width:34px;height:34px;flex:none;border-radius:9px;display:grid;place-items:center;border:1px solid transparent;background:transparent;color:var(--v2-text-muted);cursor:pointer}
@@ -261,6 +272,84 @@ h1,h2,h3,p{margin:0}
 .sugg:hover{border-color:color-mix(in srgb,var(--v2-accent) 35%,var(--v2-panel-border));color:var(--v2-text-strong)}
 .sugg svg{width:14px;height:14px;color:var(--v2-text-faint)}
 
+/* ============================================================
+   Thread + Plan scenes
+   ============================================================ */
+.threadscene{min-height:520px;background:var(--v2-canvas)}
+.threadscroll{flex:1;min-height:0;overflow-y:auto;padding:22px 20px}
+.threadscroll::-webkit-scrollbar{width:8px}
+.threadscroll::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--v2-text-faint) 42%,transparent);border-radius:8px}
+.threadwrap{width:100%;max-width:640px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
+.tmsg{font-size:14.5px;line-height:1.6}
+.tmsg.user{margin-left:auto;max-width:80%;border:1px solid color-mix(in srgb,var(--v2-accent) 25%,transparent);background:var(--v2-accent-soft);color:var(--v2-text-strong);border-radius:18px;padding:11px 15px}
+.tmsg.assistant{margin-right:auto;max-width:94%;color:var(--v2-text-strong)}
+.tmsg.assistant .lead{font-weight:560;margin-bottom:4px}
+.tmsg.note{margin-right:auto;color:var(--v2-text-muted);font-size:13.5px}
+
+/* shared action buttons (md) */
+.actbtn{display:inline-flex;align-items:center;justify-content:center;gap:6px;font:inherit;font-size:13px;font-weight:560;height:38px;padding:0 14px;border-radius:11px;cursor:pointer;border:1px solid var(--v2-panel-border);background:var(--v2-surface);color:var(--v2-text-strong)}
+.actbtn:hover{border-color:var(--v2-accent)}
+.actbtn svg{width:15px;height:15px}
+.actbtn.primary{color:#fff;border-color:rgba(76,167,230,.72);background:radial-gradient(ellipse 100% 100% at 50% 130%,#4CA7E6 0%,#2882c8 65%)}
+.actbtn.primary:hover{background:radial-gradient(ellipse 200% 220% at 50% 110%,#5BBAF5 0%,#2882c8 60%)}
+.actbtn.danger{color:var(--v2-danger-text);border-color:color-mix(in srgb,var(--v2-danger-text) 26%,var(--v2-panel-border))}
+.actbtn.ghost{background:transparent;border-color:transparent;color:var(--v2-text-muted)}
+.actbtn.launch{margin-left:auto}
+
+/* calendar reschedule + plan cards */
+.calcard,.plancard{width:100%;max-width:560px;border:1px solid var(--v2-panel-border);border-radius:18px;background:var(--v2-card-bg);box-shadow:var(--v2-card-shadow);overflow:hidden}
+.calcard .chd,.plancard .chd{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--v2-panel-border)}
+.calcard .chd .appchip{width:32px;height:32px;border-radius:10px;display:grid;place-items:center;border:1px solid;flex:none}
+.calcard .chd .appchip svg{width:16px;height:16px}
+.calcard .chd .tt,.plancard .chd .tt{min-width:0}
+.calcard .chd .tt b,.plancard .chd .tt b{display:block;font-size:14px;font-weight:600;color:var(--v2-text-strong);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.calcard .chd .tt small,.plancard .chd .tt small{font-size:12px;color:var(--v2-text-muted)}
+.calcard .chd .badge,.plancard .chd .badge{margin-left:auto}
+.calcard .cbody{padding:16px}
+.calcard .pline{font-size:14px;line-height:1.5;color:var(--v2-text);margin-bottom:12px}
+.slots{display:flex;align-items:stretch;gap:8px}
+.slotblock{flex:1;border:1px solid;border-radius:13px;padding:12px}
+.slotblock.was{border-color:color-mix(in srgb,var(--v2-danger-text) 28%,var(--v2-panel-border));background:var(--v2-danger-soft)}
+.slotblock.now{border-color:color-mix(in srgb,var(--v2-positive-text) 30%,var(--v2-panel-border));background:var(--v2-positive-soft)}
+.slotblock .cap{display:flex;align-items:center;gap:6px;margin-bottom:6px;font-family:var(--font-mono);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.14em}
+.slotblock.was .cap{color:var(--v2-danger-text)}
+.slotblock.now .cap{color:var(--v2-positive-text)}
+.slotblock .cap svg{width:13px;height:13px}
+.slotblock .day{font-size:12px;font-weight:540;color:var(--v2-text-muted)}
+.slotblock .time{font-size:15px;font-weight:640;color:var(--v2-text-strong);margin-top:1px}
+.slotblock.was .time{color:var(--v2-text-muted);text-decoration:line-through;text-decoration-color:color-mix(in srgb,var(--v2-danger-text) 60%,transparent)}
+.slotblock .mt{margin-top:3px;font-size:12px;color:var(--v2-text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.slotblock .conflict{margin-top:6px;display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--v2-danger-text)}
+.slotblock .conflict svg{width:12px;height:12px}
+.slots .arrow{display:flex;align-items:center;color:var(--v2-text-faint)}
+.slots .arrow svg{width:20px;height:20px}
+.calcard .attendees{margin-top:12px;display:flex;flex-wrap:wrap;align-items:center;gap:4px 6px;font-size:12px;color:var(--v2-text-muted)}
+.calcard .attendees svg{width:14px;height:14px}
+.calcard .attendees b{font-weight:540;color:var(--v2-text)}
+.calcard .cfoot,.plancard .pfoot{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:12px 16px;border-top:1px solid var(--v2-panel-border)}
+.termnote{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--v2-text-muted)}
+.termnote svg{width:14px;height:14px}
+.termnote.ok{color:var(--v2-positive-text)}
+
+/* plan card */
+.plancard .chd .ico{width:32px;height:32px;border-radius:10px;display:grid;place-items:center;background:var(--v2-accent-soft);color:var(--v2-accent-text);border:1px solid color-mix(in srgb,var(--v2-accent-text) 34%,var(--v2-panel-border));flex:none}
+.plancard .chd .ico svg{width:16px;height:16px}
+.plist{list-style:none;margin:0;padding:0}
+.plist li{display:flex;align-items:center;gap:12px;padding:12px 16px;border-top:1px solid var(--v2-panel-border)}
+.plist li:first-child{border-top:0}
+.plist .appchip{width:28px;height:28px;border-radius:9px;display:grid;place-items:center;border:1px solid;flex:none}
+.plist .appchip svg{width:14px;height:14px}
+.plist .pinfo{min-width:0;flex:1}
+.plist .pinfo .pt{display:flex;align-items:center;gap:8px}
+.plist .pinfo .pt b{font-size:13px;font-weight:560;color:var(--v2-text-strong);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.plist .pinfo .ps{font-size:12px;color:var(--v2-text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+.plist .pacts{display:flex;gap:6px;flex:none}
+.plist .iconsq{width:32px;height:32px;border-radius:9px;display:grid;place-items:center;border:1px solid var(--v2-panel-border);background:var(--v2-surface-soft);color:var(--v2-text-muted);cursor:pointer}
+.plist .iconsq svg{width:15px;height:15px}
+.plist .iconsq:hover{color:var(--v2-text-strong);border-color:var(--v2-accent)}
+.plist li.done .pinfo .pt b{color:var(--v2-text-muted)}
+.plist .donecheck{color:var(--v2-positive-text);width:18px;height:18px;flex:none}
+
 /* annotation flag */
 .flagwrap{position:relative}
 .flag{position:absolute;top:-9px;right:10px;z-index:4}
@@ -281,7 +370,7 @@ h1,h2,h3,p{margin:0}
     <div>
       <div class="eyebrow">IronClaw · webui_v2 · OOBE design session</div>
       <h1 class="title">The first five minutes</h1>
-      <p class="lede">A working mockup of the <b>first-run</b> onboarding — what a brand-new user sees the moment they land in chat, before any automation exists, through to the first <b>"Done for you"</b> card appearing. Built on the real <code>--v2-*</code> tokens. Press play, and toggle the cold-start <b>direction</b> to compare <b>Invite</b> (minimal) vs <b>Coach</b> (anticipatory).</p>
+      <p class="lede">A working mockup of the OOBE — from the <b>first-run</b> onboarding (cold start → first automation) through the two in-thread concepts: the inline <b>calendar reschedule</b> rich-preview and the batched <b>Plan</b> approval. Built on the real <code>--v2-*</code> tokens. Switch scenes below; on First run, press play and toggle <b>Invite</b> vs <b>Coach</b>.</p>
     </div>
     <button class="btn" id="themeBtn" title="Toggle theme" aria-label="Toggle theme">
       <svg id="themeIco" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
@@ -290,20 +379,28 @@ h1,h2,h3,p{margin:0}
   </header>
 
   <div class="toolbar">
-    <div class="seg" role="tablist" aria-label="Cold-start direction">
-      <span class="seglbl">Cold start</span>
-      <button id="dInvite" aria-pressed="true">Invite</button>
-      <button id="dCoach" aria-pressed="false">Coach</button>
+    <div class="seg primary" role="tablist" aria-label="Scene">
+      <span class="seglbl">Scene</span>
+      <button id="sFirst" aria-pressed="true">First run</button>
+      <button id="sThread" aria-pressed="false">Thread</button>
+      <button id="sPlan" aria-pressed="false">Plan</button>
     </div>
-    <button class="btn primary" id="playBtn">
-      <svg id="playIco" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-      <span id="playTxt">Play the first run</span>
-    </button>
-    <button class="btn" id="prevBtn" aria-label="Previous state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>Prev</button>
-    <button class="btn" id="nextBtn" aria-label="Next state">Next<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></button>
-    <button class="btn" id="restartBtn" aria-label="Restart"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg></button>
+    <span class="frcontrols" id="firstRunControls">
+      <div class="seg" role="tablist" aria-label="Cold-start direction">
+        <span class="seglbl">Cold start</span>
+        <button id="dInvite" aria-pressed="true">Invite</button>
+        <button id="dCoach" aria-pressed="false">Coach</button>
+      </div>
+      <button class="btn primary" id="playBtn">
+        <svg id="playIco" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        <span id="playTxt">Play the first run</span>
+      </button>
+      <button class="btn" id="prevBtn" aria-label="Previous state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>Prev</button>
+      <button class="btn" id="nextBtn" aria-label="Next state">Next<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></button>
+      <button class="btn" id="restartBtn" aria-label="Restart"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg></button>
+      <div class="scrub"><div class="track"><i id="trackFill"></i></div><span class="beatlbl" id="beatLbl">0 / 4</span></div>
+    </span>
     <button class="btn" id="flagsBtn" aria-pressed="true" title="Show or hide the annotation flags"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3v18"/><path d="M5 4h11l-2 3 2 3H5z"/></svg><span id="flagsTxt">Flags: on</span></button>
-    <div class="scrub"><div class="track"><i id="trackFill"></i></div><span class="beatlbl" id="beatLbl">0 / 4</span></div>
   </div>
 
   <div class="legend">
@@ -316,7 +413,7 @@ h1,h2,h3,p{margin:0}
 
   <div class="beatcap"><span class="n" id="capN">Beat 0 / 4</span><span class="c" id="capC"></span></div>
 
-  <!-- ============ LANDING DEVICE ============ -->
+  <!-- ============ DEVICE ============ -->
   <section class="device">
     <div class="topbar">
       <div class="brand">
@@ -327,17 +424,15 @@ h1,h2,h3,p{margin:0}
       <div class="who"><span class="nm">Ada</span><span class="av">A</span></div>
     </div>
 
-    <div class="landing">
+    <!-- ===== FIRST RUN scene ===== -->
+    <div class="scene landing on" id="sceneFirstRun">
       <div class="stagearea">
         <div class="hero">
           <h2 id="heroTitle">Welcome to IronClaw, Ada.</h2>
           <p id="heroSub">I'm your agent. Connect a tool or two and I'll start clearing the small stuff off your plate — you'll see it here.</p>
         </div>
 
-        <!-- SLOT: connect row / ghost cards / skeletons / real carousel -->
         <div class="slotwrap" id="slotwrap">
-
-          <!-- connect row (Invite + Coach, beats 0–1) -->
           <div class="rev flagwrap" id="connectBlock">
             <span class="flag tag ship">shipped in v2</span>
             <div class="connect">
@@ -346,7 +441,6 @@ h1,h2,h3,p{margin:0}
             </div>
           </div>
 
-          <!-- ghost preview cards (Coach only, beats 0–1) -->
           <div class="rev flagwrap ghostwrap" id="ghostBlock">
             <span class="flag tag native">ironclaw-native</span>
             <div class="carousel">
@@ -356,7 +450,6 @@ h1,h2,h3,p{margin:0}
             <div class="ghostveil"><span class="pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M9 2v6M15 2v6M4 8h16M6 8v9a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V8"/></svg>Connect to turn these on</span></div>
           </div>
 
-          <!-- working / real carousel (beats 2+) -->
           <div class="rev flagwrap" id="carouselBlock">
             <span class="flag tag ship" id="carouselFlag">shipped in v2</span>
             <div class="carousel">
@@ -364,16 +457,13 @@ h1,h2,h3,p{margin:0}
               <div class="strip" id="realStrip"></div>
             </div>
           </div>
-
         </div>
 
-        <!-- NEAR live status (anticipatory + first-done) -->
         <div class="livestat" id="nearStat" style="display:none">
           <svg class="near" viewBox="0 0 24 24" aria-hidden="true"><defs><clipPath id="nearClip"><path d="M21.443 0c-.89 0-1.714.46-2.18 1.218l-5.017 7.448a.533.533 0 0 0 .792.7l4.938-4.282a.2.2 0 0 1 .334.151v13.41a.2.2 0 0 1-.354.128L5.03.905A2.555 2.555 0 0 0 3.078 0h-.521A2.557 2.557 0 0 0 0 2.557v18.886a2.557 2.557 0 0 0 4.736 1.338l5.017-7.448a.533.533 0 0 0-.792-.7l-4.938 4.283a.2.2 0 0 1-.333-.152V5.352a.2.2 0 0 1 .354-.128l14.924 17.87c.486.574 1.2.905 1.952.906h.521A2.558 2.558 0 0 0 24 21.445V2.557A2.558 2.558 0 0 0 21.443 0Z"/></clipPath></defs><path class="near-base" d="M21.443 0c-.89 0-1.714.46-2.18 1.218l-5.017 7.448a.533.533 0 0 0 .792.7l4.938-4.282a.2.2 0 0 1 .334.151v13.41a.2.2 0 0 1-.354.128L5.03.905A2.555 2.555 0 0 0 3.078 0h-.521A2.557 2.557 0 0 0 0 2.557v18.886a2.557 2.557 0 0 0 4.736 1.338l5.017-7.448a.533.533 0 0 0-.792-.7l-4.938 4.283a.2.2 0 0 1-.333-.152V5.352a.2.2 0 0 1 .354-.128l14.924 17.87c.486.574 1.2.905 1.952.906h.521A2.558 2.558 0 0 0 24 21.445V2.557A2.558 2.558 0 0 0 21.443 0Z"/><g clip-path="url(#nearClip)"><path class="near-comet" d="M2.6 22.2 L2.6 2.4 L21.4 21.6 L21.4 1.8"/></g></svg>
           <span class="verb" id="nearVerb">Getting to know your inbox…</span><span class="el" id="nearEl">0:01</span>
         </div>
 
-        <!-- composer -->
         <div class="composer flagwrap">
           <span class="flag tag ship">shipped in v2</span>
           <div class="inputrow">
@@ -404,18 +494,62 @@ h1,h2,h3,p{margin:0}
         </div>
       </div>
     </div>
+
+    <!-- ===== THREAD scene ===== -->
+    <div class="scene threadscene" id="sceneThread">
+      <div class="threadscroll">
+        <div class="threadwrap">
+          <div class="tmsg user">My Thursday afternoon is packed — can you clear the conflict on my calendar?</div>
+          <div class="tmsg assistant"><span class="lead">Found one overlap.</span>Here's what I'd do — approve it, tweak the time, or skip it:</div>
+          <div class="flagwrap"><span class="flag tag ship">shipped in v2</span><div id="calHost1"></div></div>
+          <div class="tmsg note">Earlier today, while in Auto mode, I already moved another conflict for you — you can still undo it:</div>
+          <div class="flagwrap"><span class="flag tag newevt">new event</span><div id="calHost2"></div></div>
+        </div>
+      </div>
+      <div class="composer dock" aria-hidden="true">
+        <div class="inputrow"><div class="field ph">Reply, or steer the task…</div></div>
+        <div class="actions">
+          <div class="modebtn" style="pointer-events:none"><span class="dot"></span>Suggest<svg class="mode-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></div>
+          <div class="rightcluster">
+            <button class="iconbtn" aria-label="Dictate" tabindex="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg></button>
+            <button class="runbtn" disabled>Send <kbd>&#8984;</kbd><kbd>&#8629;</kbd></button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== PLAN scene ===== -->
+    <div class="scene threadscene" id="scenePlan">
+      <div class="threadscroll">
+        <div class="threadwrap">
+          <div class="tmsg assistant"><span class="lead">You're in Plan mode.</span>Here's a batch I can run together — approve all, or adjust any first:</div>
+          <div class="flagwrap"><span class="flag tag newevt">new event</span><div id="planHost"></div></div>
+        </div>
+      </div>
+      <div class="composer dock" aria-hidden="true">
+        <div class="inputrow"><div class="field ph">Reply, or steer the task…</div></div>
+        <div class="actions">
+          <div class="modebtn" style="pointer-events:none"><span class="dot"></span>Plan<svg class="mode-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg></div>
+          <div class="rightcluster">
+            <button class="iconbtn" aria-label="Dictate" tabindex="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg></button>
+            <button class="runbtn" disabled>Send <kbd>&#8984;</kbd><kbd>&#8629;</kbd></button>
+          </div>
+        </div>
+      </div>
+    </div>
   </section>
 
   <div class="foot">
-    <p><b>What this explores.</b> The automation surfaces from PR #6994 all assume automations already exist. This mockup fills the two first-run moments that leaves open: the <b>cold-start</b> screen (nothing yet) and the <b>first automation appearing</b>. Toggle <b>Invite</b> vs <b>Coach</b> to compare a minimal cold start against an anticipatory one that previews the concept with ghost cards.</p>
-    <p><b>Shipped today</b> (PR #6994, presentational, mock data): the <code>AutomationCarousel</code> + <code>AutomationTaskCard</code> + <code>TaskActionBar</code>, the agent-mode pill (<code>mode-selector.tsx</code>), and the endpoint-shaped data seam. Connect uses the existing <code>AuthRequired</code> connector card. The <code>NearProcessIndicator</code> is on <code>main</code> (#6901).</p>
-    <p><b>Needs a new payload</b> (issue #6993): the carousel <code>return null</code>s with no tasks today, so the <b>empty</b>, <b>anticipatory ("working on your first automation")</b>, and <b>reveal</b> states all need the projection to report task lifecycle — the <code>AutomationTaskAutomated</code> event drives the first-card reveal (see <code>AUTOMATION-TASKS-CONTRACT.md</code> §§2–7). The ghost/Coach state is a net-new onboarding surface.</p>
+    <p><b>What this explores.</b> The whole OOBE arc in one place. <b>First run</b> fills the two moments the PR #6994 prototype skips — the cold-start (nothing yet) and the first "Done for you" card appearing — with an Invite vs Coach toggle. <b>Thread</b> and <b>Plan</b> are the two in-thread concepts already prototyped in code: the inline calendar-reschedule rich-preview and the batched-approval Plan card. All three run on the real <code>--v2-*</code> tokens.</p>
+    <p><b>Shipped today</b> (PR #6994, presentational, mock data): the <code>AutomationCarousel</code> + <code>AutomationTaskCard</code>, <code>CalendarRescheduleCard</code>, <code>PlanCard</code>, the shared <code>TaskActionBar</code> (Approve/Modify/Cancel · Modify/Revert), and the agent-mode pill. Busy states use the branded <code>NearProcessIndicator</code> (on <code>main</code>, #6901). Connect uses the existing <code>AuthRequired</code> card.</p>
+    <p><b>Needs a new payload</b> (issue #6993): the empty / anticipatory / reveal states and the durable task lifecycle behind Thread and Plan — the <code>AutomationTaskAutomated</code> / <code>PlanUpdate</code> projection events (see <code>AUTOMATION-TASKS-CONTRACT.md</code> §§2–7). The Coach ghost strip is a net-new onboarding surface.</p>
   </div>
 </div>
 
 <script>
 (function(){
   var root=document.documentElement;
+  var NEAR_D="M21.443 0c-.89 0-1.714.46-2.18 1.218l-5.017 7.448a.533.533 0 0 0 .792.7l4.938-4.282a.2.2 0 0 1 .334.151v13.41a.2.2 0 0 1-.354.128L5.03.905A2.555 2.555 0 0 0 3.078 0h-.521A2.557 2.557 0 0 0 0 2.557v18.886a2.557 2.557 0 0 0 4.736 1.338l5.017-7.448a.533.533 0 0 0-.792-.7l-4.938 4.283a.2.2 0 0 1-.333-.152V5.352a.2.2 0 0 1 .354-.128l14.924 17.87c.486.574 1.2.905 1.952.906h.521A2.558 2.558 0 0 0 24 21.445V2.557A2.558 2.558 0 0 0 21.443 0Z";
   // ---- theme ----
   var sunIco='<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>';
   var moonIco='<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>';
@@ -429,7 +563,7 @@ h1,h2,h3,p{margin:0}
   function setFlags(on){flagsOn=on;root.classList.toggle('flags-off',!on);flagsBtn.setAttribute('aria-pressed',on?'true':'false');flagsTxt.textContent=on?'Flags: on':'Flags: off';}
   flagsBtn.onclick=function(){setFlags(!flagsOn);};
 
-  // ---- app chips ----
+  // ---- shared icons ----
   var ICON={
     mail:'<path d="M4 5h16v14H4z"/><path d="M4 7l8 6 8-6"/>',
     calendar:'<rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/>',
@@ -437,9 +571,19 @@ h1,h2,h3,p{margin:0}
     file:'<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v5h5"/>',
     edit:'<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
     undo:'<path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/>',
-    external:'<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>'
+    external:'<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
+    check:'<path d="M5 12l5 5 9-11"/>',
+    close:'<path d="M6 6l12 12M18 6L6 18"/>',
+    bolt:'<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>',
+    users:'<path d="M17 21v-2a4 4 0 0 0-3-3.9M9 21v-2a4 4 0 0 1 3-3.9M12 7a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/>',
+    list:'<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+    arrow:'<path d="M9 6l6 6-6 6"/>'
   };
+  function svg(name,sw){return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="'+(sw||1.8)+'" stroke-linecap="round" stroke-linejoin="round">'+ICON[name]+'</svg>';}
   function chipStyle(accent){return 'color:'+accent+';background:color-mix(in srgb,'+accent+' 16%,transparent);border-color:color-mix(in srgb,'+accent+' 38%,transparent)';}
+  function nearBusy(label){return '<div class="livestat busy" style="padding:2px"><svg class="near" viewBox="0 0 24 24" aria-hidden="true"><path class="near-base" d="'+NEAR_D+'"/></svg><span class="verb">'+label+'</span></div>';}
+
+  // ================= FIRST RUN scene =================
   var APPS=[
     {key:'gmail',label:'Gmail',icon:'mail',accent:'#ea4335'},
     {key:'calendar',label:'Calendar',icon:'calendar',accent:'#4285f4'},
@@ -448,21 +592,16 @@ h1,h2,h3,p{margin:0}
   var appRow=document.getElementById('appRow');
   APPS.forEach(function(a){
     var b=document.createElement('button');b.className='appbtn';b.setAttribute('data-app',a.key);
-    b.innerHTML='<span class="appchip" style="'+chipStyle(a.accent)+'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'+ICON[a.icon]+'</svg></span><span class="an">'+a.label+'</span><span class="ast">connect</span>';
+    b.innerHTML='<span class="appchip" style="'+chipStyle(a.accent)+'">'+svg(a.icon)+'</span><span class="an">'+a.label+'</span><span class="ast">connect</span>';
     b.onclick=function(){ if(step<1){step=1; render(); if(playing){clearTimeout(timer);timer=setTimeout(advance,1100);} } };
     appRow.appendChild(b);
   });
   function setAppsConnected(on){
     document.querySelectorAll('.appbtn').forEach(function(b){
-      var k=b.getAttribute('data-app');
-      var connected = on && (k==='gmail'||k==='calendar');
-      b.classList.toggle('on',connected);
-      b.querySelector('.ast').textContent=connected?'connected':'connect';
+      var k=b.getAttribute('data-app');var connected=on&&(k==='gmail'||k==='calendar');
+      b.classList.toggle('on',connected);b.querySelector('.ast').textContent=connected?'connected':'connect';
     });
   }
-
-  // ---- cards ----
-  // real completed automations that appear in the carousel
   var CARDS=[
     {app:'gmail',label:'Gmail',icon:'mail',accent:'#ea4335',title:'Triaged your inbox',when:'2m ago',metrics:[['12','replied'],['40','archived']]},
     {app:'calendar',label:'Calendar',icon:'calendar',accent:'#4285f4',title:'Accepted 3 invites',when:'just now',metrics:[['3','accepted'],['1','conflicts']]},
@@ -471,19 +610,16 @@ h1,h2,h3,p{margin:0}
   function cardHTML(c,cls){
     var m=c.metrics.map(function(x){return '<span><b>'+x[0]+'</b> '+x[1]+'</span>';}).join('');
     return '<div class="tcard '+(cls||'')+'">'
-      +'<div class="thd"><span class="appchip" style="'+chipStyle(c.accent)+'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'+ICON[c.icon]+'</svg></span>'
+      +'<div class="thd"><span class="appchip" style="'+chipStyle(c.accent)+'">'+svg(c.icon)+'</span>'
       +'<span class="alab">'+c.label+'</span><span class="when">'+c.when+'</span>'
       +'<span class="badge success"><span class="bdot"></span>Automated</span></div>'
-      +'<div class="ttl2"><b>'+c.title+'</b><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'+ICON.external+'</svg></div>'
+      +'<div class="ttl2"><b>'+c.title+'</b>'+svg('external')+'</div>'
       +'<div class="metrics">'+m+'</div>'
-      +'<div class="acts"><button><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'+ICON.edit+'</svg>Modify</button>'
-      +'<button class="revert"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'+ICON.undo+'</svg>Revert</button></div></div>';
+      +'<div class="acts"><button>'+svg('edit')+'Modify</button>'
+      +'<button class="revert">'+svg('undo')+'Revert</button></div></div>';
   }
-  // ghost preview cards (Coach)
-  var ghostStrip=document.getElementById('ghostStrip');
-  ghostStrip.innerHTML=CARDS.map(function(c){return cardHTML(c,'ghost');}).join('');
+  document.getElementById('ghostStrip').innerHTML=CARDS.map(function(c){return cardHTML(c,'ghost');}).join('');
 
-  // ---- elements ----
   var connectBlock=document.getElementById('connectBlock'),ghostBlock=document.getElementById('ghostBlock'),
       carouselBlock=document.getElementById('carouselBlock'),realStrip=document.getElementById('realStrip'),
       nearStat=document.getElementById('nearStat'),nearVerb=document.getElementById('nearVerb'),nearEl=document.getElementById('nearEl'),
@@ -492,9 +628,7 @@ h1,h2,h3,p{margin:0}
       capN=document.getElementById('capN'),capC=document.getElementById('capC'),
       trackFill=document.getElementById('trackFill'),beatLbl=document.getElementById('beatLbl');
 
-  var MAX=4, step=0, dir='invite', playing=false, timer=null;
-
-  // beat captions
+  var MAX=4, step=0, dir='invite', playing=false, timer=null, scene='first';
   var CAP=[
     'The <b>cold start</b>. Zero automations, nothing connected — the screen has to earn the first connect and the first prompt.',
     'One click connects <b>Gmail</b> and <b>Calendar</b> via the existing connector card. The agent can start.',
@@ -509,57 +643,35 @@ h1,h2,h3,p{margin:0}
     ['Here’s what I did while you got settled.',"I handled a first one on my own. Everything's reversible — take a look."],
     ['Here’s what I did while you got settled.',"A few things are already done. Review, tweak, or undo anything — and tell me what else to take on."]
   ];
-
   var nearStart=0,elTimer=null;
   function fmt(ms){var s=Math.floor(ms/1000);return Math.floor(s/60)+':'+String(s%60).padStart(2,'0');}
   function tickEl(){nearEl.textContent=fmt(Date.now()-nearStart);}
-
   function show(el,on){el.classList.toggle('hide',!on);}
 
   function render(){
     step=Math.max(0,Math.min(step,MAX));
-    // hero + caption
     heroTitle.textContent=HERO[step][0];heroSub.textContent=HERO[step][1];
     capN.textContent='Beat '+step+' / '+MAX; capC.innerHTML=CAP[step];
-
-    var coach=(dir==='coach');
-    var empty=(step<=1);           // connect / ghost visible
-    var working=(step===2);        // skeletons + busy indicator
-    var revealed=(step>=3);        // real cards
-
-    // connect row: shown while empty
+    var coach=(dir==='coach'),empty=(step<=1),working=(step===2);
     show(connectBlock, empty);
-    // ghost cards: Coach only, while empty
     show(ghostBlock, empty && coach);
-    // real carousel: from working onward
     show(carouselBlock, step>=2);
-
-    // apps connected once we reach beat 1+
     setAppsConnected(step>=1);
-
-    // carousel contents
     if(step>=2){
       if(working){
         carTtl.textContent='Working on your first automations';
         carSub.textContent='I’ll drop them here the moment they’re done';
         carouselFlag.className='flag tag newevt';carouselFlag.textContent='new event';
-        realStrip.innerHTML='<div class="sk"><div class="ln w40"></div><div class="ln w70"></div><div class="ln w55"></div></div>'
-          +'<div class="sk"><div class="ln w40"></div><div class="ln w70"></div><div class="ln w55"></div></div>'
-          +'<div class="sk"><div class="ln w40"></div><div class="ln w70"></div><div class="ln w55"></div></div>';
+        realStrip.innerHTML='<div class="sk"><div class="ln w40"></div><div class="ln w70"></div><div class="ln w55"></div></div>'.repeat(3);
       } else {
         carTtl.textContent='Done for you';
         carSub.textContent='Completed automatically — review or undo anytime';
         carouselFlag.className='flag tag ship';carouselFlag.textContent='shipped in v2';
-        var n=(step===3)?1:CARDS.length;
-        var html='';
+        var n=(step===3)?1:CARDS.length,html='';
         for(var i=0;i<n;i++){ html+=cardHTML(CARDS[i], 'reveal'+(i===0&&step===3?' first':'')); }
         realStrip.innerHTML=html;
       }
-    } else {
-      realStrip.innerHTML='';
-    }
-
-    // NEAR live status
+    } else { realStrip.innerHTML=''; }
     if(working){
       nearStat.style.display='';nearStat.classList.add('busy');nearStat.classList.remove('done');
       nearVerb.textContent='Getting to know your inbox…';nearEl.style.display='';
@@ -567,58 +679,178 @@ h1,h2,h3,p{margin:0}
     } else if(step>=3){
       nearStat.style.display='';nearStat.classList.remove('busy');nearStat.classList.add('done');
       nearVerb.textContent=(step===3?'Handled your first one — worked for 8s':'All caught up — worked for 14s');
-      nearEl.style.display='none';
-      if(elTimer){clearInterval(elTimer);elTimer=null;}
+      nearEl.style.display='none'; if(elTimer){clearInterval(elTimer);elTimer=null;}
     } else {
       nearStat.style.display='none';nearStat.classList.remove('busy','done');
       if(elTimer){clearInterval(elTimer);elTimer=null;} nearStart=0;
     }
-
-    // scrub
-    trackFill.style.width=(step/MAX*100)+'%';
-    beatLbl.textContent=step+' / '+MAX;
+    trackFill.style.width=(step/MAX*100)+'%'; beatLbl.textContent=step+' / '+MAX;
   }
 
-  // ---- player ----
-  var WAIT={1:true}; // dwell a touch longer at the connect gate
-  function advance(){ if(step>=MAX){stop();return;} step++; render();
-    if(playing){ timer=setTimeout(advance, WAIT[step]?1700:1500); } }
-  function play(){ if(step>=MAX){reset();} playing=true; setPlay(true);
-    // if starting from 0, take first step promptly
-    timer=setTimeout(advance, 700); }
+  var WAIT={1:true};
+  function advance(){ if(step>=MAX){stop();return;} step++; render(); if(playing){ timer=setTimeout(advance, WAIT[step]?1700:1500); } }
+  function play(){ if(step>=MAX){step=0;render();} playing=true; setPlay(true); timer=setTimeout(advance, 700); }
   function stop(){ playing=false; setPlay(false); if(timer){clearTimeout(timer);timer=null;} }
-  function reset(){ stop(); step=0; nearStart=0; render(); }
+  function resetFirst(){ stop(); step=0; nearStart=0; render(); }
   function setPlay(on){ document.getElementById('playTxt').textContent=on?'Pause':'Play the first run';
     document.getElementById('playIco').innerHTML=on?'<rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/>':'<path d="M8 5v14l11-7z"/>'; }
-
   document.getElementById('playBtn').onclick=function(){ playing?stop():play(); };
   document.getElementById('nextBtn').onclick=function(){ stop(); if(step<MAX){step++;render();} };
   document.getElementById('prevBtn').onclick=function(){ stop(); if(step>0){step--;render();} };
-  document.getElementById('restartBtn').onclick=function(){ reset(); };
-
-  // ---- direction seg ----
+  document.getElementById('restartBtn').onclick=function(){ resetFirst(); };
   var dInvite=document.getElementById('dInvite'),dCoach=document.getElementById('dCoach');
   function setDir(d){ dir=d; dInvite.setAttribute('aria-pressed',d==='invite'); dCoach.setAttribute('aria-pressed',d==='coach'); render(); }
   dInvite.onclick=function(){setDir('invite');};
   dCoach.onclick=function(){setDir('coach');};
 
-  // ---- mode selector ----
+  // mode selector (first-run composer)
   var modeBtn=document.getElementById('modeBtn'),modeMenu=document.getElementById('modeMenu'),modeLabel=document.getElementById('modeLabel');
   function closeMode(){modeMenu.hidden=true;modeBtn.setAttribute('aria-expanded','false');}
   modeBtn.onclick=function(e){e.stopPropagation();var willOpen=modeMenu.hidden;modeMenu.hidden=!willOpen;modeBtn.setAttribute('aria-expanded',willOpen?'true':'false');};
-  document.querySelectorAll('.modeopt').forEach(function(o){o.onclick=function(){document.querySelectorAll('.modeopt').forEach(function(x){x.classList.remove('is-sel');});o.classList.add('is-sel');modeLabel.textContent=o.getAttribute('data-mode');closeMode();};});
+  document.querySelectorAll('#modeMenu .modeopt').forEach(function(o){o.onclick=function(){document.querySelectorAll('#modeMenu .modeopt').forEach(function(x){x.classList.remove('is-sel');});o.classList.add('is-sel');modeLabel.textContent=o.getAttribute('data-mode');closeMode();};});
   document.addEventListener('click',function(e){if(!modeMenu.hidden && !modeMenu.contains(e.target) && !modeBtn.contains(e.target)) closeMode();});
-
-  // ---- composer run enable ----
   var field=document.getElementById('composerField'),runBtn=document.getElementById('runBtn');
   function syncRun(){runBtn.disabled=!(field.value.trim());}
   field.addEventListener('input',function(){field.style.height='auto';field.style.height=Math.min(field.scrollHeight,120)+'px';syncRun();});
-
-  // ---- NEAR comet measurement ----
-  var ncomet=document.querySelector('.near-comet');
+  var ncomet=document.querySelector('#nearStat .near-comet');
   if(ncomet&&ncomet.getTotalLength){var nlen=ncomet.getTotalLength();var nseg=nlen*0.15;ncomet.style.strokeDasharray=nseg.toFixed(1)+' '+(nlen-nseg).toFixed(1);ncomet.style.setProperty('--nearlen',nlen.toFixed(1)+'px');}
 
+  // ================= THREAD scene (calendar reschedule) =================
+  var CAL_ACCENT='#4285f4', TIMES=['4:15 – 4:45 PM','5:00 – 5:30 PM'];
+  var t1={state:'suggested',timeIdx:0};
+  function calCardHTML(host, o, opts){
+    // opts: {automated:bool, allowActions:bool}
+    var automated = o.state==='automated';
+    if(o.state==='dismissed' || o.state==='reverted'){
+      var note = o.state==='dismissed' ? 'Dismissed — nothing was done.' : 'Reverted — the change was undone.';
+      return '<div class="calcard"><div class="chd"><span class="appchip" style="'+chipStyle(CAL_ACCENT)+'">'+svg('calendar')+'</span>'
+        +'<div class="tt"><b>Move your 3:00 sync</b><small>Google Calendar</small></div>'
+        +'<span class="badge muted">'+(o.state==='dismissed'?'Dismissed':'Reverted')+'</span></div>'
+        +'<div class="cfoot"><span class="termnote">'+svg('undo')+note+'</span></div></div>';
+    }
+    var badge = automated ? '<span class="badge success"><span class="bdot"></span>Automated</span>' : '<span class="badge accent">Suggested</span>';
+    var pline = automated
+      ? 'Moved <b>“Design sync”</b> so it no longer overlaps your <b>“Board prep”</b>.'
+      : '<b>“Design sync”</b> overlaps your <b>“Board prep”</b>. I can move it to a slot that works for everyone.';
+    var nowCap = automated ? 'Now' : 'Proposed';
+    var footer;
+    if(o.busy){
+      footer = '<div class="cfoot">'+nearBusy(o.busyLabel||'Working…')+'</div>';
+    } else if(automated){
+      footer = '<div class="cfoot"><button class="actbtn" data-act="modify">'+svg('edit')+'Modify</button>'
+        +'<button class="actbtn danger" data-act="revert">'+svg('undo')+'Revert</button>'
+        +'<button class="actbtn ghost launch">'+svg('external')+'Open in Google Calendar</button></div>';
+    } else {
+      footer = '<div class="cfoot"><button class="actbtn primary" data-act="approve">'+svg('check')+'Approve</button>'
+        +'<button class="actbtn" data-act="modify">'+svg('edit')+'Modify time</button>'
+        +'<button class="actbtn ghost" data-act="cancel">Skip</button>'
+        +'<button class="actbtn ghost launch">'+svg('external')+'Open</button></div>';
+    }
+    return '<div class="calcard"><div class="chd"><span class="appchip" style="'+chipStyle(CAL_ACCENT)+'">'+svg('calendar')+'</span>'
+      +'<div class="tt"><b>Move your 3:00 sync</b><small>Google Calendar</small></div>'+badge+'</div>'
+      +'<div class="cbody"><p class="pline">'+pline+'</p>'
+      +'<div class="slots">'
+        +'<div class="slotblock was"><div class="cap">'+svg('close',2)+'Was</div><div class="day">Thu, Jul 23</div><div class="time">3:00 – 3:30 PM</div><div class="mt">Design sync</div><div class="conflict">'+svg('bolt')+'Conflicts with Board prep</div></div>'
+        +'<div class="arrow">'+svg('arrow',2)+'</div>'
+        +'<div class="slotblock now"><div class="cap">'+svg('check',2.4)+nowCap+'</div><div class="day">Thu, Jul 23</div><div class="time">'+TIMES[o.timeIdx]+'</div><div class="mt">Design sync</div></div>'
+      +'</div>'
+      +'<div class="attendees">'+svg('users')+'<b>Attendees</b> Priya, Marcus, Dana +2</div></div>'
+      +footer+'</div>';
+  }
+  function bindCal(host, o, isSecond){
+    host.querySelectorAll('[data-act]').forEach(function(btn){
+      btn.onclick=function(){
+        var act=btn.getAttribute('data-act');
+        if(act==='modify' && o.state==='suggested'){ o.timeIdx=(o.timeIdx+1)%TIMES.length; renderCal(host,o,isSecond); return; }
+        if(act==='cancel'){ o.busy=true; o.busyLabel='Cancelling…'; renderCal(host,o,isSecond); setTimeout(function(){o.busy=false;o.state='dismissed';renderCal(host,o,isSecond);},900); return; }
+        if(act==='approve'){ o.busy=true; o.busyLabel='Rescheduling…'; renderCal(host,o,isSecond); setTimeout(function(){o.busy=false;o.state='automated';renderCal(host,o,isSecond);},1200); return; }
+        if(act==='revert'){ o.busy=true; o.busyLabel='Reverting…'; renderCal(host,o,isSecond); setTimeout(function(){o.busy=false;o.state='reverted';renderCal(host,o,isSecond);},1000); return; }
+        if(act==='modify' && o.state==='automated'){ o.busy=true; o.busyLabel='Re-running…'; renderCal(host,o,isSecond); setTimeout(function(){o.busy=false;o.state='automated';renderCal(host,o,isSecond);},1100); return; }
+      };
+    });
+  }
+  function renderCal(host,o,isSecond){ host.innerHTML=calCardHTML(host,o); bindCal(host,o,isSecond); }
+  function resetThread(){
+    t1={state:'suggested',timeIdx:0,busy:false};
+    renderCal(document.getElementById('calHost1'), t1, false);
+    var t2={state:'automated',timeIdx:1,busy:false};
+    renderCal(document.getElementById('calHost2'), t2, true);
+  }
+
+  // ================= PLAN scene =================
+  var PLAN_ITEMS=[
+    {app:'gmail',icon:'mail',accent:'#ea4335',title:'Triage 40 unread',sum:'Reply to 12, archive the rest'},
+    {app:'calendar',icon:'calendar',accent:'#4285f4',title:'Accept 3 invites',sum:'No conflicts found'},
+    {app:'file',icon:'file',accent:'#3b82f6',title:'Summarize 2 docs',sum:'Product spec + retro notes'},
+    {app:'slack',icon:'chat',accent:'#e01e5a',title:'Post standup update',sum:"From yesterday's activity"}
+  ];
+  var plan={state:'open',items:null};
+  function planCardHTML(){
+    var items=plan.items;
+    var remaining=items.filter(function(i){return i.status==='todo';}).length;
+    var allDone=items.length>0 && remaining===0 && plan.state!=='dismissed';
+    var badge = plan.state==='dismissed' ? '<span class="badge muted">Dismissed</span>'
+      : allDone ? '<span class="badge success"><span class="bdot"></span>All done</span>'
+      : '<span class="badge accent">'+remaining+' to approve</span>';
+    var rows=items.map(function(it,idx){
+      var chip='<span class="appchip" style="'+chipStyle(it.accent)+'">'+svg(it.icon)+'</span>';
+      var info='<div class="pinfo"><div class="pt"><b>'+it.title+'</b></div><div class="ps">'+it.sum+'</div></div>';
+      var right;
+      if(it.status==='done'){ right='<svg class="donecheck" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">'+ICON.check+'</svg>'; }
+      else if(it.status==='cancelled'){ right='<span class="badge muted">Skipped</span>'; }
+      else { right='<div class="pacts"><button class="iconsq" data-pact="edit" data-i="'+idx+'" title="Modify">'+svg('edit')+'</button><button class="iconsq" data-pact="cancel" data-i="'+idx+'" title="Skip">'+svg('close',2)+'</button></div>'; }
+      return '<li class="'+(it.status==='done'?'done':'')+'">'+chip+info+right+'</li>';
+    }).join('');
+    var footer;
+    if(plan.state==='running'){ footer='<div class="pfoot">'+nearBusy('Running your plan…')+'</div>'; }
+    else if(allDone){ footer='<div class="pfoot"><span class="termnote ok">'+svg('check',2.2)+'Plan complete — everything’s been handled.</span></div>'; }
+    else if(plan.state==='dismissed'){ footer='<div class="pfoot"><span class="termnote">'+svg('undo')+'Dismissed — nothing was run.</span></div>'; }
+    else { footer='<div class="pfoot"><button class="actbtn primary" data-pfoot="approveAll">'+svg('check')+'Approve all ('+remaining+')</button><button class="actbtn ghost" data-pfoot="dismiss">Dismiss</button></div>'; }
+    return '<div class="plancard"><div class="chd"><span class="ico">'+svg('list')+'</span>'
+      +'<div class="tt"><b>Monday morning cleanup</b><small>4 tasks · about 2 minutes</small></div>'+badge+'</div>'
+      +'<ul class="plist">'+rows+'</ul>'+footer+'</div>';
+  }
+  function bindPlan(host){
+    host.querySelectorAll('[data-pfoot]').forEach(function(b){
+      b.onclick=function(){
+        var a=b.getAttribute('data-pfoot');
+        if(a==='approveAll'){ plan.state='running'; renderPlan(host); setTimeout(function(){ plan.items.forEach(function(i){ if(i.status==='todo') i.status='done'; }); plan.state='done'; renderPlan(host); },1500); }
+        else if(a==='dismiss'){ plan.state='dismissed'; renderPlan(host); }
+      };
+    });
+    host.querySelectorAll('[data-pact]').forEach(function(b){
+      b.onclick=function(){
+        var i=+b.getAttribute('data-i'),a=b.getAttribute('data-pact');
+        if(a==='cancel'){ plan.items[i].status='cancelled'; renderPlan(host); }
+        else if(a==='edit'){ b.style.borderColor='var(--v2-accent)'; }
+      };
+    });
+  }
+  function renderPlan(host){ host.innerHTML=planCardHTML(); bindPlan(host); }
+  function resetPlan(){ plan={state:'open',items:PLAN_ITEMS.map(function(i){return {app:i.app,icon:i.icon,accent:i.accent,title:i.title,sum:i.sum,status:'todo'};})}; renderPlan(document.getElementById('planHost')); }
+
+  // ================= scene switching =================
+  var sFirst=document.getElementById('sFirst'),sThread=document.getElementById('sThread'),sPlan=document.getElementById('sPlan'),
+      frControls=document.getElementById('firstRunControls');
+  function setScene(s){
+    scene=s;
+    sFirst.setAttribute('aria-pressed',s==='first');sThread.setAttribute('aria-pressed',s==='thread');sPlan.setAttribute('aria-pressed',s==='plan');
+    frControls.classList.toggle('hide', s!=='first');
+    document.getElementById('sceneFirstRun').classList.toggle('on', s==='first');
+    document.getElementById('sceneThread').classList.toggle('on', s==='thread');
+    document.getElementById('scenePlan').classList.toggle('on', s==='plan');
+    if(s!=='first') stop();
+    if(s==='first'){ render(); }
+    else if(s==='thread'){ resetThread(); capN.textContent='Inline chat'; capC.innerHTML='The <b>calendar reschedule</b> rich-preview inside a thread. Approve it, tweak the time, or skip — the top card is live. (Re-click Thread to reset.)'; }
+    else { resetPlan(); capN.textContent='Aggregate tasks'; capC.innerHTML='<b>Plan mode</b> — the agent proposes a batch; one <b>Approve all</b> runs the set. Skip any first. (Re-click Plan to reset.)'; }
+  }
+  sFirst.onclick=function(){setScene('first');};
+  sThread.onclick=function(){setScene('thread');};
+  sPlan.onclick=function(){setScene('plan');};
+
+  // ---- init ----
   setFlags(true);
-  reset();
+  resetFirst();
+  setScene('first');
 })();
 </script>
