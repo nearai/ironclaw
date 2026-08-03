@@ -203,6 +203,15 @@ mod tests {
     use super::*;
     use crate::context::RebornCliContext;
 
+    const HOST_MEDIATED_PROXY_CHECK: &str = "host_mediated_ambient_proxy";
+    const HOST_MEDIATED_PROXY_DETAIL: &str = "ambient proxy variables are configured but ignored by host-mediated ReqwestNetworkTransport so approved pinned destinations remain authoritative; LLM clients and sandbox egress use separate proxy policies";
+
+    fn render_doctor_text(dto: &DoctorDto) -> String {
+        let mut output = Vec::new();
+        dto.render_text_to(&mut output).expect("render doctor text");
+        String::from_utf8(output).expect("doctor text is UTF-8")
+    }
+
     #[test]
     fn doctor_dto_builds_with_defaults() {
         let (_tmp, context) = RebornCliContext::test_context();
@@ -224,6 +233,69 @@ mod tests {
                 .iter()
                 .any(|c| c.category == CheckCategory::Drivers)
         );
+    }
+
+    #[test]
+    fn doctor_reports_ignored_ambient_proxy_without_leaking_values() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        // The diagnostic builder deliberately receives only presence state.
+        // Proxy values therefore cannot cross into either rendering surface.
+        let dto = build_doctor_dto_with_ambient_proxy_presence(&context, true);
+        let check = dto
+            .checks
+            .iter()
+            .find(|check| check.name == HOST_MEDIATED_PROXY_CHECK)
+            .expect("configured ambient proxy variables must produce one stable diagnostic");
+
+        assert_eq!(check.category, CheckCategory::Core);
+        assert_eq!(check.outcome, CheckOutcome::Skip);
+        assert_eq!(check.detail, HOST_MEDIATED_PROXY_DETAIL);
+
+        let text = render_doctor_text(&dto);
+        let json = serde_json::to_string(&dto).expect("serialize doctor JSON");
+        for output in [&text, &json] {
+            assert!(
+                output.contains(HOST_MEDIATED_PROXY_CHECK),
+                "diagnostic identity missing from output: {output}"
+            );
+            assert!(
+                output.contains("host-mediated ReqwestNetworkTransport"),
+                "output must identify the affected transport boundary: {output}"
+            );
+            assert!(
+                output.contains("LLM clients") && output.contains("sandbox egress"),
+                "output must distinguish LLM and sandbox proxy policy: {output}"
+            );
+            for sensitive_fragment in [
+                "proxy-password",
+                "proxy-token",
+                "proxy.internal",
+                "18443",
+                "secret-path",
+            ] {
+                assert!(
+                    !output.contains(sensitive_fragment),
+                    "proxy configuration fragment leaked into output: {sensitive_fragment}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn doctor_omits_ambient_proxy_diagnostic_when_unconfigured() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let dto = build_doctor_dto_with_ambient_proxy_presence(&context, false);
+        let text = render_doctor_text(&dto);
+        let json = serde_json::to_string(&dto).expect("serialize doctor JSON");
+
+        assert!(
+            dto.checks
+                .iter()
+                .all(|check| check.name != HOST_MEDIATED_PROXY_CHECK),
+            "an absent ambient proxy configuration must not produce a warning"
+        );
+        assert!(!text.contains(HOST_MEDIATED_PROXY_CHECK));
+        assert!(!json.contains(HOST_MEDIATED_PROXY_CHECK));
     }
 
     #[test]
