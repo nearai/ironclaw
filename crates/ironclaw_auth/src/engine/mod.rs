@@ -292,10 +292,21 @@ impl AuthEngine {
         requester_extension: Option<&ExtensionId>,
         vendor: &str,
     ) -> Result<ResolvedVendorAuthRecipe, AuthProductError> {
-        self.recipes
-            .resolve(requester_extension, vendor)
-            .await
-            .ok_or(AuthProductError::MalformedConfig)
+        match self.recipes.resolve(requester_extension, vendor).await {
+            Some(resolved) => Ok(resolved),
+            None => {
+                // Every caller maps this to an opaque `malformed_config`
+                // (HTTP 503 on the connect route), so without this line an
+                // unresolvable recipe leaves no server-side trace of WHICH
+                // requester/vendor pair could not be resolved.
+                tracing::warn!(
+                    vendor = %vendor,
+                    requester_extension = requester_extension.map(ExtensionId::as_str).unwrap_or("<host>"),
+                    "no auth recipe resolved for this requester and vendor"
+                );
+                Err(AuthProductError::MalformedConfig)
+            }
+        }
     }
 
     async fn oauth2_recipe(
@@ -374,8 +385,11 @@ impl AuthEngine {
         recipe
             .validate()
             .map_err(|_| AuthProductError::MalformedConfig)?;
-        let requested_scopes =
-            effective_requested_scopes(&recipe, request.requested_scopes.clone())?;
+        let requested_scopes = effective_requested_scopes(
+            &recipe,
+            request.requested_scopes.clone(),
+            request.requester_extension.as_ref(),
+        )?;
         let client = self
             .oauth_client_material(
                 &request.scope.resource,
@@ -517,21 +531,39 @@ impl AuthProviderClient for AuthEngine {
     }
 }
 
-/// Effective requested scopes for a flow: empty request means the recipe's
-/// full ceiling; anything outside the ceiling is rejected (AUTH-4).
+/// The scopes this flow asks the vendor for (AUTH-4).
+///
+/// An empty request means the recipe's full ceiling. A HOST flow
+/// (`requester_extension` is `None`) is authorizing on its own behalf, so an
+/// explicit request is honored verbatim once validated.
+///
+/// An EXTENSION-scoped flow is different: it authorizes the vendor account
+/// that every installed extension of that vendor SHARES, and the recipe
+/// ceiling is already the union across those installed manifests
+/// (`ironclaw_extension_host::unified_vendor_recipes`). The account holds one
+/// scope set that each exchange replaces, and dispatch requires a
+/// capability's scopes to already be on it, so asking for only the requesting
+/// extension's slice forces a separate consent per sibling and leaves every
+/// not-yet-authorized sibling returning `auth_required` (#7069). Such a
+/// request is therefore validated as a LOWER BOUND — the caller's scopes must
+/// still be within the ceiling — and the ceiling is what gets requested; the
+/// returned value deliberately does not echo the input.
 fn effective_requested_scopes(
     recipe: &OAuth2CodeRecipe,
     requested: Vec<ProviderScope>,
+    requester_extension: Option<&ExtensionId>,
 ) -> Result<Vec<ProviderScope>, AuthProductError> {
-    if requested.is_empty() {
-        return recipe
-            .scopes
-            .iter()
-            .map(|scope| ProviderScope::new(scope.clone()))
-            .collect();
+    if !requested.is_empty() {
+        validate_scopes_within_ceiling(recipe, &requested)?;
+        if requester_extension.is_none() {
+            return Ok(requested);
+        }
     }
-    validate_scopes_within_ceiling(recipe, &requested)?;
-    Ok(requested)
+    recipe
+        .scopes
+        .iter()
+        .map(|scope| ProviderScope::new(scope.clone()))
+        .collect()
 }
 
 fn validate_scopes_within_ceiling(

@@ -448,11 +448,30 @@ mod tests {
         }
     }
 
+    /// The unified recipe the production resolver builds once a SECOND
+    /// extension declaring the same vendor is installed: identical recipe
+    /// data, scope ceiling unioned across both manifests.
+    fn acme_shared_vendor_recipe() -> ResolvedVendorAuthRecipe {
+        let mut resolved = acme_vendor_recipe();
+        let VendorAuthRecipe::Oauth2Code(recipe) = &mut resolved.recipe else {
+            panic!("acme fixture is an oauth2_code recipe");
+        };
+        recipe.scopes.push("msg:write".to_string());
+        resolved
+    }
+
     fn engine_with_credentials(
         credentials: Arc<dyn crate::EngineClientCredentialsSource>,
     ) -> Arc<AuthEngine> {
+        engine_with_recipe(acme_vendor_recipe(), credentials)
+    }
+
+    fn engine_with_recipe(
+        recipe: ResolvedVendorAuthRecipe,
+        credentials: Arc<dyn crate::EngineClientCredentialsSource>,
+    ) -> Arc<AuthEngine> {
         Arc::new(AuthEngine::new(AuthEngineDeps {
-            recipes: Arc::new(StaticAuthRecipeResolver::new(vec![acme_vendor_recipe()])),
+            recipes: Arc::new(StaticAuthRecipeResolver::new(vec![recipe])),
             client_credentials: credentials,
             egress: Arc::new(PanicEgress),
             secret_store: Arc::new(SecretStore::ephemeral()),
@@ -478,6 +497,10 @@ mod tests {
 
     impl GateFixture {
         fn new() -> Self {
+            Self::with_recipe(acme_vendor_recipe())
+        }
+
+        fn with_recipe(recipe: ResolvedVendorAuthRecipe) -> Self {
             let shared = Arc::new(InMemoryAuthProductServices::new());
             let flow_manager: Arc<dyn AuthFlowManager> = shared.clone();
             let flow_source: Arc<dyn AuthFlowRecordSource> = shared.clone();
@@ -486,7 +509,7 @@ mod tests {
                 flow_manager,
                 flow_source,
                 driver: OAuthGateFlowDriver::new(
-                    engine_with_credentials(Arc::new(StaticCredentials)),
+                    engine_with_recipe(recipe, Arc::new(StaticCredentials)),
                     Arc::new(SecretStore::ephemeral()),
                 ),
                 scope: TurnScope::new(
@@ -572,6 +595,40 @@ mod tests {
         );
         assert!(url.as_str().contains("code_challenge"));
         assert_eq!(fixture.active_gate_flows().await.len(), 1);
+    }
+
+    /// The gate is the production caller that turns a blocked capability into
+    /// an authorization URL. One vendor account is shared by every installed
+    /// extension of that vendor, so the URL the gate builds must ask for the
+    /// whole shared ceiling — otherwise connecting one extension leaves its
+    /// siblings gated and they keep returning `auth_required` (#7069).
+    #[tokio::test]
+    async fn gate_challenge_requests_the_shared_vendor_ceiling() {
+        let fixture = GateFixture::with_recipe(acme_shared_vendor_recipe());
+        let flow = fixture.challenge().await;
+        let AuthChallenge::OAuthUrl {
+            authorization_url: url,
+            ..
+        } = flow.challenge.expect("authorization challenge")
+        else {
+            panic!("expected OAuth URL challenge");
+        };
+        let scopes = url
+            .as_str()
+            .split("scope=")
+            .nth(1)
+            .expect("authorize URL carries a scope param")
+            .split('&')
+            .next()
+            .expect("scope param is delimited");
+        assert!(
+            scopes.contains("msg%3Aread"),
+            "the blocked capability's own scope must still be requested; got {scopes}"
+        );
+        assert!(
+            scopes.contains("msg%3Awrite"),
+            "the sibling extension's scope must ride the same consent; got {scopes}"
+        );
     }
 
     #[tokio::test]

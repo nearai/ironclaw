@@ -509,6 +509,55 @@ async fn google_extra_authorize_params_come_from_recipe_data() {
     );
 }
 
+/// An extension-scoped flow authorizes the SHARED vendor account, so it must
+/// ask for the whole shared-vendor ceiling — the union across the user's
+/// installed extensions for that vendor — not just the scopes of the extension
+/// that happened to raise the gate.
+///
+/// The account holds ONE scope set that each exchange replaces, and dispatch
+/// requires a capability's scopes to already be on it
+/// (`account_has_provider_scopes`). Asking for only the requester's scopes
+/// therefore forces a separate consent per sibling extension, and every
+/// not-yet-authorized sibling keeps returning `auth_required` (#7069).
+#[tokio::test]
+async fn extension_scoped_flow_requests_the_shared_vendor_ceiling() {
+    const GMAIL_READONLY: &str = "https://www.googleapis.com/auth/gmail.readonly";
+    const DRIVE_READONLY: &str = "https://www.googleapis.com/auth/drive.readonly";
+
+    // What the production resolver hands back once gmail and google-drive are
+    // both installed: one google recipe whose ceiling is the union.
+    let harness = Harness::new(vec![unified_manifest_recipe(
+        "google",
+        &["gmail", "google-drive"],
+    )]);
+    let prepared = harness
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "google".to_string(),
+            requester_extension: Some(ironclaw_host_api::ids::ExtensionId::new("gmail").unwrap()),
+            scope: test_scope(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").unwrap(),
+            requested_scopes: vec![ProviderScope::new(GMAIL_READONLY).unwrap()],
+        })
+        .await
+        .unwrap();
+
+    let url = url::Url::parse(prepared.authorization_url.as_str()).unwrap();
+    let pairs: HashMap<String, String> = url.query_pairs().into_owned().collect();
+    let requested = pairs.get("scope").expect("authorize URL carries scopes");
+    assert!(
+        requested.contains(GMAIL_READONLY),
+        "the requesting extension's own scopes must still be requested; got {requested}"
+    );
+    assert!(
+        requested.contains(DRIVE_READONLY),
+        "one consent must cover every installed extension sharing the google \
+         account, otherwise google-drive re-gates after gmail is connected; \
+         got {requested}"
+    );
+}
+
 #[tokio::test]
 async fn recipes_cannot_supply_or_override_reserved_authorize_params() {
     // The resolver hands back a recipe that names reserved params — as if P1
@@ -591,6 +640,24 @@ async fn scope_widening_is_rejected_before_any_vendor_call() {
         })
         .await
         .expect_err("scope outside the ceiling must be rejected");
+    assert_eq!(error.code(), ironclaw_auth::AuthErrorCode::InvalidRequest);
+
+    // An EXTENSION-scoped flow requests the whole ceiling, but its own
+    // requested scopes are still validated FIRST — validate-then-widen. If that
+    // ordering is ever flipped, an extension could name a scope no installed
+    // manifest declares and have it silently swallowed by the widening.
+    let error = harness
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "slack".to_string(),
+            requester_extension: Some(ironclaw_host_api::ids::ExtensionId::new("slack").unwrap()),
+            scope: scope.clone(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").unwrap(),
+            requested_scopes: vec![ProviderScope::new("admin").unwrap()],
+        })
+        .await
+        .expect_err("an extension-scoped flow may not name a scope outside the ceiling");
     assert_eq!(error.code(), ironclaw_auth::AuthErrorCode::InvalidRequest);
 
     // Exchange-time widening (defense in depth): rejected before egress.
