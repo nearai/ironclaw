@@ -208,6 +208,28 @@ function createHarness({ onRenameAutomation = () => {} } = {}) {
   };
 }
 
+test("AutomationDetailPanel exposes stable lifecycle action selectors", () => {
+  const harness = createHarness();
+
+  let rendered = harness.render();
+  let actionButton = componentProps(rendered, harness.Button).find(
+    (button) => button["data-testid"] === "automation-action-button",
+  );
+  assert.ok(actionButton, "pause action button should render");
+  assert.equal(actionButton["data-automation-id"], "automation-alpha");
+  assert.equal(actionButton["data-automation-action"], "pause");
+
+  rendered = harness.render({
+    automation: { ...automation(), state: "paused" },
+  });
+  actionButton = componentProps(rendered, harness.Button).find(
+    (button) => button["data-testid"] === "automation-action-button",
+  );
+  assert.ok(actionButton, "resume action button should render");
+  assert.equal(actionButton["data-automation-id"], "automation-alpha");
+  assert.equal(actionButton["data-automation-action"], "resume");
+});
+
 test("AutomationDetailPanel deletes only after confirming the shared dialog", () => {
   const deletions = [];
   const harness = createHarness();
@@ -216,9 +238,10 @@ test("AutomationDetailPanel deletes only after confirming the shared dialog", ()
     onDeleteAutomation: (automationId) => deletions.push(automationId),
   });
   const deleteButton = componentProps(rendered, harness.Button).find(
-    (button) => button["aria-label"] === "Delete: Daily status",
+    (button) => button["data-testid"] === "automation-delete-button",
   );
   assert.ok(deleteButton, "delete button should render");
+  assert.equal(deleteButton["data-automation-id"], "automation-alpha");
 
   deleteButton.onClick();
   assert.deepEqual(deletions, []);
