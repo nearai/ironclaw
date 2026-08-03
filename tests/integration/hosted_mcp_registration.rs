@@ -853,13 +853,22 @@ async fn bearer_registration_stays_setup_needed_until_the_existing_auth_continua
         server.requests().is_empty(),
         "registration must not contact MCP"
     );
-    let unfinished_retry = install_fixture(&services, scope.clone()).await;
+    let selection_required = install_fixture(&services, scope.clone()).await;
     assert!(
-        unfinished_retry.blockers.iter().any(|blocker| matches!(
+        selection_required.blockers.iter().any(|blocker| matches!(
             blocker,
-            ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
+            ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
+                ref_id: Some(ref_id),
+            } if ref_id.as_str()
+                == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
         )),
-        "ordinary installation exposes credential readiness"
+        "a bare 401 remains an explicit auth-selection setup state: {selection_required:#?}"
+    );
+    assert!(
+        selection_required.message.as_deref().is_some_and(
+            |message| message.contains("choose OAuth, Bearer token, or No authentication")
+        ),
+        "the setup state explains the recovery action: {selection_required:#?}"
     );
     assert!(
         services
@@ -871,10 +880,81 @@ async fn bearer_registration_stays_setup_needed_until_the_existing_auth_continua
         "unfinished auth publishes no MCP tools"
     );
 
+    let projected_setup = services
+        .lifecycle_service
+        .project_package(
+            lifecycle_product_context(scope.clone()),
+            fixture_package_ref(),
+        )
+        .await
+        .expect("the setup view reprojects the durable auth-selection blocker");
+    assert!(projected_setup.blockers.iter().any(|blocker| matches!(
+        blocker,
+        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
+            ref_id: Some(ref_id),
+        } if ref_id.as_str()
+            == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
+    )));
+
+    services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(webui_gate_resource_scope_for_owner(
+                "hosted-mcp-bearer-member",
+            )),
+            LifecycleProductAction::ExtensionSelectHostedMcpAuth {
+                package_ref: fixture_package_ref(),
+                auth_selection: HostedMcpAuthSelection::Bearer,
+            },
+        )
+        .await
+        .expect_err("a tenant member cannot change shared MCP authentication");
+
+    let no_auth_mismatch = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionSelectHostedMcpAuth {
+                package_ref: fixture_package_ref(),
+                auth_selection: HostedMcpAuthSelection::NoAuth,
+            },
+        )
+        .await
+        .expect("the same pending installation accepts an explicit no-auth selection");
+    assert!(no_auth_mismatch.blockers.iter().any(|blocker| matches!(
+        blocker,
+        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
+            ref_id: Some(ref_id),
+        } if ref_id.as_str()
+            == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
+    )));
+    assert!(
+        no_auth_mismatch
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("rejected unauthenticated access")),
+        "NoAuth plus 401 stays an actionable selection mismatch: {no_auth_mismatch:#?}"
+    );
+
+    let unfinished_retry = services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionSelectHostedMcpAuth {
+                package_ref: fixture_package_ref(),
+                auth_selection: HostedMcpAuthSelection::Bearer,
+            },
+        )
+        .await
+        .expect("the same pending installation accepts an explicit bearer selection");
     assert_eq!(
         unfinished_retry.phase,
         ironclaw_extension_contracts::state::InstallationState::Installed
     );
+    assert!(unfinished_retry.blockers.iter().any(|blocker| matches!(
+        blocker,
+        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
+    )));
 
     let provider = credential_provider_from_response(&unfinished_retry);
     let wrong = submit_fixture_bearer(&services, scope.clone(), provider.clone(), "wrong-token")
@@ -1085,7 +1165,7 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
     let mut notion_search = HostedMcpTool::read_only("search", json!("ok"));
     notion_search.description = notion_style_long_description();
     let server = HostedMcpRegistrationServer::start(
-        HostedMcpAuthPolicy::OAuth {
+        HostedMcpAuthPolicy::OAuthWithoutChallenge {
             access_token: "oauth-token".to_string(),
         },
         vec![notion_search],
@@ -1153,11 +1233,18 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
     );
 
     let requests = server.requests();
-    assert!(
-        requests.iter().any(|request| {
-            request.method == "GET" && request.path == "/.well-known/oauth-protected-resource"
-        }),
-        "the 401 challenge must lead to protected-resource metadata discovery: {requests:#?}"
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.method == "GET")
+            .map(|request| request.path.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "/.well-known/oauth-protected-resource/mcp",
+            "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-authorization-server",
+        ],
+        "metadata-less OAuth must try path-specific RFC 9728 discovery, then root, then the admitted authorization server: {requests:#?}"
     );
     assert!(
         requests.iter().any(|request| {
@@ -1289,6 +1376,58 @@ async fn oauth_registration_discovers_standard_metadata_then_hands_off_to_generi
     assert!(server.requests().iter().any(|request| {
         request.rpc_method.as_deref() == Some("tools/call") && request.authorization_matches
     }));
+}
+
+#[tokio::test]
+async fn oauth_registration_accepts_path_metadata_without_root_fallback() {
+    let server = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::OAuthWithoutChallengePathMetadata {
+            access_token: "oauth-token".to_string(),
+        },
+        vec![HostedMcpTool::read_only("search", json!("ok"))],
+    )
+    .await;
+    let secret_store = Arc::new(OnceLock::new());
+    let services = build_lifecycle_test_services_with_auth_provider(
+        "hosted-mcp-oauth-path-metadata",
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &server,
+        ))),
+        false,
+        Arc::new(FixtureOAuthProvider {
+            secret_store: Arc::clone(&secret_store),
+            access_token: "oauth-token".to_string(),
+        }),
+    )
+    .await;
+    assert!(secret_store.set(services.secret_store()).is_ok());
+    let scope = webui_gate_resource_scope_for_owner("hosted-mcp-oauth-path-metadata");
+    services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionRegisterHostedMcp {
+                request: automatic_request(),
+            },
+        )
+        .await
+        .expect("registration admits the definition");
+    install_fixture(&services, scope).await;
+
+    let metadata_paths = server
+        .requests()
+        .into_iter()
+        .filter(|request| request.method == "GET")
+        .map(|request| request.path)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        metadata_paths,
+        vec![
+            "/.well-known/oauth-protected-resource/mcp",
+            "/.well-known/oauth-authorization-server",
+        ],
+        "successful path-specific metadata must skip the origin-root fallback"
+    );
 }
 
 /// Drives all four `fetch_oauth_metadata` failure branches (transport error,

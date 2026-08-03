@@ -21,6 +21,7 @@ import {
   removeExtension,
   fetchExtensionSetup,
   submitExtensionSetup,
+  selectHostedMcpAuth,
   startExtensionOauth,
   fetchOauthFlowStatus,
   importExtension,
@@ -328,6 +329,12 @@ export function useExtensionSetup(packageRef) {
   return {
     secrets: query.data?.secrets || [],
     onboarding: query.data?.onboarding || null,
+    hostedMcpAuthSelectionRequired:
+      query.data?.blockers?.some(
+        (blocker) =>
+          blocker?.kind === "setup" &&
+          blocker?.ref_id === "hosted_mcp_auth_selection_required",
+      ) === true,
     isLoading: query.isLoading,
     error: query.error,
   };
@@ -615,4 +622,35 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
     },
   });
   return { ...mutation, isAuthorizing, authError };
+}
+
+export function useHostedMcpAuthSelection(packageRef, onSuccess) {
+  const t = useT();
+  const queryClient = useQueryClient();
+  const packageKey = packageRef?.id || packageRef;
+
+  const mutation = useMutation({
+    mutationFn: ({ authSelection, clientActionId: actionId }) =>
+      selectHostedMcpAuth(packageRef, authSelection, {
+        clientActionId: actionId,
+      }).then((res) => {
+        if (res.success === false) {
+          throw new Error(res.message || t("extensions.setupFailed"));
+        }
+        return res;
+      }),
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey: ["extensions"] });
+      queryClient.invalidateQueries({ queryKey: ["extension-setup", packageKey] });
+      if (onSuccess) onSuccess(res);
+    },
+  });
+
+  return {
+    ...mutation,
+    mutate: (payload, options = undefined) =>
+      mutation.mutate(withClientActionId(payload), options),
+    mutateAsync: (payload, options = undefined) =>
+      mutation.mutateAsync(withClientActionId(payload), options),
+  };
 }

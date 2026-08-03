@@ -25,6 +25,7 @@ use ironclaw_auth::{
     AuthAccountLastError, AuthAccountState, CredentialAccountId, CredentialAccountProjection,
     CredentialAccountStatus,
 };
+use ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection;
 use ironclaw_extension_contracts::{
     state::{InstallationState, LifecyclePublicState},
     surface::CapabilitySurfaceKind,
@@ -1083,6 +1084,19 @@ impl LifecycleProductService for RecordingLifecycleService {
                     message: Some("activated".to_string()),
                     payload: Some(LifecycleProductPayload::ExtensionActivate {
                         activated: true,
+                        visible_capability_ids: Vec::new(),
+                        connection_required: None,
+                    }),
+                })
+            }
+            LifecycleProductAction::ExtensionSelectHostedMcpAuth { package_ref, .. } => {
+                Ok(LifecycleProductResponse {
+                    package_ref: Some(package_ref),
+                    phase: InstallationState::Installed,
+                    blockers: Vec::new(),
+                    message: Some("hosted MCP authentication selected".to_string()),
+                    payload: Some(LifecycleProductPayload::ExtensionActivate {
+                        activated: false,
                         visible_capability_ids: Vec::new(),
                         connection_required: None,
                     }),
@@ -10299,6 +10313,62 @@ async fn setup_extension_returns_post_setup_onboarding_payload() {
         onboarding.credential_next_step.as_deref(),
         Some("After saving the token, activate GitHub to publish its tools.")
     );
+}
+
+#[tokio::test]
+async fn setup_extension_dispatches_one_typed_hosted_mcp_auth_selection() {
+    let lifecycle = Arc::new(RecordingLifecycleService::new());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_lifecycle_product_service(lifecycle.clone());
+
+    invoke_extension_setup_submit(
+        &services,
+        caller(),
+        "mcp-custom",
+        ProductSetupExtensionRequest {
+            client_action_id: None,
+            action: Some("select_auth".to_string()),
+            payload: Some(json!({
+                "auth_selection": { "kind": "bearer" }
+            })),
+        },
+    )
+    .await
+    .expect("typed hosted MCP auth selection dispatches");
+
+    assert_eq!(
+        lifecycle.actions(),
+        vec![LifecycleProductAction::ExtensionSelectHostedMcpAuth {
+            package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "mcp-custom",)
+                .expect("package ref"),
+            auth_selection: HostedMcpAuthSelection::Bearer,
+        }],
+        "the setup boundary dispatches selection exactly once and does not run a second activation",
+    );
+}
+
+#[tokio::test]
+async fn setup_extension_rejects_auto_as_a_recovery_selection() {
+    let services = setup_services_with_requirements(Vec::new());
+    let err = invoke_extension_setup_submit(
+        &services,
+        caller(),
+        "mcp-custom",
+        ProductSetupExtensionRequest {
+            client_action_id: None,
+            action: Some("select_auth".to_string()),
+            payload: Some(json!({
+                "auth_selection": { "kind": "auto" }
+            })),
+        },
+    )
+    .await
+    .expect_err("automatic detection cannot be retried as an explicit recovery choice");
+
+    assert_setup_validation(err, "payload", ProductSurfaceValidationCode::InvalidValue);
 }
 
 #[tokio::test]

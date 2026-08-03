@@ -1197,7 +1197,7 @@ async fn refresh_invalid_grant_is_a_typed_permanent_failure() {
 async fn dcr_requires_advertised_protected_resource_metadata() {
     let harness = Harness::new(vec![manifest_recipe("notion-mcp", "notion")]);
     harness.server.script(
-        "https://mcp.notion.com/mcp/.well-known/oauth-protected-resource",
+        "https://mcp.notion.com/.well-known/oauth-protected-resource/mcp",
         404,
         serde_json::json!({}),
     );
@@ -1276,7 +1276,7 @@ async fn dcr_uses_the_admitted_non_well_known_protected_resource_metadata_url() 
     assert!(
         harness
             .server
-            .requests_for("https://mcp.example.test/mcp/.well-known/oauth-protected-resource")
+            .requests_for("https://mcp.example.test/.well-known/oauth-protected-resource/mcp")
             .is_empty(),
         "DCR must not reconstruct a different metadata URL from the resource"
     );
@@ -1287,7 +1287,7 @@ async fn dcr_vendor_registers_once_and_runs_standard_oauth_afterwards() {
     let harness = Harness::new(vec![manifest_recipe("notion-mcp", "notion")]);
     let scope = test_scope();
     harness.server.script(
-        "https://mcp.notion.com/mcp/.well-known/oauth-protected-resource",
+        "https://mcp.notion.com/.well-known/oauth-protected-resource/mcp",
         200,
         serde_json::json!({
             "resource": "https://mcp.notion.com/mcp",
@@ -1411,7 +1411,7 @@ async fn dcr_rejects_protected_metadata_for_a_different_resource_before_issuer_f
     recipe.token_exchange_resource = Some("https://mcp.example.co.uk/mcp".to_string());
     let harness = Harness::new(vec![recipe]);
     harness.server.script(
-        "https://mcp.example.co.uk/mcp/.well-known/oauth-protected-resource",
+        "https://mcp.example.co.uk/.well-known/oauth-protected-resource/mcp",
         200,
         serde_json::json!({
             "resource": "https://different.example.co.uk/mcp",
@@ -1457,7 +1457,7 @@ async fn dcr_accepts_exact_resource_binding_to_a_cross_origin_issuer() {
     recipe.token_exchange_resource = Some("https://mcp.example.co.uk/mcp".to_string());
     let harness = Harness::new(vec![recipe]);
     harness.server.script(
-        "https://mcp.example.co.uk/mcp/.well-known/oauth-protected-resource",
+        "https://mcp.example.co.uk/.well-known/oauth-protected-resource/mcp",
         200,
         serde_json::json!({
             "resource": "https://mcp.example.co.uk/mcp",
@@ -1510,7 +1510,7 @@ async fn dcr_rejects_authorization_server_metadata_with_a_different_issuer() {
     recipe.token_exchange_resource = Some("https://mcp.example.test/mcp".to_string());
     let harness = Harness::new(vec![recipe]);
     harness.server.script(
-        "https://mcp.example.test/mcp/.well-known/oauth-protected-resource",
+        "https://mcp.example.test/.well-known/oauth-protected-resource/mcp",
         200,
         serde_json::json!({
             "resource": "https://mcp.example.test/mcp",

@@ -60,6 +60,8 @@ function renderModal({
   translate,
   setupResult,
   oauthMutationState = {},
+  hostedMcpAuthMutationState = {},
+  initialState = [],
   runEffects = false,
   blockPopup = false,
 } = {}) {
@@ -68,8 +70,11 @@ function renderModal({
   const stateSets = [];
   const oauthCalls = [];
   const oauthSetupArgs = [];
+  const hostedMcpAuthCalls = [];
+  const hostedMcpAuthArgs = [];
   const openedPopups = [];
   const notifications = [];
+  let stateIndex = 0;
   const context = {
     useQueryClient: () => ({
       invalidateQueries: ({ queryKey }) => invalidations.push(queryKey),
@@ -79,12 +84,17 @@ function renderModal({
     Icon() {},
     console: { error() {} },
     React: {
-      useState: (initial) => [
-        typeof initial === "function" ? initial() : initial,
-        (next) => {
-          stateSets.push(next);
-        },
-      ],
+      useState: (initial) => {
+        const index = stateIndex++;
+        return [
+          Object.prototype.hasOwnProperty.call(initialState, index)
+            ? initialState[index]
+            : typeof initial === "function" ? initial() : initial,
+          (next) => {
+            stateSets.push(next);
+          },
+        ];
+      },
       useCallback: (fn) => fn,
       useEffect: (fn) => {
         if (runEffects) fn();
@@ -115,6 +125,17 @@ function renderModal({
       };
     },
     useSetupSubmit: () => ({ mutate() {}, isPending: false, error: null }),
+    useHostedMcpAuthSelection: (...args) => {
+      hostedMcpAuthArgs.push(args);
+      return {
+        mutate(payload) {
+          hostedMcpAuthCalls.push(payload);
+        },
+        isPending: false,
+        error: null,
+        ...hostedMcpAuthMutationState,
+      };
+    },
     extensionIsActive: (extension) => extension?.installation_state === "active",
     // The real surface-taxonomy helpers: modal routing must key off declared
     // channel surfaces and connect strategies, exactly as production does.
@@ -158,11 +179,60 @@ function renderModal({
     notifications,
     oauthCalls,
     oauthSetupArgs,
+    hostedMcpAuthCalls,
+    hostedMcpAuthArgs,
     openedPopups,
     rendered,
     stateSets,
   };
 }
+
+test("ConfigureModal recovers ambiguous hosted MCP auth with only three explicit choices", () => {
+  const saved = [];
+  let closeCalls = 0;
+  const view = renderModal({
+    packageRef: { kind: "extension", id: "linear" },
+    displayName: "Linear MCP",
+    onClose: () => {
+      closeCalls += 1;
+    },
+    onSaved: (result) => saved.push(result),
+    initialState: [undefined, "oauth"],
+    setupResult: {
+      hostedMcpAuthSelectionRequired: true,
+      secrets: [
+        {
+          name: "must-not-be-rendered",
+          setup: { kind: "manual_token" },
+        },
+      ],
+      onboarding: null,
+      isLoading: false,
+      error: null,
+    },
+  });
+
+  const body = JSON.stringify(view.rendered);
+  assert.match(body, /extensions\.customMcpAuth\.bearer/);
+  assert.match(body, /extensions\.customMcpAuth\.oauth/);
+  assert.match(body, /extensions\.customMcpAuth\.no_auth/);
+  assert.doesNotMatch(body, /extensions\.customMcpAuth\.auto/);
+  assert.doesNotMatch(body, /must-not-be-rendered/);
+  assert.doesNotMatch(body, /extension-secret-/);
+
+  const submit = findHandler(view.rendered, "authSelection:");
+  assert.ok(submit, "the selected recovery choice can be submitted");
+  submit();
+  assert.deepEqual(JSON.parse(JSON.stringify(view.hostedMcpAuthCalls)), [
+    { authSelection: { kind: "oauth" } },
+  ]);
+
+  const onSuccess = view.hostedMcpAuthArgs[0][1];
+  const result = { success: true };
+  onSuccess(result);
+  assert.deepEqual(saved, [result]);
+  assert.equal(closeCalls, 1);
+});
 
 function renderFirstComponent(rendered, component, props = {}) {
   if (!rendered || !Array.isArray(rendered.values)) return null;

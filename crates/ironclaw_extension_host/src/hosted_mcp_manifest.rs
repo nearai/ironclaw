@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use ironclaw_extension_contracts::hosted_mcp::{HostedMcpAuthSelection, HostedMcpEndpoint};
+use ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection;
 use ironclaw_extensions::{
     ExtensionManifestRecord, ExtensionPackage, ManifestSource, PackageDefinitionRetention,
     PackageRootBinding,
@@ -169,27 +169,6 @@ pub(crate) fn manifest_with_admitted_oauth(
     )
     .map(|record| record.with_definition_retention(seed.definition_retention()))
     .map_err(map_extension_installation_error)
-}
-
-pub(crate) fn manifest_with_bearer(
-    seed: ExtensionManifestRecord,
-) -> Result<ExtensionManifestRecord, ProductOperationFailure> {
-    let resolved = seed.resolved();
-    let server = resolved
-        .mcp
-        .as_ref()
-        .map(|mcp| mcp.server.clone())
-        .ok_or_else(name_unavailable)?;
-    let endpoint = hosted_mcp_admission::CanonicalHostedMcpEndpoint::parse(
-        &HostedMcpEndpoint::new(server).map_err(|_| name_unavailable())?,
-    )
-    .map_err(|_| name_unavailable())?;
-    pending_manifest(
-        &resolved.id,
-        &resolved.name,
-        &endpoint,
-        &HostedMcpAuthSelection::Bearer,
-    )
 }
 
 pub(crate) fn pending_manifest(

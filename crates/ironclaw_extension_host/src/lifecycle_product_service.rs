@@ -211,6 +211,25 @@ impl ExtensionHostLifecycleProductService {
                 )
                 .await
             }
+            LifecycleProductAction::ExtensionSelectHostedMcpAuth {
+                package_ref,
+                auth_selection,
+            } => {
+                let Some(extension_management) = &self.extension_management else {
+                    return unsupported_projection(Some(package_ref));
+                };
+                let caller = lifecycle_caller(&context)?;
+                extension_management
+                    .select_hosted_mcp_auth(&package_ref, auth_selection, &caller)
+                    .await?;
+                self.execute_extension_activation(
+                    &context,
+                    extension_management,
+                    package_ref,
+                    &caller,
+                )
+                .await
+            }
             LifecycleProductAction::ExtensionRemove { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));

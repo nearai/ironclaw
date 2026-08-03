@@ -171,6 +171,46 @@ where
         })
     }
 
+    /// Return the bounded RFC 9728 discovery sequence for one protected MCP
+    /// resource. An advertised location is authoritative. When the challenge
+    /// carries no safe location, MCP interoperability requires trying the
+    /// path-specific well-known URI and then the origin-root fallback.
+    pub fn preflight_protected_resource_candidates(
+        canonical_resource: &str,
+        challenge: &McpAuthChallenge,
+    ) -> Result<Vec<ProtectedResourceMetadataFetch>, AuthProductError> {
+        if !challenge.www_authenticate_metadata.is_empty()
+            || !challenge.protected_resource_metadata.is_empty()
+        {
+            return Self::preflight_protected_resource(canonical_resource, challenge)
+                .map(|fetch| vec![fetch]);
+        }
+        if !matches!(challenge.status, 401 | 403) {
+            return Err(AuthProductError::MalformedConfig);
+        }
+        let canonical_resource = HttpsEndpoint::new(canonical_resource.to_string())
+            .map_err(|_| AuthProductError::MalformedConfig)?;
+        let path_metadata_url = HttpsEndpoint::new(super::dcr::protected_resource_metadata_url(
+            canonical_resource.as_str(),
+        )?)
+        .map_err(|_| AuthProductError::MalformedConfig)?;
+        let root_metadata_url = HttpsEndpoint::new(
+            super::dcr::protected_resource_metadata_root_url(canonical_resource.as_str())?,
+        )
+        .map_err(|_| AuthProductError::MalformedConfig)?;
+        let mut candidates = vec![ProtectedResourceMetadataFetch {
+            canonical_resource: canonical_resource.clone(),
+            metadata_url: path_metadata_url.clone(),
+        }];
+        if root_metadata_url != path_metadata_url {
+            candidates.push(ProtectedResourceMetadataFetch {
+                canonical_resource,
+                metadata_url: root_metadata_url,
+            });
+        }
+        Ok(candidates)
+    }
+
     /// Validate the fetched RFC 9728 document and produce the only issuer
     /// metadata URL that may be fetched next.
     pub fn preflight_authorization_server(
@@ -405,6 +445,69 @@ mod tests {
                 &challenge
             )
             .is_err()
+        );
+    }
+    #[test]
+    fn missing_advertisement_derives_path_then_root_candidates() {
+        let challenge = McpAuthChallenge {
+            status: 401,
+            www_authenticate_metadata: vec![],
+            protected_resource_metadata: vec![],
+        };
+        let candidates = OAuthRecipeAdmission::<Profiles>::preflight_protected_resource_candidates(
+            "https://mcp.example.test/team/mcp?tenant=one",
+            &challenge,
+        )
+        .expect("RFC 9728 candidates");
+        assert_eq!(
+            candidates
+                .iter()
+                .map(ProtectedResourceMetadataFetch::metadata_url)
+                .collect::<Vec<_>>(),
+            vec![
+                "https://mcp.example.test/.well-known/oauth-protected-resource/team/mcp?tenant=one",
+                "https://mcp.example.test/.well-known/oauth-protected-resource",
+            ]
+        );
+    }
+
+    #[test]
+    fn root_resource_deduplicates_derived_candidates() {
+        let challenge = McpAuthChallenge {
+            status: 401,
+            www_authenticate_metadata: vec![],
+            protected_resource_metadata: vec![],
+        };
+        let candidates = OAuthRecipeAdmission::<Profiles>::preflight_protected_resource_candidates(
+            "https://mcp.example.test",
+            &challenge,
+        )
+        .expect("root RFC 9728 candidate");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].metadata_url(),
+            "https://mcp.example.test/.well-known/oauth-protected-resource"
+        );
+    }
+
+    #[test]
+    fn advertised_metadata_stays_authoritative() {
+        let challenge = McpAuthChallenge {
+            status: 401,
+            www_authenticate_metadata: vec![
+                McpAuthMetadataLocation::new("https://auth.example.test/resource").unwrap(),
+            ],
+            protected_resource_metadata: vec![],
+        };
+        let candidates = OAuthRecipeAdmission::<Profiles>::preflight_protected_resource_candidates(
+            "https://mcp.example.test/mcp",
+            &challenge,
+        )
+        .expect("advertised candidate");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].metadata_url(),
+            "https://auth.example.test/resource"
         );
     }
     #[tokio::test]

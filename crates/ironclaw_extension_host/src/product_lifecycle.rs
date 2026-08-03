@@ -253,6 +253,22 @@ impl ExtensionLifecycleManager {
             .prepare_if_pending(package_ref, scope, credential_gate, caller)
             .await
     }
+
+    pub async fn select_hosted_mcp_auth(
+        &self,
+        package_ref: &LifecyclePackageRef,
+        auth_selection: ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection,
+        caller: &UserId,
+    ) -> Result<(), ProductOperationFailure> {
+        self.hosted_mcp_preparation
+            .select_auth(
+                package_ref,
+                auth_selection,
+                caller,
+                &self.tenant_operator_user_id,
+            )
+            .await
+    }
     pub fn new(dependencies: ExtensionLifecycleManagerDependencies) -> Self {
         let ExtensionLifecycleManagerDependencies {
             filesystem,
@@ -662,7 +678,12 @@ impl ExtensionLifecycleManager {
             .as_ref()
             .map(|installation| install_scope_for_owner(installation.owner()));
         let summary = available.summary();
-        Ok(response_with_payload(
+        let auth_selection_required = available.source
+            == ironclaw_extensions::ManifestSource::UserRegistered
+            && available.resolved_manifest.mcp.is_some()
+            && !has_activatable_surface
+            && package_runtime_credential_auth_requirements(&available.package).is_empty();
+        let mut response = response_with_payload(
             Some(package_ref),
             phase,
             LifecycleProductPayload::ExtensionList {
@@ -673,7 +694,15 @@ impl ExtensionLifecycleManager {
                 }],
                 count: 1,
             },
-        ))
+        );
+        if auth_selection_required {
+            response.blockers = vec![LifecycleReadinessBlocker::Setup {
+                ref_id: Some(LifecycleBlockerRef::new(
+                    ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF,
+                )?),
+            }];
+        }
+        Ok(response)
     }
 
     pub async fn active_model_visible_capabilities(
@@ -3101,7 +3130,7 @@ where
     Ok(owners)
 }
 
-fn ensure_caller_may_mutate_tenant_installation(
+pub(crate) fn ensure_caller_may_mutate_tenant_installation(
     installation: &ExtensionInstallation,
     caller: &UserId,
     tenant_operator: &UserId,

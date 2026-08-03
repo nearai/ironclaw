@@ -23,6 +23,8 @@ pub enum HostedMcpAuthPolicy {
     ExactBearer { token: String },
     ExactBearerWithoutChallenge { token: String },
     OAuth { access_token: String },
+    OAuthWithoutChallenge { access_token: String },
+    OAuthWithoutChallengePathMetadata { access_token: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -219,6 +221,10 @@ impl HostedMcpRegistrationServer {
                 get(protected_resource),
             )
             .route(
+                "/.well-known/oauth-protected-resource/mcp",
+                get(path_protected_resource),
+            )
+            .route(
                 "/.well-known/oauth-authorization-server",
                 get(authorization_server),
             )
@@ -321,6 +327,12 @@ async fn mcp(
         | HostedMcpAuthPolicy::ExactBearerWithoutChallenge { token }
         | HostedMcpAuthPolicy::OAuth {
             access_token: token,
+        }
+        | HostedMcpAuthPolicy::OAuthWithoutChallenge {
+            access_token: token,
+        }
+        | HostedMcpAuthPolicy::OAuthWithoutChallengePathMetadata {
+            access_token: token,
         } => Some(format!("Bearer {token}")),
     };
     let matches = expected
@@ -343,6 +355,10 @@ async fn mcp(
     if !matches {
         return match state.policy {
             HostedMcpAuthPolicy::OAuth { .. } => oauth_challenge(StatusCode::UNAUTHORIZED),
+            HostedMcpAuthPolicy::OAuthWithoutChallenge { .. }
+            | HostedMcpAuthPolicy::OAuthWithoutChallengePathMetadata { .. } => {
+                StatusCode::UNAUTHORIZED.into_response()
+            }
             HostedMcpAuthPolicy::ExactBearer { .. } => bearer_challenge(StatusCode::UNAUTHORIZED),
             HostedMcpAuthPolicy::ExactBearerWithoutChallenge { .. } => {
                 StatusCode::UNAUTHORIZED.into_response()
@@ -452,12 +468,34 @@ async fn protected_resource(State(state): State<Arc<StateData>>) -> Response {
     {
         return (scripted.status, scripted.body).into_response();
     }
+    if !matches!(
+        state.policy,
+        HostedMcpAuthPolicy::OAuth { .. }
+            | HostedMcpAuthPolicy::OAuthWithoutChallenge { .. }
+            | HostedMcpAuthPolicy::OAuthWithoutChallengePathMetadata { .. }
+    ) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     Json(
         // Representative protected-resource response: admission consumes only
         // its security-critical URLs and tolerates unrelated standard fields.
         json!({"resource":"https://mcp.example.test/mcp","authorization_servers":["https://auth.example.test"],"scopes_supported":["default"],"bearer_methods_supported":["header"],"resource_name":"Hosted MCP fixture"}),
     )
     .into_response()
+}
+
+async fn path_protected_resource(State(state): State<Arc<StateData>>) -> Response {
+    record_metadata_request(&state, "/.well-known/oauth-protected-resource/mcp");
+    if matches!(
+        state.policy,
+        HostedMcpAuthPolicy::OAuthWithoutChallengePathMetadata { .. }
+    ) {
+        return Json(
+            json!({"resource":"https://mcp.example.test/mcp","authorization_servers":["https://auth.example.test"]}),
+        )
+        .into_response();
+    }
+    StatusCode::NOT_FOUND.into_response()
 }
 async fn authorization_server(State(state): State<Arc<StateData>>) -> Response {
     record_metadata_request(&state, "/.well-known/oauth-authorization-server");

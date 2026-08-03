@@ -7,6 +7,7 @@ use ironclaw_product_contracts::views::RebornViewDescriptor;
 use std::collections::BTreeSet;
 
 use ironclaw_auth::AuthProductScope;
+use ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection;
 use ironclaw_extension_contracts::state::{InstallationState, LifecyclePublicState};
 use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_product_contracts::surface::{
@@ -37,6 +38,7 @@ pub const EXTENSION_SETUP_VIEW: RebornViewDescriptor = RebornViewDescriptor {
 enum SetupAction {
     View,
     Submit,
+    SelectAuth,
 }
 
 pub(super) async fn setup_extension_view(
@@ -119,6 +121,28 @@ pub(super) async fn setup_extension(
         agent_id: caller.agent_id,
         project_id: caller.project_id,
     });
+    if action == SetupAction::SelectAuth {
+        let auth_selection = parse_hosted_mcp_auth_selection(&request)?;
+        let refreshed = service
+            .execute(
+                context,
+                LifecycleProductAction::ExtensionSelectHostedMcpAuth {
+                    package_ref,
+                    auth_selection,
+                },
+            )
+            .await?;
+        let refreshed_requirements = extension_setup_credentials::requirements(&refreshed);
+        return setup_extension_response(
+            extension_credentials,
+            channel_config,
+            scope,
+            &extension_id,
+            refreshed,
+            &refreshed_requirements,
+        )
+        .await;
+    }
     let lifecycle = project_package(service, context.clone(), package_ref.clone()).await?;
     let requirements = extension_setup_credentials::requirements(&lifecycle);
     if action == SetupAction::Submit {
@@ -313,11 +337,36 @@ fn setup_action(
     match request.action.as_deref() {
         None => Ok(SetupAction::View),
         Some("submit") => Ok(SetupAction::Submit),
+        Some("select_auth") => Ok(SetupAction::SelectAuth),
         Some(_) => Err(validation_error(
             "action",
             ProductSurfaceValidationCode::InvalidValue,
         )),
     }
+}
+
+fn parse_hosted_mcp_auth_selection(
+    request: &ProductSetupExtensionRequest,
+) -> Result<HostedMcpAuthSelection, ProductSurfaceError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct SelectionPayload {
+        auth_selection: HostedMcpAuthSelection,
+    }
+    let payload = request
+        .payload
+        .clone()
+        .ok_or_else(|| validation_error("payload", ProductSurfaceValidationCode::MissingField))?;
+    let selection = serde_json::from_value::<SelectionPayload>(payload)
+        .map_err(|_| validation_error("payload", ProductSurfaceValidationCode::InvalidValue))?
+        .auth_selection;
+    if matches!(selection, HostedMcpAuthSelection::Auto) {
+        return Err(validation_error(
+            "payload",
+            ProductSurfaceValidationCode::InvalidValue,
+        ));
+    }
+    Ok(selection)
 }
 
 pub(super) fn validation_error(
