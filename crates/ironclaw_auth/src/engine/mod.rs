@@ -3,7 +3,7 @@
 //! One engine implements `oauth2_code` (with PKCE) and RFC 7591 dynamic client
 //! registration for vendors whose recipe carries no deployment client
 //! credentials. Vendors differ only in recipe **data**
-//! (`ironclaw_host_api::recipe::VendorAuthRecipe`); there is no auth trait in the
+//! (`ironclaw_extension_contracts::recipe::VendorAuthRecipe`); there is no auth trait in the
 //! extension ABI and no per-vendor code path here.
 //!
 //! Engine-owned, for every vendor:
@@ -31,12 +31,10 @@ use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{
-    http::RuntimeHttpEgress,
-    ids::ExtensionId,
-    recipe::{OAuth2CodeRecipe, PkceMode, RecipeClientCredentials, VendorAuthRecipe},
-    resource::ResourceScope,
+use ironclaw_extension_contracts::recipe::{
+    OAuth2CodeRecipe, PkceMode, RecipeClientCredentials, VendorAuthRecipe,
 };
+use ironclaw_host_api::{http::RuntimeHttpEgress, ids::ExtensionId, resource::ResourceScope};
 use ironclaw_secrets::SecretStorePort;
 use secrecy::SecretString;
 use url::Url;
@@ -66,7 +64,8 @@ pub struct ResolvedVendorAuthRecipe {
     /// The exact protected-resource metadata document admitted from the MCP
     /// authorization challenge. Dynamic registration must use this location,
     /// rather than reconstructing a well-known path from the resource URL.
-    pub protected_resource_metadata_url: Option<ironclaw_host_api::recipe::HttpsEndpoint>,
+    pub protected_resource_metadata_url:
+        Option<ironclaw_extension_contracts::recipe::HttpsEndpoint>,
 }
 
 /// Resolver port: recipe DATA for a vendor id (never adapters, never code).
@@ -307,7 +306,7 @@ impl AuthEngine {
         (
             Box<OAuth2CodeRecipe>,
             Option<String>,
-            Option<ironclaw_host_api::recipe::HttpsEndpoint>,
+            Option<ironclaw_extension_contracts::recipe::HttpsEndpoint>,
         ),
         AuthProductError,
     > {
@@ -334,7 +333,9 @@ impl AuthEngine {
         vendor: &str,
         recipe: &OAuth2CodeRecipe,
         resource: Option<&str>,
-        protected_resource_metadata_url: Option<&ironclaw_host_api::recipe::HttpsEndpoint>,
+        protected_resource_metadata_url: Option<
+            &ironclaw_extension_contracts::recipe::HttpsEndpoint,
+        >,
         register_if_missing: bool,
     ) -> Result<exchange::EffectiveOAuthClient, AuthProductError> {
         if let Some(credentials) = &recipe.client_credentials {
@@ -572,7 +573,7 @@ fn build_recipe_authorization_url(
     // The endpoint may not predefine reserved parameters (host-owned).
     for (name, _) in url.query_pairs() {
         let name = name.to_ascii_lowercase();
-        if ironclaw_host_api::recipe::RESERVED_AUTHORIZE_PARAMS.contains(&name.as_str())
+        if ironclaw_extension_contracts::recipe::RESERVED_AUTHORIZE_PARAMS.contains(&name.as_str())
             || name == recipe.scope_param()
         {
             return Err(AuthProductError::MalformedConfig);

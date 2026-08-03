@@ -871,7 +871,7 @@ pub struct RebornIntegrationGroupBuilder {
     /// wires. Default `None` (no memory consumers, today's behavior).
     bound_memory: Option<(
         Arc<dyn ironclaw_memory::MemoryService>,
-        ironclaw_host_api::memory::MemoryDescriptor,
+        ironclaw_extension_contracts::memory::MemoryDescriptor,
     )>,
 }
 

@@ -378,10 +378,8 @@ mod tests {
         AuthEngineDeps, AuthFlowStatus, EngineCallbackBase, InMemoryAuthProductServices,
         OAuthAuthorizationUrl, ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
     };
-    use ironclaw_host_api::{
-        ids::{AgentId, ExtensionId, TenantId, ThreadId, UserId, VendorId},
-        recipe::VendorAuthRecipe,
-    };
+    use ironclaw_extension_contracts::recipe::VendorAuthRecipe;
+    use ironclaw_host_api::ids::{AgentId, ExtensionId, TenantId, ThreadId, UserId, VendorId};
     use ironclaw_secrets::SecretStore;
 
     fn acme_vendor_recipe() -> ResolvedVendorAuthRecipe {
@@ -411,7 +409,7 @@ mod tests {
         async fn resolve(
             &self,
             _vendor: &str,
-            _credentials: &ironclaw_host_api::recipe::RecipeClientCredentials,
+            _credentials: &ironclaw_extension_contracts::recipe::RecipeClientCredentials,
         ) -> Result<crate::EngineOAuthClientMaterial, AuthProductError> {
             Ok(crate::EngineOAuthClientMaterial {
                 client_id: crate::OAuthClientId::new("gate-client-id")?,
@@ -428,7 +426,7 @@ mod tests {
         async fn resolve(
             &self,
             _vendor: &str,
-            _credentials: &ironclaw_host_api::recipe::RecipeClientCredentials,
+            _credentials: &ironclaw_extension_contracts::recipe::RecipeClientCredentials,
         ) -> Result<crate::EngineOAuthClientMaterial, AuthProductError> {
             Err(AuthProductError::MalformedConfig)
         }

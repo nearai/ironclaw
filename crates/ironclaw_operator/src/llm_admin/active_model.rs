@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use ironclaw_llm::LlmProvider;
-use ironclaw_product::ActiveModelReader;
+use ironclaw_product_contracts::operator_llm::ActiveModelReader;
 
 /// [`ActiveModelReader`] over the runtime's live primary provider handle.
 pub struct ProviderActiveModelReader {

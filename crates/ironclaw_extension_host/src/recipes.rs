@@ -15,8 +15,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_auth::{AuthRecipeResolver, ResolvedVendorAuthRecipe};
+use ironclaw_extension_contracts::recipe::VendorAuthRecipe;
 use ironclaw_extensions::{ExtensionInstallationStorePort, ResolvedExtensionManifest};
-use ironclaw_host_api::{ids::ExtensionId, recipe::VendorAuthRecipe};
+use ironclaw_host_api::ids::ExtensionId;
 
 use crate::SnapshotWatch;
 

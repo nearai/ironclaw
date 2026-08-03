@@ -14,7 +14,7 @@ use ironclaw_host_api::{
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
 use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
-use ironclaw_product::ProductSurfaceFailure;
+use ironclaw_product_contracts::error::ProductOperationFailure;
 
 #[derive(Clone, Default)]
 pub enum ExtensionCapabilitySurfaceSource {
@@ -38,7 +38,7 @@ impl ExtensionCapabilitySurfaceSource {
         Self::Static(surface)
     }
 
-    pub async fn snapshot(&self) -> Result<ExtensionCapabilitySurface, ProductSurfaceFailure> {
+    pub async fn snapshot(&self) -> Result<ExtensionCapabilitySurface, ProductOperationFailure> {
         match self {
             Self::Empty => Ok(ExtensionCapabilitySurface::default()),
             Self::Management(extension_management) => {
@@ -65,7 +65,7 @@ impl ExtensionCapabilitySurface {
 
     pub(super) async fn from_extension_management(
         extension_management: &RebornLocalExtensionManagementPort,
-    ) -> Result<Self, ProductSurfaceFailure> {
+    ) -> Result<Self, ProductOperationFailure> {
         Ok(Self {
             active_capabilities: extension_management
                 .active_model_visible_capabilities()

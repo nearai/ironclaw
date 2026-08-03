@@ -185,7 +185,7 @@ is_shared_test_path() {
     .github/workflows/reborn-tests.yml|.github/workflows/reborn-e2e.yml|.github/workflows/nightly-deep-ci.yml)
       return 0
       ;;
-    crates/ironclaw_common/*|crates/ironclaw_host_api/*|crates/ironclaw_host_runtime/*|crates/ironclaw_loop_contracts/*|crates/ironclaw_loop_host/*|crates/ironclaw_processes/*)
+    crates/ironclaw_common/*|crates/ironclaw_extension_contracts/*|crates/ironclaw_host_api/*|crates/ironclaw_host_runtime/*|crates/ironclaw_loop_contracts/*|crates/ironclaw_loop_host/*|crates/ironclaw_processes/*|crates/ironclaw_product_contracts/*)
       return 0
       ;;
     crates/ironclaw_filesystem/*|crates/ironclaw_memory/*|crates/ironclaw_events/*|crates/ironclaw_event_projections/*|crates/ironclaw_event_streams/*)
@@ -230,7 +230,7 @@ is_reborn_test_path() {
     crates/ironclaw_webui/*)
       return 0
       ;;
-    crates/ironclaw_conversations/*|crates/ironclaw_extension_host/*|crates/ironclaw_outbound/*|crates/ironclaw_product/*|crates/ironclaw_triggers/*)
+    crates/ironclaw_conversations/*|crates/ironclaw_extension_host/*|crates/ironclaw_extension_manager/*|crates/ironclaw_outbound/*|crates/ironclaw_product/*|crates/ironclaw_triggers/*)
       return 0
       ;;
     scripts/ci/reborn-coverage-*.sh|scripts/ci/test-reborn-coverage.sh|scripts/ci/test-reborn-coverage-*.sh|scripts/ci/reborn_changed_coverage.py|scripts/ci/test_reborn_changed_coverage.py|scripts/ci/critical_mutation_gate.py|scripts/ci/test-critical-mutation-gate.sh|scripts/ci/check-reborn-branch-coverage-flags.py|scripts/ci/test-check-reborn-branch-coverage-flags.sh|scripts/ci/check-reborn-qa-fixtures.sh|scripts/ci/test-check-reborn-qa-fixtures.sh|scripts/ci/lib/reborn_coverage_lcov.py|scripts/ci/reborn-crate-test-buckets.sh|scripts/ci/test-reborn-crate-test-buckets.sh|scripts/ci/ws12-suite-shards.toml|scripts/ci/ws12_suite_shards.py|scripts/ci/test_ws12_suite_shards.py|scripts/ci/ws12_workflow_contracts.py|scripts/ci/test_ws12_workflow_contracts.py|scripts/ci/check-test-suite-boundaries.sh|scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh)

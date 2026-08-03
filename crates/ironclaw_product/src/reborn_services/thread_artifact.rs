@@ -1,7 +1,7 @@
 //! Caller-owned, redacted evidence bundle for a complete thread.
 
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::product_surface::{
+use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
 };
 use ironclaw_reborn_traces::contribution::DeterministicTraceRedactor;
@@ -9,15 +9,18 @@ use ironclaw_reborn_traces::contribution::DeterministicTraceRedactor;
 use ironclaw_threads::{BoundedThreadMessages, BoundedThreadMessagesRequest};
 use serde::{Deserialize, Serialize};
 
+use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewProvider};
+
 use super::{
-    ProductCapabilityInvoker, RebornServices, RebornViewDescriptor, RebornViewProvider,
-    RunArtifactLogs, RunArtifactMessage, RunArtifactRedaction, map_timeline_probe_error,
-    parse_thread_id_field,
+    ProductCapabilityInvoker, RebornServices, RunArtifactLogs, RunArtifactMessage,
+    RunArtifactRedaction, map_timeline_probe_error, parse_thread_id_field,
     run_artifact::{ARTIFACT_REDACTION_PIPELINE, artifact_messages, context_messages_by_id},
     thread_scope_from_turn_scope,
 };
 
 pub const THREAD_ARTIFACT_SCHEMA: &str = "ironclaw.thread_artifact.v1";
+pub use ironclaw_product_contracts::product_wire::RebornThreadArtifactRequest;
+
 pub const THREAD_ARTIFACT_MAX_MESSAGES: usize = 1_000;
 const THREAD_ARTIFACT_MAX_STORED_BYTES: usize = 16 * 1024 * 1024;
 const THREAD_ARTIFACT_MAX_SERIALIZED_BYTES: usize = 20 * 1024 * 1024;
@@ -25,11 +28,6 @@ pub const THREAD_ARTIFACT_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "thread_artifact",
     paginated: false,
 };
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornThreadArtifactRequest {
-    pub thread_id: String,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornThreadArtifact {

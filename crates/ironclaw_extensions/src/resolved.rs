@@ -15,12 +15,13 @@
 
 use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode, RuntimeCredentialAccountSetup},
-    channel::ChannelDescriptor,
     ids::{ExtensionId, SecretHandle, VendorId},
-    memory::MemoryDescriptor,
     path::VirtualPath,
-    recipe::VendorAuthRecipe,
     trust::RequestedTrustClass,
+};
+
+use ironclaw_extension_contracts::{
+    channel::ChannelDescriptor, memory::MemoryDescriptor, recipe::VendorAuthRecipe,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -141,7 +142,7 @@ pub struct ResolvedMcpDeclaration {
     /// user-registered MCP definition. Bundled/static providers use NoAuth
     /// here because their concrete auth recipe remains the authority.
     #[serde(default)]
-    pub registration_auth: ironclaw_host_api::hosted_mcp::HostedMcpAuthSelection,
+    pub registration_auth: ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection,
 }
 
 /// One vendor the extension authenticates against: the account setup this
@@ -158,7 +159,8 @@ pub struct ResolvedAuthSurface {
     /// OAuth MCP. This stays with the recipe so later DCR uses the advertised
     /// location rather than guessing a well-known resource path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub protected_resource_metadata_url: Option<ironclaw_host_api::recipe::HttpsEndpoint>,
+    pub protected_resource_metadata_url:
+        Option<ironclaw_extension_contracts::recipe::HttpsEndpoint>,
 }
 
 /// Serializable mirror of a v2 `[[host_api]]` reference.
@@ -171,7 +173,7 @@ pub struct ResolvedHostApiRef {
 /// Serializable mirror of a v2 contract-projected section surface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedSectionSurface {
-    pub kind: ironclaw_host_api::surface::CapabilitySurfaceKind,
+    pub kind: ironclaw_extension_contracts::surface::CapabilitySurfaceKind,
     pub host_api: String,
     pub section: String,
 }

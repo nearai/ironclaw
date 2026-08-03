@@ -20,9 +20,10 @@ use std::time::Duration;
 
 use chrono::{TimeZone, Utc};
 use ironclaw_conversations::{
-    AdapterInstallationId, AdapterKind, ExternalActorRef, InMemoryConversationServices,
+    AdapterInstallationId, AdapterKind, InMemoryConversationServices,
     trusted_trigger_fire_submitter,
 };
+use ironclaw_extension_contracts::external::ExternalActorRef;
 use ironclaw_host_api::turn::{TurnGateRef, TurnRunId, TurnScope, TurnStatus};
 use ironclaw_llm::testing::provider_chain_over;
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
@@ -95,6 +96,7 @@ impl RebornIntegrationHarness {
                 ExternalActorRef::new(
                     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
                     self.binding.actor_user_id.as_str(),
+                    None::<String>,
                 )?,
                 self.binding.actor_user_id.clone(),
             )

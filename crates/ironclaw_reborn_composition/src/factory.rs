@@ -82,11 +82,15 @@ use ironclaw_capabilities::{
     CapabilityObligationPhase, CapabilityObligationRequest,
 };
 use ironclaw_conversations::RebornFilesystemConversationServices;
-use ironclaw_conversations::{
-    AdapterInstallationId, AdapterKind, ConversationActorPairingService, ExternalActorRef,
-};
+use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ConversationActorPairingService};
 use ironclaw_events::{DurableAuditLog, DurableEventLog};
+use ironclaw_extension_contracts::external::ExternalActorRef;
+use ironclaw_extension_contracts::recipe::RecipeClientCredentials;
 use ironclaw_extension_host::channel_pairing::ChannelPairingRegistry;
+use ironclaw_extension_host::extension_lifecycle::{
+    ExtensionCredentialCleanup, RebornLocalExtensionManagementPort,
+    RebornProductAuthCredentialCleanup,
+};
 use ironclaw_extension_host::{
     ActiveExtensionPublisher, AdminConfigurationCatalogUse, AdminConfigurationService,
     AvailableExtensionCatalog, ChannelConfigService, ExtensionRemovalCleanupAdapter,
@@ -95,17 +99,13 @@ use ironclaw_extension_host::{
     product_extension_host_api_contract_registry, provider_instance_readiness_map,
     restore_extension_lifecycle_state,
 };
-use ironclaw_extension_host::{
+use ironclaw_extension_manager::{
     admin_configuration::{
         ComposedAdminConfigurationService, ComposedExtensionAdminConfigurationResolver,
     },
     admin_configuration_capability::{
         extend_builtin_first_party_package as extend_builtin_admin_configuration_package,
         insert_handler as insert_admin_configuration_handler,
-    },
-    extension_lifecycle::{
-        ExtensionCredentialCleanup, RebornLocalExtensionManagementPort,
-        RebornProductAuthCredentialCleanup,
     },
     extension_lifecycle_capabilities::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
@@ -151,7 +151,6 @@ use ironclaw_host_api::{
     ids::{CorrelationId, ExtensionId, InvocationId, PackageId, RunId, UserId, VendorId},
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
-    recipe::RecipeClientCredentials,
     resource::{ResourceEstimate, ResourceScope},
     runtime::{RuntimeKind, TrustClass},
 };
@@ -174,10 +173,13 @@ use ironclaw_outbound::{
 use ironclaw_processes::{ProcessConcurrencyLimits, ProcessJournalStore, ProcessServices};
 use ironclaw_product::RebornProjectService;
 use ironclaw_product::{
-    ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
-    ExtensionAccountSetupRegistry, LifecycleProductSurfaceContext,
-    OutboundPreferencesProductService, ProductAuthTurnGateResumeDispatcher, ProjectService,
+    ChannelConnectionRequirement, ExtensionAccountSetupRegistry, OutboundPreferencesProductService,
+    ProductAuthTurnGateResumeDispatcher, ProjectService,
 };
+use ironclaw_product_contracts::account_setup::{
+    ChannelConnectionNoticePolicy, ExtensionAccountSetupDescriptor,
+};
+use ironclaw_product_contracts::lifecycle_service::LifecycleProductSurfaceContext;
 use ironclaw_projects::ProjectRepository;
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_resources::{
@@ -218,6 +220,7 @@ use trigger_creation_assembly::{
 mod production_backend_assembly;
 mod production_build_assembly;
 mod runtime_lane_assembly;
+use ironclaw_product_contracts::delivery::ChannelDeliveryResolver;
 #[cfg(any(test, feature = "test-support"))]
 use production_backend_assembly::build_libsql_production;
 #[cfg(test)]
@@ -343,7 +346,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) memory_service_resolver: MemoryServiceResolver,
     /// Lifecycle hooks declared by the bound memory provider. Host-initiated
     /// retrieval, recording, and profile reads are wired only when declared.
-    pub(crate) memory_lifecycle: ironclaw_host_api::memory::MemoryDescriptor,
+    pub(crate) memory_lifecycle: ironclaw_extension_contracts::memory::MemoryDescriptor,
     pub(crate) workspace_mounts: MountView,
     pub(crate) standalone_storage_root: Option<PathBuf>,
     pub(crate) default_system_prompt_path: Option<PathBuf>,
@@ -408,8 +411,7 @@ pub(crate) struct RebornRuntimeStores {
     /// The deployment-first channel delivery resolver behind the coordinator,
     /// exposed separately for host flows (e.g. DM target provisioning) that
     /// need one stable adapter + egress read outside a delivery.
-    pub(crate) channel_delivery_resolver:
-        Option<Arc<dyn ironclaw_product::ChannelDeliveryResolver>>,
+    pub(crate) channel_delivery_resolver: Option<Arc<dyn ChannelDeliveryResolver>>,
     /// Registry of beta-era channel credential bridges (§11 compatibility):
     /// channel hosts whose secrets predate the extension-config store
     /// register resolution ports here.
@@ -421,7 +423,7 @@ pub(crate) struct RebornRuntimeStores {
 struct ChannelHostWiring {
     extension_ingress: Option<ironclaw_extension_host::extension_ingress::ExtensionIngressParts>,
     delivery_coordinator: Option<Arc<ironclaw_product::DeliveryCoordinator>>,
-    channel_delivery_resolver: Option<Arc<dyn ironclaw_product::ChannelDeliveryResolver>>,
+    channel_delivery_resolver: Option<Arc<dyn ChannelDeliveryResolver>>,
     #[cfg(feature = "test-support")]
     channel_egress_credential_bridges:
         Option<Arc<ironclaw_extension_host::channel_egress::BridgedChannelEgressCredentials>>,
@@ -1227,7 +1229,7 @@ fn manifest_channel_account_setup_descriptors(
             let channel = manifest.channel.as_ref()?;
             let connection = channel.connection.as_ref()?;
             if connection.strategy
-                != ironclaw_host_api::channel::ChannelConnectionStrategy::WebGeneratedCode
+                != ironclaw_extension_contracts::channel::ChannelConnectionStrategy::WebGeneratedCode
             {
                 return None;
             }

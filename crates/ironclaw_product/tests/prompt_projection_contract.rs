@@ -10,9 +10,10 @@ use ironclaw_host_api::{
 };
 use ironclaw_product::AuthPromptChallengeKind;
 use ironclaw_product::{
-    AuthChallengeProvider, AuthChallengeView, BlockedAuthPromptRequest, approval_prompt_lookup,
+    AuthChallengeProvider, AuthChallengeView, approval_prompt_lookup,
     auth_prompt_view_for_blocked_auth,
 };
+use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
 
 #[derive(Debug)]
 struct OAuthChallenge {

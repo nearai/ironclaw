@@ -1,7 +1,7 @@
 """Admin user-management E2E against the real ``ironclaw-reborn serve`` binary.
 
 Drives the WebChat v2 admin surface (`/api/webchat/v2/admin/*`, backed by
-`ironclaw_product::AdminUserService`) over HTTP against the standalone
+`ironclaw_product_contracts::admin_users::AdminUserService`) over HTTP against the standalone
 Reborn binary — so unlike the crate-tier `admin_api_e2e.rs` (which composes the
 router in-process), this exercises serve.rs's real wiring: the operator
 env-bearer authenticator, and the signed-session-store token minter that must
@@ -18,8 +18,11 @@ covered at the crate tier; here every lifecycle/delete user stays a `member`,
 which can never strand the tenant's admins.
 """
 
+import asyncio
+import json
 import re
 import uuid
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -133,6 +136,132 @@ async def test_list_users_contains_new_user(admin_client, test_user):
     assert r.status_code == 200, r.text
     ids = [u["user_id"] for u in r.json()["users"]]
     assert test_user["id"] in ids
+
+
+async def test_admin_users_ui_paginates_retries_and_deduplicates(
+    reborn_v2_page, reborn_v2_server
+):
+    """The served Admin users page preserves cursor pages and retries safely."""
+    requested_cursors = []
+    pagination_attempts = 0
+    release_final_page = asyncio.Event()
+
+    def user_record(user_id, display_name):
+        return {
+            "user_id": user_id,
+            "display_name": display_name,
+            "email": f"{user_id}@example.com",
+            "role": "member",
+            "status": "active",
+            "job_count": 0,
+            "total_cost": 0,
+        }
+
+    async def handle_users(route):
+        nonlocal pagination_attempts
+        query = parse_qs(urlparse(route.request.url).query)
+        cursor = query.get("cursor", [None])[0]
+        requested_cursors.append(cursor)
+
+        if cursor is None:
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "users": [
+                            user_record("first-user", "First User"),
+                            user_record("shared-user", "Shared User"),
+                        ],
+                        "next_cursor": "cursor-1",
+                    }
+                ),
+            )
+            return
+
+        assert cursor == "cursor-1"
+        pagination_attempts += 1
+        # React Query retries a failed query once. Fail both automatic attempts
+        # so the page reaches its explicit retry state.
+        if pagination_attempts <= 2:
+            await route.fulfill(
+                status=503,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "error": "service_unavailable",
+                        "kind": "service_unavailable",
+                        "retryable": True,
+                    }
+                ),
+            )
+            return
+
+        await release_final_page.wait()
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "users": [
+                        user_record("shared-user", "Shared User"),
+                        user_record("second-user", "Second User"),
+                    ],
+                    "next_cursor": None,
+                }
+            ),
+        )
+
+    page = reborn_v2_page
+    await page.route(f"**{ADMIN_BASE}/users*", handle_users)
+    await page.goto(
+        f"{reborn_v2_server}/admin/users?token={REBORN_V2_AUTH_TOKEN}"
+    )
+
+    load_more = page.locator(SEL_V2["admin_users_load_more"])
+    await expect(page.get_by_role("button", name="First User", exact=True)).to_be_visible(
+        timeout=15000
+    )
+    await expect(page.get_by_role("button", name="Shared User", exact=True)).to_have_count(
+        1
+    )
+    await expect(page.get_by_role("button", name="Second User", exact=True)).to_have_count(
+        0
+    )
+    await expect(load_more).to_be_visible()
+
+    await load_more.click()
+    load_more_error = page.locator(SEL_V2["admin_users_load_more_error"])
+    await expect(load_more_error).to_be_visible(timeout=15000)
+    await expect(page.get_by_role("button", name="First User", exact=True)).to_be_visible()
+    await expect(page.get_by_role("button", name="Shared User", exact=True)).to_have_count(
+        1
+    )
+    assert pagination_attempts == 2
+
+    async with page.expect_request(
+        lambda request: "cursor=cursor-1" in request.url
+    ):
+        await load_more.click()
+    try:
+        await expect(load_more).to_be_disabled()
+        await expect(load_more).to_contain_text("Loading...")
+        # A native click on the disabled control must not start a duplicate page.
+        await load_more.evaluate("(element) => element.click()")
+        await page.wait_for_timeout(100)
+        assert pagination_attempts == 3
+    finally:
+        release_final_page.set()
+
+    await expect(page.get_by_role("button", name="Second User", exact=True)).to_be_visible(
+        timeout=15000
+    )
+    await expect(page.get_by_role("button", name="Shared User", exact=True)).to_have_count(
+        1
+    )
+    await expect(load_more_error).to_have_count(0)
+    await expect(load_more).to_have_count(0)
+    assert requested_cursors == [None, "cursor-1", "cursor-1", "cursor-1"]
 
 
 async def test_get_user_detail(admin_client, test_user):

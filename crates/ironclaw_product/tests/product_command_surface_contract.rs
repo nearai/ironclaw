@@ -5,23 +5,24 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::product_surface::{
-    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
-    ProductSurfaceInvokeRequest, ProductSurfaceInvokeResponse,
-};
 use ironclaw_product::{
-    ActionDispatchKind, AdminUserRole, CommandActorRoleResolver, DefaultProductSurface,
-    DirectConversationCommandAdmission, FakeConversationBindingService, FakeIdempotencyLedger,
-    FakeInboundTurnService, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
-    PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand,
-    ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
-    ProductInboundAck, ProductRejectionKind, ProductSurfaceFailure,
+    ActionDispatchKind, DefaultProductSurface, DirectConversationCommandAdmission,
+    FakeConversationBindingService, FakeIdempotencyLedger, FakeInboundTurnService,
+    PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID, PRODUCT_MODEL_COMMAND_OPERATION_ID,
+    PRODUCT_STATUS_COMMAND_OPERATION_ID, ProductCommand, ProductCommandAdmission,
+    ProductCommandAdmissionService, ProductInboundAck, ProductRejectionKind, ProductSurfaceFailure,
 };
 use ironclaw_product::{
     AdapterInstallationId, AuthRequirement, ConversationBindingService, ExternalActorRef,
     ExternalConversationRef, ExternalEventId, InboundCommandPayload, ProductAdapterId,
     ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence,
     ResolveBindingRequest, ResolvedBinding, TrustedInboundContext,
+};
+use ironclaw_product_contracts::admin_users::AdminUserRole;
+use ironclaw_product_contracts::command::{CommandActorRoleResolver, ProductCommandContext};
+use ironclaw_product_contracts::surface::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceInvokeRequest, ProductSurfaceInvokeResponse,
 };
 
 fn sample_command_envelope(
@@ -183,8 +184,8 @@ impl ProductSurface for RecordingCommandSurface {
     async fn query(
         &self,
         _caller: ProductSurfaceCaller,
-        _request: ironclaw_host_api::product_surface::ProductSurfaceQueryRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceQueryPage, ProductSurfaceError>
+        _request: ironclaw_product_contracts::surface::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_product_contracts::surface::ProductSurfaceQueryPage, ProductSurfaceError>
     {
         Err(ProductSurfaceError::internal())
     }
@@ -192,9 +193,11 @@ impl ProductSurface for RecordingCommandSurface {
     async fn stream_events(
         &self,
         _caller: ProductSurfaceCaller,
-        _request: ironclaw_host_api::product_surface::ProductSurfaceStreamRequest,
-    ) -> Result<ironclaw_host_api::product_surface::ProductSurfaceStreamResponse, ProductSurfaceError>
-    {
+        _request: ironclaw_product_contracts::surface::ProductSurfaceStreamRequest,
+    ) -> Result<
+        ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
+        ProductSurfaceError,
+    > {
         Err(ProductSurfaceError::internal())
     }
 }

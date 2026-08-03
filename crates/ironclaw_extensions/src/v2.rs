@@ -53,9 +53,10 @@ use ironclaw_host_api::{
     ids::{CapabilityId, ExtensionId, SecretHandle, VendorId},
     resource::ResourceProfile,
     runtime::{RuntimeKind, TrustClass},
-    surface::CapabilitySurfaceKind,
     trust::RequestedTrustClass,
 };
+
+use ironclaw_extension_contracts::surface::CapabilitySurfaceKind;
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
 

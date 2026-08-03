@@ -4,9 +4,11 @@
 //! deliveries or client retries are detected and replay the prior outcome
 //! instead of re-executing side effects.
 
+use ironclaw_product_contracts::action::ActionFingerprintKey;
+
 use async_trait::async_trait;
 
-use crate::action::{ActionFingerprintKey, ProductInboundAction};
+use crate::action::ProductInboundAction;
 use crate::error::ProductSurfaceFailure;
 
 /// Port for the durable inbound action idempotency ledger.

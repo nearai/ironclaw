@@ -27,6 +27,7 @@ use crate::Mem0ConnectionConfig;
 use crate::RebornBuildError;
 use crate::RebornCompositionProfile;
 use crate::deployment::DeploymentConfig;
+use ironclaw_product_contracts::account_setup::ExtensionAccountSetupDescriptor;
 
 const DEFAULT_REBORN_POSTGRES_URL_ENV: &str = "IRONCLAW_REBORN_POSTGRES_URL";
 const DEFAULT_REBORN_SECRET_MASTER_KEY_ENV: &str = "IRONCLAW_REBORN_SECRET_MASTER_KEY";
@@ -236,11 +237,12 @@ pub struct ChannelExtensionBinding {
     /// The extension id the manifest declares (also the adapter id).
     pub extension_id: String,
     /// The channel adapter implementation linked into the deployment.
-    pub adapter: std::sync::Arc<dyn ironclaw_product::ChannelAdapter>,
+    pub adapter: std::sync::Arc<dyn ironclaw_extension_contracts::channel_adapter::ChannelAdapter>,
     /// The vendor half of the preference-target codec, consumed by the
     /// generic outbound-target provider and triggered-delivery hook.
-    pub preference_target_codec:
-        Option<std::sync::Arc<dyn ironclaw_product::PreferenceTargetCodec>>,
+    pub preference_target_codec: Option<
+        std::sync::Arc<dyn ironclaw_extension_contracts::preference_target::PreferenceTargetCodec>,
+    >,
 }
 
 #[derive(Clone, Debug)]
@@ -772,7 +774,7 @@ impl RebornHostBindings {
     /// Binary-assembled account-setup descriptors (see the field doc).
     pub fn with_account_setup_descriptors(
         mut self,
-        descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
+        descriptors: Vec<ExtensionAccountSetupDescriptor>,
     ) -> Self {
         self.deployment.account_setup_descriptors = descriptors;
         self

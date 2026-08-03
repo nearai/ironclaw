@@ -4,13 +4,14 @@
 //! before accepted-message staging. They may allow, rewrite, or reject a
 //! user-message payload without exposing raw policy internals to adapters.
 
+use ironclaw_product_contracts::action::SourceBindingKey;
+
 use crate::{
     AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ProductAdapterId,
     ProductInboundEnvelope, ProductRejection, UserMessagePayload,
 };
 use async_trait::async_trait;
 
-use crate::action::SourceBindingKey;
 use crate::error::ProductSurfaceFailure;
 
 /// Request passed to before-inbound policy implementations.

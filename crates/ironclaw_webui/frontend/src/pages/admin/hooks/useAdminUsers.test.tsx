@@ -34,7 +34,7 @@ function createQueryClient() {
       queries: { retry: false, staleTime: Infinity },
     },
   });
-  queryClient.setQueryData(usersQueryKey, { users: [] });
+  queryClient.setQueryData(usersQueryKey, { users: [], nextCursor: null });
   return queryClient;
 }
 

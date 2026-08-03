@@ -8,9 +8,11 @@ use ironclaw_host_api::{
     ids::{ExtensionId, UserId, VendorId},
 };
 use ironclaw_product::{
+    ChannelConnectionRequirement, ExtensionAccountSetupRegistry, RebornChannelConnectStrategy,
+};
+use ironclaw_product_contracts::account_setup::{
     AccountConnectionStatusError, AccountConnectionStatusSource, ChannelConnectionNoticePolicy,
-    ChannelConnectionRequirement, ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
-    ExtensionAccountSetupRegistry, RebornChannelConnectStrategy,
+    ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
 };
 
 fn extension_id(value: &str) -> ExtensionId {

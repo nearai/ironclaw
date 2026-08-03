@@ -18,9 +18,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::memory::{MemoryDescriptor, MemoryLifecycleHook};
 use ironclaw_host_api::{
     ids::{CorrelationId, InvocationId},
-    memory::{MemoryDescriptor, MemoryLifecycleHook},
     resource::ResourceScope,
 };
 use ironclaw_loop_contracts::{

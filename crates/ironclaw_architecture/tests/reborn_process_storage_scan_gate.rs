@@ -1,4 +1,9 @@
-use std::path::{Path, PathBuf};
+#[allow(dead_code)]
+mod ratchet_support;
+
+use std::path::Path;
+
+use ratchet_support::workspace_root;
 
 #[test]
 fn process_and_thread_request_storage_paths_do_not_enumerate_collections() {
@@ -65,12 +70,4 @@ fn line_number(source: &str, offset: usize) -> usize {
 fn read(path: &Path) -> String {
     std::fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
-}
-
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("architecture crate must be under workspace/crates")
-        .to_path_buf()
 }

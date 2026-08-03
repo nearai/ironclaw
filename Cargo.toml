@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/ironclaw_common", "crates/ironclaw_observability", "crates/ironclaw_host_api", "crates/ironclaw_host_ingress", "crates/ironclaw_libsql_runtime", "crates/ironclaw_filesystem", "crates/ironclaw_attachments", "crates/ironclaw_extractors", "crates/ironclaw_memory", "crates/ironclaw_memory_native", "crates/ironclaw_memory_mem0", "crates/ironclaw_events", "crates/ironclaw_event_projections", "crates/ironclaw_event_streams", "crates/ironclaw_reborn_event_store", "crates/ironclaw_extensions", "crates/ironclaw_extension_host", "crates/ironclaw_processes", "crates/ironclaw_scripts", "crates/ironclaw_process_sandbox", "crates/ironclaw_mcp", "crates/ironclaw_wasm", "crates/ironclaw_wasm_limiter", "crates/ironclaw_capabilities", "crates/ironclaw_secrets", "crates/ironclaw_network", "crates/ironclaw_host_runtime", "crates/ironclaw_runtime_policy", "crates/ironclaw_authorization", "crates/ironclaw_approvals", "crates/ironclaw_resources", "crates/ironclaw_auth", "crates/ironclaw_trust", "crates/ironclaw_turns", "crates/ironclaw_loop_contracts", "crates/ironclaw_agent_loop", "crates/ironclaw_threads", "crates/ironclaw_prompt_envelope", "crates/ironclaw_hooks", "crates/ironclaw_loop_host", "crates/ironclaw_runner", "crates/ironclaw_reborn_config", "crates/ironclaw_operator", "crates/ironclaw_reborn_composition", "crates/ironclaw_reborn_identity", "crates/ironclaw_first_party_extensions", "crates/ironclaw_first_party_extension_ports", "crates/ironclaw_reborn_cli", "crates/ironclaw_reborn_traces", "crates/ironclaw_webui", "crates/ironclaw_reborn_openai_compat", "crates/ironclaw_conversations", "crates/ironclaw_product", "crates/ironclaw_telegram_extension", "crates/ironclaw_telegram_v2_adapter", "crates/ironclaw_slack_extension", "crates/ironclaw_outbound", "crates/ironclaw_triggers", "crates/ironclaw_projects", "crates/ironclaw_architecture", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_llm", "tools/ironclaw_stress"]
+members = [".", "crates/ironclaw_common", "crates/ironclaw_observability", "crates/ironclaw_host_api", "crates/ironclaw_host_ingress", "crates/ironclaw_libsql_runtime", "crates/ironclaw_filesystem", "crates/ironclaw_attachments", "crates/ironclaw_extractors", "crates/ironclaw_memory", "crates/ironclaw_memory_native", "crates/ironclaw_memory_mem0", "crates/ironclaw_events", "crates/ironclaw_event_projections", "crates/ironclaw_event_streams", "crates/ironclaw_reborn_event_store", "crates/ironclaw_extensions", "crates/ironclaw_extension_host", "crates/ironclaw_extension_manager", "crates/ironclaw_processes", "crates/ironclaw_scripts", "crates/ironclaw_process_sandbox", "crates/ironclaw_mcp", "crates/ironclaw_wasm", "crates/ironclaw_wasm_limiter", "crates/ironclaw_capabilities", "crates/ironclaw_secrets", "crates/ironclaw_network", "crates/ironclaw_host_runtime", "crates/ironclaw_runtime_policy", "crates/ironclaw_authorization", "crates/ironclaw_approvals", "crates/ironclaw_resources", "crates/ironclaw_auth", "crates/ironclaw_trust", "crates/ironclaw_turns", "crates/ironclaw_loop_contracts", "crates/ironclaw_extension_contracts", "crates/ironclaw_product_contracts", "crates/ironclaw_agent_loop", "crates/ironclaw_threads", "crates/ironclaw_prompt_envelope", "crates/ironclaw_hooks", "crates/ironclaw_loop_host", "crates/ironclaw_runner", "crates/ironclaw_reborn_config", "crates/ironclaw_operator", "crates/ironclaw_reborn_composition", "crates/ironclaw_reborn_identity", "crates/ironclaw_first_party_extensions", "crates/ironclaw_first_party_extension_ports", "crates/ironclaw_reborn_cli", "crates/ironclaw_reborn_traces", "crates/ironclaw_webui", "crates/ironclaw_reborn_openai_compat", "crates/ironclaw_conversations", "crates/ironclaw_product", "crates/ironclaw_telegram_extension", "crates/ironclaw_telegram_v2_adapter", "crates/ironclaw_slack_extension", "crates/ironclaw_outbound", "crates/ironclaw_triggers", "crates/ironclaw_projects", "crates/ironclaw_architecture", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_llm", "tools/ironclaw_stress"]
 default-members = ["crates/ironclaw_reborn_cli"]
 exclude = [
     "crates/ironclaw_silk_decoder",
@@ -102,7 +102,12 @@ url = "2"
 toml = "1.1"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
-ironclaw_host_api = { path = "crates/ironclaw_host_api", version = "0.1.0" }
+# `test-support` exposes `ProtocolAuthEvidence::test_verified` — the seam an
+# integration test uses to stand in for the host now that minting is
+# witness-gated (WS1.5). Declared explicitly rather than inherited through a
+# sibling dev-dep's feature unification, so the suite still compiles when run
+# alone.
+ironclaw_host_api = { path = "crates/ironclaw_host_api", version = "0.1.0", features = ["test-support"] }
 ironclaw_memory = { path = "crates/ironclaw_memory", version = "0.1.0" }
 ironclaw_host_ingress = { path = "crates/ironclaw_host_ingress", version = "0.1.0" }
 ironclaw_runtime_policy = { path = "crates/ironclaw_runtime_policy", version = "0.1.0" }
@@ -146,6 +151,9 @@ ironclaw_extensions = { path = "crates/ironclaw_extensions", version = "0.1.0" }
 # Extension-runtime P2: the invented-vendor fixture factory the integration
 # harness registers (`NativeExtensionFactory`), plus scripted channel fakes.
 ironclaw_extension_host = { path = "crates/ironclaw_extension_host", version = "0.1.0", features = ["test-support"] }
+# WS2.4: the lifecycle service bundle the hosted-MCP registration integration
+# test drives moved to the manager with the product face it builds.
+ironclaw_extension_manager = { path = "crates/ironclaw_extension_manager", version = "0.1.0", features = ["test-support"] }
 ironclaw_filesystem = { path = "crates/ironclaw_filesystem", version = "0.1.0" }
 ironclaw_mcp = { path = "crates/ironclaw_mcp", version = "0.1.0" }
 ironclaw_first_party_extensions = { path = "crates/ironclaw_first_party_extensions", version = "0.1.0" }
@@ -189,6 +197,8 @@ ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
 # runtime used by integration tests. cfg(test) does not propagate from an
 # integration-test binary into its deps, so the feature is explicit here.
 ironclaw_loop_contracts = { path = "crates/ironclaw_loop_contracts", version = "0.1.0" }
+ironclaw_extension_contracts = { path = "crates/ironclaw_extension_contracts", version = "0.1.0" }
+ironclaw_product_contracts = { path = "crates/ironclaw_product_contracts", version = "0.1.0" }
 ironclaw_turns = { path = "crates/ironclaw_turns", version = "0.1.0", features = ["test-support"] }
 # `InMemoryDurableEventLog` for the W5-WEBUI-API-1 SSE scenario's test-local
 # `ProjectionStream` wiring (`build_webui_event_stream_for_test`).

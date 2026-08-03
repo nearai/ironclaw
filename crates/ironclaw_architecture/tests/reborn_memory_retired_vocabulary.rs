@@ -11,20 +11,16 @@
 //! `tests/integration/`) so none of it can be reintroduced silently — same
 //! shape as `reborn_retired_taxonomy.rs`.
 //!
-//! Sanctioned exceptions are path-scoped, not term-scoped:
-//! - the v1 gateway enclave is being strangled wholesale, not policed
-//!   term-by-term;
-//! - this test names every term on purpose.
+//! Sanctioned exceptions are path-scoped, not term-scoped: this test names
+//! every term on purpose. The list is shrink-only and pinned to reality — see
+//! `SANCTIONED_PATHS`.
 
-use std::path::{Path, PathBuf};
+#[allow(dead_code)]
+mod ratchet_support;
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("architecture crate under crates")
-        .to_path_buf()
-}
+use std::path::Path;
+
+use ratchet_support::workspace_root;
 
 /// Retired memory vocabulary. A hit outside the sanctioned paths is a
 /// regression, not a style issue.
@@ -45,10 +41,15 @@ const RETIRED_TERMS: &[&str] = &[
 ];
 
 /// Path fragments allowed to reference retired vocabulary.
+///
+/// Shrink-only, and pinned to reality by
+/// `sanctioned_paths_each_resolve_to_exactly_one_file`: a fragment matching no
+/// scanned file exempts nothing, so it is dead text that reads as policy, and a
+/// fragment matching *more than one* exempts more than it says. The
+/// `crates/ironclaw_gateway/` entry had already outlived its crate when that
+/// check was added — invisibly, because a fragment that matches nothing simply
+/// never sanctions anything.
 const SANCTIONED_PATHS: &[&str] = &[
-    // The v1 gateway is a legacy enclave being strangled wholesale — not
-    // policed term-by-term (same footing as `src/`).
-    "crates/ironclaw_gateway/",
     // This gate names every term on purpose.
     "reborn_memory_retired_vocabulary.rs",
 ];
@@ -61,7 +62,12 @@ fn is_sanctioned(path: &str) -> bool {
 
 /// A scan error is a gate failure, not a skip: an unreadable directory or
 /// file could hide a reintroduced term.
-fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) -> std::io::Result<()> {
+fn scan_dir(
+    root: &Path,
+    dir: &Path,
+    hits: &mut Vec<String>,
+    scanned: &mut Vec<String>,
+) -> std::io::Result<()> {
     let entries = std::fs::read_dir(dir)?;
     for entry in entries {
         let entry = entry?;
@@ -72,7 +78,7 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) -> std::io::Result<
             if name == "target" || name == "node_modules" || name == ".git" {
                 continue;
             }
-            scan_dir(root, &path, hits)?;
+            scan_dir(root, &path, hits, scanned)?;
             continue;
         }
         let is_rust = name.ends_with(".rs");
@@ -90,6 +96,7 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) -> std::io::Result<
             .unwrap_or(&path)
             .to_string_lossy()
             .replace('\\', "/");
+        scanned.push(relative.clone());
         if is_sanctioned(&relative) {
             continue;
         }
@@ -104,15 +111,106 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) -> std::io::Result<
     Ok(())
 }
 
-#[test]
-fn reborn_code_never_references_retired_memory_vocabulary() {
-    let root = workspace_root();
+/// Every scanned path, plus the hits. A scan error is a gate failure, not a
+/// skip, so both walks are `expect`ed rather than tolerated.
+fn scan_workspace(root: &Path) -> (Vec<String>, Vec<String>) {
     let mut hits = Vec::new();
-    scan_dir(&root, &root.join("crates"), &mut hits).expect("scan crates/ without I/O errors");
-    scan_dir(&root, &root.join("tests/integration"), &mut hits)
-        .expect("scan tests/integration without I/O errors");
+    let mut scanned = Vec::new();
+    scan_dir(root, &root.join("crates"), &mut hits, &mut scanned)
+        .expect("scan crates/ without I/O errors");
+    scan_dir(
+        root,
+        &root.join("tests/integration"),
+        &mut hits,
+        &mut scanned,
+    )
+    .expect("scan tests/integration without I/O errors");
     hits.sort();
     hits.dedup();
+    (hits, scanned)
+}
+
+/// Which scanned file a sanctioned fragment resolves to, refusing both the
+/// stale and the ambiguous case.
+///
+/// `is_sanctioned` matches with `contains`, so a fragment is only as precise as
+/// the tree makes it: a second file whose path contains `"…retired_vocabulary.rs"`
+/// would be exempted too, silently and invisibly. Requiring exactly one match
+/// keeps the fragment form (a workspace-relative literal would re-key this list
+/// to the flat `crates/<name>/` depth this PR exists to remove) while making
+/// ambiguity a failure rather than a widening.
+fn resolve_sanctioned<'a>(fragment: &str, scanned: &'a [String]) -> Result<&'a str, String> {
+    let matches: Vec<&str> = scanned
+        .iter()
+        .map(String::as_str)
+        .filter(|path| path.contains(fragment))
+        .collect();
+    match matches.as_slice() {
+        [single] => Ok(single),
+        [] => Err(format!(
+            "`{fragment}` matches no scanned file — delete it; this list is shrink-only and \
+             an entry that sanctions nothing is dead text that reads as policy"
+        )),
+        _ => Err(format!(
+            "`{fragment}` matches {} scanned files ({matches:?}) — an exemption must name \
+             exactly one file, or it silently exempts every future file whose path happens \
+             to contain the fragment. Lengthen the fragment until it is unambiguous",
+            matches.len()
+        )),
+    }
+}
+
+/// An exemption that matches nothing exempts nothing, and one that matches more
+/// than one file exempts more than it says. Mirrors the stale-entry check in
+/// `reborn_retired_taxonomy.rs`, this gate's twin, and adds the ambiguity half.
+#[test]
+fn sanctioned_paths_each_resolve_to_exactly_one_file() {
+    let (_, scanned) = scan_workspace(&workspace_root());
+    let problems: Vec<String> = SANCTIONED_PATHS
+        .iter()
+        .filter_map(|fragment| resolve_sanctioned(fragment, &scanned).err())
+        .collect();
+
+    assert!(
+        problems.is_empty(),
+        "SANCTIONED_PATHS entries must each name exactly one scanned file:\n  - {}",
+        problems.join("\n  - ")
+    );
+}
+
+/// Both refusals are pinned directly, so the rule does not depend on today's
+/// tree happening to be unambiguous.
+#[test]
+fn the_sanctioned_path_resolver_refuses_stale_and_ambiguous_entries() {
+    let scanned = vec![
+        "crates/ironclaw_architecture/tests/reborn_memory_retired_vocabulary.rs".to_string(),
+        "crates/ironclaw_memory/src/lib.rs".to_string(),
+    ];
+    assert_eq!(
+        resolve_sanctioned("reborn_memory_retired_vocabulary.rs", &scanned),
+        Ok("crates/ironclaw_architecture/tests/reborn_memory_retired_vocabulary.rs")
+    );
+
+    let error = resolve_sanctioned("does_not_exist.rs", &scanned)
+        .expect_err("a fragment matching nothing must refuse");
+    assert!(
+        error.contains("matches no scanned file"),
+        "expected a stale-entry refusal, got: {error}"
+    );
+
+    let mut shadowed = scanned.clone();
+    shadowed.push("crates/ironclaw_memory/src/reborn_memory_retired_vocabulary.rs".to_string());
+    let error = resolve_sanctioned("reborn_memory_retired_vocabulary.rs", &shadowed)
+        .expect_err("a fragment matching two files must refuse");
+    assert!(
+        error.contains("matches 2 scanned files"),
+        "expected an ambiguity refusal naming the count, got: {error}"
+    );
+}
+
+#[test]
+fn reborn_code_never_references_retired_memory_vocabulary() {
+    let (hits, _) = scan_workspace(&workspace_root());
     assert!(
         hits.is_empty(),
         "retired memory vocabulary reintroduced (the bound provider's manifest \

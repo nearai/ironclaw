@@ -1,12 +1,12 @@
 use ironclaw_agent_loop::executor::HostStage;
 use ironclaw_loop_contracts::{AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind};
 
-use crate::failure_categories::{
+use crate::failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND;
+use ironclaw_host_api::failure::categories::{
     BUDGET_ACCOUNTING_FAILED_CATEGORY, MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
-    MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_CREDITS_EXHAUSTED_REASON_KIND,
-    MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY, MODEL_STAGE_POLICY_DENIED_CATEGORY,
-    MODEL_STAGE_REQUEST_INVALID_CATEGORY, MODEL_STAGE_SCOPE_MISMATCH_CATEGORY,
-    TRANSCRIPT_WRITE_FAILED_CATEGORY,
+    MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_SPEND_BUDGET_EXHAUSTED_CATEGORY,
+    MODEL_STAGE_POLICY_DENIED_CATEGORY, MODEL_STAGE_REQUEST_INVALID_CATEGORY,
+    MODEL_STAGE_SCOPE_MISMATCH_CATEGORY, TRANSCRIPT_WRITE_FAILED_CATEGORY,
 };
 
 pub(crate) fn host_stage_failure_category(
@@ -90,7 +90,7 @@ mod tests {
             );
             assert_ne!(
                 category,
-                crate::failure_categories::HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY,
+                ironclaw_host_api::failure::categories::HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY,
                 "{kind:?} must name its own cause, not a generic host outage"
             );
         }

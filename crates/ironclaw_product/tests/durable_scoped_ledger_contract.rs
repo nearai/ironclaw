@@ -13,9 +13,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_product::ProductInboundAck;
 use ironclaw_product::RebornFilesystemIdempotencyLedger;
-use ironclaw_product::{
-    ActionFingerprintKey, IdempotencyDecision, IdempotencyLedger, ProductSurfaceFailure,
-};
+use ironclaw_product::{IdempotencyDecision, IdempotencyLedger, ProductSurfaceFailure};
+use ironclaw_product_contracts::action::ActionFingerprintKey;
 
 #[path = "durable_ledger_support/mod.rs"]
 mod support;

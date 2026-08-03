@@ -4,7 +4,9 @@
 //! opaque endpoint and auth selection, while the durable manifest remains the
 //! sole stored contract.
 
-use ironclaw_host_api::{hosted_mcp::HostedMcpEndpoint, ids::VendorId};
+use ironclaw_host_api::ids::VendorId;
+
+use ironclaw_extension_contracts::hosted_mcp::HostedMcpEndpoint;
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

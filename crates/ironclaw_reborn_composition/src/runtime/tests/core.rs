@@ -512,8 +512,8 @@ fn production_scheduler_wake_guard_passes_standalone_with_absent_wiring() {
         .expect("standalone is exempt from the scheduler wake wiring requirement");
 }
 
+use ironclaw_extension_contracts::state::{InstallationState, LifecyclePublicState};
 use ironclaw_host_api::ids::ProjectId;
-use ironclaw_host_api::state::{InstallationState, LifecyclePublicState};
 use ironclaw_host_api::turn::{
     AcceptedMessageRef, IdempotencyKey, LoopResultRef, ReplyTargetBindingRef,
     SanitizedCancelReason, SourceBindingRef, TurnActor, TurnId, TurnRunId, TurnScope, TurnStatus,
@@ -522,9 +522,6 @@ use ironclaw_host_api::{
     ids::{
         ActivityId, AgentId, ApprovalRequestId, CapabilityId, InvocationId, TenantId, ThreadId,
         UserId,
-    },
-    product_surface::{
-        ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
     },
     resolution::Resolution,
     resource::ResourceScope,
@@ -553,9 +550,13 @@ use ironclaw_product::{
     ProductSurfaceCommandDescriptor, RESOLVE_GATE_COMMAND, RebornExtensionCredentialSetup,
     RebornOutboundPreferencesResponse, RebornSetupExtensionResponse, RebornSkillListResponse,
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornViewPage, RebornViewQuery, SUBMIT_TURN_COMMAND, approval_gate_ref,
+    SUBMIT_TURN_COMMAND, approval_gate_ref,
 };
 use ironclaw_product::{ProductOutboundPayload, ProductProjectionItem};
+use ironclaw_product_contracts::surface::{
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+};
+use ironclaw_product_contracts::views::{RebornViewPage, RebornViewQuery};
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
     AppendToolResultReferenceRequest, EnsureThreadRequest, LoadContextMessagesRequest, MessageKind,
@@ -578,7 +579,7 @@ use crate::runtime_input::{
 use crate::{RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError};
 use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
 
-use super::{RebornSkillSourceKind, build_reborn_runtime};
+use super::{RebornSkillActivationSource, build_reborn_runtime};
 
 const RUNTIME_POLL_TIMEOUT: Duration = Duration::from_secs(10);
 const RUNTIME_SEND_TIMEOUT: Duration = Duration::from_secs(15);
@@ -4509,7 +4510,7 @@ async fn execute_skill_message_returns_plan_and_reads_active_bundle_assets() {
     assert_eq!(result.plan.activations()[0].name, "asset-helper");
     assert_eq!(
         result.plan.activations()[0].source,
-        Some(RebornSkillSourceKind::User)
+        Some(RebornSkillActivationSource::User)
     );
     assert_eq!(result.plan.active_bundles().len(), 1);
     assert_eq!(result.plan.active_bundles()[0].skill_name, "asset-helper");
@@ -5144,7 +5145,7 @@ async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
     // this test resolves the same authority a vision-capable model would.
     let read_port =
         ironclaw_product::ProjectScopedAttachmentReader::new(Arc::clone(&read_write_filesystem));
-    let lander = ironclaw_product::ProjectScopedAttachmentLander::new(read_write_filesystem);
+    let lander = ironclaw_attachments::ProjectScopedAttachmentLander::new(read_write_filesystem);
 
     let thread_scope = ThreadScope {
         tenant_id: TenantId::new("runtime-attachment-mount-tenant").unwrap(),
@@ -5153,7 +5154,7 @@ async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
         owner_user_id: Some(UserId::new("runtime-attachment-mount-owner").unwrap()),
         mission_id: None,
     };
-    let refs = ironclaw_product::InboundAttachmentLander::land(
+    let refs = ironclaw_attachments::InboundAttachmentLander::land(
         &lander,
         &thread_scope,
         "msg-attachment-mount",
@@ -5244,14 +5245,14 @@ async fn production_channel_host_lands_attachment_with_read_write_mount() {
 }
 
 async fn query_webui_extension_setup(
-    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
+    api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
     package_id: &str,
 ) -> RebornSetupExtensionResponse {
     let page = query_product_surface_page(
         api,
         caller,
-        ironclaw_product::RebornViewQuery {
+        ironclaw_product_contracts::views::RebornViewQuery {
             view_id: ironclaw_product::EXTENSION_SETUP_VIEW.id.to_string(),
             params: serde_json::json!({ "package_id": package_id }),
             cursor: None,
@@ -5263,7 +5264,7 @@ async fn query_webui_extension_setup(
 }
 
 async fn invoke_product_command<T, O>(
-    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
+    api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
     command: ProductSurfaceCommandDescriptor<T, O>,
     input: T,
@@ -5273,10 +5274,10 @@ where
     O: serde::de::DeserializeOwned,
 {
     let input = serde_json::to_value(input).map_err(ProductSurfaceError::internal_from)?;
-    let response = ironclaw_host_api::product_surface::ProductSurface::invoke(
+    let response = ironclaw_product_contracts::surface::ProductSurface::invoke(
         api,
         caller,
-        ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
             operation_id: command.capability_id()?,
             input,
             activity_id: ActivityId::new(),
@@ -5287,7 +5288,7 @@ where
 }
 
 async fn invoke_product_capability<T>(
-    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
+    api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
     capability_id: &str,
     input: T,
@@ -5296,10 +5297,10 @@ where
     T: serde::Serialize,
 {
     let input = serde_json::to_value(input).map_err(ProductSurfaceError::internal_from)?;
-    let response = ironclaw_host_api::product_surface::ProductSurface::invoke(
+    let response = ironclaw_product_contracts::surface::ProductSurface::invoke(
         api,
         caller,
-        ironclaw_host_api::product_surface::ProductSurfaceInvokeRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
             operation_id: CapabilityId::new(capability_id).expect("capability id"),
             input,
             activity_id: ActivityId::new(),
@@ -5310,14 +5311,14 @@ where
 }
 
 async fn query_product_surface_page(
-    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
+    api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
     query: RebornViewQuery,
 ) -> Result<RebornViewPage, ProductSurfaceError> {
-    let page = ironclaw_host_api::product_surface::ProductSurface::query(
+    let page = ironclaw_product_contracts::surface::ProductSurface::query(
         api,
         caller,
-        ironclaw_host_api::product_surface::ProductSurfaceQueryRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceQueryRequest {
             view_id: query.view_id,
             input: query.params,
             cursor: query.cursor,
@@ -5337,14 +5338,14 @@ async fn query_product_surface_page(
 }
 
 async fn stream_product_events(
-    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
+    api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
     request: RebornStreamEventsRequest,
 ) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
-    let response = ironclaw_host_api::product_surface::ProductSurface::stream_events(
+    let response = ironclaw_product_contracts::surface::ProductSurface::stream_events(
         api,
         caller,
-        ironclaw_host_api::product_surface::ProductSurfaceStreamRequest {
+        ironclaw_product_contracts::surface::ProductSurfaceStreamRequest {
             stream_id: Some(request.thread_id),
             after_cursor: request
                 .after_cursor
@@ -5362,7 +5363,7 @@ async fn stream_product_events(
 }
 
 async fn submit_webui_extension_setup(
-    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
+    api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
     package_id: &str,
     request: ProductSetupExtensionRequest,
@@ -5391,7 +5392,7 @@ async fn submit_webui_extension_setup(
 }
 
 async fn install_webui_extension_for_setup(
-    api: &dyn ironclaw_host_api::product_surface::ProductSurface,
+    api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
     package_id: &str,
 ) {
@@ -5568,7 +5569,7 @@ async fn standalone_webui_bundle_exposes_outbound_preferences_service() {
     let cleared_page = query_product_surface_page(
         bundle.as_ref(),
         caller.clone(),
-        ironclaw_product::RebornViewQuery {
+        ironclaw_product_contracts::views::RebornViewQuery {
             view_id: ironclaw_product::OUTBOUND_PREFERENCES_VIEW.id.to_string(),
             params: serde_json::json!({}),
             cursor: None,
@@ -5583,7 +5584,7 @@ async fn standalone_webui_bundle_exposes_outbound_preferences_service() {
     let targets_page = query_product_surface_page(
         bundle.as_ref(),
         caller,
-        ironclaw_product::RebornViewQuery {
+        ironclaw_product_contracts::views::RebornViewQuery {
             view_id: ironclaw_product::OUTBOUND_DELIVERY_TARGETS_VIEW
                 .id
                 .to_string(),
@@ -5656,7 +5657,7 @@ async fn standalone_webui_bundle_invokes_skill_install_with_scoped_mounts() {
     let skills_page = query_product_surface_page(
         bundle.as_ref(),
         caller,
-        ironclaw_product::RebornViewQuery {
+        ironclaw_product_contracts::views::RebornViewQuery {
             view_id: ironclaw_product::SKILLS_VIEW.id.to_string(),
             params: serde_json::json!({}),
             cursor: None,
@@ -5869,7 +5870,7 @@ async fn runtime_product_surface_without_local_runtime_still_lists_automations_f
     let response = query_product_surface_page(
         bundle.as_ref(),
         caller,
-        ironclaw_product::RebornViewQuery {
+        ironclaw_product_contracts::views::RebornViewQuery {
             view_id: ironclaw_product::AUTOMATIONS_VIEW.id.to_string(),
             params: serde_json::to_value(ProductListAutomationsRequest::default())
                 .expect("automation list params"),
@@ -6256,15 +6257,15 @@ async fn standalone_webui_bundle_records_selectable_filesystem_skill_context() {
 /// candidates carry the same (prompt-stage) surface version and the run completes.
 #[tokio::test]
 async fn multi_tool_call_response_survives_surface_change_mid_register() {
-    use ironclaw_product::{
-        LifecycleProductAction, LifecycleProductContext, LifecycleProductService,
-        LifecycleProductSurfaceContext,
+    use ironclaw_product::LifecycleProductAction;
+    use ironclaw_product_contracts::lifecycle_service::{
+        LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
     };
     use std::sync::OnceLock;
 
     // Gateway state seeded after runtime build.
     struct LifecycleServiceHandle {
-        service: ironclaw_extension_host::ExtensionHostLifecycleProductService,
+        service: ironclaw_extension_manager::ExtensionHostLifecycleProductService,
     }
 
     impl std::fmt::Debug for LifecycleServiceHandle {
@@ -6430,9 +6431,9 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
 
     // Seed the lifecycle service before the model gateway runs.
     let extension_management = runtime.extension_management.clone();
-    let service = ironclaw_extension_host::ExtensionHostLifecycleProductService::new(Arc::clone(
-        &runtime.skill_management,
-    ))
+    let service = ironclaw_extension_manager::ExtensionHostLifecycleProductService::new(
+        Arc::clone(&runtime.skill_management),
+    )
     .with_extension_management(extension_management)
     .with_runtime_credential_accounts(Arc::new(MultiToolConfiguredCredentials));
     service_slot

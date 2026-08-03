@@ -29,6 +29,7 @@ memory-mem0 = ["dep:ironclaw_memory_mem0"]
 test-support = [
     "dep:ironclaw_first_party_extensions",
     "ironclaw_extension_host/test-support",
+    "ironclaw_extension_manager/test-support",
     "ironclaw_auth/test-support",
     "ironclaw_host_runtime/test-support",
     "ironclaw_loop_host/test-support",
@@ -55,8 +56,11 @@ ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_hooks = { path = "../ironclaw_hooks" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_product_contracts = { path = "../ironclaw_product_contracts", version = "0.1.0" }
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_host_ingress = { path = "../ironclaw_host_ingress" }
 ironclaw_extension_host = { path = "../ironclaw_extension_host" }
+ironclaw_extension_manager = { path = "../ironclaw_extension_manager" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_llm = { path = "../ironclaw_llm", default-features = false, features = ["registry-provider-factory"] }
 ironclaw_loop_host = { path = "../ironclaw_loop_host" }
@@ -75,7 +79,7 @@ ironclaw_observability = { path = "../ironclaw_observability" }
 ironclaw_operator = { path = "../ironclaw_operator" }
 ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
-ironclaw_product = { path = "../ironclaw_product", features = ["host-auth-mint"] }
+ironclaw_product = { path = "../ironclaw_product" }
 ironclaw_runner = { path = "../ironclaw_runner" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_reborn_identity = { path = "../ironclaw_reborn_identity" }
@@ -127,6 +131,7 @@ uuid = { version = "1", features = ["v4"] }
 [dev-dependencies]
 ironclaw_auth = { path = "../ironclaw_auth", features = ["test-support"] }
 ironclaw_extension_host = { path = "../ironclaw_extension_host", features = ["test-support"] }
+ironclaw_extension_manager = { path = "../ironclaw_extension_manager", features = ["test-support"] }
 # DEL-7: composition no longer links first-party extensions in production; the
 # binary injects them as neutral data. The dev-dependency stays so the crate's
 # own unit/integration tests (and the test-support inventory helper) can build

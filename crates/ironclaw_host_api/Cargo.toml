@@ -20,7 +20,6 @@ layer = "contracts"
 # downstream crates stop hand-rolling ~25 one-method dispatcher fakes. Never
 # enabled by a shipped artifact.
 test-support = []
-host-auth-mint = []
 
 [dependencies]
 async-trait = "0.1"

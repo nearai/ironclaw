@@ -118,7 +118,7 @@ pub(crate) fn auth_prompt_text(view: &AuthPromptView, direct_message: bool) -> S
     // and expiry. Rendering locally silently dropped the code, so a pairing
     // challenge told the user to "send the displayed code" without ever
     // displaying one.
-    ironclaw_host_api::product_adapter::render_channel_auth_prompt(view, direct_message)
+    ironclaw_extension_contracts::auth_prompt::render_channel_auth_prompt(view, direct_message)
 }
 
 /// The body to render for a serviceable challenge. A pairing challenge
@@ -225,7 +225,7 @@ pub(crate) fn triggered_label_from_prompt(prompt: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::product_adapter::PairingPromptView;
+    use ironclaw_extension_contracts::auth_prompt::PairingPromptView;
     use ironclaw_host_api::turn::TurnRunId;
 
     fn view(challenge_kind: Option<AuthPromptChallengeKind>) -> AuthPromptView {

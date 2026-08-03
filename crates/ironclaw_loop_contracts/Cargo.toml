@@ -20,6 +20,7 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 hex = "0.4.3"
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_extension_contracts = { path = "../ironclaw_extension_contracts", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_jcs = "0.2"
 serde_json = "1"

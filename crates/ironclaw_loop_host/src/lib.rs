@@ -137,8 +137,6 @@ pub const ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT: &str = concat!(
     "\n\n",
     include_str!("../prompts/active_task_compaction_append.md"),
 );
-pub const FAILURE_EXPLANATION_SYSTEM_PROMPT: &str =
-    include_str!("../prompts/failure_explanation.md");
 pub use token_estimator::{
     CHARS_PER_TOKEN_DEFAULT, EstimatedTokenCount, estimate_tokens_from_chars,
 };

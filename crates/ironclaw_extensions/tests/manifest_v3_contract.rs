@@ -7,6 +7,10 @@
 
 use std::sync::Arc;
 
+use ironclaw_extension_contracts::{
+    channel::ConversationModel, memory::MemoryLifecycleHook, recipe::VendorAuthRecipe,
+    surface::CapabilitySurfaceKind,
+};
 use ironclaw_extensions::{
     CapabilityProviderHostApiContract, CapabilitySurfaceDeclV2, CapabilityVisibility,
     ExtensionManifestRecord, ExtensionRuntimeV2, HostApiContractRegistry,
@@ -17,13 +21,9 @@ use ironclaw_host_api::{
         EffectKind, OriginGatePolicy, PermissionMode, RuntimeCredentialAccountSetup,
         RuntimeCredentialRequirementSource,
     },
-    channel::ConversationModel,
     host_port::{
         HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortId,
     },
-    memory::MemoryLifecycleHook,
-    recipe::VendorAuthRecipe,
-    surface::CapabilitySurfaceKind,
 };
 
 const ACME_MANIFEST: &str =

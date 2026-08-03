@@ -3,18 +3,18 @@
 use super::*;
 
 use crate::{
-    AttachmentCleanupReport, AuthRequirement, ExternalEventId, ParsedProductInbound,
-    ProductInboundEnvelope, ProductInboundPayload, ProjectScopedAttachmentLander,
-    ProtocolAuthEvidence, TrustedInboundContext,
+    AuthRequirement, ExternalEventId, ParsedProductInbound, ProductInboundEnvelope,
+    ProductInboundPayload, ProtocolAuthEvidence, TrustedInboundContext,
 };
+use ironclaw_attachments::{AttachmentCleanupReport, ProjectScopedAttachmentLander};
 use ironclaw_filesystem::{
     Fault, FaultInjecting, FilesystemError, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
 };
 use ironclaw_host_api::{
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
-    product_surface::ProductSurfaceError,
 };
+use ironclaw_product_contracts::surface::ProductSurfaceError;
 use ironclaw_threads::{
     AttachmentKind, AttachmentRef, FilesystemSessionThreadService, InMemorySessionThreadService,
 };

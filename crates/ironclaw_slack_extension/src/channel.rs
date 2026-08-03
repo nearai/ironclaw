@@ -11,16 +11,18 @@
 //! anything delivered.
 
 use async_trait::async_trait;
-use ironclaw_host_api::product_adapter::{
-    AdapterInstallationId, ChannelAdapter, ChannelError, DeliveryReport, ExternalConversationRef,
-    ImmediateResponse, InboundOutcome, OutboundEnvelope, OutboundPart, PartDeliveryOutcome,
-    TargetCandidate, TargetQuery, VerifiedInbound, render_channel_auth_prompt,
+use ironclaw_extension_contracts::auth_prompt::render_channel_auth_prompt;
+use ironclaw_extension_contracts::channel_adapter::{
+    ChannelAdapter, ChannelError, DeliveryReport, ImmediateResponse, InboundOutcome,
+    OutboundEnvelope, OutboundPart, PartDeliveryOutcome, TargetCandidate, TargetQuery,
+    VerifiedInbound,
 };
-use ironclaw_host_api::{
-    action::NetworkMethod,
-    ids::SecretHandle,
-    tool_adapter::{RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest},
+use ironclaw_extension_contracts::external::ExternalConversationRef;
+use ironclaw_extension_contracts::tool_adapter::{
+    RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest,
 };
+use ironclaw_host_api::product_adapter::AdapterInstallationId;
+use ironclaw_host_api::{action::NetworkMethod, ids::SecretHandle};
 use serde::Deserialize;
 
 use crate::delivery::{SlackDeliveryFailureKind, slack_error_kind};
@@ -69,7 +71,7 @@ impl ChannelAdapter for SlackChannelAdapter {
 
     async fn fetch_attachment(
         &self,
-        attachment: &ironclaw_host_api::product_adapter::ChannelAttachmentRef,
+        attachment: &ironclaw_extension_contracts::channel_adapter::ChannelAttachmentRef,
         egress: &dyn RestrictedEgress,
     ) -> Result<ironclaw_host_api::attachment::InboundAttachment, ChannelError> {
         crate::attachment_transfer::fetch_attachment(attachment, egress).await
@@ -447,7 +449,7 @@ fn parse_error(error: SlackPayloadParseError) -> ChannelError {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::product_adapter::ProductTriggerReason;
+    use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 
     use super::*;
 
@@ -786,11 +788,13 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
-    use ironclaw_host_api::product_adapter::{
-        ChannelAttachmentRef, OutboundPart, PartDeliveryOutcome, ProductAttachmentDescriptor,
-        ProductAttachmentKind,
+    use ironclaw_extension_contracts::channel_adapter::{
+        ChannelAttachmentRef, OutboundPart, PartDeliveryOutcome,
     };
-    use ironclaw_host_api::tool_adapter::{
+    use ironclaw_extension_contracts::external::{
+        ProductAttachmentDescriptor, ProductAttachmentKind,
+    };
+    use ironclaw_extension_contracts::tool_adapter::{
         RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
     };
     use ironclaw_host_api::{attachment::WorkspaceFile, path::ScopedPath};
@@ -847,8 +851,8 @@ mod tests {
             extension_id: "slack".to_string(),
             installation_id: "install_alpha".to_string(),
             delivery_attempt_id: "attempt-1".to_string(),
-            target: ironclaw_host_api::product_adapter::OutboundTarget {
-                conversation: ironclaw_host_api::product_adapter::ExternalConversationRef::new(
+            target: ironclaw_extension_contracts::channel_adapter::OutboundTarget {
+                conversation: ironclaw_extension_contracts::external::ExternalConversationRef::new(
                     Some("T-A"),
                     "D123",
                     Some("1710000000.000100"),
@@ -1720,7 +1724,7 @@ mod tests {
         )]);
         let candidates = SlackChannelAdapter
             .list_targets(
-                ironclaw_host_api::product_adapter::TargetQuery {
+                ironclaw_extension_contracts::channel_adapter::TargetQuery {
                     extension_id: "slack".to_string(),
                     installation_id: "install_alpha".to_string(),
                     query: Some("im:U123".to_string()),
@@ -1748,7 +1752,7 @@ mod tests {
         let egress = ScriptedEgress::new(Vec::new());
         let error = SlackChannelAdapter
             .list_targets(
-                ironclaw_host_api::product_adapter::TargetQuery {
+                ironclaw_extension_contracts::channel_adapter::TargetQuery {
                     extension_id: "slack".to_string(),
                     installation_id: "install_alpha".to_string(),
                     query: None,

@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use ironclaw_extension_contracts::hosted_mcp::{HostedMcpAuthSelection, HostedMcpEndpoint};
 use ironclaw_extensions::{
     ExtensionManifestRecord, ExtensionPackage, ManifestSource, PackageDefinitionRetention,
     PackageRootBinding,
@@ -17,13 +18,12 @@ use ironclaw_host_api::{
         CapabilityDescriptor, RuntimeCredentialAccountSetup, RuntimeCredentialRequirement,
         RuntimeCredentialRequirementSource,
     },
-    hosted_mcp::{HostedMcpAuthSelection, HostedMcpEndpoint},
     http::RuntimeCredentialTarget,
     ids::{ExtensionId, SecretHandle, VendorId},
 };
-use ironclaw_product::{
+use ironclaw_product_contracts::error::ProductOperationFailure;
+use ironclaw_product_contracts::package_lifecycle::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
-    ProductSurfaceFailure,
 };
 
 use crate::{
@@ -36,7 +36,7 @@ use crate::{
 pub(crate) fn registration_response(package_ref: LifecyclePackageRef) -> LifecycleProductResponse {
     LifecycleProductResponse {
         package_ref: Some(package_ref),
-        phase: ironclaw_host_api::state::InstallationState::Installed,
+        phase: ironclaw_extension_contracts::state::InstallationState::Installed,
         blockers: Vec::new(),
         message: Some("Hosted MCP registration accepted.".to_string()),
         payload: Some(LifecycleProductPayload::ExtensionInstall {
@@ -48,24 +48,61 @@ pub(crate) fn registration_response(package_ref: LifecyclePackageRef) -> Lifecyc
     }
 }
 
-pub(crate) fn name_unavailable() -> ProductSurfaceFailure {
-    ProductSurfaceFailure::InvalidBindingRequest {
+pub(crate) fn name_unavailable() -> ProductOperationFailure {
+    ProductOperationFailure::InvalidBindingRequest {
         reason: "hosted MCP extension name is unavailable".to_string(),
     }
 }
 
-pub(crate) fn discovery_error(error: HostedMcpDiscoveryError) -> ProductSurfaceFailure {
+/// Prefix every hosted-MCP discovery failure carries, emitted by
+/// [`discovery_error`] below. The post-install classifiers key on it, so it is
+/// a **cross-module contract**, not an incidental message.
+pub(crate) const HOSTED_MCP_PREPARATION_FAILURE_PREFIX: &str =
+    "hosted MCP catalog preparation failed:";
+
+/// The one discovery outcome that is not a preparation failure at all: the
+/// server answered, but published nothing callable. Produced by
+/// `product_lifecycle::generic_host_error` wrapping
+/// `entrypoint.rs`'s `HostedMcpEntrypointError`.
+pub(crate) const HOSTED_MCP_NO_CALLABLE_TOOLS_REASON: &str = concat!(
+    "generic extension host rejected the activation: ",
+    "hosted MCP discovery published no callable tools"
+);
+
+/// Whether a post-install `InvalidBindingRequest` reason means "hosted-MCP
+/// discovery did not work out" — in which case the extension is still
+/// **installed** and the caller is told so, rather than the whole install being
+/// reported as a failure.
+///
+/// Lives here, beside the producer that emits the prefix, because it is the one
+/// genuinely shared *decision* between the two post-install classifiers
+/// (`lifecycle_product_service::install_activation_error` and
+/// `extension_lifecycle_capabilities::install_activation_error`). Those two
+/// classifiers are deliberately **not** merged — they have different return
+/// types and their `Err` arms encode different policies, one preserving the
+/// remediation text for the product surface and one collapsing it to a safe
+/// summary for a model-facing capability. What they must agree on is exactly
+/// this predicate: *which* failures still leave a usable install. It was
+/// duplicated as two inline string comparisons string-coupled to a producer in
+/// a third module, which is the shape that drifts silently. Raised by
+/// CodeRabbit on #7000.
+pub fn hosted_mcp_discovery_left_the_install_usable(reason: &str) -> bool {
+    reason.starts_with(HOSTED_MCP_PREPARATION_FAILURE_PREFIX)
+        || reason == HOSTED_MCP_NO_CALLABLE_TOOLS_REASON
+}
+
+pub(crate) fn discovery_error(error: HostedMcpDiscoveryError) -> ProductOperationFailure {
     match error {
-        HostedMcpDiscoveryError::Transient(reason) => ProductSurfaceFailure::Transient {
-            reason: format!("hosted MCP catalog preparation failed: {reason}"),
+        HostedMcpDiscoveryError::Transient(reason) => ProductOperationFailure::Transient {
+            reason: format!("{HOSTED_MCP_PREPARATION_FAILURE_PREFIX} {reason}"),
         },
         HostedMcpDiscoveryError::Permanent(reason) => {
-            ProductSurfaceFailure::InvalidBindingRequest {
-                reason: format!("hosted MCP catalog preparation failed: {reason}"),
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: format!("{HOSTED_MCP_PREPARATION_FAILURE_PREFIX} {reason}"),
             }
         }
         HostedMcpDiscoveryError::CredentialsRejected(_) => {
-            ProductSurfaceFailure::InvalidBindingRequest {
+            ProductOperationFailure::InvalidBindingRequest {
                 reason: "hosted MCP account setup is required".to_string(),
             }
         }
@@ -74,14 +111,14 @@ pub(crate) fn discovery_error(error: HostedMcpDiscoveryError) -> ProductSurfaceF
 
 pub(crate) fn oauth_admission_error(
     error: ironclaw_auth::AuthProductError,
-) -> ProductSurfaceFailure {
+) -> ProductOperationFailure {
     tracing::debug!(?error, "hosted MCP OAuth metadata admission rejected");
-    ProductSurfaceFailure::InvalidBindingRequest {
+    ProductOperationFailure::InvalidBindingRequest {
         reason: "hosted MCP OAuth metadata was not admissible".to_string(),
     }
 }
 
-pub(crate) fn metadata_network_policy(url: &str) -> Result<NetworkPolicy, ProductSurfaceFailure> {
+pub(crate) fn metadata_network_policy(url: &str) -> Result<NetworkPolicy, ProductOperationFailure> {
     let parsed = url::Url::parse(url)
         .map_err(|_| oauth_admission_error(ironclaw_auth::AuthProductError::MalformedConfig))?;
     if parsed.scheme() != "https"
@@ -109,7 +146,7 @@ pub(crate) fn manifest_with_admitted_oauth(
     seed: ExtensionManifestRecord,
     endpoint: &hosted_mcp_admission::CanonicalHostedMcpEndpoint,
     admitted: ironclaw_auth::ResolvedVendorAuthRecipe,
-) -> Result<ExtensionManifestRecord, ProductSurfaceFailure> {
+) -> Result<ExtensionManifestRecord, ProductOperationFailure> {
     if admitted.token_exchange_resource.as_deref() != Some(endpoint.as_str()) {
         return Err(oauth_admission_error(
             ironclaw_auth::AuthProductError::MalformedConfig,
@@ -173,7 +210,7 @@ pub(crate) fn manifest_with_admitted_oauth(
 
 pub(crate) fn manifest_with_bearer(
     seed: ExtensionManifestRecord,
-) -> Result<ExtensionManifestRecord, ProductSurfaceFailure> {
+) -> Result<ExtensionManifestRecord, ProductOperationFailure> {
     let resolved = seed.resolved();
     let server = resolved
         .mcp
@@ -197,9 +234,9 @@ pub(crate) fn pending_manifest(
     desired_name: &str,
     endpoint: &hosted_mcp_admission::CanonicalHostedMcpEndpoint,
     selection: &HostedMcpAuthSelection,
-) -> Result<ExtensionManifestRecord, ProductSurfaceFailure> {
+) -> Result<ExtensionManifestRecord, ProductOperationFailure> {
     if desired_name.trim().is_empty() || desired_name.len() > 256 {
-        return Err(ProductSurfaceFailure::InvalidBindingRequest {
+        return Err(ProductOperationFailure::InvalidBindingRequest {
             reason: "hosted MCP extension name is invalid".to_string(),
         });
     }
@@ -210,7 +247,7 @@ pub(crate) fn pending_manifest(
             || profile.len() > 128
             || profile.chars().any(char::is_control))
     {
-        return Err(ProductSurfaceFailure::InvalidBindingRequest {
+        return Err(ProductOperationFailure::InvalidBindingRequest {
             reason: "hosted MCP OAuth client profile is invalid".to_string(),
         });
     }
@@ -265,13 +302,13 @@ effects = ["network", "use_secret"]
         raw.clone(),
         ManifestSource::UserRegistered,
         &ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-            ProductSurfaceFailure::InvalidBindingRequest {
+            ProductOperationFailure::InvalidBindingRequest {
                 reason: format!("host port catalog rejected hosted MCP registration: {error}"),
             }
         })?,
         Some(manifest_hash.clone()),
         &product_extension_host_api_contract_registry().map_err(|error| {
-            ProductSurfaceFailure::InvalidBindingRequest {
+            ProductOperationFailure::InvalidBindingRequest {
                 reason: format!("host API contracts rejected hosted MCP registration: {error}"),
             }
         })?,
@@ -298,11 +335,11 @@ effects = ["network", "use_secret"]
 
 pub(crate) fn available_package(
     record: &ExtensionManifestRecord,
-) -> Result<AvailableExtensionPackage, ProductSurfaceFailure> {
+) -> Result<AvailableExtensionPackage, ProductOperationFailure> {
     let id = record.resolved().id.as_str();
     let manifest: ironclaw_extensions::ExtensionManifest =
         record.manifest().clone().try_into().map_err(|error| {
-            ProductSurfaceFailure::InvalidBindingRequest {
+            ProductOperationFailure::InvalidBindingRequest {
                 reason: format!("hosted MCP package manifest is invalid: {error}"),
             }
         })?;
@@ -356,4 +393,195 @@ pub(crate) fn available_package(
         oauth_setup_override: None,
         search_aliases: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{discovery_error, oauth_admission_error};
+    use crate::HostedMcpDiscoveryError;
+    use ironclaw_product_contracts::error::ProductOperationFailure;
+
+    /// Hosted-MCP discovery talks to a third-party server, so its three
+    /// outcomes must stay distinct: a blip the caller should retry, a server
+    /// that will never work as configured, and a server asking the user to
+    /// connect an account. `install_activation_error` keys on the exact
+    /// "hosted MCP catalog preparation failed:" prefix to decide whether a
+    /// post-install discovery failure still leaves a usable install, so the
+    /// prefix is asserted, not just the variant.
+    #[test]
+    fn hosted_mcp_discovery_outcomes_stay_distinguishable() {
+        assert_eq!(
+            discovery_error(HostedMcpDiscoveryError::Transient(
+                "upstream 503".to_string()
+            )),
+            ProductOperationFailure::Transient {
+                reason: "hosted MCP catalog preparation failed: upstream 503".to_string(),
+            },
+            "a transport blip is retryable and keeps the prefix install keys on"
+        );
+        assert_eq!(
+            discovery_error(HostedMcpDiscoveryError::Permanent(
+                "not an MCP endpoint".to_string()
+            )),
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "hosted MCP catalog preparation failed: not an MCP endpoint".to_string(),
+            },
+            "a permanently wrong endpoint is the registrant's to fix"
+        );
+        assert_eq!(
+            discovery_error(HostedMcpDiscoveryError::CredentialsRejected(
+                ironclaw_extension_contracts::hosted_mcp::McpAuthChallenge {
+                    status: 401,
+                    www_authenticate_metadata: Vec::new(),
+                    protected_resource_metadata: Vec::new(),
+                }
+            )),
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "hosted MCP account setup is required".to_string(),
+            },
+            "a credential challenge must route the user to setup, not read as a transport failure"
+        );
+    }
+
+    /// The producer above and the predicate the post-install classifiers key on
+    /// are joined here rather than each asserting its own copy of the literal.
+    ///
+    /// This is the coupling that drifts silently: `discovery_error` emits the
+    /// prefix in `hosted_mcp_manifest.rs`, and two classifiers in two other
+    /// modules decide "still installed" from it. Asserting the prefix on one
+    /// side and the comparison on the other would let a reworded producer pass
+    /// both. Feeding the producer's *actual output* into the predicate is what
+    /// makes a rewording fail — and the negative cases are what stop the
+    /// predicate from degenerating into "always true".
+    #[test]
+    fn every_discovery_failure_the_producer_emits_still_reads_as_an_installed_extension() {
+        for outcome in [
+            HostedMcpDiscoveryError::Transient("upstream 503".to_string()),
+            HostedMcpDiscoveryError::Permanent("not an MCP endpoint".to_string()),
+        ] {
+            let reason = match discovery_error(outcome) {
+                ProductOperationFailure::Transient { reason }
+                | ProductOperationFailure::InvalidBindingRequest { reason } => reason,
+                other => panic!("discovery failures are transient or invalid, got {other:?}"),
+            };
+            assert!(
+                super::hosted_mcp_discovery_left_the_install_usable(&reason),
+                "the post-install classifiers must recognize what discovery_error emits: {reason:?}"
+            );
+        }
+
+        assert!(
+            super::hosted_mcp_discovery_left_the_install_usable(
+                super::HOSTED_MCP_NO_CALLABLE_TOOLS_REASON
+            ),
+            "a server that published no callable tools still leaves the extension installed"
+        );
+
+        // A credential challenge is NOT a discovery failure — it must reach the
+        // caller so the user is offered the connect step, so the same producer's
+        // third outcome must read the other way.
+        let credentials_rejected = discovery_error(HostedMcpDiscoveryError::CredentialsRejected(
+            ironclaw_extension_contracts::hosted_mcp::McpAuthChallenge {
+                status: 401,
+                www_authenticate_metadata: Vec::new(),
+                protected_resource_metadata: Vec::new(),
+            },
+        ));
+        let ProductOperationFailure::InvalidBindingRequest { reason } = credentials_rejected else {
+            panic!("a credential challenge is the caller's to fix");
+        };
+        assert!(
+            !super::hosted_mcp_discovery_left_the_install_usable(&reason),
+            "account setup must surface to the caller, not be swallowed as a usable install"
+        );
+        assert!(
+            !super::hosted_mcp_discovery_left_the_install_usable("some unrelated rejection"),
+            "the predicate is reason-specific; any other rejection must still surface"
+        );
+    }
+
+    /// OAuth metadata arrives from the remote server, so the rejection text is
+    /// deliberately fixed: the underlying error is logged, never forwarded.
+    #[test]
+    fn inadmissible_oauth_metadata_is_rejected_without_echoing_the_cause() {
+        assert_eq!(
+            oauth_admission_error(ironclaw_auth::AuthProductError::MalformedConfig),
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "hosted MCP OAuth metadata was not admissible".to_string(),
+            },
+        );
+        assert_eq!(
+            oauth_admission_error(ironclaw_auth::AuthProductError::ProviderDenied),
+            ProductOperationFailure::InvalidBindingRequest {
+                reason: "hosted MCP OAuth metadata was not admissible".to_string(),
+            },
+            "every admission failure collapses to one non-echoing reason"
+        );
+    }
+
+    /// `pending_manifest` builds a manifest by string interpolation, so its two
+    /// input guards are the boundary that keeps caller-supplied text out of the
+    /// generated TOML. Both are pinned against a control that is accepted, so
+    /// the assertions cannot pass because the whole call fails for some other
+    /// reason.
+    #[test]
+    fn hosted_mcp_registration_rejects_unusable_names_and_client_profiles() {
+        let extension_id =
+            ironclaw_host_api::ids::ExtensionId::new("mcp-linear").expect("valid extension id");
+        let endpoint = crate::hosted_mcp_admission::CanonicalHostedMcpEndpoint::parse(
+            &ironclaw_extension_contracts::hosted_mcp::HostedMcpEndpoint::new(
+                "https://mcp.linear.app/rpc".to_string(),
+            )
+            .expect("valid endpoint"),
+        )
+        .expect("canonical endpoint");
+        let no_auth = super::HostedMcpAuthSelection::NoAuth;
+
+        let name_expected = ProductOperationFailure::InvalidBindingRequest {
+            reason: "hosted MCP extension name is invalid".to_string(),
+        };
+        for unusable_name in ["", "   ", &"x".repeat(257)] {
+            assert_eq!(
+                super::pending_manifest(&extension_id, unusable_name, &endpoint, &no_auth)
+                    .expect_err("an unusable display name must be rejected"),
+                name_expected,
+                "name {unusable_name:?} must not reach manifest interpolation"
+            );
+        }
+        assert!(
+            super::pending_manifest(&extension_id, "Linear", &endpoint, &no_auth).is_ok(),
+            "a usable name must still register — the guard is about the name, not the call"
+        );
+
+        let profile_expected = ProductOperationFailure::InvalidBindingRequest {
+            reason: "hosted MCP OAuth client profile is invalid".to_string(),
+        };
+        for unusable_profile in ["", "   ", "has\u{0}control", &"p".repeat(129)] {
+            assert_eq!(
+                super::pending_manifest(
+                    &extension_id,
+                    "Linear",
+                    &endpoint,
+                    &super::HostedMcpAuthSelection::OAuth {
+                        client_profile_id: Some(unusable_profile.to_string()),
+                    },
+                )
+                .expect_err("an unusable client profile must be rejected"),
+                profile_expected,
+                "client profile {unusable_profile:?} must not reach the manifest"
+            );
+        }
+        assert!(
+            super::pending_manifest(
+                &extension_id,
+                "Linear",
+                &endpoint,
+                &super::HostedMcpAuthSelection::OAuth {
+                    client_profile_id: Some("linear-profile".to_string()),
+                },
+            )
+            .is_ok(),
+            "a usable client profile must still register"
+        );
+    }
 }
