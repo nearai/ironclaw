@@ -6,11 +6,12 @@ use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnScope};
 
 use crate::{
     AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendRequest,
-    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundError, OutboundPushCandidate,
-    OutboundPushKind, OutboundPushPlan, OutboundPushTargetRequest, ProjectionSubscriptionRecord,
-    RecoverInterruptedDeliveryRequest, RunDeliveryCleanupRecord, RunDeliveryCleanupRequest,
-    RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord, RunFinalReplyTargetRequest,
-    ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
+    FailPreparedDeliveryAttemptRequest, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
+    OutboundError, OutboundPushCandidate, OutboundPushKind, OutboundPushPlan,
+    OutboundPushTargetRequest, ProjectionSubscriptionRecord, RecoverInterruptedDeliveryRequest,
+    RunDeliveryCleanupRecord, RunDeliveryCleanupRequest, RunFinalReplyHandoffRecord,
+    RunFinalReplyTargetRecord, RunFinalReplyTargetRequest, ThreadNotificationPolicy,
+    UpdateDeliveryStatusRequest,
 };
 
 #[async_trait]
@@ -146,6 +147,13 @@ pub trait OutboundStateStorePort: Send + Sync {
     async fn claim_delivery_attempt_for_send(
         &self,
         request: ClaimDeliveryAttemptForSendRequest,
+    ) -> Result<bool, OutboundError>;
+
+    /// Atomically settle a permanent preflight failure without consuming or
+    /// rewriting an attempt that has already reached `Sending`.
+    async fn fail_prepared_delivery_attempt(
+        &self,
+        request: FailPreparedDeliveryAttemptRequest,
     ) -> Result<bool, OutboundError>;
 
     /// Crash recovery for an interrupted send. Re-reads the attempt inside the

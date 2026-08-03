@@ -77,11 +77,12 @@ pub use triggered_run_delivery::{
 };
 pub use types::{
     AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendRequest, DeliveryFailureKind,
-    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryDecision,
-    OutboundDeliveryStatus, OutboundPushCandidate, OutboundPushKind, OutboundPushPlan,
-    OutboundPushTargetRequest, PrepareCommunicationDeliveryRequest, PrepareOutboundDeliveryRequest,
-    ProjectionSubscriptionRecord, ProjectionSubscriptionRequest, RecoverInterruptedDeliveryRequest,
-    ReplyTargetBindingClaim, ReplyTargetValidationRequest, ThreadNotificationPolicy,
-    ThreadNotificationTarget, ThreadProjectionAccessClaim, ThreadProjectionAccessGrant,
-    ThreadProjectionAccessRequest, UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
+    FailPreparedDeliveryAttemptRequest, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
+    OutboundDeliveryDecision, OutboundDeliveryStatus, OutboundPushCandidate, OutboundPushKind,
+    OutboundPushPlan, OutboundPushTargetRequest, PrepareCommunicationDeliveryRequest,
+    PrepareOutboundDeliveryRequest, ProjectionSubscriptionRecord, ProjectionSubscriptionRequest,
+    RecoverInterruptedDeliveryRequest, ReplyTargetBindingClaim, ReplyTargetValidationRequest,
+    ThreadNotificationPolicy, ThreadNotificationTarget, ThreadProjectionAccessClaim,
+    ThreadProjectionAccessGrant, ThreadProjectionAccessRequest, UpdateDeliveryStatusRequest,
+    ValidatedReplyTargetBinding,
 };

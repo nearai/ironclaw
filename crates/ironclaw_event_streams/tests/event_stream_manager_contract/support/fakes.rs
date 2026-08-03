@@ -846,6 +846,13 @@ impl OutboundStateStorePort for FailingOutboundStore {
         Err(self.error())
     }
 
+    async fn fail_prepared_delivery_attempt(
+        &self,
+        _request: ironclaw_outbound::FailPreparedDeliveryAttemptRequest,
+    ) -> Result<bool, OutboundError> {
+        Err(self.error())
+    }
+
     async fn recover_interrupted_delivery_attempt(
         &self,
         _request: ironclaw_outbound::RecoverInterruptedDeliveryRequest,

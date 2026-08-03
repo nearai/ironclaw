@@ -71,7 +71,8 @@ use crate::reply_attachment_intents::validate_reply_attachment_intents;
 use crate::validation::{
     validate_advance_request, validate_communication_preference, validate_delivery_attempt,
     validate_delivery_identity, validate_delivery_status_request, validate_policy,
-    validate_subscription_identity, validate_subscription_record, validate_subscription_request,
+    validate_prepared_failure_request, validate_subscription_identity,
+    validate_subscription_record, validate_subscription_request,
 };
 use crate::{
     AdvanceSubscriptionCursorRequest, CommunicationPreferenceKey, CommunicationPreferenceRecord,
@@ -1072,6 +1073,51 @@ where
             // last-write-wins fallback: a backend without versioned CAS is
             // incapable of proving sole vendor-egress ownership and must
             // fail closed instead.
+            match self
+                .filesystem
+                .put(
+                    &resource_scope,
+                    &path,
+                    entry,
+                    CasExpectation::Version(versioned.version),
+                )
+                .await
+                .map_err(map_fs_error)
+            {
+                Ok(_) => return Ok(true),
+                Err(OutboundError::CasConflict) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(OutboundError::Backend)
+    }
+
+    async fn fail_prepared_delivery_attempt(
+        &self,
+        request: crate::FailPreparedDeliveryAttemptRequest,
+    ) -> Result<bool, OutboundError> {
+        validate_prepared_failure_request(&request)?;
+        let path = delivery_path(&request.delivery_id)?;
+        let resource_scope = request.scope.to_resource_scope();
+        for _ in 0..MAX_CAS_RETRIES {
+            let Some((mut attempt, versioned)) = self
+                .get_versioned_json::<OutboundDeliveryAttempt>(&resource_scope, &path)
+                .await?
+            else {
+                return Err(OutboundError::DeliveryNotFound);
+            };
+            if attempt.scope != request.scope {
+                return Err(OutboundError::SubscriptionScopeMismatch);
+            }
+            if attempt.status != OutboundDeliveryStatus::Prepared {
+                return Ok(false);
+            }
+            attempt.status = OutboundDeliveryStatus::Failed;
+            attempt.failure_kind = Some(request.failure_kind);
+            let entry = delivery_attempt_entry(&attempt)?;
+            // As with the send claim, consuming `Prepared` requires versioned
+            // CAS. Falling back to an unconditional byte write could race a
+            // send claim and rewrite an attempt that may reach the vendor.
             match self
                 .filesystem
                 .put(

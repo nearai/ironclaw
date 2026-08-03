@@ -351,6 +351,17 @@ pub struct ClaimDeliveryAttemptForSendRequest {
     pub scope: TurnScope,
 }
 
+/// Guarded settlement for a permanent failure discovered before vendor
+/// egress ownership is claimed. Stores transition `Prepared -> Failed` only;
+/// attempts that are already claimed or terminal are left unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailPreparedDeliveryAttemptRequest {
+    pub delivery_id: OutboundDeliveryId,
+    pub scope: TurnScope,
+    pub updated_at: Timestamp,
+    pub failure_kind: DeliveryFailureKind,
+}
+
 /// Guarded crash-recovery transition for an interrupted send. The store
 /// re-reads the attempt inside its own CAS and transitions `Sending -> Unknown`
 /// only when it is still `Sending`. A stale recovery snapshot therefore cannot

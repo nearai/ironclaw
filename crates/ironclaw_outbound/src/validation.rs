@@ -4,9 +4,9 @@ use ironclaw_host_api::turn::ReplyTargetBindingRef;
 
 use crate::{
     AdvanceSubscriptionCursorRequest, CommunicationPreferenceRecord, DeliveryDefaultScope,
-    DeliveryFailureKind, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
-    OutboundDeliveryStatus, OutboundError, ProjectionSubscriptionRecord, ThreadNotificationPolicy,
-    UpdateDeliveryStatusRequest,
+    DeliveryFailureKind, FailPreparedDeliveryAttemptRequest, LoadSubscriptionCursorRequest,
+    OutboundDeliveryAttempt, OutboundDeliveryStatus, OutboundError, ProjectionSubscriptionRecord,
+    ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
 };
 
 const MAX_NOTIFICATION_TARGETS: usize = 32;
@@ -137,6 +137,21 @@ pub(crate) fn validate_delivery_status_request(
     request: &UpdateDeliveryStatusRequest,
 ) -> Result<(), OutboundError> {
     validate_delivery_status(request.status, request.failure_kind)
+}
+
+pub(crate) fn validate_prepared_failure_request(
+    request: &FailPreparedDeliveryAttemptRequest,
+) -> Result<(), OutboundError> {
+    match request.failure_kind {
+        DeliveryFailureKind::AuthorizationRevoked
+        | DeliveryFailureKind::Rejected
+        | DeliveryFailureKind::Unknown => Ok(()),
+        DeliveryFailureKind::TransientValidatorError
+        | DeliveryFailureKind::TransportUnavailable
+        | DeliveryFailureKind::RateLimited => Err(OutboundError::InvalidRequest {
+            reason: "transient preflight failures must remain prepared",
+        }),
+    }
 }
 
 fn validate_delivery_status(

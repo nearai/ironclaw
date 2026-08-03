@@ -14,11 +14,11 @@
 //! - An attempt is persisted (`Prepared`→`Sending`) **before** any vendor
 //!   egress (OUT-3); the coordinator is the sole delivery-state writer —
 //!   adapters get no store and cannot mark anything delivered (OUT-4).
-//! - `Sending` means durable egress ownership was claimed before fallible
-//!   target/channel resolution and attachment materialization. A crash can
-//!   therefore happen before vendor contact or after possible vendor success;
-//!   recovery cannot distinguish those cases, marks the attempt `Unknown`, and
-//!   never blindly resends (OUT-6).
+//! - Target/channel/context resolution and attachment materialization run as a
+//!   read-only preflight while the attempt remains `Prepared`. The coordinator
+//!   claims `Prepared -> Sending` immediately before calling the adapter, so
+//!   transient preflight failures remain safely retryable while crash recovery
+//!   still treats every `Sending` attempt as possibly delivered (OUT-6).
 //! - Once any part of a multipart delivery is sent, a later retryable part
 //!   failure is terminal — a whole-envelope retry would duplicate the parts
 //!   the vendor already accepted (OUT-7).
@@ -37,10 +37,10 @@ use ironclaw_host_api::path::ScopedPath;
 use ironclaw_host_api::product_adapter::AdapterInstallationId;
 use ironclaw_outbound::{
     ClaimDeliveryAttemptForSendRequest, CommunicationPreferenceRepository, DeliveryFailureKind,
-    OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryStatus,
-    OutboundPolicyService, OutboundPushCandidate, OutboundPushKind, OutboundStateStorePort,
-    PrepareCommunicationDeliveryRequest, RecoverInterruptedDeliveryRequest, ReplyAttachmentIntent,
-    UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
+    FailPreparedDeliveryAttemptRequest, OutboundDeliveryAttempt, OutboundDeliveryDecision,
+    OutboundDeliveryStatus, OutboundPolicyService, OutboundPushCandidate, OutboundPushKind,
+    OutboundStateStorePort, PrepareCommunicationDeliveryRequest, RecoverInterruptedDeliveryRequest,
+    ReplyAttachmentIntent, UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
 };
 use ironclaw_product_contracts::delivery::{
     ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
@@ -324,13 +324,13 @@ impl DeliveryCoordinator {
     }
 
     /// Crash recovery (OUT-6): every attempt still `Sending` in this scope
-    /// held the durable egress claim when its coordinator stopped. Because the
-    /// claim precedes fallible target/channel resolution, attachment
-    /// materialization, and vendor egress, recovery cannot tell whether the
-    /// vendor was never contacted or may have accepted the message. Mark each
-    /// `Unknown`; never blindly resend. A per-attempt recovery failure does not
-    /// abandon the captured snapshot: recovery continues, then returns the
-    /// first typed store error after all remaining attempts have been guarded.
+    /// held the durable egress claim when its coordinator stopped. The claim
+    /// immediately precedes adapter delivery, so recovery still cannot tell
+    /// whether the vendor was never contacted or may have accepted the
+    /// message. Mark each `Unknown`; never blindly resend. A per-attempt
+    /// recovery failure does not abandon the captured snapshot: recovery
+    /// continues, then returns the first typed store error after all remaining
+    /// attempts have been guarded.
     pub async fn recover_interrupted_deliveries(
         &self,
         scope: ironclaw_turns::TurnScope,
@@ -404,19 +404,6 @@ impl DeliveryCoordinator {
             }
         };
 
-        if !self
-            .store
-            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
-                delivery_id: attempt.delivery_id,
-                scope: attempt.scope.clone(),
-            })
-            .await?
-        {
-            return Ok(CoordinatedDeliveryOutcome::DuplicateSuppressed {
-                delivery_id: attempt.delivery_id,
-            });
-        }
-
         self.drive_authorized(
             target_resolver,
             attempt,
@@ -440,7 +427,7 @@ impl DeliveryCoordinator {
     /// Deliver one notice-class intent to its source conversation, under the
     /// same persistence and sole-writer rules as the policy path. The attempt
     /// is recorded `Prepared` before the channel resolves and moves to
-    /// `Sending` before any vendor egress.
+    /// `Sending` immediately before vendor egress.
     pub async fn deliver_notice(
         &self,
         request: NoticeDeliveryRequest<'_>,
@@ -485,18 +472,6 @@ impl DeliveryCoordinator {
             failure_kind: None,
         };
         self.store.record_delivery_attempt(attempt.clone()).await?;
-        if !self
-            .store
-            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
-                delivery_id: attempt.delivery_id,
-                scope: attempt.scope.clone(),
-            })
-            .await?
-        {
-            return Ok(CoordinatedDeliveryOutcome::DuplicateSuppressed {
-                delivery_id: attempt.delivery_id,
-            });
-        }
 
         self.drive_resolved(
             attempt,
@@ -529,26 +504,39 @@ impl DeliveryCoordinator {
             Err(error) => {
                 let kind =
                     crate::outbound_delivery::delivery_failure_kind_for_surface_error(&error);
-                self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(kind))
-                    .await;
-                return Err(CoordinatedDeliveryError::Workflow(error));
+                if kind == DeliveryFailureKind::TransportUnavailable {
+                    return Err(CoordinatedDeliveryError::Workflow(error));
+                }
+                return if self.fail_prepared(&attempt, kind).await? {
+                    Err(CoordinatedDeliveryError::Workflow(error))
+                } else {
+                    Ok(Self::duplicate_suppressed(&attempt))
+                };
             }
         };
 
         // Resolve the generation-pinned adapter and stored reply context
         // before touching workspace bytes. A missing channel or failed
         // context lookup must not cause file materialization as a side effect.
-        let (channel, reply_context) = self
+        let Some((channel, reply_context)) = self
             .resolve_channel_context(&attempt, extension_id, &metadata.external_conversation_ref)
-            .await?;
+            .await?
+        else {
+            return Ok(Self::duplicate_suppressed(&attempt));
+        };
 
         let parts = match materialize_workspace_file_parts(materialization, parts).await {
             Ok(parts) => parts,
             Err(error) => {
                 let failure_kind = workspace_materialization_failure_kind(&error);
-                self.mark_terminal(&attempt, OutboundDeliveryStatus::Failed, Some(failure_kind))
-                    .await;
-                return Err(error);
+                if failure_kind == DeliveryFailureKind::TransportUnavailable {
+                    return Err(error);
+                }
+                return if self.fail_prepared(&attempt, failure_kind).await? {
+                    Err(error)
+                } else {
+                    Ok(Self::duplicate_suppressed(&attempt))
+                };
             }
         };
 
@@ -574,9 +562,12 @@ impl DeliveryCoordinator {
         thread_anchor: Option<String>,
         parts: Vec<OutboundPart>,
     ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
-        let (channel, reply_context) = self
+        let Some((channel, reply_context)) = self
             .resolve_channel_context(&attempt, extension_id, &conversation)
-            .await?;
+            .await?
+        else {
+            return Ok(Self::duplicate_suppressed(&attempt));
+        };
         self.drive_prepared(
             attempt,
             channel,
@@ -593,18 +584,23 @@ impl DeliveryCoordinator {
         attempt: &OutboundDeliveryAttempt,
         extension_id: &str,
         conversation: &ExternalConversationRef,
-    ) -> Result<(ResolvedChannelDelivery, Option<Vec<u8>>), CoordinatedDeliveryError> {
+    ) -> Result<Option<(ResolvedChannelDelivery, Option<Vec<u8>>)>, CoordinatedDeliveryError> {
         // Resolve the channel from ONE snapshot read (generation-pinned).
         let Some(channel) = self.resolver.resolve_channel_delivery(extension_id) else {
-            self.mark_terminal(
-                attempt,
-                OutboundDeliveryStatus::Failed,
-                Some(DeliveryFailureKind::TransportUnavailable),
-            )
-            .await;
-            return Err(CoordinatedDeliveryError::ChannelUnavailable {
-                extension_id: extension_id.to_string(),
-            });
+            // The resolver currently has no typed permanent/transient
+            // taxonomy. Preserve the existing fail-closed, no-retry behavior
+            // and caller error, while recording only the sanitized permanent
+            // `Rejected` kind accepted by the preflight-settlement contract.
+            return if self
+                .fail_prepared(attempt, DeliveryFailureKind::Rejected)
+                .await?
+            {
+                Err(CoordinatedDeliveryError::ChannelUnavailable {
+                    extension_id: extension_id.to_string(),
+                })
+            } else {
+                Ok(None)
+            };
         };
 
         // Stored reply context for source-route replies (ING-11).
@@ -617,7 +613,7 @@ impl DeliveryCoordinator {
             )
             .await;
 
-        Ok((channel, reply_context))
+        Ok(Some((channel, reply_context)))
     }
 
     async fn drive_prepared(
@@ -640,6 +636,17 @@ impl DeliveryCoordinator {
             parts,
             reply_context,
         };
+
+        if !self
+            .store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id: attempt.delivery_id,
+                scope: attempt.scope.clone(),
+            })
+            .await?
+        {
+            return Ok(Self::duplicate_suppressed(&attempt));
+        }
 
         // 6. Drive the adapter with bounded retries. Once any part has been
         //    sent, a later retryable failure is terminal (OUT-7).
@@ -736,6 +743,27 @@ impl DeliveryCoordinator {
                     tokio::time::sleep(self.retry.backoff).await;
                 }
             }
+        }
+    }
+
+    async fn fail_prepared(
+        &self,
+        attempt: &OutboundDeliveryAttempt,
+        failure_kind: DeliveryFailureKind,
+    ) -> Result<bool, ironclaw_outbound::OutboundError> {
+        self.store
+            .fail_prepared_delivery_attempt(FailPreparedDeliveryAttemptRequest {
+                delivery_id: attempt.delivery_id,
+                scope: attempt.scope.clone(),
+                updated_at: chrono::Utc::now(),
+                failure_kind,
+            })
+            .await
+    }
+
+    fn duplicate_suppressed(attempt: &OutboundDeliveryAttempt) -> CoordinatedDeliveryOutcome {
+        CoordinatedDeliveryOutcome::DuplicateSuppressed {
+            delivery_id: attempt.delivery_id,
         }
     }
 
